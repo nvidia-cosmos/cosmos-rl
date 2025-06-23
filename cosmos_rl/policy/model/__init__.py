@@ -16,6 +16,7 @@
 from cosmos_rl.policy.model.gpt import GPT
 from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
 from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
+from cosmos_rl.policy.model.kimi_moonlight import DeepseekV3MoEModel
 from cosmos_rl.policy.config import Config as CosmosConfig
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils.logging import logger
@@ -23,7 +24,7 @@ from transformers import AutoConfig
 import torch
 
 
-supported_cls_list = [GPT, Qwen2_5_VLConditionalModel, Qwen3MoE]
+supported_cls_list = [GPT, Qwen2_5_VLConditionalModel, Qwen3MoE, DeepseekV3MoEModel]
 
 
 def get_data_packer(config: CosmosConfig):

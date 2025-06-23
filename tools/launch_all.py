@@ -249,7 +249,7 @@ def parse_args():
         "--rdzv-port",
         type=int,
         default=29345,
-        help="Rendezvous endpoint port for the job, default is 29345. This is used when multi-node training are used for one replica.", 
+        help="Rendezvous endpoint port for the job, default is 29345. This is used when multi-node training are used for one replica.",
     )
 
     parser.add_argument(
@@ -543,7 +543,7 @@ def replica_placement(
                         rdzv_ip = get_worker_ip(global_worker_idx)
                 else:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-                
+
                 control_urls.append(control_url)
                 output_files.append(
                     os.path.join(output_dir, f"rollout_{i}.log")
@@ -613,7 +613,7 @@ def main():
     else:
         launcher = args.launcher
     args.launcher = launcher
-    
+
     # Get the number of GPUs required for policy and rollout
     # and the number of replicas for each
     policy_parallelism = cosmos_config.get("policy", {}).get("parallelism", {})
@@ -983,7 +983,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
         hostname = f"{prefix}-{cur_work_idx}.{subdomain}"
         logger.info(f"Setting hostname to {hostname} for worker index {cur_work_idx}")
         os.system(f"hostname {hostname}")
-    
+
     control_url = None
     if args.url is not None:
         ip, port = args.url.split(":")
@@ -1014,7 +1014,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
                 port = args.port
         else:
             port = util.find_available_port(args.port)
-    
+
     if control_url is None:
         logger.info(f"Controller will be launched locally on port {port}.")
     else:

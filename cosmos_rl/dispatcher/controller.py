@@ -131,7 +131,8 @@ class Controller:
         self.config = config
         task_type = config.train.train_policy.type
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            config.policy.model_name_or_path
+            config.policy.model_name_or_path,
+            trust_remote_code=True,
         )
 
         if "wandb" in config.logging.logger and is_wandb_available():
