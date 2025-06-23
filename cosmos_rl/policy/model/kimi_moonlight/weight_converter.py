@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_reason1.utils.parallelism import ParallelDims
+from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 import re
 from typing import Tuple, Dict, Any
-from cosmos_reason1.utils.parallelism_registry import register_parallelism_strategy
+from cosmos_rl.utils.parallelism_registry import register_parallelism_strategy
 
 
 def map_key_from_hf(name: str, src_model_type: str) -> str:

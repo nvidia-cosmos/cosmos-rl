@@ -33,12 +33,12 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-from cosmos_reason1.utils.parallelism import ParallelDims
-from cosmos_reason1.utils.logging import logger
-from cosmos_reason1.policy.config import Config as CosmosConfig
-from cosmos_reason1.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
 from typing import Callable, Optional
-from cosmos_reason1.utils.distributed import ReplicateParallel
+from cosmos_rl.utils.distributed import ReplicateParallel
 
 
 def parallelize(

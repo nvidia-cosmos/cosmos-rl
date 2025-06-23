@@ -26,23 +26,23 @@ from typing import Tuple, List, Optional, Callable, Union
 from transformers import AutoConfig
 from transformers.cache_utils import Cache, DynamicCache
 import torch.distributed._symmetric_memory as symm_mem
-from cosmos_reason1.utils.util import (
+from cosmos_rl.utils.util import (
     resolve_model_path,
     IdentityLayer,
     clear_weight_name,
     sync_model_vocab,
     retry,
 )
-from cosmos_reason1.utils.logging import logger
-from cosmos_reason1.policy.model.kimi_moonlight.weight_converter import (
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.policy.model.kimi_moonlight.weight_converter import (
     convert_weight_from_hf,
 )
-from cosmos_reason1.utils.parallelism import ParallelDims
-from cosmos_reason1.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
-from cosmos_reason1.policy.kernel.moe.indices import generate_permute_indices
-from cosmos_reason1.policy.config import Config as CosmosConfig
-from cosmos_reason1.policy.model.base import BaseModel
-from cosmos_reason1.dispatcher.data.packer.decoder_only_llm_data_packer import (
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
+from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.model.base import BaseModel
+from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
     DecoderOnlyLLMDataPacker,
 )
 from transformers.activations import ACT2FN
@@ -971,7 +971,7 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
 
     @property
     def parallelize_fn(self):
-        from cosmos_reason1.policy.model.kimi_moonlight.parallelize import parallelize
+        from cosmos_rl.policy.model.kimi_moonlight.parallelize import parallelize
 
         return parallelize, self
 
