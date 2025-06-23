@@ -3,7 +3,7 @@ redis = "12800"
 [train]
 resume = false
 epoch = 15
-output_dir = "./outputs/qwen2-5-32b-p-fsdp2-tp4-r-tp4-pp1-grpo"
+output_dir = "./outputs/qwen2-5-32b-p-fsdp2-tp4-r-tp4-pp1-grpo-math"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 2e-6
@@ -18,8 +18,10 @@ param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 384 
+train_batch_per_replica = 384
 sync_weight_interval = 1
+enable_validation = true
+validation_step = 70
 
 [rollout]
 gpu_memory_utilization = 0.7
@@ -28,8 +30,6 @@ n_generation = 16
 batch_size = 24
 quantization = "none"
 max_response_length = 1024
-seed = 3407
-enforce_eager = false
 
 [policy]
 model_name_or_path = "Qwen/Qwen2.5-32B-Instruct"
@@ -39,25 +39,21 @@ model_gradient_checkpointing = true
 [logging]
 logger = ['console', 'wandb']
 project_name = "echo"
-experiment_name = "qwen-32b-DR.GRPO"
+experiment_name = "qwen-32b-math-grpo"
 
 [train.train_policy]
 type = "grpo"
-dataset.name = "openai/gsm8k"
-dataset.subset = "main"
+dataset.name = "DigitalLearningGmbH/MATH-lighteval"
+dataset.subset = "default"
 dataset.split = "train"
-prompt_column_name = "question"
-response_column_name = "answer"
-reward_function = "gsm8k"
 temperature = 1.0
 epsilon_low = 0.2
 epsilon_high = 0.28
+lower_bound_ratio = 10.0
 kl_beta = 0.0
 mu_iterations = 1
 min_filter_prefix_tokens = 1
-mini_batch = 8
-unbiased_loss_max_tokens = 200 
-loss_type = "seq-mean-token-mean"
+mini_batch = 4
 
 [train.ckpt]
 enable_checkpoint = true
@@ -65,7 +61,7 @@ save_freq = 1000
 max_keep = 5
 save_mode = "async"
 upload_hf = true
-hf_repo_name = "Echo-Qwen-32B-GSM8K-JX"
+hf_repo_name = "Echo-Qwen-32B-GRPO-MATH"
 
 [rollout.parallelism]
 n_init_replicas = 1
@@ -84,3 +80,10 @@ dp_shard_size = 2
 pp_size = 1
 dp_replicate_size = 1
 cp_rotate_method = "allgather"
+
+[validation]
+temperature = 0.0
+max_response_length = 2048
+dataset.name = "DigitalLearningGmbH/MATH-lighteval"
+dataset.subset = "default"
+dataset.split = "test"

@@ -69,7 +69,7 @@ model_gradient_checkpointing = true
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "cosmos_rl"
+project_name = "cosmos_rl_job"
 experiment_name = "None"
 
 [train.train_policy]
@@ -78,7 +78,7 @@ dataset.name = "JiaxinTsao/math_examples"
 prompt_column_name = "prompt"
 response_column_name = "result"
 reward_function = "boxed_math"
-dataset.train_split="train"
+dataset.split="train"
 temperature = 1
 epsilon_low = 0.2
 epsilon_high = 0.2

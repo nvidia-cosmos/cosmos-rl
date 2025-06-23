@@ -36,7 +36,7 @@ class GSM8kDataset(Dataset):
         '''
         self.config = config
         self.tokenizer = tokenizer
-        modelscope_dataset_if_enabled = modelscope_load_dataset('AI-ModelScope/gsm8k', subset_name='main', split='train')
+        modelscope_dataset_if_enabled = modelscope_load_dataset(config.train.train_policy.dataset.name, subset_name='main', split='train')
         if modelscope_dataset_if_enabled is None:
             self.dataset = load_dataset("openai/gsm8k", "main", split="train")
         else:
@@ -54,10 +54,9 @@ class GSM8kDataset(Dataset):
         ```
         [
             {
-                "role": "system",
-                "content": "You are an AI math expert, you will be given a question and required to answer. "
+                "role": "user",
+                "content": f"{question} Let\'s think step by step and output the final answer after \"####\".",
             }
-            ...
         ]
         ```
         '''
@@ -99,39 +98,17 @@ class GSM8kValDataset(GSM8kDataset):
 
         self.config = config
         self.tokenizer = tokenizer
-        if not config.validation.dataset.name:
-            config.validation.dataset.name = config.train.train_policy.dataset.name
-            config.validation.dataset.subset = config.train.train_policy.dataset.subset
-            config.validation.dataset.revision = config.train.train_policy.dataset.revision
-        if not config.validation.dataset.test_split:
-            config.validation.dataset.test_split = config.train.train_policy.dataset.train_split
-        if not config.validation.dataset.test_size:
-            config.validation.dataset.test_size = config.train.train_policy.dataset.test_size
 
         self.dataset = load_dataset(config.validation.dataset.name, config.validation.dataset.subset)
-        if config.validation.dataset.test_split:
-            if isinstance(config.validation.dataset.test_split, list):
+        if config.validation.dataset.split:
+            if isinstance(config.validation.dataset.split, list):
                 dataset_list = []
-                for split_name in config.validation.dataset.test_split:
+                for split_name in config.validation.dataset.split:
                     dataset_list.append(self.dataset[split_name])
                 self.dataset = ConcatDataset(dataset_list)
             else:
-                assert isinstance(config.validation.dataset.test_split, str)
-                self.dataset = self.dataset[config.validation.dataset.test_split]
-        if config.validation.dataset.test_size is not None:
-            if isinstance(config.validation.dataset.test_size, float):
-                n_test_samples = int(
-                    len(self.dataset) * config.validation.dataset.test_size
-                )
-            else:
-                n_test_samples = config.validation.dataset.test_size
-            n_test_samples = max(min(n_test_samples, len(self.dataset)), 1)
-
-            # Prepare the validation dataset by taking the first `n_test_samples` samples
-            indices = list(range(len(self.dataset)))
-            val_indices = indices[:n_test_samples]
-            self.dataset = Subset(self.dataset, val_indices)
-
+                assert isinstance(config.validation.dataset.split, str)
+                self.dataset = self.dataset[config.validation.dataset.split]
 
 def custom_reward_fn(to_be_evaluated: str, reference: Optional[Any] = None, *args, **kwargs) -> float:
     assert isinstance(reference, str), "Reference answer should be a string"
