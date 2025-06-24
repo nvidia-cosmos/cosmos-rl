@@ -1580,7 +1580,7 @@ def _swizzle_pp_grpo_forward(
         ]
         assert isinstance(old_per_token_logprobs, torch.Tensor)
         assert (
-            old_per_token_logprobs.ndim == 1
+            old_per_token_logprobs.ndim == 2
         ), f"old_per_token_logprobs.ndim: {old_per_token_logprobs.ndim}, while it should be 1"
         assert (
             old_per_token_logprobs.shape == current_per_token_logprobs.shape
@@ -1602,7 +1602,7 @@ def _swizzle_pp_grpo_forward(
             micro_batch_id
         ]
         assert (
-            ref_per_token_logprobs.ndim == 1
+            ref_per_token_logprobs.ndim == 2
         ), f"ref_per_token_logprobs.ndim: {ref_per_token_logprobs.ndim}, while it should be 1"
         assert (
             ref_per_token_logprobs.shape == current_per_token_logprobs.shape
