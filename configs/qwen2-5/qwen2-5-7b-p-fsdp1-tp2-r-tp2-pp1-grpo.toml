@@ -20,7 +20,7 @@ fsdp_offload = false
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 8
 sync_weight_interval = 1
-enable_validation = true
+enable_validation = false
 validation_step = 16
 
 [validation]

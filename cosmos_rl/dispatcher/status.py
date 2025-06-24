@@ -698,6 +698,9 @@ class PolicyStatusManager:
         if len(arrived_replicas) == 0:
             return
 
+        if self.training_finished():
+            return
+
         if is_fake_last_cmd:
             required_rollouts = 0
             all_ready_or_reduced = True
@@ -711,6 +714,7 @@ class PolicyStatusManager:
             all_ready_or_reduced = self.all_ready_or_reduced() and (
                 self.rollout_buffer.qsize() >= required_rollouts
             )
+
 
         # If the last command is fake, we need to trigger data fetch and training no matter
         # whether there are enough rollouts or whether replicas are `ready` or `reduced`.
