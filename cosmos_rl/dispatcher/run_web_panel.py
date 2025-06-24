@@ -328,10 +328,7 @@ async def put_rollout_group(rollout: RolloutRequest):
                             "[Controller] Clear the rollout buffer, and trigger an extra `DataFetch`"
                         )
                         # Clear the rollout buffer
-                        with (
-                            controller.policy_status_manager.rollout_buffer.queue.mutex
-                        ):
-                            controller.policy_status_manager.rollout_buffer.queue.clear()
+                        controller.policy_status_manager.rollout_buffer.queue.clear()
                         controller.policy_status_manager.total_steps = (
                             controller.policy_status_manager.current_step + 1
                         )

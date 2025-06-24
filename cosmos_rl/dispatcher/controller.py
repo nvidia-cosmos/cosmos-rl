@@ -335,7 +335,7 @@ class Controller:
                         if self.epoch == self.config.train.epoch + 1:
                             # We only log this all finished information once.
                             logger.info(
-                                "[Controller] All epochs finished, start stopping all replicas."
+                                "[Controller] All epochs finished fetching rollout prompts, wait for rollouts generation and training to complete."
                             )
                         is_end = True
                         break
