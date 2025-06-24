@@ -130,9 +130,9 @@ Save this file to `./custom_controller_entry.py`
         )
 
 
-1. Either add `launcher` argument to `launch_all.py` if one-click launch is used:
+1. Either add `launcher` argument to `cosmos-rl` command if one-click launch is used:
 
->>> python tools/launch_all.py \
+>>> cosmos-rl \
     --config configs/qwen2-5/qwen2-5-7b-p-tp4-r-tp2-pp1-grpo.toml \
     --policy 1 \
     --rollout 2 \

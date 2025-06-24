@@ -6,7 +6,7 @@ One-click solution
 
 This example demonstrates how to run `Qwen2.5-7B-Instruct` on a single node with 8 GPUs.
 
->>> python tools/launch_all.py \
+>>> cosmos-rl \
     --config configs/qwen2-5/qwen2-5-7b-p-tp4-r-tp2-pp1-grpo.toml \
     --policy 1 \
     --rollout 2

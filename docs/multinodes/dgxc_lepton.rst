@@ -41,7 +41,7 @@ If you already have access to the **DGX Cloud Lepton Platform**, you can launch 
 To launch your job, use the following command as a template. Make sure to **replace the placeholders** (e.g., image, config, secrets) with your own values.
 ::
 
-  python tools/launch_all.py \
+  cosmos-rl \
   --config configs/qwen2-5/qwen2-5-7b-p-fsdp1-tp2-r-tp2-pp1-grpo.toml \
   --lepton-mode \
   --lepton-job-name <job_name> \
@@ -65,7 +65,7 @@ If your node group has **Local Disk enabled**, and you have a volume named `volu
 
   --lepton-mount /dataset:/job_dataset:local-path-for-local:volume_A
 
-For more available options, scroll down to [**Option Reference for `launch_all.py`**]
+For more available options, scroll down to [**Option Reference for `cosmos-rl` command**]
 
 
 Valid Resource Shapes
@@ -108,7 +108,7 @@ GPU Instances
 - `gpu.8xh100-sxm`
 
 
-Option Reference for `launch_all.py`
+Option Reference for `cosmos-rl` command
 --------------------------------------
 
 .. list-table:: 
