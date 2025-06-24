@@ -14,7 +14,7 @@ Setup
 
 You can either build docker image from source or install dependencies inside your python env:
 
-🐳 Option 1: Build docker image from source:
+🐳 Option 1: Build docker image from source
 ::::::::::::::::::::::::::::::::::::::::::::
 
 .. code-block:: bash

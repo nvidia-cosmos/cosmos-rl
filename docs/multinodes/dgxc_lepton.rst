@@ -42,7 +42,7 @@ To launch your job, use the following command as a template. Make sure to **repl
 ::
 
   cosmos-rl \
-  --config configs/qwen2-5/qwen2-5-7b-p-fsdp1-tp2-r-tp2-pp1-grpo.toml \
+  --config configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml \
   --lepton-mode \
   --lepton-job-name <job_name> \
   --lepton-container-image <image> \

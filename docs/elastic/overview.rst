@@ -66,7 +66,7 @@ Demo: Elastic Scaling in Action
 
 ::
 
-  ./tools/launch_controller.sh --port 8080 --config ./configs/qwen2-5/qwen2-5-7b-p-fsdp1-tp2-r-tp2-pp1-grpo.toml
+  ./tools/launch_controller.sh --port 8080 --config ./configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml
 
 ### Step 2: Launch Initial Replicas (Assuming 8-GPU machine)
 

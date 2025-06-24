@@ -10,6 +10,8 @@ Please check and install our [Docs](https://nvidia-cosmos.github.io/cosmos-rl/).
 ## SFT and RL Training System Architecture
 Cosmos-RL provides toolchain to enable large scale SFT and RL training workload with following features:
 1. **HuggingFace Integration**
+    - Llama-2
+    - Llama-3
     - Qwen-2.5
     - Qwen-2.5-VL
     - Qwen-3
