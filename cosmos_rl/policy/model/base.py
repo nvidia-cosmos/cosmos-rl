@@ -189,3 +189,12 @@ class BaseModel(ABC):
     @abstractmethod
     def data_packer(cls) -> DataPacker:
         raise NotImplementedError
+
+    def check_cp_compatible(self, parallel_dims: ParallelDims):
+        _, cp_size = parallel_dims.cp_coord
+        _, tp_size = parallel_dims.tp_coord
+        if parallel_dims.cp_enabled:
+            if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
+                raise ValueError(
+                    f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size {parallel_dims.cp_size}"
+                )

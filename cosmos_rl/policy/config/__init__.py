@@ -610,14 +610,6 @@ class ParallelismConfig:
         },
     )
 
-    cp_rotate_method: str = field(
-        default="allgather",
-        metadata={
-            "help": "The method to rotate kv shards during context parallelism",
-            "choices": ["allgather", "alltoall"],
-        },
-    )
-
     @property
     def world_size(self):
         world_size = os.environ.get("WORLD_SIZE", 1)
@@ -677,13 +669,6 @@ class RolloutParallelismConfig(ParallelismConfig):
     )
     dp_shard_size: int = skip_ui_field(
         default=-1, metadata={"help": "Data Parallelism size in sharded mode"}
-    )
-    cp_rotate_method: str = skip_ui_field(
-        default="allgather",
-        metadata={
-            "help": "The method to rotate kv shards during context parallelism",
-            "choices": ["allgather", "alltoall"],
-        },
     )
 
 

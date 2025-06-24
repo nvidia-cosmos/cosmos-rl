@@ -180,18 +180,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=2):
     return q_embed, k_embed
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -216,6 +204,7 @@ class Attention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
+        self.attn_func = flash_attn_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -284,7 +273,7 @@ class Attention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
 
-        output = flash_attn_func(xq, xk, xv, causal=True)
+        output = self.attn_func(xq, xk, xv, causal=True)
         # output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
         # output = output.transpose(
         #     1, 2

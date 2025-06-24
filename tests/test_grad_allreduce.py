@@ -106,7 +106,6 @@ cp_size = 1
 dp_shard_size = {dp_shard}
 pp_size = 1
 dp_replicate_size = 1
-cp_rotate_method = "allgather"
 """
     cfg_file_path = os.path.join(WORK_DIR, "train_config.toml")
     with open(cfg_file_path, "w") as f:

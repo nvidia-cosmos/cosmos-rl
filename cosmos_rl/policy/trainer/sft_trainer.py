@@ -16,7 +16,6 @@
 from cosmos_rl.policy.trainer import Trainer
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
-    create_context_parallel_ctx,
 )
 from cosmos_rl.policy.config import (
     Config as CosmosConfig,
@@ -329,61 +328,44 @@ class SFTTrainer(Trainer):
                     **val_batch
                 )
 
-                val_cp_context = (
-                    create_context_parallel_ctx(
-                        cp_mesh=self.parallel_dims.mesh["cp"],
-                        cp_buffers=[val_inputs, val_labels, val_position_ids],
-                        cp_seq_dims=[1, 1, val_pos_seq_dim],
-                        cp_no_restore_buffers={
-                            val_inputs,
-                            val_labels,
-                            val_position_ids,
-                        },
-                        cp_rotate_method=self.config.parallelism.cp_rotate_method,
+                if self.parallel_dims.pp_enabled:
+                    pp_last_stage = (
+                        self.parallel_dims.pp_coord[0]
+                        == self.parallel_dims.pp_coord[1] - 1
                     )
-                    if self.parallel_dims.cp_enabled
-                    else None
-                )
+                    pp_first_stage = self.parallel_dims.pp_coord[0] == 0
 
-                with self.context(val_cp_context):
-                    if self.parallel_dims.pp_enabled:
-                        pp_last_stage = (
-                            self.parallel_dims.pp_coord[0]
-                            == self.parallel_dims.pp_coord[1] - 1
+                    if pp_first_stage:
+                        self.pp_scheduler_val.step(
+                            **val_batch,
+                            position_ids=val_position_ids,
+                            pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                            seq_len_multiple=self.seq_len_multiple,
                         )
-                        pp_first_stage = self.parallel_dims.pp_coord[0] == 0
-
-                        if pp_first_stage:
-                            self.pp_scheduler_val.step(
-                                **val_batch,
-                                position_ids=val_position_ids,
-                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                seq_len_multiple=self.seq_len_multiple,
-                            )
-                        else:
-                            pp_out = self.pp_scheduler_val.step(
-                                position_ids=val_position_ids,
-                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                seq_len_multiple=self.seq_len_multiple,
-                            )
-
-                        if pp_last_stage:
-                            val_logits = pp_out[:, :-1].contiguous()
-                            val_loss = self.loss_fn(
-                                val_logits.view(-1, val_logits.size(-1)),
-                                val_labels[:, 1:].contiguous().view(-1),
-                            )
-                        else:
-                            val_loss = torch.tensor([-1.0], device=self.device)
                     else:
-                        val_logits = self.model(
-                            **val_batch, position_ids=val_position_ids
-                        )[:, :-1].contiguous()
+                        pp_out = self.pp_scheduler_val.step(
+                            position_ids=val_position_ids,
+                            pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                            seq_len_multiple=self.seq_len_multiple,
+                        )
+
+                    if pp_last_stage:
+                        val_logits = pp_out[:, :-1].contiguous()
                         val_loss = self.loss_fn(
                             val_logits.view(-1, val_logits.size(-1)),
                             val_labels[:, 1:].contiguous().view(-1),
                         )
-                    val_total_loss += val_loss.item() * val_inputs.size(0)
+                    else:
+                        val_loss = torch.tensor([-1.0], device=self.device)
+                else:
+                    val_logits = self.model(**val_batch, position_ids=val_position_ids)[
+                        :, :-1
+                    ].contiguous()
+                    val_loss = self.loss_fn(
+                        val_logits.view(-1, val_logits.size(-1)),
+                        val_labels[:, 1:].contiguous().view(-1),
+                    )
+                val_total_loss += val_loss.item() * val_inputs.size(0)
             val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
             logger.info(f"Validation loss: {val_avg_loss}")
         return val_avg_loss
@@ -415,7 +397,6 @@ class SFTTrainer(Trainer):
                 for k, v in batch.items():
                     batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
 
-                inputs = batch["input_ids"]
                 labels = batch.pop("label_ids")
 
                 position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
@@ -424,60 +405,45 @@ class SFTTrainer(Trainer):
 
                 self.optimizers.zero_grad()
 
-                cp_context = (
-                    create_context_parallel_ctx(
-                        cp_mesh=self.parallel_dims.mesh["cp"],
-                        cp_buffers=[inputs, labels, position_ids],
-                        cp_seq_dims=[1, 1, pos_seq_dim],
-                        cp_no_restore_buffers={inputs, labels, position_ids},
-                        cp_rotate_method=self.config.parallelism.cp_rotate_method,
+                if self.parallel_dims.pp_enabled:
+                    pp_last_stage = (
+                        self.parallel_dims.pp_coord[0]
+                        == self.parallel_dims.pp_coord[1] - 1
                     )
-                    if self.parallel_dims.cp_enabled
-                    else None
-                )
+                    pp_first_stage = self.parallel_dims.pp_coord[0] == 0
 
-                with self.context(cp_context):
-                    if self.parallel_dims.pp_enabled:
-                        pp_last_stage = (
-                            self.parallel_dims.pp_coord[0]
-                            == self.parallel_dims.pp_coord[1] - 1
-                        )
-                        pp_first_stage = self.parallel_dims.pp_coord[0] == 0
-
-                        # Pipeline Parallel forward / backward inside step() call
-                        targets, losses = (
-                            (labels, []) if pp_last_stage else (None, None)
-                        )
-                        if pp_first_stage:
-                            self.pp_scheduler.step(
-                                **batch,
-                                position_ids=position_ids,
-                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                seq_len_multiple=self.seq_len_multiple,
-                            )
-                        else:
-                            # FWD + BWD if it is 1F1B-like scheduler
-                            self.pp_scheduler.step(
-                                position_ids=position_ids,
-                                target=targets,
-                                losses=losses,
-                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                seq_len_multiple=self.seq_len_multiple,
-                            )
-                        loss = (
-                            torch.mean(torch.stack(losses)).to(self.device)
-                            if pp_last_stage
-                            else torch.tensor([-1.0], device=self.device)
+                    # Pipeline Parallel forward / backward inside step() call
+                    targets, losses = (labels, []) if pp_last_stage else (None, None)
+                    if pp_first_stage:
+                        self.pp_scheduler.step(
+                            **batch,
+                            position_ids=position_ids,
+                            pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                            seq_len_multiple=self.seq_len_multiple,
                         )
                     else:
-                        logits = self.model(**batch, position_ids=position_ids)[
-                            :, :-1
-                        ].contiguous()
-                        loss = self.loss_fn(
-                            logits.view(-1, logits.size(-1)),
-                            labels[:, 1:].contiguous().view(-1),
+                        # FWD + BWD if it is 1F1B-like scheduler
+                        self.pp_scheduler.step(
+                            position_ids=position_ids,
+                            target=targets,
+                            losses=losses,
+                            pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                            seq_len_multiple=self.seq_len_multiple,
                         )
-                        loss.backward()
+                    loss = (
+                        torch.mean(torch.stack(losses)).to(self.device)
+                        if pp_last_stage
+                        else torch.tensor([-1.0], device=self.device)
+                    )
+                else:
+                    logits = self.model(**batch, position_ids=position_ids)[
+                        :, :-1
+                    ].contiguous()
+                    loss = self.loss_fn(
+                        logits.view(-1, logits.size(-1)),
+                        labels[:, 1:].contiguous().view(-1),
+                    )
+                    loss.backward()
                 loss = loss.detach()
 
                 for model_part in self.model_parts:

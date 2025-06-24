@@ -37,6 +37,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
+from cosmos_rl.utils.ulysses import ulysses_attn_func
 import os
 from typing import Callable, Optional
 
@@ -70,6 +71,10 @@ def parallelize(
 
     if config.policy.model_gradient_checkpointing:
         apply_ac(model)
+
+    if parallel_dims.cp_enabled:
+        apply_cp(model, world_mesh["cp"])
+        logger.info("Applied Context Parallel to the model")
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if config.train.compile:
@@ -147,9 +152,6 @@ def parallelize(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
 
         if config.train.fsdp_offload:
             logger.info("Applied CPU Offloading to the model")
@@ -249,6 +251,23 @@ def parallelize(
             return schedule, None
     else:
         return None, None
+
+
+def apply_cp(model: nn.Module, cp_mesh: DeviceMesh):
+    """Apply Context Parallel to the model."""
+    # For language
+    for _, transformer_block in model.model.layers.items():
+        original_attn_func = transformer_block.self_attn.attn_func
+        transformer_block.self_attn.attn_func = ulysses_attn_func(
+            original_attn_func, cp_mesh
+        )
+    # For visual model
+    if model.visual is not None:
+        for _, transformer_block in model.visual.blocks.items():
+            original_attn_func = transformer_block.attn.attn_func
+            transformer_block.attn.attn_func = ulysses_attn_func(
+                original_attn_func, cp_mesh
+            )
 
 
 def apply_tp(

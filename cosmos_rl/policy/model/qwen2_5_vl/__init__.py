@@ -253,6 +253,7 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
+        self.attn_func = F.scaled_dot_product_attention
 
     def forward(
         self,
@@ -272,7 +273,7 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
-        attn_output = F.scaled_dot_product_attention(
+        attn_output = self.attn_func(
             q,
             k,
             v,
@@ -650,18 +651,6 @@ def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim
     return q_embed, k_embed
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Qwen2_5_VLAttention(nn.Module):
     """
     Multi-head attention module.
@@ -692,6 +681,7 @@ class Qwen2_5_VLAttention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
+        self.attn_func = flash_attn_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -744,7 +734,7 @@ class Qwen2_5_VLAttention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = apply_multimodal_rotary_pos_emb(xq, xk, cos, sin, self.mrope_section)
 
-        output = flash_attn_func(xq, xk, xv, causal=True)
+        output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 

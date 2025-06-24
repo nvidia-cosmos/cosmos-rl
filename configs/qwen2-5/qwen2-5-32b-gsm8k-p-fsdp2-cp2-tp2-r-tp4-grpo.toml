@@ -2,8 +2,8 @@ redis = "12800"
 
 [train]
 resume = false
-epoch = 10
-output_dir = "./outputs/qwen2-5-32b-p-fsdp2-tp4-r-tp4-pp1-grpo"
+epoch = 15
+output_dir = "./outputs/qwen2-5-32b-gsm8k-p-fsdp2-cp2-tp2-r-tp4-grpo"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 2e-6
@@ -20,6 +20,7 @@ fsdp_offload = false
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 384 
 sync_weight_interval = 1
+enable_validation = true
 
 [rollout]
 gpu_memory_utilization = 0.7
@@ -30,6 +31,13 @@ quantization = "none"
 max_response_length = 1024
 seed = 3407
 enforce_eager = false
+
+[validation]
+temperature = 0.0
+max_response_length = 2048
+dataset.name = "openai/gsm8k"
+dataset.subset = "main"
+dataset.split = "test"
 
 [policy]
 model_name_or_path = "Qwen/Qwen2.5-32B-Instruct"
@@ -55,7 +63,7 @@ epsilon_high = 0.28
 kl_beta = 0.0
 mu_iterations = 1
 min_filter_prefix_tokens = 1
-mini_batch = 6
+mini_batch = 8
 unbiased_loss_max_tokens = 200 
 loss_type = "seq-mean-token-mean"
 
@@ -78,8 +86,8 @@ dp_replicate_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
-tp_size = 4
-cp_size = 1
+tp_size = 2
+cp_size = 2
 dp_shard_size = 2
 pp_size = 1
 dp_replicate_size = 1
