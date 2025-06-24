@@ -1,6 +1,6 @@
 # Usage
 
-1. `git clone git@github.com:jcao-ai/cosmos-doc.git && cd cosmos-doc`
+1. `git@github.com:nvidia-cosmos/cosmos-rl.git && cd cosmos-rl` 
 2. Install `sphinx-...` packages
     ``` bash
     pip install sphinx-autobuild  sphinx_rtd_theme recommonmark sphinx_markdown_tables

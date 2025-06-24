@@ -27,7 +27,7 @@ from .utils import console
 @click.group()
 def cosmos():
     """
-    Cosmos RL CLI.
+    Cosmos Reason1 CLI.
     """
     pass
 

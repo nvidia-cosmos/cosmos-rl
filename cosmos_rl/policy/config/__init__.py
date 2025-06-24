@@ -64,13 +64,9 @@ class DatasetConfig:
         },
     )
 
-    train_split: Union[str, List[str]] = field(
+    split: Union[str, List[str]] = field(
         default_factory=list,
         metadata={"help": "A list of dataset splits to train"},
-    )
-
-    test_split: Union[str, List[str]] = field(
-        default="test", metadata={"help": "A list of Dataset split to test"}
     )
 
     test_size: Optional[Union[float, int]] = field(
@@ -166,7 +162,7 @@ class CheckpointConfig:
         metadata={"help": "Whather to upload the safetensors weight to huggingface."},
     )
     hf_repo_name: str = field(
-        default="Cosmos-Reason1",
+        default="Comos-Reason1",
         metadata={
             "help": "The huggingface repo name to upload the safetensors weight."
         },
@@ -177,8 +173,8 @@ class CheckpointConfig:
             "help": "Whether to upload the checkpoint and safetensors to S3. Default to False, set `final` will upload the final checkpoint, `all` will upload all checkpoints."
         },
     )
-    s3_bucket: str = field(
-        default="cosmos-reason1",
+    s3_bucket: Optional[str] = field(
+        default=None,
         metadata={
             "help": "The S3 bucket name to upload the checkpoint and safetensors weight."
         },
@@ -191,6 +187,10 @@ class CheckpointConfig:
     )
 
     def __post_init__(self):
+        if self.upload_s3 and self.s3_bucket is None:
+            raise ValueError(
+                "s3_bucket must be specified when upload_s3 is True, got None"
+            )
         if self.save_mode not in ["async", "sync"]:
             raise ValueError(
                 f"Invalid save_mode: {self.save_mode}. Must be one of ['async', 'sync']"
@@ -269,7 +269,7 @@ class GrpoConfig:
         metadata={"help": "Column name for response/reference answer"},
     )
     reward_function: List[str] = field(
-        default_factory=list,
+        default_factory=lambda: ["single_choice"],
         metadata={
             "help": "A List of reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. ",
         },
@@ -539,7 +539,7 @@ class TrainingConfig:
         default=False,
         metadata={"help": "Enable validation during training."},
     )
-    validation_freq: int = field(
+    validation_step: int = field(
         default=20,
         metadata={
             "help": "Validation frequency during training, in terms of training steps",
@@ -711,13 +711,6 @@ class ValidationConfig:
         },
     )
 
-    reward_function: List[str] = field(
-        default_factory=list,
-        metadata={
-            "help": "A List of reward functions for the model used in validation. Currently support `single_choice`, `boxed_math`, and `format`. ",
-        },
-    )
-
     temperature: float = field(
         default=0.9, metadata={"help": "Temperature for sampling during validation."}
     )
@@ -770,6 +763,10 @@ class RolloutConfig:
 
     batch_size: int = skip_ui_field(
         default=1, metadata={"help": "Batch size for rollout."}
+    )
+    val_batch_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Batch size for rollout generation during validation."},
     )
 
     # not used yet.
@@ -926,23 +923,19 @@ class Config:
                 len(self.train.train_policy.reward_function) > 0
             ), "reward_function must be a list of reward functions"
 
-        if isinstance(self.train.train_policy.dataset.train_split, str):
-            self.train.train_policy.dataset.train_split = [
-                self.train.train_policy.dataset.train_split
+        if isinstance(self.train.train_policy.dataset.split, str):
+            self.train.train_policy.dataset.split = [
+                self.train.train_policy.dataset.split
             ]
-        if isinstance(self.train.train_policy.dataset.test_split, str):
-            self.train.train_policy.dataset.test_split = [
-                self.train.train_policy.dataset.test_split
+        if isinstance(self.train.train_policy.dataset.split, str):
+            self.train.train_policy.dataset.split = [
+                self.train.train_policy.dataset.split
             ]
 
         if self.train.train_policy.type == "grpo":
             # Handle for evaludation configuration.
-            if isinstance(self.validation.dataset.test_split, str):
-                self.validation.dataset.test_split = [
-                    self.validation.dataset.test_split
-                ]
-            if isinstance(self.validation.reward_function, str):
-                self.validation.reward_function = [self.validation.reward_function]
+            if isinstance(self.validation.dataset.split, str):
+                self.validation.dataset.split = [self.validation.dataset.split]
 
         if self.train.ckpt.upload_s3:
             if self.train.ckpt.upload_s3 not in ["final", "all"]:

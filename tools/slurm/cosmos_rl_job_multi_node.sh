@@ -11,7 +11,7 @@
 [[EXTRA_SBATCH_ARGS]]
 
 # Prerequisite of using this slurm script
-# 1. Build the cosmos_rl._cpp module. Most likely need to use srun to schedule an interactive node, and then run the following commands under the interactive node to build the cosmos_rl._cpp module in the root cosmos-rl path.
+# 1. Build the cosmos_rl._cpp module. Most likely need to use srun to schedule an interactive node, and then run the following commands under the interactive node to build the cosmos_rl._cpp module in the root cosmos- path.
 #    cd cosmos-rl
 #    pip install -e .
 # 2. Change the paths in the following ### Needs to Change ### section.

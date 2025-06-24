@@ -40,7 +40,6 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_REGISTER_SUFFIX,
     COSMOS_API_UNREGISTER_SUFFIX,
-    COSMOS_API_POLICY_WEIGHT_READY_SUFFIX,
 )
 
 
@@ -68,7 +67,7 @@ output_dir = "{WORK_DIR}"
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "cosmos_rl"
+project_name = "cosmos_rl_job"
 experiment_name = "None"
 
 [train.train_policy]
@@ -76,7 +75,7 @@ type = "grpo"
 dataset.name = "JiaxinTsao/math_examples"
 prompt_column_name = "prompt"
 response_column_name = "result"
-dataset.train_split = "train"
+dataset.split = "train"
 reward_function = "boxed_math"
 temperature = 0.9
 epsilon_low = 0.2
@@ -188,16 +187,6 @@ class TestHANccl(CommMixin):
         )
         self._is_registered = True
         logger.info(f"register to controller: {self.replica_name}")
-
-        if self.replica_rank == 0:
-            # MOCK, tell the controller the weight is ready, then buildmesh and weight sync command will be triggered
-            make_request_with_retry(
-                partial(
-                    requests.post,
-                    json={"replica_name": self.replica_name},
-                ),
-                self.__get_alternative_urls(COSMOS_API_POLICY_WEIGHT_READY_SUFFIX),
-            )
 
     @override
     def unregister_from_controller(self):
