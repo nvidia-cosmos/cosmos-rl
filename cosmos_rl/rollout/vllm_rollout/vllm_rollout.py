@@ -140,7 +140,8 @@ class vLLMRollout(RolloutBase):
                 f"[Rollout] Failed to load generation config from {hf_config_path}: {str(e)}, use default eos_token_id."
             )
             # self.eos_token_ids = [tokenizer.eos_token_id]
-            self.eos_token_ids = [151645, 151643]  # Hack for cosmos-reason1
+            # TODO(lms): remove this
+            self.eos_token_ids = [151645, 151643]
 
         self.tokenizer = tokenizer
 

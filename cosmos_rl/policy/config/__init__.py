@@ -173,8 +173,8 @@ class CheckpointConfig:
             "help": "Whether to upload the checkpoint and safetensors to S3. Default to False, set `final` will upload the final checkpoint, `all` will upload all checkpoints."
         },
     )
-    s3_bucket: str = field(
-        default="cosmos-reason1",
+    s3_bucket: Optional[str] = field(
+        default=None,
         metadata={
             "help": "The S3 bucket name to upload the checkpoint and safetensors weight."
         },
@@ -187,6 +187,10 @@ class CheckpointConfig:
     )
 
     def __post_init__(self):
+        if self.upload_s3 and self.s3_bucket is None:
+            raise ValueError(
+                "s3_bucket must be specified when upload_s3 is True, got None"
+            )
         if self.save_mode not in ["async", "sync"]:
             raise ValueError(
                 f"Invalid save_mode: {self.save_mode}. Must be one of ['async', 'sync']"
