@@ -400,8 +400,11 @@ class FeedForward(nn.Module):
         self.reshard_helper_layer = IdentityLayer()
 
         cuda_device_props = torch.cuda.get_device_properties()
-        self.is_hopper_gpu = (
-            cuda_device_props.major == 9 and cuda_device_props.minor == 0
+        # Use torch implemetation or 3rd party implementation
+        self.use_torch_group_gemm_impl = (
+            cuda_device_props.major == 9
+            and cuda_device_props.minor == 0
+            and hasattr(torch, "_grouped_mm")
         )
 
         assert not any(
@@ -595,7 +598,7 @@ class FeedForward(nn.Module):
         contig_tokens = token_gather_buf[permuted_indices]
         # group gemm - handle all three group gemms (up, gate, down for all experts)
         # print(f"m_sizes: {m_sizes}, m_offsets: {m_offsets}")
-        if self.is_hopper_gpu:
+        if self.use_torch_group_gemm_impl:
             hidden_outputs = self._run_group_gemm_hopper(
                 contig_tokens,
                 m_sizes,
