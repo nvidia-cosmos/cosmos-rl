@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")
 
 COSMOS_RL_DIR = "/workspace/cosmos_rl"
-TOOLS_RELATIVE_DIR = "tools"
+TOOLS_RELATIVE_DIR = "cosmos_rl/launcher"
 
 
 def wait_for_url_ready(url: str, process: Optional[subprocess.Popen] = None):
@@ -718,8 +718,12 @@ def main():
         job_spec = LeptonJobUserSpec()
 
         # Construct the original launch_processes command
-        with open(args.config, "r") as f:
-            config_content = f.read()
+        # Update policy and rollout numbers in the lepton config
+        if "policy" in cosmos_config and "parallelism" in cosmos_config["policy"]:
+            cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
+        if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
+            cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
+        config_content = toml.dumps(cosmos_config)
         launch_cmd = f"""\
 cd {COSMOS_RL_DIR}
 
