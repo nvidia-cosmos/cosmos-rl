@@ -75,7 +75,16 @@ def parallelize(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if config.train.compile:
-        apply_compile(model)
+        # FIXME: (lms) For ulysses, an error will be raised by torch.compile:
+        # ... torch._dynamo.exc.Unsupported: Graph break due to unsupported builtin None.pybind11_object.__new__.
+        # This is caused by the coustom SeqAllToAll in ulysses.py
+        # Related torch issue: https://github.com/pytorch/pytorch/issues/149586
+        # tmp workaround is set fullgraph to False. Figure it out later.
+        if parallel_dims.cp_enabled:
+            logger.warning(
+                "torch.compile and CP will have some issues, temporarily set `fullgraph` to False to bypass the issue. This may cause performance degradation."
+            )
+        apply_compile(model, not parallel_dims.cp_enabled)
 
     if (
         parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
@@ -465,16 +474,16 @@ def apply_ac(model: nn.Module):
     logger.info("Applied activation checkpointing to the model")
 
 
-def apply_compile(model: nn.Module):
+def apply_compile(model: nn.Module, fullgraph: bool = True):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(transformer_block, fullgraph=True)
+        transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
         model.layers.register_module(layer_id, transformer_block)
 
-    logger.info("Compiling each TransformerBlock with torch.compile")
+    logger.info("Each TransformerBlock compiled with torch.compile")
 
 
 def apply_fsdp(
