@@ -249,6 +249,7 @@ class DeepseekV3Attention(nn.Module):
         self.v_head_dim = config.v_head_dim
         self.qk_nope_head_dim = config.qk_nope_head_dim
         self.q_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
+        self.attn_func = None
 
         self.is_causal = True
 
@@ -1334,3 +1335,12 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
     @classmethod
     def data_packer(cls) -> DecoderOnlyLLMDataPacker:
         return DecoderOnlyLLMDataPacker()
+
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        raise NotImplementedError(
+            "Context Parallel is not supported for DeepseekV3MoEModel now."
+        )
+        # if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
+        #     raise ValueError(
+        #         f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+        #     )

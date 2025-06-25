@@ -67,8 +67,21 @@ def parallelize(
     if config.policy.model_gradient_checkpointing:
         apply_ac(model)
 
+    if parallel_dims.cp_enabled:
+        apply_cp(model, parallel_dims)
+        logger.info("Applied Context Parallel to the model")
+
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if config.train.compile:
+        # FIXME: (lms) For ulysses, an error will be raised by torch.compile:
+        # ... torch._dynamo.exc.Unsupported: Graph break due to unsupported builtin None.pybind11_object.__new__.
+        # This is caused by the custom SeqAllToAll in ulysses.py
+        # Related torch issue: https://github.com/pytorch/pytorch/issues/149586
+        # tmp workaround is set fullgraph to False. Figure it out later.
+        if parallel_dims.cp_enabled:
+            logger.warning(
+                "torch.compile and CP will have some issues, temporarily set `fullgraph` to False to bypass the issue. This may cause performance degradation."
+            )
         apply_compile(model)
 
     if (
@@ -175,6 +188,14 @@ def parallelize(
             return schedule, None
     else:
         return None, None
+
+
+def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
+    """Apply Context Parallel to the model."""
+    cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
+    model.check_cp_compatible(cp_size, tp_size)
+
+    # TODO: (lms) Add support for DeepseekV3MoEModel with MLA.
 
 
 def apply_tp_ep(
