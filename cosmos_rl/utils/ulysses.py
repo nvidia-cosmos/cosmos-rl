@@ -13,19 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import contextmanager
 import torch
-from typing import Any, Tuple, Callable, Dict
+
+from typing import Any, Tuple, Callable
 from functools import partial
-import torch.distributed as dist
 
 from torch.distributed.device_mesh import DeviceMesh
+import torch.distributed as dist
 
 from cosmos_rl.utils.attn_util import repeat_kv
-from cosmos_rl.utils.parallelism import ParallelDims
-
-
-COSMOS_ATTN_FUNC = None
 
 
 def all_to_all_tensor(
@@ -91,13 +87,21 @@ def all_gather_tensor(
     """
     group = cp_mesh.get_group()
     cp_world_size = cp_mesh.size()
-    output_shape = list(local_tensor.shape)
+    output_shape = local_tensor.shape
     output_shape[0] = output_shape[0] * cp_world_size
     output = torch.empty(
         output_shape, dtype=local_tensor.dtype, device=local_tensor.device
     )
-    dist.all_gather_into_tensor(output, local_tensor, group=group, async_op=async_op)
-    # FIXME: lms: should we wait for the async_op?
+    comm = dist.all_gather_into_tensor(
+        output, local_tensor, group=group, async_op=async_op
+    )
+    if async_op:
+
+        def wait():
+            comm.wait()
+            return output
+
+        return wait
     return output
 
 
@@ -194,8 +198,7 @@ def slice_input_tensor(
 ) -> torch.Tensor:
     # We must use local rank, not get_rank()
     cp_world_size, cp_rank = cp_mesh.size(), cp_mesh.get_local_rank()
-    dim_size = data.size(dim)
-    partial_size = dim_size // cp_world_size
+    partial_size = data.size(dim) // cp_world_size
     slc = [slice(None)] * len(data.shape)
     slc[dim] = slice(cp_rank * partial_size, (cp_rank + 1) * partial_size)
     return data[slc].contiguous()
@@ -205,20 +208,15 @@ def slice_input_for_ulysses(
     input_ids: torch.Tensor, position_ids: torch.Tensor, cp_mesh: DeviceMesh
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-
-
-    Note both input_ids_rmpad and position_ids_rmpad will be padded and sliced.
-
-    The is the utility of pre-forward for ulysses sequence parallelism
-
+    `input_ids` and `position_ids` are already padded by cosmos-rl datapacker.
     Args:
-        input_ids_rmpad: shape of [bsz, seqlen]
-        position_ids_rmpad: shape of [bsz, seqlen], where bsz must be 1
-        sp_size (int): ulysses sequence parallelism size
+        input_ids: shape of [bsz, seqlen]
+        position_ids: shape of [bsz, seqlen]
+        cp_mesh: ulysses sequence parallelism size
 
     Returns:
-        torch.Tensor: padded and sliced input_ids
-        torch.Tensor: padded and sliced position_ids
+        torch.Tensor: input_ids for current rank
+        torch.Tensor: position_ids for current rank
     """
     input_for_current_rank = slice_input_tensor(input_ids, dim=1, cp_mesh=cp_mesh)
     position_ids_for_current_rank = slice_input_tensor(
@@ -243,10 +241,17 @@ def gather_seq_scatter_heads(
     cp_mesh: DeviceMesh,
 ) -> torch.Tensor:
     """
-    A func to sync embedding input with alltoall in sequence parallel
+    A func to sync embedding input with alltoall in sequence parallel.
     gather sequence dimension and scatter head dim:
-    e.g. seq_dim: 1, head_dim: 2
+    For example, when seq_dim is 1, head_dim is 2, the transformation is:
     [bsz, seq/n, h, ...] -> [bsz, seq, h/n, ...]
+    Args:
+        x: shape of [bsz, seq/n, h, ...]
+        seq_dim: the dimension to gather
+        head_dim: the dimension to scatter
+        cp_mesh: ulysses sequence parallelism size
+    Returns:
+        torch.Tensor: shape of gathered and scattered tensor
     """
     x = SeqAllToAll.apply(cp_mesh, x, head_dim, seq_dim)
     return x
@@ -256,13 +261,21 @@ def gather_heads_scatter_seq(
     x: torch.Tensor, head_dim: int, seq_dim: int, cp_mesh: DeviceMesh
 ) -> torch.Tensor:
     """
-    A func to sync attention result with alltoall in sequence parallel
+    A func to sync attention result with alltoall in sequence parallel.
     gather head dimension and scatter seq dim:
-    e.g. seq_dim: 1, head_dim: 2
+    For example, when seq_dim is 1, head_dim is 2, the transformation is:
     [bsz, seq, h/n, ...] -> [bsz, seq/n, h, ...]
+
+    Args:
+        x (torch.Tensor): shape of [bsz, seq, h/n, ...]
+        head_dim (int): the dimension to gather
+        seq_dim (int): the dimension to scatter
+        cp_mesh (DeviceMesh): ulysses sequence parallelism size
+
+    Returns:
+        torch.Tensor: shape of [bsz, seq/n, h, ...]
     """
     return SeqAllToAll.apply(cp_mesh, x, seq_dim, head_dim, False)
-    # return x
 
 
 def ulysses_wrapper_of_flash_attn(
@@ -270,28 +283,29 @@ def ulysses_wrapper_of_flash_attn(
     key_states: torch.Tensor,
     value_states: torch.Tensor,
     cp_mesh: DeviceMesh,
-    *args,
     original_attn_func: Callable,
+    *args,
     **kwargs,
 ):
     """Insert all-to-all before and after flash attention.
     DeepSpeed-Ulysses: https://arxiv.org/pdf/2309.14509
 
     Args:
-        query_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads, head_dim)
-        key_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads_k, head_dim)
-        value_states (torch.Tensor): (batch_size, seqlen/sp_size, nheads_k, head_dim)
-        position_ids (torch.Tensor, optional): (batch_size, seqlen/sp_size)
+        query_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads, head_dim]
+        key_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads_k, head_dim]
+        value_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads_k, head_dim]
+        cp_mesh (DeviceMesh): ulysses sequence parallelism device mesh
+        original_attn_func: the original attention function
 
     Returns:
-        torch.Tensor: (batch_size, seqlen/sp_size, nheads, head_dim)
+        torch.Tensor: [batch_size, seqlen/cp_size, nheads, head_dim]
     """
     cp_world_size = cp_mesh.size()
     assert cp_world_size > 1, "CP world size must be greater than 1"
 
-    ########## AlltoAll for Ulysses ##########
+    # AlltoAll for Ulysses
     # NOTE: repeat kv heads to be divided by sequence parallel. Instead of repeating nheads_q//nheads_k,
-    # we choose to repeat sp_size//nheads_k, since flash_attention supports MQA/GQA.
+    # we choose to repeat cp_size//nheads_k, since flash_attention supports MQA/GQA.
     # For example:
     # - nheads_k=4, sp=8, repeats=2
     # - nheads_k=8, sp=8, repeats=1
@@ -311,21 +325,12 @@ def ulysses_wrapper_of_flash_attn(
         value_states, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
     )
 
-    # TODO: all_gather position_ids because `prepare_fa2_from_position_ids` needs it, we can eliminate
-    # this all_gather by passing cu_seq_lens_q, cu_seq_lens_k, max_length_k, max_length_q explicitly.
-    # https://github.com/huggingface/transformers/pull/33932
-
-    # (bsz, seq_len/n) -> (bsz, seq_len)
-    # position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
-    # torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
-    # position_ids = torch.concat(position_ids_list, dim=-1)
-
     # (bsz, seq_len, n_head/n, head_dim)
     attn_output = original_attn_func(
         query_states, key_states, value_states, *args, **kwargs
     )
 
-    ########## AlltoAll for Ulysses ##########
+    # AlltoAll for Ulysses
     # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
     attn_output = gather_heads_scatter_seq(
         attn_output, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
@@ -340,30 +345,3 @@ def ulysses_attn_func(original_attn_func: Callable, cp_mesh: DeviceMesh):
         original_attn_func=original_attn_func,
         cp_mesh=cp_mesh,
     )
-
-
-@contextmanager
-def ulysses_cp_context(user_mini_batch: Dict[str, Any], parallel_dims: ParallelDims):
-    cp_mesh = parallel_dims.mesh["cp"]
-    dp_mesh = parallel_dims.mesh["dp"]
-
-    cp_world_size = cp_mesh.size()
-    if cp_world_size == 1:
-        # do nothing if
-        yield
-    else:
-        if dp_mesh.size() == 1:
-            # do nothing if dp_world_size == 1
-            yield
-        else:
-            # slice input_ids and position_ids for each dp
-            input_ids_per_dp = user_mini_batch["input_ids"]  # [bs, seqlen]
-            position_ids_per_dp = user_mini_batch["position_ids"]  # [bs, seqlen]
-
-            try:
-                # user_mini_batch["input_ids"] = input_ids
-                # user_mini_batch["position_ids"] = position_ids
-                yield
-            finally:
-                user_mini_batch["input_ids"] = input_ids_per_dp
-                user_mini_batch["position_ids"] = position_ids_per_dp
