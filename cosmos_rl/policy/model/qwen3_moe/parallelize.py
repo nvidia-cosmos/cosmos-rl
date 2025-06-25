@@ -135,39 +135,35 @@ def parallelize(
 
         assert (
             config.train.train_batch_per_replica
-            % config.policy.parallelism.pp_micro_batch_size
+            % config.policy.parallelism.micro_batch_size
             == 0
-        ), "train_batch must be divisible by pp_micro_batch_size"
+        ), "train_batch must be divisible by micro_batch_size"
         assert (
-            (
-                config.train.train_batch_per_replica
-                // config.policy.parallelism.pp_micro_batch_size
-            )
-            % pp_size
-            == 0
-        ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
+            config.train.train_batch_per_replica
+            // config.policy.parallelism.micro_batch_size
+        ) % pp_size == 0, "train_batch / micro_batch_size must be divisible by pp_size"
         assert pp_loss_fn is not None, "pp_loss_fn must be provided"
         n_microbatches = (
             config.train.train_batch_per_replica
-            // config.policy.parallelism.pp_micro_batch_size
+            // config.policy.parallelism.micro_batch_size
         )
         if config.train.enable_validation:
             assert (
                 config.train.validation_batch_per_replica
-                % config.policy.parallelism.pp_micro_batch_size
+                % config.policy.parallelism.micro_batch_size
                 == 0
-            ), "validation_batch must be divisible by pp_micro_batch_size"
+            ), "validation_batch must be divisible by micro_batch_size"
             assert (
                 (
                     config.train.validation_batch_per_replica
-                    // config.policy.parallelism.pp_micro_batch_size
+                    // config.policy.parallelism.micro_batch_size
                 )
                 % pp_size
                 == 0
-            ), "validation_batch / pp_micro_batch_size must be divisible by pp_size"
+            ), "validation_batch / micro_batch_size must be divisible by pp_size"
             n_val_microbatches = (
                 config.train.validation_batch_per_replica
-                // config.policy.parallelism.pp_micro_batch_size
+                // config.policy.parallelism.micro_batch_size
             )
         schedule = Schedule1F1B(
             stage=stage,
