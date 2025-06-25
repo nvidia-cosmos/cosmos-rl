@@ -23,7 +23,7 @@ A `torch.utils.data.Dataset` object with `query_reference_answer` method is all 
             Query the reference answer for reward computation.
             """
             return self.data[idx]["reference_answer"]
-            
+
 
 Here we attach the `BytedTsinghua-SIA/DAPO-Math-17k <https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k>`_ dataset as an example:
 
@@ -49,8 +49,8 @@ Here we attach the `BytedTsinghua-SIA/DAPO-Math-17k <https://huggingface.co/data
             self.tokenizer = tokenizer
 
             # This demo is only for DAPO-Math-17k dataset
-            assert config.train.train_policy.dataset_name == "BytedTsinghua-SIA/DAPO-Math-17k"
-            self.dataset = load_dataset(config.train.train_policy.dataset_name, config.train.train_policy.dataset_subset)
+            assert config.train.train_policy.dataset.name == "BytedTsinghua-SIA/DAPO-Math-17k"
+            self.dataset = load_dataset(config.train.train_policy.dataset.name, config.train.train_policy.dataset.subset)
 
         def __len__(self):
             return len(self.dataset)
@@ -225,7 +225,7 @@ Here we just reuse the pre-deined LLM data packer to demonstrate how to pass you
             conversation = [
                 {
                     "role": "system",
-                    "content": """You are an AI math expert, you will be given a question and required to answer. 
+                    "content": """You are an AI math expert, you will be given a question and required to answer.
     Final answer should be like
     ```
     #### [ANS]
@@ -305,5 +305,5 @@ Here we just reuse the pre-deined LLM data packer to demonstrate how to pass you
             dataset=GSM8kDataset(),
             data_packer=DemoDataPacker(),
         )
-        
+
 
