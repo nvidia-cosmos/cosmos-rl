@@ -461,7 +461,6 @@ class HighAvailabilitylNccl:
 
         if len(cmd.replica_name_to_rank) == 1:
             self.replica_name_to_rank = cmd.replica_name_to_rank
-            assert self.replica_name in cmd.replica_name_to_rank
             self.is_single_peer.set()
             self.is_comm_ready.set()
             return

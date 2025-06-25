@@ -577,7 +577,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     prompt_id_and_payload_list = None
             except Exception as e:
                 logger.error(
-                    f"[Rollout] Failed in query prompts from controller: {str(e)}"
+                    f"[Rollout]Failed in query prompts from controller: {str(e)}"
                 )
                 prompt_id_and_payload_list = None
             prompts_and_is_end = (prompt_id_and_payload_list, is_end)
@@ -633,7 +633,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
         try:
             logger.debug(
-                f"[Rollout] Posting rollout end signal to controller: {response}"
+                f"[Rollout] Posting prompt end event to controller: {response}"
             )
             make_request_with_retry(
                 partial(
@@ -664,7 +664,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 )
                 if no_more_prompts:
                     logger.debug(
-                        f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation."
+                        f"[Rollout] Receive prompt end, preparing exiting for {self.replica_name}."
                     )
                     self.state.set_prompt_fetch_end()
                     # Further make sure to set `prompt_consume_end` if no more prompts to be consumed

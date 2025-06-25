@@ -250,7 +250,6 @@ class PolicyStatusManager:
         ), f"Replica {replica_name} not found in policy status manager"
 
         replica = self.policy_replicas.pop(replica_name)
-        self.status.pop(replica_name)
 
         if self.training_finished():
             # This policy replica is normally finished
@@ -716,6 +715,7 @@ class PolicyStatusManager:
                 self.rollout_buffer.qsize() >= required_rollouts
             )
 
+
         # If the last command is fake, we need to trigger data fetch and training no matter
         # whether there are enough rollouts or whether replicas are `ready` or `reduced`.
         if all_ready_or_reduced:
@@ -827,7 +827,7 @@ class RolloutStatusManager:
         """
         return self.rollout_replicas.get(replica_name)
 
-    def maintain_life_status(self, policy_status_manager: PolicyStatusManager):
+    def maintain_life_status(self):
         """
         Maintain the life status of the rollout.
         """
@@ -838,7 +838,7 @@ class RolloutStatusManager:
                 logger.warning(f"[Controller] Rollout {replica.name} is dead")
                 dead_replicas.add(replica.name)
         for replica_name in dead_replicas:
-            self.unregister(replica_name, policy_status_manager=policy_status_manager)
+            self.unregister(replica_name)
 
     def heartbeat(self, replica_name: str):
         timestamp: int = int(time.time())
@@ -871,11 +871,13 @@ class RolloutStatusManager:
         ), f"Replica {replica_name} not found in policy status manager"
 
         replica = self.rollout_replicas.pop(replica_name)
+
         if policy_status_manager.training_finished():
             # This policy replica is normally finished
             # Do not trigger rebuild mesh since everything is gonna be finished shortly
             logger.info(f"[Controller] Replica {replica_name} is stopping.")
             return
+
         if replica.in_mesh and len(self.rollout_replicas) > 0:
             self.trigger_rebuild_mesh(self.get_all_atoms_arrived_replicas())
 

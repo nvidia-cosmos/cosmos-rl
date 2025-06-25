@@ -131,12 +131,8 @@ def construct_dataset(
         test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
         train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
     else:
-        assert hasattr(
-            train_dataset, "train_test_split"
-        ), "train_dataset must have train_test_split method"
-        split = train_dataset.train_test_split(
-            test_size=config.dataset.test_size, shuffle=False
-        )
+        assert hasattr(train_dataset, "train_test_split"), "train_dataset must have train_test_split method"
+        split = train_dataset.train_test_split(test_size=config.dataset.test_size, shuffle=False)
         train_dataset = split["train"]
         test_dataset = split["test"]
 

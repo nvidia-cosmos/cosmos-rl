@@ -4,20 +4,17 @@
 
 
 ## Getting Started
+### SFT and RL Training
+Please check and install our [Docs](https://nvidia-cosmos.github.io/cosmos-rl/).
 
-Cosmos-RL is a flexible and scalable Reinforcement Learning framework specialized for Physical AI applications.
-
-[Documentation](https://nvidia-cosmos.github.io/cosmos-rl).
-
-## System Architecture
-Cosmos-RL provides toolchain to enable large scale RL training workload with following features:
+## SFT and RL Training System Architecture
+Cosmos-RL provides toolchain to enable large scale SFT and RL training workload with following features:
 1. **HuggingFace Integration**
-    - Llama-2
-    - Llama-3
     - Qwen-2.5
     - Qwen-2.5-VL
     - Qwen-3
     - Qwen-3-MoE
+
 2. **Parallelism**
     - Tensor Parallelism
     - Sequence Parallelism
@@ -30,7 +27,8 @@ Cosmos-RL provides toolchain to enable large scale RL training workload with fol
     - Low-precision training (FP8) and rollout (FP8 & FP4) support
 4. **Single-Controller Architecture**
     - Efficient messaging system (e.g., `weight-sync`, `rollout`, `evaluate`) to coordinate policy and rollout replicas
-    - Dynamic NCCL Process Groups for on-the-fly GPU [un]registration to enable fault-tolerant and elastic large-scale RL training
+    - Dynamic NCCL Process Groups for on-the-fly replicas registration/un-registration to enable fault-tolerant and elastic large-scale RL training
+    - Dynamic hyper-parameters adjustment
 
 ![Policy-Rollout-Controller Decoupled Architecture](./assets/rl_infra.svg)
 

@@ -415,8 +415,8 @@ PYBIND11_MODULE(_cpp, m) {
   m.def("watchdog_exit", &cosmos_rl::watchdog_exit, py::arg("abort"),
         "Exit the watchdog context");
 
-  m.def("create_nccl_comm", &cosmos_rl::create_nccl_comm, py::arg("uid_chars"),
-        py::arg("rank"), py::arg("world_size"),
+  m.def("create_nccl_comm", &cosmos_rl::create_nccl_comm,
+        py::arg("uid_chars"), py::arg("rank"), py::arg("world_size"),
         py::arg("timeout_ms") = cosmos_rl::get_default_timeout_ms(),
         py::call_guard<py::gil_scoped_release>(), "Create a NCCL communicator");
   m.def("create_nccl_uid", &cosmos_rl::create_nccl_uid,
@@ -437,8 +437,8 @@ PYBIND11_MODULE(_cpp, m) {
         void* tensor_ptr = (void*)tensor;
         cudaStream_t stream_ptr = (cudaStream_t)stream;
         ncclDataType_t dtype_ = (ncclDataType_t)dtype;
-        cosmos_rl::nccl_broadcast(tensor_ptr, count, dtype_, rank, comm_idx,
-                                  stream_ptr, timeout_ms);
+        cosmos_rl::nccl_broadcast(tensor_ptr, count, dtype_, rank,
+                                       comm_idx, stream_ptr, timeout_ms);
       },
       py::arg("tensor"), py::arg("count"), py::arg("dtype"), py::arg("rank"),
       py::arg("comm_idx"), py::arg("stream"),
@@ -465,7 +465,7 @@ PYBIND11_MODULE(_cpp, m) {
         ncclDataType_t dtype_ = (ncclDataType_t)dtype;
         cudaStream_t stream_ptr = (cudaStream_t)stream;
         cosmos_rl::nccl_send(tensor_ptr, count, dtype_, peer, comm_idx,
-                             stream_ptr, timeout_ms);
+                                  stream_ptr, timeout_ms);
       },
       py::arg("tensor"), py::arg("count"), py::arg("dtype"), py::arg("peer"),
       py::arg("comm_idx"), py::arg("stream"),
@@ -492,7 +492,7 @@ PYBIND11_MODULE(_cpp, m) {
         cudaStream_t stream_ptr = (cudaStream_t)stream;
         ncclDataType_t dtype_ = (ncclDataType_t)dtype;
         cosmos_rl::nccl_recv(tensor_ptr, count, dtype_, peer, comm_idx,
-                             stream_ptr, timeout_ms);
+                                  stream_ptr, timeout_ms);
       },
       py::arg("tensor"), py::arg("count"), py::arg("dtype"), py::arg("peer"),
       py::arg("comm_idx"), py::arg("stream"),
@@ -520,8 +520,9 @@ PYBIND11_MODULE(_cpp, m) {
         ncclDataType_t dtype_ = (ncclDataType_t)dtype;
         ncclRedOp_t op_ = (ncclRedOp_t)op;
         cudaStream_t stream_ptr = (cudaStream_t)stream;
-        cosmos_rl::nccl_allreduce(sendbuff_ptr, recvbuff_ptr, count, dtype_,
-                                  op_, comm_idx, stream_ptr, timeout_ms);
+        cosmos_rl::nccl_allreduce(sendbuff_ptr, recvbuff_ptr, count,
+                                       dtype_, op_, comm_idx, stream_ptr,
+                                       timeout_ms);
       },
       py::arg("sendbuff"), py::arg("recvbuff"), py::arg("count"),
       py::arg("dtype"), py::arg("op"), py::arg("comm_idx"), py::arg("stream"),
@@ -549,8 +550,8 @@ PYBIND11_MODULE(_cpp, m) {
         void* recvbuff_ptr = (void*)recvbuff;
         ncclDataType_t dtype_ = (ncclDataType_t)dtype;
         cudaStream_t stream_ptr = (cudaStream_t)stream;
-        cosmos_rl::nccl_alltoall(sendbuff_ptr, recvbuff_ptr, total_size, dtype_,
-                                 comm_idx, stream_ptr, timeout_ms);
+        cosmos_rl::nccl_alltoall(sendbuff_ptr, recvbuff_ptr, total_size,
+                                      dtype_, comm_idx, stream_ptr, timeout_ms);
       },
       py::arg("sendbuff"), py::arg("recvbuff"), py::arg("total_size"),
       py::arg("dtype"), py::arg("comm_idx"), py::arg("stream"),

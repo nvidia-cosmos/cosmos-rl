@@ -124,7 +124,7 @@ Save this file to `./custom_controller_entry.py`
 1. Either add `launcher` argument to `cosmos-rl` command if one-click launch is used:
 
 >>> cosmos-rl \
-    --config configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml \
+    --config configs/qwen2-5/qwen2-5-7b-p-tp4-r-tp2-pp1-grpo.toml \
     --policy 1 \
     --rollout 2 \
     custom_controller_entry.py
@@ -133,7 +133,7 @@ Save this file to `./custom_controller_entry.py`
 
 >>> ./tools/launch_controller.sh \
     --port 8000 \
-    --config configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml \
+    --config configs/qwen2-5/qwen2-5-7b-p-tp4-r-tp2-pp1-grpo.toml \
     custom_controller_entry.py
 
 Check `./tools/dataset/ <#>`_ for more pre-defined customized datasets. 

@@ -53,7 +53,6 @@ experiment_name = "None"
 [train.train_policy]
 type = "grpo"
 dataset.name = "openai/gsm8k"
-dataset.subset = "main"
 prompt_column_name = "question"
 response_column_name = "answer"
 reward_function = "gsm8k"
