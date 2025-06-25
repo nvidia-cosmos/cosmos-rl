@@ -189,3 +189,8 @@ class BaseModel(ABC):
     @abstractmethod
     def data_packer(cls) -> DataPacker:
         raise NotImplementedError
+
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        raise NotImplementedError(
+            "This func should not be called in BaseModel instance."
+        )
