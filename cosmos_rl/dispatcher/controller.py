@@ -108,8 +108,7 @@ class Controller:
         self.config = config
         task_type = config.train.train_policy.type
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            config.policy.model_name_or_path,
-            trust_remote_code=True,
+            config.policy.model_name_or_path
         )
 
         if "wandb" in config.logging.logger and is_wandb_available():
@@ -336,7 +335,7 @@ class Controller:
                         if self.epoch == self.config.train.epoch + 1:
                             # We only log this all finished information once.
                             logger.info(
-                                "[Controller] All epochs finished, start stopping all replicas."
+                                "[Controller] All epochs finished fetching rollout prompts, wait for rollouts generation and training to complete."
                             )
                         is_end = True
                         break

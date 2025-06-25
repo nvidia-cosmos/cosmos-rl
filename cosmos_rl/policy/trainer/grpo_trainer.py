@@ -752,6 +752,7 @@ class GRPOTrainer(Trainer):
             try:
                 # Need to reload again from checkpoint to make sure the model is in the correct state
                 self.model_resume_from_checkpoint()
+                model_loaded = True
             except Exception as e:
                 if isinstance(e, FileNotFoundError):
                     logger.info(
@@ -791,7 +792,8 @@ class GRPOTrainer(Trainer):
         assert self.replica_name == command.replica_name
         self.replica_batch_for_this_step = command.items_count
 
-        if self.replica_batch_for_this_step > 0:
+        is_fake_step = self.replica_batch_for_this_step == 0
+        if not is_fake_step:
             report_data = self.train(
                 current_step=command.global_step,
                 total_steps=command.total_steps,
@@ -804,7 +806,7 @@ class GRPOTrainer(Trainer):
             )
 
         # Train ACK
-        if is_master_rank(self.parallel_dims, self.global_rank):
+        if is_master_rank(self.parallel_dims, self.global_rank) and not is_fake_step:
             try:
                 make_request_with_retry(
                     partial(

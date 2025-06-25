@@ -705,8 +705,6 @@ class GPT(nn.Module, BaseModel):
 
         if max_position_embeddings is None:
             max_position_embeddings = hf_config.max_position_embeddings
-        else:
-            hf_config.max_position_embeddings = max_position_embeddings
 
         vocab_size = sync_model_vocab(model_name_or_path)
 

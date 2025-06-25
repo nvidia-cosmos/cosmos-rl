@@ -30,7 +30,7 @@ fqn_filter=["lm_head"]
 [rollout]
 gpu_memory_utilization = 0.7
 enable_chunked_prefill = false
-max_response_length = 512
+max_response_length = 512 
 n_generation = 16
 batch_size = 1
 quantization = "none"
@@ -38,7 +38,7 @@ seed = 42
 
 [policy]
 model_name_or_path = "Qwen/Qwen3-30B-A3B"
-model_max_length = 512
+model_max_length = 512 
 model_gradient_checkpointing = true
 
 [logging]

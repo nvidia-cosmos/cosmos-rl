@@ -64,11 +64,11 @@ inline void myAssert(bool result, const char* const file, int const line,
 }
 
 #define COSMOS_CHECK(val) myAssert(val, __FILE__, __LINE__)
-#define COSMOS_CHECK_WITH_INFO(val, info)                                 \
-  do {                                                                    \
-    bool is_valid_val = (val);                                            \
-    if (!is_valid_val) {                                                  \
+#define COSMOS_CHECK_WITH_INFO(val, info)                            \
+  do {                                                               \
+    bool is_valid_val = (val);                                       \
+    if (!is_valid_val) {                                             \
       cosmos_rl::myAssert(is_valid_val, __FILE__, __LINE__, (info)); \
-    }                                                                     \
+    }                                                                \
   } while (0)
 }  // namespace cosmos_rl

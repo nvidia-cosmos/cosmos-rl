@@ -38,7 +38,6 @@ from cosmos_rl.policy.model.qwen3_moe.weight_converter import (
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
 from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
-from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
 from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
@@ -333,6 +332,32 @@ class FakeLinear(nn.Module):
         self.weight = nn.Parameter(torch.empty(num_experts, in_features, out_features))
 
 
+class FakeGroupMMBackwardCheck(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, w, m_offsets, out_dtype):
+        ctx.save_for_backward(x, w, m_offsets)
+        ctx.out_dtype = out_dtype
+        return torch._grouped_mm(x, w, m_offsets, out_dtype=out_dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, w, m_offsets = ctx.saved_tensors
+        out_dtype = ctx.out_dtype
+
+        grad_x = torch._grouped_mm(
+            grad_output, w.transpose(-2, -1), m_offsets, out_dtype=out_dtype
+        )
+        # remove NaNs
+        grad_x = torch.nan_to_num(grad_x)
+
+        grad_w = torch._grouped_mm(
+            x.transpose(-2, -1), grad_output, m_offsets, out_dtype=out_dtype
+        )
+        # remove NaNs
+        grad_w = torch.nan_to_num(grad_w)
+        return grad_x, grad_w, None, None
+
+
 class FeedForward(nn.Module):
     """
     FeedForward module, support hybrid parallelism including:
@@ -365,7 +390,6 @@ class FeedForward(nn.Module):
         self.up_proj = FakeLinear(dim, intermediate_dim, self.local_experts)
         self.gate_proj = FakeLinear(dim, intermediate_dim, self.local_experts)
         self.down_proj = FakeLinear(intermediate_dim, dim, self.local_experts)
-        self.act_fn = F.silu
         self.gate = MoEGate(
             num_routed_experts=self.total_experts,
             num_experts_per_tok=model_args.hf_config.num_experts_per_tok,
@@ -374,7 +398,14 @@ class FeedForward(nn.Module):
         )
         self.local_to_dtensor = IdentityLayer()
         self.reshard_helper_layer = IdentityLayer()
-        self.group_gemm_imp = group_gemm_imp()
+
+        cuda_device_props = torch.cuda.get_device_properties()
+        # Use torch implemetation or 3rd party implementation
+        self.use_torch_group_gemm_impl = (
+            cuda_device_props.major == 9
+            and cuda_device_props.minor == 0
+            and hasattr(torch, "_grouped_mm")
+        )
 
         assert not any(
             [
@@ -421,6 +452,78 @@ class FeedForward(nn.Module):
         self.token_gather_buf.grad = None
         return self.token_gather_buf.detach()
 
+    def _run_group_gemm(self, contig_tokens, m_sizes, m_offsets):
+        try:
+            from grouped_gemm import ops
+        except ImportError:
+            print(
+                "grouped_gemm is not available. Please run:"
+                "pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
+            )
+            raise
+
+        gate_weight = self.gate_proj.weight.to_local()
+        up_weight = self.up_proj.weight.to_local()
+        down_weight = self.down_proj.weight.to_local()
+
+        sizes_cpu = m_sizes.cpu().to(torch.int64)
+
+        gate_proj = ops.gmm(
+            contig_tokens,
+            gate_weight,
+            sizes_cpu,
+            trans_b=False,
+        )
+
+        up_proj = ops.gmm(
+            contig_tokens,
+            up_weight,
+            sizes_cpu,
+            trans_b=False,
+        )
+
+        # Apply activation
+        hidden_outputs = F.silu(gate_proj) * up_proj
+
+        # Run the third GEMM (down projection)
+        hidden_outputs = ops.gmm(
+            hidden_outputs,
+            down_weight,
+            sizes_cpu,
+            trans_b=False,
+        )
+        return hidden_outputs
+
+    def _run_group_gemm_hopper(self, contig_tokens, m_sizes, m_offsets):
+        gate_weight = self.gate_proj.weight.to_local()
+        up_weight = self.up_proj.weight.to_local()
+        down_weight = self.down_proj.weight.to_local()
+
+        gate_proj = FakeGroupMMBackwardCheck.apply(
+            contig_tokens,
+            gate_weight,
+            m_offsets,
+            torch.bfloat16,
+        )
+
+        up_proj = FakeGroupMMBackwardCheck.apply(
+            contig_tokens,
+            up_weight,
+            m_offsets,
+            torch.bfloat16,
+        )
+
+        # Apply activation
+        hidden_outputs = F.silu(gate_proj) * up_proj
+
+        # Run the third GEMM (down projection)
+        hidden_outputs = FakeGroupMMBackwardCheck.apply(
+            hidden_outputs,
+            down_weight,
+            m_offsets,
+            torch.bfloat16,
+        )
+        return hidden_outputs
 
     def moe_on_device(self, x, topk_ids, topk_weight):
         """
@@ -495,15 +598,18 @@ class FeedForward(nn.Module):
         contig_tokens = token_gather_buf[permuted_indices]
         # group gemm - handle all three group gemms (up, gate, down for all experts)
         # print(f"m_sizes: {m_sizes}, m_offsets: {m_offsets}")
-        hidden_outputs = self.group_gemm_imp(
-            contig_tokens,
-            m_sizes,
-            m_offsets,
-            self.gate_proj.weight.to_local(),
-            self.up_proj.weight.to_local(),
-            self.down_proj.weight.to_local(),
-            self.act_fn,
-        )
+        if self.use_torch_group_gemm_impl:
+            hidden_outputs = self._run_group_gemm_hopper(
+                contig_tokens,
+                m_sizes,
+                m_offsets,
+            )
+        else:
+            hidden_outputs = self._run_group_gemm(
+                contig_tokens,
+                m_sizes,
+                m_offsets,
+            )
 
         # Prepare buffer for tokens processed by experts
         processed_tokens = self.get_gather_buf()
@@ -1037,8 +1143,6 @@ class Qwen3MoE(nn.Module, BaseModel):
 
             if max_position_embeddings is None:
                 max_position_embeddings = hf_config.max_position_embeddings
-            else:
-                hf_config.max_position_embeddings = max_position_embeddings
 
             vocab_size = sync_model_vocab(model_name_or_path)
             rope_scaling = {}

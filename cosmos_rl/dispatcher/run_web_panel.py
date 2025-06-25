@@ -88,7 +88,9 @@ async def lifespan(app: FastAPI):
     async def monitor_replica_status():
         while True:
             controller.policy_status_manager.maintain_life_status()
-            controller.rollout_status_manager.maintain_life_status()
+            controller.rollout_status_manager.maintain_life_status(
+                controller.policy_status_manager
+            )
             await asyncio.sleep(COSMOS_ROLLOUT_SCAN_INTERVAL)
 
     util.create_async_task(monitor_replica_status())
@@ -328,10 +330,7 @@ async def put_rollout_group(rollout: RolloutRequest):
                             "[Controller] Clear the rollout buffer, and trigger an extra `DataFetch`"
                         )
                         # Clear the rollout buffer
-                        with (
-                            controller.policy_status_manager.rollout_buffer.queue.mutex
-                        ):
-                            controller.policy_status_manager.rollout_buffer.queue.clear()
+                        controller.policy_status_manager.rollout_buffer.queue.clear()
                         controller.policy_status_manager.total_steps = (
                             controller.policy_status_manager.current_step + 1
                         )

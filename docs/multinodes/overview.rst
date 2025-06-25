@@ -46,7 +46,7 @@ DGXC-Lepton job example
 DGXC-Lepton Job takes care of the number of GPU required by each policy and rollout replica. It will calculate and allocate the number of total nodes necessary to launch the job.
 
 >>> cosmos-rl \
-        --config ./configs/qwen2-5/qwen2-5-7b-p-tp4-r-tp2-pp1-grpo.toml \
+        --config ./configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml \
         --lepton-mode \
         --lepton-job-name cosmos-multi-node-test \
         --lepton-container-image {your-docker-image} \

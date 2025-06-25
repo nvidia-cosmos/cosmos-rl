@@ -27,4 +27,3 @@ click
 rich
 pyyaml
 pytest
-blobfile
