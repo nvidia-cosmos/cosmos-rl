@@ -26,14 +26,12 @@ def test_process_exit_grpo():
     """Test grpo all processes exit cleanly."""
     cur_dir = os.path.dirname(os.path.abspath(__file__))
     world_size = 2
-    tools_dir = os.path.join(cur_dir, "..", "tools")
+    tools_dir = os.path.join(cur_dir, "..", "cosmos_rl", "launcher")
     port = util.find_available_port(8123)
     config_path = os.path.join(
         cur_dir,
-        "..",
         "configs",
-        "qwen2-5",
-        "qwen2-5-3b-p-fsdp1-tp2-r-tp2-pp1-grpo.toml",
+        "test_simple_grpo.toml",
     )
     with open(config_path, "r") as f:
         config = toml.load(f)
@@ -47,7 +45,7 @@ def test_process_exit_grpo():
         toml.dump(config, tmpfile)
         tmpfile_toml = tmpfile.name
     controller_cmd = (
-        f"{os.path.join(tools_dir, "launch_controller.sh")} --config {tmpfile_toml}"
+        f"{os.path.join(tools_dir, 'launch_controller.sh')} --config {tmpfile_toml}"
     )
     controller_cmd += f" --port {port}"
     controller_process = subprocess.Popen(
@@ -115,14 +113,12 @@ def test_process_exit_sft():
     """Test sft all processes exit cleanly."""
     cur_dir = os.path.dirname(os.path.abspath(__file__))
     world_size = 2
-    tools_dir = os.path.join(cur_dir, "..", "tools")
+    tools_dir = os.path.join(cur_dir, "..", "cosmos_rl", "launcher")
     port = util.find_available_port(8123)
     config_path = os.path.join(
         cur_dir,
-        "..",
         "configs",
-        "qwen2-5",
-        "qwen2-5-3b-tp2-fsdp-sft.toml",
+        "test_simple_sft.toml",
     )
     with open(config_path, "r") as f:
         config = toml.load(f)
@@ -136,7 +132,7 @@ def test_process_exit_sft():
         toml.dump(config, tmpfile)
         tmpfile_toml = tmpfile.name
     controller_cmd = (
-        f"{os.path.join(tools_dir, "launch_controller.sh")} --config {tmpfile_toml}"
+        f"{os.path.join(tools_dir, 'launch_controller.sh')} --config {tmpfile_toml}"
     )
     controller_cmd += f" --port {port}"
     controller_process = subprocess.Popen(
