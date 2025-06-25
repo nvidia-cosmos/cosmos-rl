@@ -731,7 +731,7 @@ cat >config.toml <<EOF
 {config_content}
 EOF
 
-python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
+python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
 
         # Get all non-Lepton arguments
         non_lepton_args = []
@@ -759,6 +759,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
 
         # Add all non-Lepton arguments to the command
         launch_cmd += " " + " ".join(non_lepton_args)
+        launch_cmd += f" {launcher}"
 
         # Handle node groups and queue priority
         if args.lepton_node_group or args.lepton_queue_priority:
