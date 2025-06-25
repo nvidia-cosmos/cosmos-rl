@@ -481,7 +481,7 @@ def main(
     parser.add_argument(
         "--redis-logfile-path",
         type=str,
-        default="/opt/redis.log",
+        default="/tmp/redis.log",
         help="The redis server log file path.",
     )
     args = parser.parse_args()

@@ -43,7 +43,7 @@ experiment_name = "None"
 type = "grpo"
 dataset.name = "openai/gsm8k"
 dataset.subset = "main"
-dataset.train_split = "train"
+dataset.split = "train"
 prompt_column_name = "question"
 response_column_name = "answer"
 reward_function = "gsm8k"
@@ -61,8 +61,7 @@ temperature = 0.0
 max_response_length = 2048
 dataset.name = "openai/gsm8k"
 dataset.subset = "main"
-dataset.test_split = "test"
-reward_function = "gsm8k"
+dataset.split = "test"
 
 [train.ckpt]
 enable_checkpoint = true

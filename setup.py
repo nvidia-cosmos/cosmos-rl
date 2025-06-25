@@ -64,7 +64,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "cosmos-rl = tools.launch_all:main",
+            "cosmos-rl = cosmos_rl.launcher.launch_all:main",
         ],
     },
     install_requires=requirements,

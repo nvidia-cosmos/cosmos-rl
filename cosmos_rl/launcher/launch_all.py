@@ -50,10 +50,14 @@ def wait_for_url_ready(url: str, process: Optional[subprocess.Popen] = None):
             if process is not None:
                 if process.poll() is not None:
                     if process.returncode != 0:
-                        logger.error(f"Process {process.pid} exited with code {process.returncode}. Exiting.")
+                        logger.error(
+                            f"Process {process.pid} exited with code {process.returncode}. Exiting."
+                        )
                         sys.exit(1)
                     else:
-                        logger.error(f"Process {process.pid} exited as soon as launched. Exiting.")
+                        logger.error(
+                            f"Process {process.pid} exited as soon as launched. Exiting."
+                        )
                         sys.exit(1)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
@@ -249,14 +253,14 @@ def parse_args():
         "--rdzv-port",
         type=int,
         default=29345,
-        help="Rendezvous endpoint port for the job, default is 29345. This is used when multi-node training are used for one replica.", 
+        help="Rendezvous endpoint port for the job, default is 29345. This is used when multi-node training are used for one replica.",
     )
 
     parser.add_argument(
         "launcher",
-        nargs="?",            # “?” means 0 or 1 occurrences
+        nargs="?",  # “?” means 0 or 1 occurrences
         default="cosmos_rl.dispatcher.run_web_panel",
-        help="The launcher to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom launcher can be provided for custom dataset and reward functions injection."
+        help="The launcher to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom launcher can be provided for custom dataset and reward functions injection.",
     )
 
     parser.add_argument(
@@ -401,6 +405,7 @@ def get_local_ip():
         logger.error(f"Error getting local IP address: {e}")
         return None
 
+
 def replica_placement(
     available_gpus: List[int],
     n_policy: int,
@@ -417,7 +422,12 @@ def replica_placement(
     gpu_devices = []
     control_urls = []
     output_files = []
-    assert len(available_gpus) in [1, 2, 4, 8], "Number of GPUs per worker must be 1, 2, 4, or 8"
+    assert len(available_gpus) in [
+        1,
+        2,
+        4,
+        8,
+    ], "Number of GPUs per worker must be 1, 2, 4, or 8"
     # Prepare the command to launch the controller for all workers
     global_available_gpus = [available_gpus]
     # Create commands for policy and rollout replicas
@@ -428,23 +438,20 @@ def replica_placement(
     # Assign launch settings for each worker
     for i in range(n_policy):
         if min_n_gpus_policy > len(global_available_gpus[global_worker_idx]):
-            assert min_n_gpus_policy % len(
-                global_available_gpus[global_worker_idx]
-            ) == 0, f"min_n_gpus_policy {min_n_gpus_policy} is not divisible by {len(global_available_gpus[global_worker_idx])}"
+            assert (
+                min_n_gpus_policy % len(global_available_gpus[global_worker_idx]) == 0
+            ), f"min_n_gpus_policy {min_n_gpus_policy} is not divisible by {len(global_available_gpus[global_worker_idx])}"
             nodes_needed = min_n_gpus_policy // len(
                 global_available_gpus[global_worker_idx]
             )
             rdzv_ip = "localhost"
             for node_in_replica in range(nodes_needed):
                 gpu_devices.append(
-                    ",".join(
-                        [
-                            str(g)
-                            for g in global_available_gpus[global_worker_idx]
-                        ]
-                    )
+                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
                 )
-                commands.append(f"{replica_script} --type policy --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed}")
+                commands.append(
+                    f"{replica_script} --type policy --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed}"
+                )
                 if node_in_replica == 0:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
@@ -466,10 +473,11 @@ def replica_placement(
                 control_urls = []
                 output_files = []
                 global_worker_idx += 1
-                global_available_gpus.append(
-                    available_gpus)
+                global_available_gpus.append(available_gpus)
         else:
-            if gpu_idx + min_n_gpus_policy > len(global_available_gpus[global_worker_idx]):
+            if gpu_idx + min_n_gpus_policy > len(
+                global_available_gpus[global_worker_idx]
+            ):
                 global_launch_settings.append(
                     [commands, gpu_devices, control_urls, output_files]
                 )
@@ -479,9 +487,7 @@ def replica_placement(
                 output_files = []
                 gpu_idx = 0
                 global_worker_idx += 1
-                global_available_gpus.append(
-                    available_gpus
-                )
+                global_available_gpus.append(available_gpus)
 
             gpu_devices.append(
                 ",".join(
@@ -493,7 +499,9 @@ def replica_placement(
                     ]
                 )
             )
-            commands.append(f"{replica_script} --type policy --ngpus {min_n_gpus_policy}")
+            commands.append(
+                f"{replica_script} --type policy --ngpus {min_n_gpus_policy}"
+            )
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"policy_{i}.log")
@@ -514,36 +522,31 @@ def replica_placement(
             output_files = []
             gpu_idx = 0
             global_worker_idx += 1
-            global_available_gpus.append(
-                available_gpus
-            )
+            global_available_gpus.append(available_gpus)
 
     for i in range(n_rollouts):
         if min_n_gpus_rollout > len(global_available_gpus[global_worker_idx]):
-            assert min_n_gpus_rollout % len(
-                global_available_gpus[global_worker_idx]
-            ) == 0, f"min_n_gpus_rollout {min_n_gpus_rollout} is not divisible by {len(global_available_gpus[global_worker_idx])}"
+            assert (
+                min_n_gpus_rollout % len(global_available_gpus[global_worker_idx]) == 0
+            ), f"min_n_gpus_rollout {min_n_gpus_rollout} is not divisible by {len(global_available_gpus[global_worker_idx])}"
             nodes_needed = min_n_gpus_rollout // len(
                 global_available_gpus[global_worker_idx]
             )
             rdzv_ip = "localhost"
             for node_in_replica in range(nodes_needed):
                 gpu_devices.append(
-                    ",".join(
-                        [
-                            str(g)
-                            for g in global_available_gpus[global_worker_idx]
-                        ]
-                    )
+                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
                 )
-                commands.append(f"{replica_script} --type rollout --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed}")
+                commands.append(
+                    f"{replica_script} --type rollout --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed}"
+                )
                 if node_in_replica == 0:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
                         rdzv_ip = get_worker_ip(global_worker_idx)
                 else:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-                
+
                 control_urls.append(control_url)
                 output_files.append(
                     os.path.join(output_dir, f"rollout_{i}.log")
@@ -558,11 +561,11 @@ def replica_placement(
                 control_urls = []
                 output_files = []
                 global_worker_idx += 1
-                global_available_gpus.append(
-                    available_gpus
-                )
+                global_available_gpus.append(available_gpus)
         else:
-            if gpu_idx + min_n_gpus_rollout > len(global_available_gpus[global_worker_idx]):
+            if gpu_idx + min_n_gpus_rollout > len(
+                global_available_gpus[global_worker_idx]
+            ):
                 global_launch_settings.append(
                     [commands, gpu_devices, control_urls, output_files]
                 )
@@ -572,16 +575,19 @@ def replica_placement(
                 output_files = []
                 gpu_idx = 0
                 global_worker_idx += 1
-                global_available_gpus.append(
-                    available_gpus
-                )
+                global_available_gpus.append(available_gpus)
 
             gpu_devices.append(
                 ",".join(
-                    [str(g) for g in available_gpus[gpu_idx : gpu_idx + min_n_gpus_rollout]]
+                    [
+                        str(g)
+                        for g in available_gpus[gpu_idx : gpu_idx + min_n_gpus_rollout]
+                    ]
                 )
             )
-            commands.append(f"{replica_script} --type rollout --ngpus {min_n_gpus_rollout}")
+            commands.append(
+                f"{replica_script} --type rollout --ngpus {min_n_gpus_rollout}"
+            )
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"rollout_{i}.log")
@@ -605,7 +611,7 @@ def main():
     # Check if the config file is provided
     cosmos_config = read_config(args.config)
     launcher = args.launcher
-    
+
     # Get the number of GPUs required for policy and rollout
     # and the number of replicas for each
     policy_parallelism = cosmos_config.get("policy", {}).get("parallelism", {})
@@ -626,22 +632,26 @@ def main():
         * rollout_parallelism.get("cp_size", 1)
     )
     if policy_parallelism.get("dp_shard_size", 1) >= 1:
-        min_n_gpus_policy = (
-            min_n_gpus_policy * policy_parallelism.get("dp_shard_size", 1)
+        min_n_gpus_policy = min_n_gpus_policy * policy_parallelism.get(
+            "dp_shard_size", 1
         )
     if rollout_parallelism.get("dp_shard_size", 1) >= 1:
-        min_n_gpus_rollout = (
-            min_n_gpus_rollout * rollout_parallelism.get("dp_shard_size", 1)
+        min_n_gpus_rollout = min_n_gpus_rollout * rollout_parallelism.get(
+            "dp_shard_size", 1
         )
     if args.p2r_ratio is not None:
-        assert args.num_workers is not None, "When using --p2r-ratio, --num-workers must be specified"
+        assert (
+            args.num_workers is not None
+        ), "When using --p2r-ratio, --num-workers must be specified"
         p2r_ratio = args.p2r_ratio.split(":")
-        assert len(p2r_ratio) == 2, "Invalid --p2r-ratio format. Use 'policy:rollout' format."
+        assert (
+            len(p2r_ratio) == 2
+        ), "Invalid --p2r-ratio format. Use 'policy:rollout' format."
         p_ratio = int(p2r_ratio[0])
         r_ratio = int(p2r_ratio[1])
 
         if args.lepton_mode:
-            match = re.search(r'(8|4|2)x', args.lepton_resource_shape)
+            match = re.search(r"(8|4|2)x", args.lepton_resource_shape)
             if match:
                 num_gpus_per_node = int(match.group(1))
             else:
@@ -649,12 +659,18 @@ def main():
         else:
             num_gpus_per_node = len(get_available_gpus())
 
-        num_per_ratio = args.num_workers * num_gpus_per_node / (p_ratio * min_n_gpus_policy + r_ratio * min_n_gpus_rollout)
+        num_per_ratio = (
+            args.num_workers
+            * num_gpus_per_node
+            / (p_ratio * min_n_gpus_policy + r_ratio * min_n_gpus_rollout)
+        )
         args.policy = int(num_per_ratio * p_ratio)
         args.rollout = int(num_per_ratio * r_ratio)
         assert args.policy >= 1, "Number of policy replicas must be at least 1"
-        assert args.policy * min_n_gpus_policy + args.rollout * min_n_gpus_rollout <= args.num_workers * num_gpus_per_node
-
+        assert (
+            args.policy * min_n_gpus_policy + args.rollout * min_n_gpus_rollout
+            <= args.num_workers * num_gpus_per_node
+        )
 
     if args.policy is None:
         n_policy = policy_parallelism.get("n_init_replicas", 1)
@@ -666,7 +682,10 @@ def main():
         n_rollouts = args.rollout
 
     # If the training type is SFT, set n_rollouts to 0
-    if cosmos_config.get("train", {}).get("train_policy", {}).get("type", "grpo") == "sft":
+    if (
+        cosmos_config.get("train", {}).get("train_policy", {}).get("type", "grpo")
+        == "sft"
+    ):
         n_rollouts = 0
 
     # Handle Lepton mode
@@ -783,7 +802,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
         # Use this to replace the args.num_workers to calculate the number of nodes needed rather than specifying it using --num-workers
         # example
 
-        match = re.search(r'(8|4|2)x', args.lepton_resource_shape)
+        match = re.search(r"(8|4|2)x", args.lepton_resource_shape)
         if match:
             num_gpus_per_node = int(match.group(1))
         else:
@@ -796,7 +815,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
             min_n_gpus_rollout,
             "",
             "",
-            None
+            None,
         )
         if args.num_workers is not None:
             assert args.num_workers >= len(global_launch_settings)
@@ -887,14 +906,17 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
 
     import cosmos_rl.utils.util as util
 
-    logger.info(f"Number of policy replicas: {n_policy} with {min_n_gpus_policy} gpus each")
-    logger.info(f"Number of rollout replicas: {n_rollouts} with {min_n_gpus_rollout} gpus each")
+    logger.info(
+        f"Number of policy replicas: {n_policy} with {min_n_gpus_policy} gpus each"
+    )
+    logger.info(
+        f"Number of rollout replicas: {n_rollouts} with {min_n_gpus_rollout} gpus each"
+    )
 
     # Get available GPUs
     available_gpus = get_available_gpus()
     if not available_gpus:
         raise RuntimeError("No GPUs available. Please check your GPU configuration.")
-
 
     # List of bash scripts to run (these should exist in the same directory)
     script_names = ["launch_controller.sh", "launch_replica.sh"]
@@ -933,7 +955,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
                 ["getent", "hosts", "--", host],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
             )
 
             if result.returncode == 0:
@@ -955,7 +977,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
                     logger.info(f"Resolved hostname: {hostname}")
                     break
                 time.sleep(1)
-        except Exception as e:
+        except Exception:
             pass
         return hostname
 
@@ -975,7 +997,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
         hostname = f"{prefix}-{cur_work_idx}.{subdomain}"
         logger.info(f"Setting hostname to {hostname} for worker index {cur_work_idx}")
         os.system(f"hostname {hostname}")
-    
+
     control_url = None
     if args.url is not None:
         ip, port = args.url.split(":")
@@ -1006,11 +1028,13 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
                 port = args.port
         else:
             port = util.find_available_port(args.port)
-    
+
     if control_url is None:
         logger.info(f"Controller will be launched locally on port {port}.")
     else:
-        logger.info(f"Controller will be launched on another node. This node will connect to {control_url} for control.")
+        logger.info(
+            f"Controller will be launched on another node. This node will connect to {control_url} for control."
+        )
 
     controller_cmd = None
     tmpfile_toml = None
@@ -1023,7 +1047,9 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
                 # Only available for RL.
                 cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
         # Create a temporary file and write to it
-        with tempfile.NamedTemporaryFile(mode='w+', suffix=".toml", delete=False) as tmpfile:
+        with tempfile.NamedTemporaryFile(
+            mode="w+", suffix=".toml", delete=False
+        ) as tmpfile:
             toml.dump(cosmos_config, tmpfile)
             tmpfile_toml = tmpfile.name
         logger.info(f"Temporary configuration file created at {tmpfile_toml}")
@@ -1087,14 +1113,18 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
     num_workers = len(global_launch_settings)
     logger.info(f"Number of workers required: {num_workers}")
     if num_workers > 1:
-        logger.info("Multiple worker nodes will be used. Ensure that the launch script is excuted on all worker nodes.")
+        logger.info(
+            "Multiple worker nodes will be used. Ensure that the launch script is excuted on all worker nodes."
+        )
     assert (
         len(available_gpus) * num_workers
         >= min_n_gpus_policy * n_policy + min_n_gpus_rollout * n_rollouts
     ), f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * n_rollouts}, Available: {len(available_gpus)}"
 
-
-    if len(global_launch_settings) <= cur_work_idx or len(global_launch_settings[cur_work_idx]) == 0:
+    if (
+        len(global_launch_settings) <= cur_work_idx
+        or len(global_launch_settings[cur_work_idx]) == 0
+    ):
         if controller_cmd is None:
             logger.info(
                 f"No launch settings found for worker index {cur_work_idx}, no need launch"
@@ -1110,17 +1140,25 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
             [controller_cmd],
             [""],
             [""],
-            [os.path.join(output_dir, "controller.log") if output_dir is not None else None],
+            [
+                os.path.join(output_dir, "controller.log")
+                if output_dir is not None
+                else None
+            ],
         )
         controller_id = len(processes)
         processes.append(controller_process[0])
 
     logger.info(f"Waiting for controller to be ready at {control_url}")
-    wait_for_url_ready(control_url, controller_process[0] if controller_cmd is not None else None)
+    wait_for_url_ready(
+        control_url, controller_process[0] if controller_cmd is not None else None
+    )
     logger.info(f"Controller is ready at {control_url}")
 
-
-    if len(global_launch_settings) > cur_work_idx and len(global_launch_settings[cur_work_idx]) != 0:
+    if (
+        len(global_launch_settings) > cur_work_idx
+        and len(global_launch_settings[cur_work_idx]) != 0
+    ):
         commands = global_launch_settings[cur_work_idx][0]
         gpu_devices = global_launch_settings[cur_work_idx][1]
         control_urls = global_launch_settings[cur_work_idx][2]
@@ -1138,7 +1176,9 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
         ), f"Number of GPU devices ({len(gpu_devices)}) does not match number of commands ({len(commands)})"
 
         # Launch all processes
-        processes.extend(launch_processes(commands, gpu_devices, control_urls, output_files))
+        processes.extend(
+            launch_processes(commands, gpu_devices, control_urls, output_files)
+        )
 
     if tmpfile_toml is not None and os.path.exists(tmpfile_toml):
         # Clean up the temporary file
@@ -1157,7 +1197,9 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml {launcher}"""
                     if returncode == 0:
                         logger.info(f"Process {i} completed successfully")
                     else:
-                        logger.error(f"Process {i} failed with return code {returncode}")
+                        logger.error(
+                            f"Process {i} failed with return code {returncode}"
+                        )
                         # Terminate all remaining processes
                         if controller_id == -1 or i == controller_id:
                             for p in processes:

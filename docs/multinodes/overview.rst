@@ -13,7 +13,7 @@ In this example, 4 policy replica with each of 4 GPUs and two rollout replica wi
 
     ### On node A
     # 1. Launch the controller process
-    ./tools/launch_controller.sh --port 8000 --config configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml
+    ./cosmos_rl/launcher/launch_controller.sh --port 8000 --config configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml
 
     export COSMOS_CONTROLLER_HOST=localhost:8000
 
@@ -32,8 +32,8 @@ In this example, 4 policy replica with each of 4 GPUs and two rollout replica wi
 
 .. note::
 
-    | In case one single replica needs more GPUs than 8 (across multiple nodes), 
-    
+    | In case one single replica needs more GPUs than 8 (across multiple nodes),
+
     .. code-block:: bash
 
         --rdzv-endpoint={MASTER_ADDR}:{MASTER_PORT}
