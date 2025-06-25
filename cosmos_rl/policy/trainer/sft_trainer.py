@@ -39,6 +39,7 @@ import functools
 import os
 from typing import Optional, Dict, Any
 from tqdm import tqdm
+from cosmos_rl.utils.ulysses import slice_input_for_ulysses, gather_outputs_for_ulysses
 
 
 def collate_fn(
@@ -403,6 +404,18 @@ class SFTTrainer(Trainer):
                     **batch
                 )
 
+                batch["position_ids"] = position_ids
+
+                if self.parallel_dims.cp_enabled:
+                    input_ids, position_ids = slice_input_for_ulysses(
+                        input_ids, position_ids, self.parallel_dims.mesh["cp"]
+                    )
+                    input_ids_before_cp = input_ids
+                    position_ids_before_cp = position_ids
+
+                    batch["input_ids"] = input_ids
+                    batch["position_ids"] = position_ids
+
                 self.optimizers.zero_grad()
 
                 if self.parallel_dims.pp_enabled:
@@ -417,14 +430,13 @@ class SFTTrainer(Trainer):
                     if pp_first_stage:
                         self.pp_scheduler.step(
                             **batch,
-                            position_ids=position_ids,
                             pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
                             seq_len_multiple=self.seq_len_multiple,
                         )
                     else:
                         # FWD + BWD if it is 1F1B-like scheduler
                         self.pp_scheduler.step(
-                            position_ids=position_ids,
+                            position_ids=batch["position_ids"],
                             target=targets,
                             losses=losses,
                             pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
@@ -436,9 +448,15 @@ class SFTTrainer(Trainer):
                         else torch.tensor([-1.0], device=self.device)
                     )
                 else:
-                    logits = self.model(**batch, position_ids=position_ids)[
-                        :, :-1
-                    ].contiguous()
+                    logits = self.model(**batch)
+                    # recover from ulysses if cp is enabled
+                    if self.parallel_dims.cp_enabled:
+                        logits = gather_outputs_for_ulysses(
+                            logits, gather_dim=1, cp_mesh=self.parallel_dims.mesh["cp"]
+                        )
+                        batch["input_ids"] = input_ids_before_cp
+                        batch["position_ids"] = position_ids_before_cp
+                    logits = logits[:, :-1].contiguous()
                     loss = self.loss_fn(
                         logits.view(-1, logits.size(-1)),
                         labels[:, 1:].contiguous().view(-1),
@@ -632,8 +650,21 @@ class SFTTrainer(Trainer):
             output: torch.Tensor, target: torch.LongTensor
         ) -> torch.Tensor:
             """Common cross-entropy loss function for Transformer models training."""
+            # output is raw-logits from last stage, we should recover to the whole length
+            # if cp is enabled.
+            if self.parallel_dims.cp_enabled:
+                output = gather_outputs_for_ulysses(
+                    output, gather_dim=1, cp_mesh=self.parallel_dims.mesh["cp"]
+                )
             return torch.nn.functional.cross_entropy(
                 output[:, :-1].flatten(0, 1).float(), target[:, 1:].flatten(0, 1)
             )
 
-        return torch.compile(cross_entropy_loss)
+        if self.parallel_dims.cp_enabled:
+            # It seems that when using `self.parallel_dims.mesh["cp"]` will cause
+            # torch.compile/dynamo complaint. Workaround: do not compile `cross_entropy_loss`
+            # if cp is enabled.
+            # Issue: https://github.com/pytorch/pytorch/issues/152447
+            return cross_entropy_loss
+        else:
+            return torch.compile(cross_entropy_loss)
