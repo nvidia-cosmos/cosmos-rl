@@ -1679,7 +1679,7 @@ def _swizzle_pp_grpo_forward(
     """
     # [mini_batch_size]: the mini-batch index of the sample with respect to the whole batch
     # [micro_batch_size]: the micro-batch index of the sample with respect to the mini-batch
-    # TODO(zjx), template renmae those key.
+    # TODO(zjx), template rename those key.
     micro_batch_ids = kwargs.pop("pp_batch_ids")
     loss_scaling = kwargs.pop("loss_scaling")
     only_forward = kwargs.pop("only_forward")
