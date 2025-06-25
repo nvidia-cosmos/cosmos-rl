@@ -87,7 +87,7 @@ def all_gather_tensor(
     """
     group = cp_mesh.get_group()
     cp_world_size = cp_mesh.size()
-    output_shape = local_tensor.shape
+    output_shape = list(local_tensor.shape)
     output_shape[0] = output_shape[0] * cp_world_size
     output = torch.empty(
         output_shape, dtype=local_tensor.dtype, device=local_tensor.device
