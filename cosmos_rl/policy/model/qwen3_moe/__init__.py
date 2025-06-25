@@ -421,7 +421,6 @@ class FeedForward(nn.Module):
         self.token_gather_buf.grad = None
         return self.token_gather_buf.detach()
 
-
     def moe_on_device(self, x, topk_ids, topk_weight):
         """
         x: [batch * local_seq_len, dim]

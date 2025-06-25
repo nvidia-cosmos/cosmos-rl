@@ -126,7 +126,8 @@ def convert_weight_from_hf(
             return None, None
     elif (
         match := re.search(  # noqa: F841
-            r"layers\.(\d+)\.mlp\.shared_experts\.(up_proj|gate_proj)\.(weight|bias)", dest_name
+            r"layers\.(\d+)\.mlp\.shared_experts\.(up_proj|gate_proj)\.(weight|bias)",
+            dest_name,
         )
     ) is not None:
         shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
@@ -254,7 +255,8 @@ def map_weight_parallel_dims(
                 dims_map[dim] = len(shape) - 1
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.shared_experts\.(up_proj|gate_proj)\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.shared_experts\.(up_proj|gate_proj)\.(weight|bias)",
+                    dest_name,
                 )
             ) is not None:
                 dims_map[dim] = (
@@ -262,12 +264,11 @@ def map_weight_parallel_dims(
                 )
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.shared_experts\.down_proj\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.shared_experts\.down_proj\.(weight|bias)",
+                    dest_name,
                 )
             ) is not None:
-                dims_map[dim] = (
-                    0
-                )
+                dims_map[dim] = 0
             elif (
                 match := re.search(  # noqa: F841
                     r"layers\.(\d+)\.post_attention_layernorm\.(weight|bias)", dest_name

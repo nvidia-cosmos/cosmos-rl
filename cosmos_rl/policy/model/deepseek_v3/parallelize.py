@@ -238,13 +238,14 @@ def apply_tp_ep(
 
     # - Apply tensor + sequence parallelism to self-attention
     # - Apply expert parallelism to MLP
-    #for layer_id, transformer_block in model.layers.items():
+    # for layer_id, transformer_block in model.layers.items():
     moe_layer_freq = model.model_args.moe_layer_freq
     first_k_dense_replace = model.model_args.first_k_dense_replace
     n_routed_experts = model.model_args.n_routed_experts
-    n_shared_experts = model.model_args.n_shared_experts
+    # n_shared_experts = model.model_args.n_shared_experts
     for layer_id, transformer_block in enumerate(model.layers):
-        has_moe = (n_routed_experts is not None
+        has_moe = (
+            n_routed_experts is not None
             and layer_id >= first_k_dense_replace
             and layer_id % moe_layer_freq == 0
         )
@@ -261,7 +262,7 @@ def apply_tp_ep(
                 ),  # Attn OP needs the input to be replicated over the sequence dimension so that all sequence can be attended to
             ),
             "self_attn.q_proj": colwise_parallel(),
-            "self_attn.kv_a_proj_with_mqa": ReplicateParallel(), # n_head = 1, no need to shard over the head dimension
+            "self_attn.kv_a_proj_with_mqa": ReplicateParallel(),  # n_head = 1, no need to shard over the head dimension
             "self_attn.kv_a_layernorm": SequenceParallel(use_local_output=True),
             "self_attn.kv_b_proj": colwise_parallel(),
             "self_attn.o_proj": rowwise_parallel(output_layouts=Shard(1)),
@@ -275,18 +276,22 @@ def apply_tp_ep(
 
         if has_moe:
             transformer_block.mlp.experts = None
-            layer_plan.update({
-                # "mlp.gate": ReplicateParallel(),
-                "mlp.shared_experts": prepare_module_input(
-                    input_layouts=(Shard(1),),
-                    desired_input_layouts=(
-                        Replicate(),
-                    ),  # Weight is shared, so no sharding on input
-                ),
-                "mlp.shared_experts.gate_proj": colwise_parallel(),
-                "mlp.shared_experts.down_proj": rowwise_parallel(output_layouts=Shard(1)),
-                "mlp.shared_experts.up_proj": colwise_parallel(),
-            })
+            layer_plan.update(
+                {
+                    # "mlp.gate": ReplicateParallel(),
+                    "mlp.shared_experts": prepare_module_input(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(
+                            Replicate(),
+                        ),  # Weight is shared, so no sharding on input
+                    ),
+                    "mlp.shared_experts.gate_proj": colwise_parallel(),
+                    "mlp.shared_experts.down_proj": rowwise_parallel(
+                        output_layouts=Shard(1)
+                    ),
+                    "mlp.shared_experts.up_proj": colwise_parallel(),
+                }
+            )
             transformer_block.mlp.ep_group = tp_ep_mesh.get_group()
             transformer_block.mlp.ep_size = tp_ep_mesh.size()
             assert (
@@ -366,17 +371,19 @@ def apply_tp_ep(
                 == transformer_block.mlp.local_experts
             ), f"down_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.experts_ep.down_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
         else:
-            layer_plan.update({
-                "mlp": prepare_module_input(
-                    input_layouts=(Shard(1),),
-                    desired_input_layouts=(
-                        Replicate(),
-                    ),  # Weight is shared, so no sharding on input
-                ),
-                "mlp.gate_proj": colwise_parallel(),
-                "mlp.down_proj": rowwise_parallel(output_layouts=Shard(1)),
-                "mlp.up_proj": colwise_parallel(),
-            })
+            layer_plan.update(
+                {
+                    "mlp": prepare_module_input(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(
+                            Replicate(),
+                        ),  # Weight is shared, so no sharding on input
+                    ),
+                    "mlp.gate_proj": colwise_parallel(),
+                    "mlp.down_proj": rowwise_parallel(output_layouts=Shard(1)),
+                    "mlp.up_proj": colwise_parallel(),
+                }
+            )
 
         parallelize_module(
             module=transformer_block,

@@ -111,6 +111,7 @@ class DeepseekV3MoeArgs:
     hidden_act: str = "silu"
     hf_config: AutoConfig = None
 
+
 class DeepseekV3RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
         super().__init__()
@@ -159,16 +160,19 @@ class DeepseekV3RotaryEmbedding(nn.Module):
             self.sin_cached[:seq_len].to(dtype=x.dtype),
         )
 
+
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
+
 def yarn_get_mscale(scale=1, mscale=1):
     if scale <= 1:
         return 1.0
     return 0.1 * mscale * math.log(scale) + 1.0
+
 
 # Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
@@ -218,6 +222,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         batch, num_key_value_heads, n_rep, slen, head_dim
     )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
 
 # Copied from transformers.models.llama.modeling_llama.LlamaAttention with Llama->DeepseekV3
 class DeepseekV3Attention(nn.Module):
@@ -381,7 +386,9 @@ class DeepseekV3Attention(nn.Module):
         k_pe_expanded = k_pe.expand(-1, k_nope.shape[1], -1, -1)
         key_states = torch.cat([k_nope, k_pe_expanded], dim=-1)
 
-        attn_output = F.scaled_dot_product_attention(query_states, key_states, value_states, is_causal=True)
+        attn_output = F.scaled_dot_product_attention(
+            query_states, key_states, value_states, is_causal=True
+        )
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, -1)
         return self.o_proj(attn_output)
@@ -420,9 +427,15 @@ class DeepseekV3MLPWithEP(nn.Module):
             config.intermediate_size if intermediate_size is None else intermediate_size
         )
         # Transpose the MLP for group gemm
-        self.gate_proj = FakeLinear(self.hidden_size, self.intermediate_size, self.experts_num)
-        self.up_proj = FakeLinear(self.hidden_size, self.intermediate_size, self.experts_num)
-        self.down_proj = FakeLinear(self.intermediate_size, self.hidden_size, self.experts_num)
+        self.gate_proj = FakeLinear(
+            self.hidden_size, self.intermediate_size, self.experts_num
+        )
+        self.up_proj = FakeLinear(
+            self.hidden_size, self.intermediate_size, self.experts_num
+        )
+        self.down_proj = FakeLinear(
+            self.intermediate_size, self.hidden_size, self.experts_num
+        )
         self.act_fn = ACT2FN[config.hidden_act]
 
 
@@ -474,15 +487,17 @@ class MoEGate(nn.Module):
         ### select top-k experts
         if self.topk_method == "noaux_tc":
             # assert not self.training
-            scores_for_choice = scores.view(bsz * seq_len, -1) + self.e_score_correction_bias.unsqueeze(0)
+            scores_for_choice = scores.view(
+                bsz * seq_len, -1
+            ) + self.e_score_correction_bias.unsqueeze(0)
             group_scores = (
-                scores_for_choice.view(bsz * seq_len, self.n_group, -1).topk(2, dim=-1)[0].sum(dim = -1)
+                scores_for_choice.view(bsz * seq_len, self.n_group, -1)
+                .topk(2, dim=-1)[0]
+                .sum(dim=-1)
             )  # [n, n_group]
             group_idx = torch.topk(
                 group_scores, k=self.topk_group, dim=-1, sorted=False
-            )[
-                1
-            ]  # [n, top_k_group]
+            )[1]  # [n, top_k_group]
             group_mask = torch.zeros_like(group_scores)  # [n, n_group]
             group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
             score_mask = (
@@ -492,10 +507,10 @@ class MoEGate(nn.Module):
                 )
                 .reshape(bsz * seq_len, -1)
             )  # [n, e]
-            tmp_scores = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
-            _, topk_idx = torch.topk(
-                tmp_scores, k=self.top_k, dim=-1, sorted=False
-            )
+            tmp_scores = scores_for_choice.masked_fill(
+                ~score_mask.bool(), 0.0
+            )  # [n, e]
+            _, topk_idx = torch.topk(tmp_scores, k=self.top_k, dim=-1, sorted=False)
             topk_weight = scores.gather(1, topk_idx)
         else:
             raise NotImplementedError(
@@ -506,7 +521,9 @@ class MoEGate(nn.Module):
         if self.top_k > 1 and self.norm_topk_prob:
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
             topk_weight = topk_weight / denominator
-        topk_weight = topk_weight * self.routed_scaling_factor # must multiply the scaling factor
+        topk_weight = (
+            topk_weight * self.routed_scaling_factor
+        )  # must multiply the scaling factor
 
         return topk_idx, topk_weight
 
@@ -515,8 +532,10 @@ class DeepseekV3MoE(nn.Module):
     """
     A mixed expert module containing shared experts.
     """
+
     token_send_buf: Optional[torch.Tensor] = None
     token_gather_buf: Optional[torch.Tensor] = None
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -530,14 +549,15 @@ class DeepseekV3MoE(nn.Module):
         self.experts_per_rank = config.n_routed_experts
         self.experts = nn.ModuleList(
             [
-                DeepseekV3MLP(
-                    config, intermediate_size=config.moe_intermediate_size
-                )
+                DeepseekV3MLP(config, intermediate_size=config.moe_intermediate_size)
                 for i in range(config.n_routed_experts)
             ]
         )
         self.experts_ep = DeepseekV3MLPWithEP(
-            config, intermediate_size=config.moe_intermediate_size, experts_num=config.n_routed_experts)
+            config,
+            intermediate_size=config.moe_intermediate_size,
+            experts_num=config.n_routed_experts,
+        )
         if config.n_shared_experts is not None:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             self.shared_experts = DeepseekV3MLP(
@@ -694,9 +714,7 @@ class DeepseekV3MoE(nn.Module):
             .type(returned_tokens.dtype)
         )
 
-
         return final_out
-
 
     def moe_infer(self, x, topk_ids, topk_weight):
         cnts = topk_ids.new_zeros((topk_ids.shape[0], self.config.n_routed_experts))
@@ -736,7 +754,9 @@ class DeepseekV3MoE(nn.Module):
         topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         if self.ep_size > 1:
-            y = self.moe_infer_ep(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+            y = self.moe_infer_ep(hidden_states, topk_idx, topk_weight).view(
+                *orig_shape
+            )
         else:
             y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
         # y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
@@ -750,23 +770,16 @@ class DeepseekV3DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.dim
         self.layer_idx = layer_idx
-        self.self_attn = DeepseekV3Attention(
-            config=config, layer_idx=layer_idx
-        )
-        self.use_moe = (config.n_routed_experts is not None
+        self.self_attn = DeepseekV3Attention(config=config, layer_idx=layer_idx)
+        self.use_moe = (
+            config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
             and layer_idx % config.moe_layer_freq == 0
         )
 
-        self.mlp = (
-            DeepseekV3MoE(config)
-            if self.use_moe
-            else DeepseekV3MLP(config)
-        )
+        self.mlp = DeepseekV3MoE(config) if self.use_moe else DeepseekV3MLP(config)
 
-        self.input_layernorm = DeepseekV3RMSNorm(
-            config.dim, eps=config.norm_eps
-        )
+        self.input_layernorm = DeepseekV3RMSNorm(config.dim, eps=config.norm_eps)
         self.post_attention_layernorm = DeepseekV3RMSNorm(
             config.dim, eps=config.norm_eps
         )
@@ -789,6 +802,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         output = self.mlp(self.post_attention_layernorm(h))
         output = h + output
         return output
+
 
 class DeepseekV3MoEModel(nn.Module, BaseModel):
     """
@@ -818,7 +832,7 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
         self.n_layers = model_args.n_layers
         self.embed_tokens = nn.Embedding(model_args.vocab_size, model_args.dim)
 
-        self.layers  = nn.ModuleList(
+        self.layers = nn.ModuleList(
             [
                 DeepseekV3DecoderLayer(model_args, layer_idx)
                 for layer_idx in range(model_args.n_layers)
@@ -847,7 +861,7 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
         **kwargs,
     ):
         if self.embed_tokens is not None:
-            hidden_states= self.embed_tokens(input_ids)
+            hidden_states = self.embed_tokens(input_ids)
             # Do not remove this line
             # This is a trick for TP with torch.compile
             hidden_states = self.identity_layer(hidden_states)
@@ -874,8 +888,12 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
                     if is_w_dist_tensor
                     else self.embed_tokens.weight
                 )
-                is_a_dist_tensor = isinstance(hidden_states, torch.distributed.tensor.DTensor)
-                hidden_states = hidden_states.full_tensor() if is_a_dist_tensor else hidden_states
+                is_a_dist_tensor = isinstance(
+                    hidden_states, torch.distributed.tensor.DTensor
+                )
+                hidden_states = (
+                    hidden_states.full_tensor() if is_a_dist_tensor else hidden_states
+                )
                 output = hidden_states @ embed_tokens_weight.t()
             return output
         else:
@@ -1021,7 +1039,9 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
                 ):
                     expert_id = int(match.group(2))
                     if tp_ep_size > 1:
-                        dest_name = dest_name.replace(f"experts.{expert_id}.", "experts_ep.")
+                        dest_name = dest_name.replace(
+                            f"experts.{expert_id}.", "experts_ep."
+                        )
 
                     # Convert expert_id to local_expert_id
                     n_local_experts = (
@@ -1224,7 +1244,10 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
 
             vocab_size = sync_model_vocab(model_name_or_path)
             rope_scaling = None
-            if hasattr(hf_config, "rope_scaling") and hf_config.rope_scaling is not None:
+            if (
+                hasattr(hf_config, "rope_scaling")
+                and hf_config.rope_scaling is not None
+            ):
                 rope_scaling = hf_config.rope_scaling or {}
             rope_type = "default"
             if rope_scaling:
