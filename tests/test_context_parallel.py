@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import torch
 import os
 from datetime import timedelta
@@ -14,10 +29,7 @@ from cosmos_rl.policy.model.gpt import GPT
 import toml
 import random
 
-from cosmos_rl.utils.ulysses import (
-    slice_input_for_ulysses,
-    gather_outputs_for_ulysses,
-)
+from cosmos_rl.utils.ulysses import slice_input_for_ulysses
 
 
 """
@@ -136,10 +148,6 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
 
     # parallel model
     try:
-        # If cp is enabled, check if the model is compatible with cp parallelism.
-        # If cp enabled but not compatible, an error will be raised.
-        model.check_cp_compatible(parallel_dims)
-
         # Apply parallelism to the model
         parallelize_fn, _ = model.parallelize_fn
         _, _ = parallelize_fn(model, parallel_dims, loaded_config, None)
@@ -173,13 +181,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     user_mini_batch["position_ids"] = position_ids
     user_mini_batch["input_ids"] = input_ids
 
-    raw_logits = model(**user_mini_batch)
-
-    ulysses_logits = gather_outputs_for_ulysses(
-        raw_logits,
-        gather_dim=1,
-        cp_mesh=cp_mesh,
-    )
+    ulysses_logits = model(**user_mini_batch)
     # for foward, each rank will have the same output.
     mean_ulysses_logits = ulysses_logits.mean()
 
@@ -224,10 +226,6 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
 
     # parallel model
     try:
-        # If cp is enabled, check if the model is compatible with cp parallelism.
-        # If cp enabled but not compatible, an error will be raised.
-        model.check_cp_compatible(parallel_dims)
-
         # Apply parallelism to the model
         parallelize_fn, _ = model.parallelize_fn
         _, _ = parallelize_fn(model, parallel_dims, loaded_config, None)

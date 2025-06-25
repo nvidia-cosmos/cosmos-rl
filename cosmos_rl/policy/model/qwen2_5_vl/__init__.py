@@ -1596,3 +1596,15 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
             "visual",
         ]  # Filter Linear in visual out, they will corrupt the FP8 Linear.
         return llm + visual
+
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        visual_n_heads = self.config.encoder_args.n_heads
+        llm_n_heads = self.config.lm_args.n_heads
+        cp_compatible = (
+            visual_n_heads % (cp_size * tp_size) == 0
+            and llm_n_heads % (cp_size * tp_size) == 0
+        )
+        if not cp_compatible:
+            raise ValueError(
+                f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+            )

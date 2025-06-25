@@ -93,10 +93,6 @@ class Trainer(CommMixin):
             model.to_empty(device="cpu")
 
         try:
-            # If cp is enabled, check if the model is compatible with cp parallelism.
-            # If cp enabled but not compatible, an error will be raised.
-            model.check_cp_compatible(parallel_dims)
-
             # Apply parallelism to the model
             parallelize_fn, _ = model.parallelize_fn
             # `pp_scheduler` is used for both `sft` and `RLHF`

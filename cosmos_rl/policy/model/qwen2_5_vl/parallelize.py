@@ -37,7 +37,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
-from cosmos_rl.utils.ulysses import ulysses_attn_func
+from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
 import os
 from typing import Callable, Optional
 
@@ -73,7 +73,7 @@ def parallelize(
         apply_ac(model)
 
     if parallel_dims.cp_enabled:
-        apply_cp(model, world_mesh["cp"])
+        apply_cp(model, parallel_dims)
         logger.info("Applied Context Parallel to the model")
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
@@ -262,8 +262,13 @@ def parallelize(
         return None, None
 
 
-def apply_cp(model: nn.Module, cp_mesh: DeviceMesh):
+def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
     """Apply Context Parallel to the model."""
+    # check if cp is compatible with model
+    cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
+    model.check_cp_compatible(cp_size, tp_size)
+
+    cp_mesh = parallel_dims.mesh["cp"]
     # For language
     for _, transformer_block in model.model.layers.items():
         original_attn_func = transformer_block.self_attn.attn_func
@@ -277,6 +282,8 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh):
             transformer_block.attn.attn_func = ulysses_attn_func(
                 original_attn_func, cp_mesh
             )
+
+    swizzle_cp_forward(model, parallel_dims)
 
 
 def apply_tp(

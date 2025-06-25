@@ -39,7 +39,7 @@ import functools
 import os
 from typing import Optional, Dict, Any
 from tqdm import tqdm
-from cosmos_rl.utils.ulysses import slice_input_for_ulysses, gather_outputs_for_ulysses
+from cosmos_rl.utils.ulysses import slice_input_for_ulysses
 
 
 def collate_fn(
@@ -451,9 +451,9 @@ class SFTTrainer(Trainer):
                     logits = self.model(**batch)
                     # recover from ulysses if cp is enabled
                     if self.parallel_dims.cp_enabled:
-                        logits = gather_outputs_for_ulysses(
-                            logits, gather_dim=1, cp_mesh=self.parallel_dims.mesh["cp"]
-                        )
+                        # logits = gather_outputs_for_ulysses(
+                        #     logits, gather_dim=1, cp_mesh=self.parallel_dims.mesh["cp"]
+                        # )
                         batch["input_ids"] = input_ids_before_cp
                         batch["position_ids"] = position_ids_before_cp
                     logits = logits[:, :-1].contiguous()
@@ -652,19 +652,19 @@ class SFTTrainer(Trainer):
             """Common cross-entropy loss function for Transformer models training."""
             # output is raw-logits from last stage, we should recover to the whole length
             # if cp is enabled.
-            if self.parallel_dims.cp_enabled:
-                output = gather_outputs_for_ulysses(
-                    output, gather_dim=1, cp_mesh=self.parallel_dims.mesh["cp"]
-                )
+            # if self.parallel_dims.cp_enabled:
+            #     output = gather_outputs_for_ulysses(
+            #         output, gather_dim=1, cp_mesh=self.parallel_dims.mesh["cp"]
+            #     )
             return torch.nn.functional.cross_entropy(
                 output[:, :-1].flatten(0, 1).float(), target[:, 1:].flatten(0, 1)
             )
 
-        if self.parallel_dims.cp_enabled:
-            # It seems that when using `self.parallel_dims.mesh["cp"]` will cause
-            # torch.compile/dynamo complaint. Workaround: do not compile `cross_entropy_loss`
-            # if cp is enabled.
-            # Issue: https://github.com/pytorch/pytorch/issues/152447
-            return cross_entropy_loss
-        else:
-            return torch.compile(cross_entropy_loss)
+        # if self.parallel_dims.cp_enabled:
+        #     # It seems that when using `self.parallel_dims.mesh["cp"]` will cause
+        #     # torch.compile/dynamo complaint. Workaround: do not compile `cross_entropy_loss`
+        #     # if cp is enabled.
+        #     # Issue: https://github.com/pytorch/pytorch/issues/152447
+        #     return cross_entropy_loss
+        # else:
+        return torch.compile(cross_entropy_loss)

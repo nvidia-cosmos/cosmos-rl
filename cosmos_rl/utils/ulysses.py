@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
+import types
 import torch
 
 from typing import Any, Tuple, Callable
@@ -20,8 +22,10 @@ from functools import partial
 
 from torch.distributed.device_mesh import DeviceMesh
 import torch.distributed as dist
+import torch.nn as nn
 
 from cosmos_rl.utils.attn_util import repeat_kv
+from cosmos_rl.utils.parallelism import ParallelDims
 
 
 def all_to_all_tensor(
@@ -345,3 +349,44 @@ def ulysses_attn_func(original_attn_func: Callable, cp_mesh: DeviceMesh):
         original_attn_func=original_attn_func,
         cp_mesh=cp_mesh,
     )
+
+
+def swizzle_cp_forward(model: nn.Module, parallel_dims: ParallelDims):
+    cp_mesh = parallel_dims.mesh["cp"]
+    if parallel_dims.pp_enabled:
+        # because `_swizzle_pp_grpo_forward` is replaced as the `forward` of model,
+        # So hook wo't work in pp. We do a cp replacement, too.
+        # substitute the original forward of model of last stage
+        if parallel_dims.pp_coord[0] == parallel_dims.pp_coord[1] - 1:  # last stage
+            origin_forward = model.forward
+            full_signature = list(inspect.signature(origin_forward).parameters.keys())
+
+            def gather_output_forward(*args, **kwargs):
+                args = args[1:]
+                n_args = len(args)
+                if n_args > 0:
+                    signature = full_signature[:n_args]
+                    for key in signature:
+                        if key in kwargs:
+                            kwargs.pop(key)
+                outputs = origin_forward(*args, **kwargs)
+                return gather_outputs_for_ulysses(
+                    outputs, gather_dim=1, cp_mesh=cp_mesh
+                )
+
+            model.forward = types.MethodType(gather_output_forward, model)
+    else:
+        # non-pp case, just use hook is perfect.
+        def gather_output_hook(model, args, output):
+            if parallel_dims.pp_enabled:
+                last_stage = parallel_dims.pp_coord[0] == parallel_dims.pp_coord[1] - 1
+                if last_stage:
+                    return gather_outputs_for_ulysses(
+                        output, gather_dim=1, cp_mesh=cp_mesh
+                    )
+                else:
+                    return output
+            else:
+                return gather_outputs_for_ulysses(output, gather_dim=1, cp_mesh=cp_mesh)
+
+        model.register_forward_hook(gather_output_hook)

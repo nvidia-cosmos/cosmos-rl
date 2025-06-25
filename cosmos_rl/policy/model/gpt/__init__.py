@@ -751,3 +751,9 @@ class GPT(nn.Module, BaseModel):
     @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:
         return ["lm_head"]
+
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
+            raise ValueError(
+                f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+            )

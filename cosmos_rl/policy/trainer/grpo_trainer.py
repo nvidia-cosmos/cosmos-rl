@@ -60,7 +60,6 @@ import msgpack
 from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils.ulysses import (
     slice_input_for_ulysses,
-    gather_outputs_for_ulysses,
 )
 from cosmos_rl.utils.util import is_master_rank, seperate_nccl_comm_needed
 from cosmos_rl.utils import constant
@@ -1297,15 +1296,14 @@ class GRPOTrainer(Trainer):
                                     # First/Last stage: pass all inputs
                                     kwargs = {}
                                     if self.parallel_dims.cp_enabled:
-                                        kwargs["cp_mesh"] = self.parallel_dims.mesh[
-                                            "cp"
-                                        ]
+                                        # This is for recover these two tensors after ulysses
                                         kwargs["input_ids_before_cp"] = (
                                             input_ids_before_cp
                                         )
                                         kwargs["position_ids_before_cp"] = (
                                             position_ids_before_cp
                                         )
+
                                     self.pp_scheduler.step(
                                         **user_mini_batch,
                                         advantages=minibatched_advantages,
@@ -1332,11 +1330,6 @@ class GRPOTrainer(Trainer):
                                 raw_logits = self.model(**user_mini_batch)
 
                                 if self.parallel_dims.cp_enabled:
-                                    raw_logits = gather_outputs_for_ulysses(
-                                        raw_logits,
-                                        gather_dim=1,
-                                        cp_mesh=self.parallel_dims.mesh["cp"],
-                                    )
                                     # reset the position ids and input ids
                                     user_mini_batch["position_ids"] = (
                                         position_ids_before_cp
@@ -1521,6 +1514,8 @@ class GRPOTrainer(Trainer):
         return fake_compute_loss
 
 
+# TODO: (lms) May be it's better to register this func as a hook to the last stage model.
+# That way is more clean. I think it's feasible but need to be compatible with torch Pipelie schedule.
 def _swizzle_pp_grpo_forward(
     trainer: GRPOTrainer, ori_forward: Callable, config: CosmosConfig, *args, **kwargs
 ):
@@ -1557,19 +1552,15 @@ def _swizzle_pp_grpo_forward(
         # remove the first `n_args` arguments from kwargs
         signature = list(inspect.signature(ori_forward).parameters.keys())[:n_args]
         for key in signature:
-            kwargs.pop(key)
+            if key in kwargs:
+                kwargs.pop(key)
 
     raw_logits = ori_forward(*args, **kwargs)
 
-    if "cp_mesh" in kwargs:
-        # this means that context parallel is enabled
-        raw_logits = gather_outputs_for_ulysses(
-            raw_logits,
-            gather_dim=1,
-            cp_mesh=kwargs["cp_mesh"],
-        )
-        # recover the input ids and position ids
+    # recover the input ids and position ids
+    if "input_ids_before_cp" in kwargs:
         user_input["input_ids"] = kwargs["input_ids_before_cp"]
+    if "position_ids_before_cp" in kwargs:
         user_input["position_ids"] = kwargs["position_ids_before_cp"]
 
     if config.train.train_policy.temperature > 1e-6:
