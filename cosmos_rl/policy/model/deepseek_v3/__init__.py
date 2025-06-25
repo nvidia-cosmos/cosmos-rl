@@ -33,7 +33,7 @@ from cosmos_rl.utils.util import (
     retry,
 )
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.policy.model.kimi_moonlight.weight_converter import (
+from cosmos_rl.policy.model.deepseek_v3.weight_converter import (
     convert_weight_from_hf,
 )
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -148,6 +148,7 @@ class DeepseekV3RotaryEmbedding(nn.Module):
         self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
         self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
 
+    @torch.no_grad()
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
         if self.max_seq_len_cached is None or seq_len > self.max_seq_len_cached:
@@ -697,7 +698,6 @@ class DeepseekV3MoE(nn.Module):
         return final_out
 
 
-    @torch.no_grad()
     def moe_infer(self, x, topk_ids, topk_weight):
         cnts = topk_ids.new_zeros((topk_ids.shape[0], self.config.n_routed_experts))
         cnts.scatter_(1, topk_ids, 1)
@@ -923,7 +923,7 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
 
     @property
     def parallelize_fn(self):
-        from cosmos_rl.policy.model.kimi_moonlight.parallelize import parallelize
+        from cosmos_rl.policy.model.deepseek_v3.parallelize import parallelize
 
         return parallelize, self
 
