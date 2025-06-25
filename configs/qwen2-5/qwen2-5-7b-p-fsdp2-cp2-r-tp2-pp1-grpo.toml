@@ -37,7 +37,7 @@ model_gradient_checkpointing = true
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "echo"
+project_name = "cosmos_rl_job"
 experiment_name = "None"
 
 [train.train_policy]
@@ -73,7 +73,7 @@ top_k = 10
 n_init_replicas = 1
 tp_size = 1
 cp_size = 2
-dp_shard_size = 2
-pp_size = 1
+dp_shard_size = 1
+pp_size = 2
 dp_replicate_size = 1
 

@@ -37,7 +37,7 @@ model_gradient_checkpointing = true
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "echo"
+project_name = "cosmos_rl_job"
 experiment_name = "None"
 
 [train.train_policy]
