@@ -755,6 +755,7 @@ class GRPOTrainer(Trainer):
             try:
                 # Need to reload again from checkpoint to make sure the model is in the correct state
                 self.model_resume_from_checkpoint()
+                model_loaded = True
             except Exception as e:
                 if isinstance(e, FileNotFoundError):
                     logger.info(
