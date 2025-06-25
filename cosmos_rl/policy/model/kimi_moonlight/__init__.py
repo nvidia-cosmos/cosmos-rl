@@ -47,7 +47,6 @@ from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
 )
 from transformers.activations import ACT2FN
 from functools import cached_property, partial
-import numpy as np
 
 
 class DeepseekV3RMSNorm(nn.Module):
