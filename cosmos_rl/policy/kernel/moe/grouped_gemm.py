@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import torch
 
 cuda_device_props = torch.cuda.get_device_properties()
@@ -7,6 +22,7 @@ use_torch_group_gemm_impl = (
     and cuda_device_props.minor == 0
     and hasattr(torch, "_grouped_mm")
 )
+
 
 class FakeGroupMMBackwardCheck(torch.autograd.Function):
     @staticmethod
@@ -29,7 +45,9 @@ class FakeGroupMMBackwardCheck(torch.autograd.Function):
         return grad_x, grad_w, None, None
 
 
-def run_group_gemm_hopper(contig_tokens, m_sizes, m_offsets, gate_weight, up_weight, down_weight, act_fn):
+def run_group_gemm_hopper(
+    contig_tokens, m_sizes, m_offsets, gate_weight, up_weight, down_weight, act_fn
+):
     gate_proj = FakeGroupMMBackwardCheck.apply(
         contig_tokens,
         gate_weight,
@@ -56,7 +74,10 @@ def run_group_gemm_hopper(contig_tokens, m_sizes, m_offsets, gate_weight, up_wei
     )
     return hidden_outputs
 
-def run_group_gemm_3rd_party(contig_tokens, m_sizes, m_offsets, gate_weight, up_weight, down_weight, act_fn):
+
+def run_group_gemm_3rd_party(
+    contig_tokens, m_sizes, m_offsets, gate_weight, up_weight, down_weight, act_fn
+):
     try:
         from grouped_gemm import ops
     except ImportError:
@@ -97,4 +118,6 @@ def run_group_gemm_3rd_party(contig_tokens, m_sizes, m_offsets, gate_weight, up_
 
 def group_gemm_imp():
     # Use torch implemetation if torch._grouped_mm is available, otherwise use 3rd party implementation
-    return run_group_gemm_hopper if use_torch_group_gemm_impl else run_group_gemm_3rd_party
+    return (
+        run_group_gemm_hopper if use_torch_group_gemm_impl else run_group_gemm_3rd_party
+    )
