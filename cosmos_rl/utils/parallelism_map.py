@@ -88,7 +88,7 @@ def slice_tensor_with_strategy(
 
 
 def slice_tensor_with_strategies(
-    tensor: torch.Tensor, strategys: Dict[int, DimRankInfo]
+    self: torch.Tensor, strategys: Dict[int, DimRankInfo]
 ) -> torch.Tensor:
     """
     Slices the tensor according to the given strategies.
@@ -96,10 +96,13 @@ def slice_tensor_with_strategies(
     :param strategys: A dictionary mapping dimension indices to DimRankInfo objects.
     :return: The sliced tensor.
     """
-    view = tensor
+    view = self
     for idx, split in strategys.items():
         view = slice_tensor_with_strategy(view, idx, split)
     return view
+
+
+torch.Tensor.cosmos_slice = slice_tensor_with_strategies
 
 
 class ParallelTopoMapper:
@@ -569,7 +572,7 @@ class ParallelTopoMapper:
                     merged[idx].append(d)
         return merged
 
-    def generate_policy_to_rollout_insts(
+    def policy_to_rollout_manifest(
         self,
         params: List[Tuple[str, Tuple[int]]],
         global_rank: int,
@@ -627,7 +630,7 @@ class ParallelTopoMapper:
                             )
         return policy_to_rollput_insts
 
-    def generate_rollout_from_policy_insts(
+    def rollout_from_policy_manifest(
         self,
         params: List[Tuple[str, Tuple[int]]],
         rollout_rank: int,
@@ -755,24 +758,9 @@ class ParallelTopoMapperGroup:
                 )
             )
 
-    def generate_policy_to_rollout_insts_for_index(
-        self,
-        params: List[Tuple[str, Tuple[int]]],
-        global_rank: int,
-        index: int = 0,
-    ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        return self.mapper_group[index].generate_policy_to_rollout_insts(
-            params, global_rank
-        )
-
-    def generate_rollout_from_policy_insts_for_index(
-        self, params: List[Tuple[str, Tuple[int]]], rollout_rank: int, index: int
-    ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        return self.mapper_group[index].generate_rollout_from_policy_insts(
-            params, rollout_rank
-        )
-
-    def resort_params(self, params: List[Tuple[str, int]]):
+    def _sort_params_by_model_index(
+        self, params: List[Tuple[str, int]]
+    ) -> List[List[Tuple[str, int]]]:
         """
         Resort the parameters based on the name mapper.
         :param params: The parameters to resort.
@@ -780,35 +768,35 @@ class ParallelTopoMapperGroup:
         """
         if len(self.mapper_group) == 1:
             return [params]
-        new_params = [[] for _ in self.mapper_group]
+        x = [[] for _ in self.mapper_group]
         for name, rank in params:
             idx = self.weight_mapper.name_to_model_index(name)
-            new_params[idx].append((name, rank))
-        return new_params
+            x[idx].append((name, rank))
+        return x
 
-    def generate_policy_to_rollout_insts(
+    def prepare_policy_to_rollout_manifest(
         self,
-        param_key_n_rank: List[Tuple[str, int]],
+        hf_key_n_rank: List[Tuple[str, int]],
         global_rank: int,
     ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        new_params = self.resort_params(param_key_n_rank)
+        x = self._sort_params_by_model_index(hf_key_n_rank)
         insts = []
-        for index, p in enumerate(new_params):
+        for model_index, p in enumerate(x):
             insts.extend(
-                self.mapper_group[index].generate_policy_to_rollout_insts(
+                self.mapper_group[model_index].policy_to_rollout_manifest(
                     p, global_rank
                 )
             )
         return insts
 
-    def generate_rollout_from_policy_insts(
-        self, param_key_n_rank: List[Tuple[str, int]], rollout_rank: int
+    def prepare_rollout_from_policy_manifest(
+        self, hf_key_n_rank: List[Tuple[str, int]], rollout_rank: int
     ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        new_params = self.resort_params(param_key_n_rank)
+        x = self._sort_params_by_model_index(hf_key_n_rank)
         insts = []
-        for index, p in enumerate(new_params):
+        for model_index, p in enumerate(x):
             insts.extend(
-                self.mapper_group[index].generate_rollout_from_policy_insts(
+                self.mapper_group[model_index].rollout_from_policy_manifest(
                     p, rollout_rank
                 )
             )

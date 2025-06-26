@@ -17,7 +17,6 @@ import unittest
 
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapper,
-    slice_tensor_with_strategies,
 )
 from cosmos_rl.utils.parallelism import ParallelismConfig
 import torch
@@ -81,11 +80,11 @@ class TestParallelMap(unittest.TestCase):
         for inst in insts:
             p_rank, r_rank, tensor_split_strategys, dest_name, shape = inst
             local_view = torch.zeros(shape).to("cuda")
-            view = slice_tensor_with_strategies(local_view, tensor_split_strategys)
+            view = local_view.cosmos_slice(tensor_split_strategys)
             assert (view.eq(0).all()).item()
             view.copy_(torch.ones(view.shape).to("cuda"))
             assert (view.eq(1).all()).item()
-            new_view = slice_tensor_with_strategies(local_view, tensor_split_strategys)
+            new_view = local_view.cosmos_slice(tensor_split_strategys)
             assert (new_view.eq(1).all()).item()
             assert p_rank == global_rank
             while layers[layer_idx][0] != dest_name:
@@ -114,7 +113,5 @@ class TestParallelMap(unittest.TestCase):
             assert p_rank >= p_rank_max
             if p_rank > p_rank_max:
                 p_rank_max = p_rank
-
-
 if __name__ == "__main__":
     unittest.main()

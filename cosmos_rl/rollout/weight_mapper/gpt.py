@@ -50,7 +50,7 @@ class GPTWeightMapper(WeightMapper):
         v_weight = weight[unit_dim * (self.kv_head_ratio + 1) :]
         return q_weight, k_weight, v_weight
 
-    def split_gate_proj_weight(self, name, weight: torch.Tensor):
+    def _split_gate_proj_weight(self, name, weight: torch.Tensor):
         # weight has shape [2 * x, hidden_dim]
         dim_0 = weight.shape[0]
         gate_proj_weight = weight[: dim_0 // 2]
@@ -85,7 +85,7 @@ class GPTWeightMapper(WeightMapper):
                 recv_key_n_shape_list.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in compatible_key:
                 # split gate and up proj
-                gate_proj_weight, up_proj_weight = self.split_gate_proj_weight(
+                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
                     compatible_key, param
                 )
                 gate_proj_weight_key = compatible_key.replace(
@@ -104,9 +104,6 @@ class GPTWeightMapper(WeightMapper):
                 recv_key_n_shape_list.append((compatible_key, param.ndim))
 
         return vllm_weight_inplace_view_map, recv_key_n_shape_list
-
-    def name_to_model_index(self, dest_name: str) -> int:
-        return 0
 
     def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
         return [replica_parallelism]

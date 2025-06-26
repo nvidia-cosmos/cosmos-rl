@@ -1505,7 +1505,7 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
             clear_weight_name(k): v for k, v in visual_state_dict.items()
         }
         transforms = []
-        for dest_name, _ in self.sorted_param_key_n_rank:
+        for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, lm_state_dict, visual_state_dict
             )
@@ -1522,7 +1522,7 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
         return name
 
     @cached_property
-    def sorted_param_key_n_rank(self) -> List[Tuple[str, int]]:
+    def sorted_hf_key_n_rank(self) -> List[Tuple[str, int]]:
         sorted_key_n_rank = []
         for k, v in self.named_parameters():
             k = self.map_local_key_to_hf_key(k)

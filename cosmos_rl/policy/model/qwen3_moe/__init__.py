@@ -974,7 +974,7 @@ class Qwen3MoE(nn.Module, BaseModel):
         self_state_dict = self.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         transforms = []
-        for dest_name, _ in self.sorted_param_key_n_rank:
+        for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, self_state_dict
             )

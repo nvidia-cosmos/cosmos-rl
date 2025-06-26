@@ -357,7 +357,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.get_underlying_model()
         )
 
-        insts = self.parallel_mapper.generate_rollout_from_policy_insts(
+        insts = self.parallel_mapper.prepare_rollout_from_policy_manifest(
             recv_param_key_n_rank_list, self.global_rank
         )
 

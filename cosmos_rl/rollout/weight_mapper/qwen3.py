@@ -58,7 +58,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         v_weight = weight[unit_dim * (self.kv_head_ratio + 1) :]
         return q_weight, k_weight, v_weight
 
-    def split_gate_proj_weight(self, name, weight: torch.Tensor):
+    def _split_gate_proj_weight(self, name, weight: torch.Tensor):
         # weight has shape [num_experts, 2 * x, hidden_dim]
         dim_1 = weight.shape[1]
         gate_proj_weight = weight[:, : dim_1 // 2]
@@ -91,7 +91,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 recv_key_n_rank_list.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in param_name_hf:
                 # split gate and up proj
-                gate_proj_weight, up_proj_weight = self.split_gate_proj_weight(
+                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
                     param_name_hf, param
                 )
                 gate_proj_weight_key = param_name_hf.replace(
@@ -110,9 +110,6 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 recv_key_n_rank_list.append((param_name_hf, param.ndim))
 
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
-
-    def name_to_model_index(self, dest_name: str) -> int:
-        return 0
 
     def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
         return [replica_parallelism]

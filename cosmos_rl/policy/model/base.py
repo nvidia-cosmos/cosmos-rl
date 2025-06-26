@@ -31,7 +31,7 @@ class BaseModel(ABC):
         return next(self.parameters()).device
 
     @cached_property
-    def sorted_param_key_n_rank(self) -> List[Tuple[str, int]]:
+    def sorted_hf_key_n_rank(self) -> List[Tuple[str, int]]:
         """
         Return sorted parameter tensor name and their rank of local view.
         """

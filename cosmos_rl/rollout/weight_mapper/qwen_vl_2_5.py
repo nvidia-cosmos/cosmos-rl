@@ -133,9 +133,7 @@ class QwenVL25WeightMapper(WeightMapper):
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     def name_to_model_index(self, dest_name: str) -> int:
-        if "lm_head.weight" == dest_name:
-            return 0
-        elif "lm_head.bias" == dest_name:
+        if dest_name in ["lm_head.weight", "lm_head.bias"]:
             return 0
         elif dest_name.startswith("visual."):
             return 1

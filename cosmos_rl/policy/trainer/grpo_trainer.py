@@ -50,7 +50,6 @@ from cosmos_rl.utils.util import (
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
-    slice_tensor_with_strategies,
 )
 from functools import cached_property
 from typing import List, Callable, Dict, Any, Tuple, Optional
@@ -547,9 +546,7 @@ class GRPOTrainer(Trainer):
         and replacing certain substrings in the parameter names.
         """
         name_to_transform = {}
-        assert (
-            len(self.model.sorted_param_key_n_rank) > 0
-        ), "No sorted parameters found."
+        assert len(self.model.sorted_hf_key_n_rank) > 0, "No sorted parameters found."
         for name, transform_block in self.model.weight_sync_transforms:
             assert isinstance(transform_block, Callable) or isinstance(
                 transform_block, torch.Tensor
@@ -584,21 +581,24 @@ class GRPOTrainer(Trainer):
                 self.hf_config,
                 self.config.policy.model_name_or_path,
             )
-        send = command.src_replica_name == self.replica_name
-        if not send:
+        if not command.src_replica_name == self.replica_name:
+            logger.error(
+                f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
+            )
             return False
 
         if self.policy_to_rollout_insts is None:
-            param_key_n_rank = self.model.sorted_param_key_n_rank
+            # Ordered list of (hf_key, tensor_dim)
+            hf_key_n_rank: List[Tuple[str, int]] = self.model.sorted_hf_key_n_rank
             self.policy_to_rollout_insts = (
-                self.parallel_mapper.generate_policy_to_rollout_insts(
-                    param_key_n_rank, self.global_rank
+                self.parallel_mapper.prepare_policy_to_rollout_manifest(
+                    hf_key_n_rank, self.global_rank
                 )
             )
             self.p2r_related_ranks = [set() for _ in range(command.src_replica_size)]
             for rank in range(command.src_replica_size):
-                insts_at_rank = self.parallel_mapper.generate_policy_to_rollout_insts(
-                    param_key_n_rank, rank
+                insts_at_rank = self.parallel_mapper.prepare_policy_to_rollout_manifest(
+                    hf_key_n_rank, rank
                 )
                 for i in insts_at_rank:
                     p_rank, r_rank, _, _, _ = i
@@ -686,9 +686,7 @@ class GRPOTrainer(Trainer):
                     pass
 
                 view = (
-                    slice_tensor_with_strategies(local_view, tensor_split_strategys)
-                    .contiguous()
-                    .cuda()
+                    local_view.cosmos_slice(tensor_split_strategys).contiguous().cuda()
                 )
                 assert self.global_rank == p_rank
                 nccl_send(

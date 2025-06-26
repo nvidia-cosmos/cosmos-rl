@@ -18,7 +18,6 @@ import torch
 from torch import nn
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_map import (
-    slice_tensor_with_strategies,
     DimRankInfo,
 )
 from abc import ABC, abstractmethod
@@ -61,7 +60,7 @@ class WeightMapper(ABC):
 
         target_tensor = self.vllm_weight_inplace_view_map[dest_name]
 
-        view = slice_tensor_with_strategies(target_tensor, tensor_split_strategys)
+        view = target_tensor.cosmos_slice(tensor_split_strategys)
 
         if do_weight_sync_check:
             cloned_target_tensor = target_tensor.clone()
@@ -109,7 +108,7 @@ class WeightMapper(ABC):
         pass
 
     def name_to_model_index(self, dest_name: str) -> int:
-        pass
+        return 0
 
     @abstractmethod
     def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):

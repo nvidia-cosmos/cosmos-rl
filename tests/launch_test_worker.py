@@ -64,7 +64,7 @@ class TestModel:
     num_hidden_layers = 16
 
     def __init__(self, device, parallel_dims):
-        self.sorted_param_key_n_rank = [
+        self.sorted_hf_key_n_rank = [
             ("model.layers.9.input_layernorm.weight", torch.Size([1024])),
             ("model.layers.9.mlp.down_proj.weight", torch.Size([1024, 11008])),
             ("model.layers.9.mlp.gate_proj.weight", torch.Size([5504, 2048])),
@@ -81,7 +81,7 @@ class TestModel:
             ("model.norm.weight", torch.Size([1024])),
             ("model.embed_tokens.weight", torch.Size([75968, 2048])),
         ]
-        self.sorted_param_key_n_rank.sort(key=lambda x: x[0])
+        self.sorted_hf_key_n_rank.sort(key=lambda x: x[0])
         self.device = device
         self.parallel_dims = parallel_dims
         self.tensors = [
@@ -92,7 +92,7 @@ class TestModel:
                 .to(self.device)
                 * 0.001,
             )
-            for k, v in self.sorted_param_key_n_rank
+            for k, v in self.sorted_hf_key_n_rank
         ]
         self.sharded_tensors = {}
         for k, v in self.tensors:
@@ -100,7 +100,7 @@ class TestModel:
                 v, k, self.model_type, self.parallel_dims
             )[1]
         self.sorted_sharded_params = [
-            (k, self.sharded_tensors[k].shape) for k, _ in self.sorted_param_key_n_rank
+            (k, self.sharded_tensors[k].shape) for k, _ in self.sorted_hf_key_n_rank
         ]
 
 
@@ -134,7 +134,7 @@ class TestPolicy:
         self.rollouts_comm = rollouts_comm
         self.policy_to_rollout_insts = None
         self.map_w_from_policy_to_rollout = self.model.sharded_tensors
-        self.model.sorted_param_key_n_rank = self.model.sorted_sharded_params
+        self.model.sorted_hf_key_n_rank = self.model.sorted_sharded_params
         self.p2r_nccl_uuids = rollouts_comm
         self.train_stream = torch.cuda.Stream()
 
