@@ -636,7 +636,6 @@ class PolicyStatusManager:
                         logger.debug(
                             f"Step: {train_step-1}/{total_steps}, Iteration time: {total_iter_time_avg:2f} s"
                         )
-                    # lms:
                     logger.info(
                         f"Step: {train_step}/{total_steps}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}."
                     )
