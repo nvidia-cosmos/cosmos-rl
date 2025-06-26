@@ -9,6 +9,7 @@ communicator is aborted via :pyfunc:`nccl_abort` and a ``RuntimeError`` is
 raised.
 
 """
+
 from __future__ import annotations
 
 import os
@@ -76,6 +77,7 @@ def _current_ctx():
 # Helper utilities
 # ---------------------------------------------------------------------------
 
+
 def _dtype_enum(dtype: torch.dtype) -> int:
     """Map torch.dtype to NCCL enum (raises on unsupported)."""
     return ncclDataTypeEnum.from_torch(dtype)
@@ -121,8 +123,11 @@ def _get_timeout_ms(user_timeout: Optional[int] = None) -> int:
 # Context-manager
 # ---------------------------------------------------------------------------
 
+
 @contextmanager
-def nccl_timeout_watchdog(*, wait_stream: bool = False, timeout_ms: Optional[int] = None):
+def nccl_timeout_watchdog(
+    *, wait_stream: bool = False, timeout_ms: Optional[int] = None
+):
     """Context-manager that aborts all NCCL comms if block exceeds timeout_ms.
 
     Parameters
@@ -141,7 +146,6 @@ def nccl_timeout_watchdog(*, wait_stream: bool = False, timeout_ms: Optional[int
 
     # Record a CPU‐side monotonic timestamp as the authoritative timeout reference.
     start_ts = time.monotonic()
-
 
     def _timeout_action():
         if wait_stream:
@@ -186,13 +190,16 @@ def nccl_timeout_watchdog(*, wait_stream: bool = False, timeout_ms: Optional[int
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def create_nccl_uid() -> List[int]:
     """Generate a NCCL unique ID and return it as a list of 128 bytes."""
     uid = _nccl.ncclGetUniqueId()
     return list(uid.internal)
 
 
-def create_nccl_comm(uid_chars: List[int], rank: int, world_size: int, timeout_ms: Optional[int] = None) -> int:
+def create_nccl_comm(
+    uid_chars: List[int], rank: int, world_size: int, timeout_ms: Optional[int] = None
+) -> int:
     """Create a communicator and return comm_idx handle (int)."""
     uid = ncclUniqueId()
     for i, byte in enumerate(uid_chars):
@@ -228,7 +235,14 @@ def nccl_abort(comm_idx: int):
 
 # Collective wrapper functions
 
-def nccl_broadcast(tensor: torch.Tensor, rank: int, comm_idx: int, stream: Optional[Stream] = None, timeout_ms: Optional[int] = None):
+
+def nccl_broadcast(
+    tensor: torch.Tensor,
+    rank: int,
+    comm_idx: int,
+    stream: Optional[Stream] = None,
+    timeout_ms: Optional[int] = None,
+):
     """Broadcast tensor from rank (root) to all peers in communicator.
 
     Parameters
@@ -264,7 +278,13 @@ def nccl_broadcast(tensor: torch.Tensor, rank: int, comm_idx: int, stream: Optio
     )
 
 
-def nccl_send(tensor: torch.Tensor, peer: int, comm_idx: int, stream: Optional[Stream] = None, timeout_ms: Optional[int] = None):
+def nccl_send(
+    tensor: torch.Tensor,
+    peer: int,
+    comm_idx: int,
+    stream: Optional[Stream] = None,
+    timeout_ms: Optional[int] = None,
+):
     """Point-to-point send."""
     _check_tensor(tensor)
     comm = _comm_store[comm_idx][0]
@@ -278,7 +298,13 @@ def nccl_send(tensor: torch.Tensor, peer: int, comm_idx: int, stream: Optional[S
     )
 
 
-def nccl_recv(tensor: torch.Tensor, peer: int, comm_idx: int, stream: Optional[Stream] = None, timeout_ms: Optional[int] = None):
+def nccl_recv(
+    tensor: torch.Tensor,
+    peer: int,
+    comm_idx: int,
+    stream: Optional[Stream] = None,
+    timeout_ms: Optional[int] = None,
+):
     """Point-to-point receive."""
     _check_tensor(tensor)
     comm = _comm_store[comm_idx][0]
@@ -292,7 +318,14 @@ def nccl_recv(tensor: torch.Tensor, peer: int, comm_idx: int, stream: Optional[S
     )
 
 
-def nccl_allreduce(sendbuff: torch.Tensor, recvbuff: torch.Tensor, op: ReduceOp, comm_idx: int, stream: Optional[Stream] = None, timeout_ms: Optional[int] = None):
+def nccl_allreduce(
+    sendbuff: torch.Tensor,
+    recvbuff: torch.Tensor,
+    op: ReduceOp,
+    comm_idx: int,
+    stream: Optional[Stream] = None,
+    timeout_ms: Optional[int] = None,
+):
     """All-reduce collective."""
     _check_tensor(sendbuff)
     _check_tensor(recvbuff)
@@ -308,7 +341,13 @@ def nccl_allreduce(sendbuff: torch.Tensor, recvbuff: torch.Tensor, op: ReduceOp,
     )
 
 
-def nccl_alltoall(sendbuff: torch.Tensor, recvbuff: torch.Tensor, comm_idx: int, stream: Optional[Stream] = None, timeout_ms: Optional[int] = None):
+def nccl_alltoall(
+    sendbuff: torch.Tensor,
+    recvbuff: torch.Tensor,
+    comm_idx: int,
+    stream: Optional[Stream] = None,
+    timeout_ms: Optional[int] = None,
+):
     """All-to-all emulation via AllGather (NCCL native AllToAll not exposed)."""
     _check_tensor(sendbuff)
     _check_tensor(recvbuff)
@@ -323,8 +362,8 @@ def nccl_alltoall(sendbuff: torch.Tensor, recvbuff: torch.Tensor, comm_idx: int,
     )
 
 
-
 # Compatibility helper (legacy API surface)
+
 
 def get_nccl_timeout_ms() -> int:
     """Public helper that mirrors the old pynccl.get_nccl_timeout_ms API."""
@@ -347,4 +386,4 @@ __all__ = [
     "nccl_timeout_watchdog",
     # compatibility helper
     "get_nccl_timeout_ms",
-] 
+]
