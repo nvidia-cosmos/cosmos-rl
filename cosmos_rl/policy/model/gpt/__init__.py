@@ -639,13 +639,6 @@ class GPT(nn.Module, BaseModel):
         local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
         return local_view
 
-    def weight_sync_transform_by_key(
-        self, dest_name: str
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        self_state_dict = self.state_dict()
-        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        return self.weight_sync_transform_by_key_internal(dest_name, self_state_dict)
-
     @cached_property
     def weight_sync_transforms(self) -> List[Tuple[str, Tuple[int], torch.Tensor]]:
         self_state_dict = self.state_dict()

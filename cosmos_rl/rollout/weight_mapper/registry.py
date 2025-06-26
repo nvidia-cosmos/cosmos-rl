@@ -22,7 +22,6 @@ from cosmos_rl.utils.parallelism_map import (
     DimRankInfo,
 )
 from abc import ABC
-from cosmos_rl.utils.util import seperate_nccl_comm_needed
 from cosmos_rl.utils.pynccl import nccl_recv
 
 
@@ -72,8 +71,6 @@ class WeightMapper(ABC):
         communicator_index: Dict[int, int],
         do_weight_sync_check: bool = False,
     ):
-        need_sep_comm = seperate_nccl_comm_needed()
-
         p_rank, r_rank, tensor_split_strategys, dest_name, shape = inst
         assert r_rank == global_rank_of_rollout
 
@@ -96,9 +93,7 @@ class WeightMapper(ABC):
         # logger.info(
         #     f"[Rollout] rank {global_rank_of_rollout} recv tensor: {dest_name} from rank {p_rank} with shape: {view.shape} out of {target_tensor.shape} with dtype {view.dtype} on device {view.device}"
         # )
-        nccl_recv(
-            recv_tensor, 0 if need_sep_comm else p_rank, communicator_index[p_rank]
-        )
+        nccl_recv(recv_tensor, p_rank, communicator_index[p_rank])
 
         # inplace copy
         if not view.is_contiguous():
@@ -118,20 +113,20 @@ class WeightMapper(ABC):
         return recv_tensor.numel() * recv_tensor.element_size()
 
 
-_MODEL_WEIGHT_MAPPER_REGISTRY: Dict[str, Type[WeightMapper]] = {}
+_MODEL_WEIGHT_MAPPER_REGISTRY: Dict[str, Tuple[Type[WeightMapper], int]] = {}
 
 
-def register_class(reg_key: str, *, allow_override: bool = False):
+def register_class(reg_key: str, *, allow_override: bool = False, n_model: int = 1):
     def decorator(cls: Type) -> Type:
         if not allow_override and reg_key in _MODEL_WEIGHT_MAPPER_REGISTRY:
             raise ValueError(f"Class '{reg_key}' is already registered.")
-        _MODEL_WEIGHT_MAPPER_REGISTRY[reg_key] = cls
+        _MODEL_WEIGHT_MAPPER_REGISTRY[reg_key] = (cls, n_model)
         return cls
 
     return decorator
 
 
-def get_weight_mapper(model_type: str) -> Type[WeightMapper]:
+def get_weight_mapper(model_type: str) -> Tuple[Type[WeightMapper], int]:
     if model_type not in _MODEL_WEIGHT_MAPPER_REGISTRY:
         raise ValueError(f"ModelType '{model_type}' is not supported now.")
 

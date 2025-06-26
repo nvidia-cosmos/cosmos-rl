@@ -716,18 +716,12 @@ class ParallelTopoMapperGroup:
         :param model_config: The model configuration.
         :param model_path: The path to the model.
         """
-        connverted = {
-            "gpt": "qwen2",
-        }
         self.model_config = model_config
         model_type = model_config.model_type
-        if model_type in connverted:
-            model_type = connverted[model_type]
-
         from cosmos_rl.rollout.weight_mapper.registry import get_weight_mapper
 
-        self.weight_mapper = get_weight_mapper(model_type)(model_path)
-        model_num = {"qwen2_5_vl": 2}
+        weight_mapper_fn, n_model = get_weight_mapper(model_type)
+        self.weight_mapper = weight_mapper_fn(model_path)
 
         policy_config = self.weight_mapper.get_policy_parallelism(policy_parallelism)
         rollout_config = self.weight_mapper.get_rollout_parallelism(rollout_parallelism)
@@ -736,7 +730,6 @@ class ParallelTopoMapperGroup:
         # the param tensor of a give name.
         policy_strategies = self.weight_mapper.get_policy_parallelism_strategy()
         rollout_strategies = self.weight_mapper.get_rollout_parallelism_strategy()
-        n_model = model_num.get(model_type, 1)
         for i in range(n_model):
             # logger.info(
             #     f"Policy parallelism config: {policy_config[i]}, Rollout parallelism config: {rollout_config[i]}"

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Tuple, Callable, Union
+from typing import Optional, List, Tuple
 import torch
 from functools import cached_property
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -146,19 +146,6 @@ class BaseModel(ABC):
         model_name_or_path: str,
         max_position_embeddings: Optional[int] = None,
     ) -> "BaseModel":
-        raise NotImplementedError
-
-    @abstractmethod
-    def weight_sync_transform_by_key(
-        cls, dest_name: str
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        """
-        Get the local view of the tensor from the state dict
-        Args:
-            name (str): The name of the tensor to be retrieved.
-        Returns:
-            torch.Tensor: The tensor corresponding to the given name.
-        """
         raise NotImplementedError
 
     @cached_property

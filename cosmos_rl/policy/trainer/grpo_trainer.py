@@ -58,10 +58,8 @@ import types
 from functools import partial
 import msgpack
 from cosmos_rl.utils.network_util import make_request_with_retry
-from cosmos_rl.utils.ulysses import (
-    slice_input_for_ulysses,
-)
-from cosmos_rl.utils.util import is_master_rank, seperate_nccl_comm_needed
+from cosmos_rl.utils.ulysses import slice_input_for_ulysses
+from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.dispatcher.replica import Rollout
@@ -584,8 +582,6 @@ class GRPOTrainer(Trainer):
 
     @Trainer.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        need_sep_comm = seperate_nccl_comm_needed()
-
         assert command.src_replica_size == self.world_size
         if self.parallel_mapper is None:
             self.parallel_mapper = ParallelTopoMapperGroup(
@@ -602,10 +598,11 @@ class GRPOTrainer(Trainer):
 
         if self.policy_to_rollout_insts is None:
             param = self.model.sorted_params
-            insts = self.parallel_mapper.generate_policy_to_rollout_insts(
-                param, self.global_rank
+            self.policy_to_rollout_insts = (
+                self.parallel_mapper.generate_policy_to_rollout_insts(
+                    param, self.global_rank
+                )
             )
-            self.policy_to_rollout_insts = insts
             self.p2r_related_ranks = [set() for _ in range(command.src_replica_size)]
             for rank in range(command.src_replica_size):
                 insts_at_rank = self.parallel_mapper.generate_policy_to_rollout_insts(
@@ -616,16 +613,14 @@ class GRPOTrainer(Trainer):
                     self.p2r_related_ranks[rank].add(r_rank)
 
         comm_id = {}
+        # Create nccl id for one policy replica to another rollout replica
         for p_rank in range(command.src_replica_size):
             for r_rank in sorted(self.p2r_related_ranks[p_rank]):
                 mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-                if need_sep_comm:
-                    mesh_key += f"_{p_rank}_{r_rank}"
 
                 if mesh_key not in self.p2r_nccl_uuids:
                     nccl_uuid = None
                     if self.global_rank == 0:
-                        # initialize nccl handle for building mesh among policies
                         # Only create nccl group id in rank 0.
                         nccl_uuid = create_nccl_uid()
                         base64_nccl_group_id = list_to_b64(nccl_uuid)
@@ -654,8 +649,6 @@ class GRPOTrainer(Trainer):
 
         for r_rank in sorted(self.p2r_related_ranks[self.global_rank]):
             mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-            if need_sep_comm:
-                mesh_key += f"_{self.global_rank}_{r_rank}"
             if mesh_key not in self.rollouts_comm:
                 assert mesh_key in self.p2r_nccl_uuids
                 nccl_uuid = self.p2r_nccl_uuids[mesh_key]
@@ -664,10 +657,8 @@ class GRPOTrainer(Trainer):
                 )
                 comm_id[r_rank] = create_nccl_comm(
                     nccl_uuid,
-                    0 if need_sep_comm else self.global_rank,
-                    2
-                    if need_sep_comm
-                    else (self.world_size + command.dst_replica_size),
+                    self.global_rank,
+                    self.world_size + command.dst_replica_size,
                 )
                 logger.debug(
                     f"[Policy] `P2R` nccl comm: {comm_id[r_rank]} for `P2R` with mesh_key: {mesh_key} is created."
@@ -678,24 +669,6 @@ class GRPOTrainer(Trainer):
         assert (
             self.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."
-        # Check the model parameters for sync consistency
-        # This is a sanity check to make sure the model parameters are consistent
-        # Commenting out for now, since it is time consuming and not necessary
-        # for name, shape in self.model.sorted_params():
-        #     local_view = self.model.weight_sync_transform_by_key(name)
-        #     sync_view = self.get_parameter_to_sync(name)
-        #     assert local_view.data_ptr() == sync_view.data_ptr(), (
-        #         f"Data pointer mismatch: {local_view.data_ptr()} != {sync_view.data_ptr()} for {name}"
-        #     )
-        #     assert local_view.shape == shape, (
-        #         f"Shape mismatch: {local_view.shape} != {shape} for {name}"
-        #     )
-        #     assert sync_view.shape == shape, (
-        #         f"Shape mismatch: {sync_view.shape} != {shape} for {name}"
-        #     )
-        #     assert local_view.dtype == sync_view.dtype, (
-        #         f"Data type mismatch: {local_view.dtype} != {sync_view.dtype} for {name}"
-        #     )
         st = time.time()
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
@@ -707,14 +680,17 @@ class GRPOTrainer(Trainer):
             for inst in self.policy_to_rollout_insts:
                 p_rank, r_rank, tensor_split_strategys, dest_name, shape = inst
                 if dest_name not in self.map_w_from_policy_to_rollout:
-                    raise Exception(
-                        f"[Policy] {dest_name} not in map_w_from_policy_to_rollout. Please call execute_policy_to_rollout_unicast_preparation first."
+                    raise RuntimeError(
+                        f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
                     )
                 local_view = self.map_w_from_policy_to_rollout[dest_name]
                 if dest_name in prepared_tensors_to_rollout:
                     local_view = prepared_tensors_to_rollout[dest_name]
                 elif isinstance(local_view, Callable):
                     local_view = local_view()
+                else:
+                    pass
+
                 assert (
                     local_view.nelement() == int(np.prod(shape))
                 ), f"Number of elements mismatch: {local_view.nelement()} != {np.prod(shape)} for {dest_name}"
@@ -726,7 +702,7 @@ class GRPOTrainer(Trainer):
                 assert self.global_rank == p_rank
                 nccl_send(
                     view,
-                    1 if need_sep_comm else (self.world_size + r_rank),
+                    self.world_size + r_rank,
                     comm_id[r_rank],
                 )
                 total_bytes_sent += view.numel() * view.element_size()

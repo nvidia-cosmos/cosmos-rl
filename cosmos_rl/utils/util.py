@@ -763,13 +763,6 @@ def retry(func=None, *, max_retry=10, max_delay=30.0):
     return decorator
 
 
-def seperate_nccl_comm_needed():
-    """
-    Check if separate NCCL communications needed to prevent hang.
-    """
-    return False
-
-
 def write_redis_config(port, logfile, file_path="/opt/redis_config.conf"):
     """
     Write the redis config file.

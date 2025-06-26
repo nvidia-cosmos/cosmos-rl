@@ -191,10 +191,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path
         )
-        model_type = hf_config.model_type
-        weight_mapper_cls = get_weight_mapper(model_type)
+        weight_mapper_cls, _ = get_weight_mapper(hf_config.model_type)
         self.weight_mapper = weight_mapper_cls(self.config.policy.model_name_or_path)
-        self.model_type = model_type
         self.model_config = hf_config
 
         atexit.register(self.handle_shutdown)
@@ -341,7 +339,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         This is Policy -> Rollout replica. Will only happen between
         a pair of policy and rollout replica.
         """
-        need_sep_comm = util.seperate_nccl_comm_needed()
         if command.dst_replica_name != self.replica_name:
             return
         if self.parallel_mapper is None:
@@ -375,8 +372,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             nccl_unique_id_key = (
                 command.src_replica_name + "_" + command.dst_replica_name
             )
-            if need_sep_comm:
-                nccl_unique_id_key += f"_{p_rank}_{self.global_rank}"
             if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
                 logger.debug(
                     f"[Rollout] Reusing cached communicator for {nccl_unique_id_key}"
@@ -400,12 +395,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # p_rank is the rank in policy, r_rank is the rank in rollout
                 communicator_index[p_rank] = create_nccl_comm(
                     nccl_group_id,
-                    1
-                    if need_sep_comm
-                    else (self.global_rank + command.src_replica_size),
-                    2
-                    if need_sep_comm
-                    else (self.world_size + command.src_replica_size),
+                    self.global_rank + command.src_replica_size,
+                    self.world_size + command.src_replica_size,
                 )
                 # cache the communicator index
                 self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (

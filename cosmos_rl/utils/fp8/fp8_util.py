@@ -18,7 +18,7 @@ import torch.nn as nn
 
 from strenum import StrEnum
 from abc import abstractmethod, ABC
-from typing import Union, List, Dict, Type
+from typing import Union, List
 from functools import partial
 from torchao.float8 import convert_to_float8_training
 from torchao.float8 import Float8LinearConfig
@@ -53,19 +53,6 @@ class ModelConverter(ABC):
         Post-optimizer hook (e.g. compute weights statistics).
         """
         ...
-
-
-_COSMOS_MODEL_CONVERTER_REGISTRY: Dict[str, Type[ModelConverter]] = {}
-
-
-def register_class(reg_key: str, *, allow_override: bool = False):
-    def decorator(cls: Type) -> Type:
-        if not allow_override and reg_key in _COSMOS_MODEL_CONVERTER_REGISTRY:
-            raise ValueError(f"Class '{reg_key}' is already registered.")
-        _COSMOS_MODEL_CONVERTER_REGISTRY[reg_key] = cls
-        return cls
-
-    return decorator
 
 
 class FP8Recipe(StrEnum):
@@ -115,7 +102,6 @@ def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
-@register_class("fp8")
 class FP8ModelConverter(ModelConverter):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
         super().__init__(config, parallel_dims)

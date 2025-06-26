@@ -1493,22 +1493,6 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
         local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
         return local_view
 
-    def weight_sync_transform_by_key(
-        self, dest_name: str
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        lm_state_dict = self.model.state_dict()
-        if self.visual is not None:
-            visual_state_dict = self.visual.state_dict()
-        else:
-            visual_state_dict = {}
-        lm_state_dict = {clear_weight_name(k): v for k, v in lm_state_dict.items()}
-        visual_state_dict = {
-            clear_weight_name(k): v for k, v in visual_state_dict.items()
-        }
-        return self.weight_sync_transform_by_key_internal(
-            dest_name, lm_state_dict, visual_state_dict
-        )
-
     @cached_property
     def weight_sync_transforms(self) -> List[Tuple[str, Tuple[int], torch.Tensor]]:
         lm_state_dict = self.model.state_dict()

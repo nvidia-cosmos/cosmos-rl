@@ -30,7 +30,7 @@ from cosmos_rl.utils.parallelism_registry import (
 import cosmos_rl.utils.util as util
 
 
-@register_class("qwen2_5_vl")
+@register_class("qwen2_5_vl", n_model=2)
 class QwenVL25WeightMapper(WeightMapper):
     def __init__(self, hf_config_path: str):
         super().__init__(hf_config_path)
