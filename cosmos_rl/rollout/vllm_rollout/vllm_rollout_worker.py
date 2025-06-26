@@ -48,7 +48,7 @@ from cosmos_rl.utils.pynccl import (
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
-from cosmos_rl.rollout.weight_mapper import get_weight_mapper
+from cosmos_rl.rollout.weight_mapper import WeightMapper
 from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -191,7 +191,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path
         )
-        weight_mapper_cls, _ = get_weight_mapper(hf_config.model_type)
+        weight_mapper_cls, _ = WeightMapper.get_weight_mapper(hf_config.model_type)
         self.weight_mapper = weight_mapper_cls(self.config.policy.model_name_or_path)
         self.model_config = hf_config
 
@@ -353,14 +353,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # get the nccl_unique_id from the controller
         communicator_index = {}
-        _, compatible_list = self.weight_mapper.generate_compatible_map(
+        recv_param_key_n_rank_list = self.weight_mapper.rollout_prepare_recv(
             self.get_underlying_model()
         )
-        # same as policy
-        compatible_list.sort(key=lambda x: x[0])
 
         insts = self.parallel_mapper.generate_rollout_from_policy_insts(
-            compatible_list, self.global_rank
+            recv_param_key_n_rank_list, self.global_rank
         )
 
         related_ranks = [set() for _ in range(command.dst_replica_size)]
@@ -608,6 +606,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
                 )
             except Exception as e:
+                import traceback
+
+                traceback.print_exc()
                 logger.error(f"[Rollout] Command execution failed: {str(e)}")
 
     def send_end_signal(self, url_suffix: str):

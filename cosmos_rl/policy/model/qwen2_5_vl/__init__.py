@@ -1494,7 +1494,7 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
         return local_view
 
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Tuple[int], torch.Tensor]]:
+    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         lm_state_dict = self.model.state_dict()
         if self.visual is not None:
             visual_state_dict = self.visual.state_dict()
@@ -1505,11 +1505,11 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
             clear_weight_name(k): v for k, v in visual_state_dict.items()
         }
         transforms = []
-        for dest_name, shape in self.sorted_params:
+        for dest_name, _ in self.sorted_param_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, lm_state_dict, visual_state_dict
             )
-            transforms.append((dest_name, shape, local_view))
+            transforms.append((dest_name, local_view))
         return transforms
 
     @classmethod
@@ -1522,13 +1522,8 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
         return name
 
     @cached_property
-    def sorted_params(self) -> List[Tuple[str, Tuple[int]]]:
-        """
-        Returns the state dict of the model and visual model, along with the sorted parameters information.
-        The sorted parameters information is a list of tuples, where each tuple contains the parameter name and its shape.
-        The state dicts are obtained from the model and visual model respectively.
-        """
-        sorted_params_info = []
+    def sorted_param_key_n_rank(self) -> List[Tuple[str, int]]:
+        sorted_key_n_rank = []
         for k, v in self.named_parameters():
             k = self.map_local_key_to_hf_key(k)
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
@@ -1539,18 +1534,21 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
                 q_view = local_view[:unit_dim]
                 k_view = local_view[unit_dim : 2 * unit_dim]
                 v_view = local_view[2 * unit_dim :]
-                sorted_params_info.append((k.replace("qkv", "q"), q_view.shape))
-                sorted_params_info.append((k.replace("qkv", "k"), k_view.shape))
-                sorted_params_info.append((k.replace("qkv", "v"), v_view.shape))
+                sorted_key_n_rank.append((k.replace("qkv", "q"), q_view.ndim))
+                sorted_key_n_rank.append((k.replace("qkv", "k"), k_view.ndim))
+                sorted_key_n_rank.append((k.replace("qkv", "v"), v_view.ndim))
             else:
                 local_view = v.to_local() if is_dist_tensor else v
-                sorted_params_info.append((k, local_view.shape))
-        sorted_params_info.sort(key=lambda x: x[0])
-        return sorted_params_info
+                sorted_key_n_rank.append((k, local_view.ndim))
+        sorted_key_n_rank.sort(key=lambda x: x[0])
+        return sorted_key_n_rank
 
-    def tensor_precollect_required_for_sync(self, name: str) -> bool:
+    def pre_P2R_gather_required_for_sync(self, name: str) -> bool:
         """
-        Check if the tensor sync precollect is required for the given name.
+        For P->R weight sync, we need to first all-gather vision encoder qkv weights from all ranks.
+        To not be messed up with the following `nccl_send/recv` instructions,
+        pre-collect those weights before first `nccl_send/recv` instruction.
+
         Args:
             name (str): The name of the tensor.
         Returns:

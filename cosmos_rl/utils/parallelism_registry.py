@@ -14,50 +14,68 @@
 # limitations under the License.
 
 from typing import Dict, Callable
+from enum import Enum
 
 
-_MODEL_WEIGHT_PARALLELISM_REGISTRY_POLICY: Dict[str, Callable] = {}
-_MODEL_WEIGHT_PARALLELISM_REGISTRY_ROLLOUT: Dict[str, Callable] = {}
+class ParallelismStrategyRole(Enum):
+    POLICY = 1
+    ROLLOUT = 1 << 1
+    ALL = POLICY | ROLLOUT
+
+    def __or__(self, other):
+        return self.value | other.value
+
+    def __and__(self, other):
+        return self.value & other.value
 
 
-def register_policy_parallelism_strategy(reg_key: str, *, allow_override: bool = False):
-    def decorator(func: Callable) -> Callable:
-        if not allow_override and reg_key in _MODEL_WEIGHT_PARALLELISM_REGISTRY_POLICY:
-            raise ValueError(f"Function '{reg_key}' is already registered.")
-        _MODEL_WEIGHT_PARALLELISM_REGISTRY_POLICY[reg_key] = func
-        return func
-
-    return decorator
+_PARALLELISM_STRATEGY_REGISTRY: Dict[int, Dict[str, Callable]] = {
+    ParallelismStrategyRole.POLICY: {},
+    ParallelismStrategyRole.ROLLOUT: {},
+}
 
 
-def register_rollout_parallelism_strategy(
-    reg_key: str, *, allow_override: bool = False
+def register_parallelism_strategy(
+    reg_key: str,
+    *,
+    allow_override: bool = False,
+    role: ParallelismStrategyRole = ParallelismStrategyRole.ALL,
 ):
     def decorator(func: Callable) -> Callable:
-        if not allow_override and reg_key in _MODEL_WEIGHT_PARALLELISM_REGISTRY_ROLLOUT:
-            raise ValueError(f"Function '{reg_key}' is already registered.")
-        _MODEL_WEIGHT_PARALLELISM_REGISTRY_ROLLOUT[reg_key] = func
+        if role & ParallelismStrategyRole.POLICY:
+            if (
+                not allow_override
+                and reg_key
+                in _PARALLELISM_STRATEGY_REGISTRY[ParallelismStrategyRole.POLICY]
+            ):
+                raise ValueError(f"Function '{reg_key}' is already registered.")
+            _PARALLELISM_STRATEGY_REGISTRY[ParallelismStrategyRole.POLICY][reg_key] = (
+                func
+            )
+        if role & ParallelismStrategyRole.ROLLOUT:
+            if (
+                not allow_override
+                and reg_key
+                in _PARALLELISM_STRATEGY_REGISTRY[ParallelismStrategyRole.ROLLOUT]
+            ):
+                raise ValueError(f"Function '{reg_key}' is already registered.")
+            _PARALLELISM_STRATEGY_REGISTRY[ParallelismStrategyRole.ROLLOUT][reg_key] = (
+                func
+            )
         return func
 
     return decorator
 
 
-def register_parallelism_strategy(reg_key: str, *, allow_override: bool = False):
-    def decorator(func: Callable) -> Callable:
-        if not allow_override and reg_key in _MODEL_WEIGHT_PARALLELISM_REGISTRY_POLICY:
-            raise ValueError(f"Function '{reg_key}' is already registered.")
-        _MODEL_WEIGHT_PARALLELISM_REGISTRY_POLICY[reg_key] = func
-        if not allow_override and reg_key in _MODEL_WEIGHT_PARALLELISM_REGISTRY_ROLLOUT:
-            raise ValueError(f"Function '{reg_key}' is already registered.")
-        _MODEL_WEIGHT_PARALLELISM_REGISTRY_ROLLOUT[reg_key] = func
-        return func
-
-    return decorator
+def query_parallelism_strategy(
+    model_name: str, role: ParallelismStrategyRole
+) -> Callable:
+    return _PARALLELISM_STRATEGY_REGISTRY[role][model_name]
 
 
 def get_policy_parallelism_strategy(model_name: str) -> Callable:
-    return _MODEL_WEIGHT_PARALLELISM_REGISTRY_POLICY[model_name]
+    return query_parallelism_strategy(model_name, ParallelismStrategyRole.POLICY)
 
 
 def get_rollout_parallelism_strategy(model_name: str) -> Callable:
-    return _MODEL_WEIGHT_PARALLELISM_REGISTRY_ROLLOUT[model_name]
+    return query_parallelism_strategy(model_name, ParallelismStrategyRole.ROLLOUT)

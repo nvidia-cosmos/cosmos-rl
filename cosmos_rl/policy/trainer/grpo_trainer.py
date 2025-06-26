@@ -547,25 +547,17 @@ class GRPOTrainer(Trainer):
         and replacing certain substrings in the parameter names.
         """
         name_to_transform = {}
-        assert len(self.model.sorted_params) > 0, "No sorted parameters found."
-        for info in self.model.weight_sync_transforms:
-            name, shape, transform_block = info
-            # Condition is relaxed from shape matching to number of elements matching because the tensor may be transposed/reshaped
-            if isinstance(transform_block, Callable):
-                mapped_tensor = transform_block()
-            elif isinstance(transform_block, torch.Tensor):
-                mapped_tensor = transform_block
-            else:
-                raise ValueError(
-                    f"Transform block is not a callable or tensor: {transform_block}"
-                )
-            assert (
-                mapped_tensor.nelement() == int(np.prod(shape))
-            ), f"Number of elements mismatch: {mapped_tensor.nelement()} != {np.prod(shape)} for {name}"
+        assert (
+            len(self.model.sorted_param_key_n_rank) > 0
+        ), "No sorted parameters found."
+        for name, transform_block in self.model.weight_sync_transforms:
+            assert isinstance(transform_block, Callable) or isinstance(
+                transform_block, torch.Tensor
+            )
             name_to_transform[name] = transform_block
         return name_to_transform
 
-    def precollect_parameters_for_sync(self):
+    def pre_P2R_collect_parameters(self):
         needed_tensors = []
         for inst in self.policy_to_rollout_insts:
             dest_name = inst[3]
@@ -574,7 +566,7 @@ class GRPOTrainer(Trainer):
         for dest_name, local_view in self.map_w_from_policy_to_rollout.items():
             if isinstance(
                 local_view, Callable
-            ) and self.model.tensor_precollect_required_for_sync(dest_name):
+            ) and self.model.pre_P2R_gather_required_for_sync(dest_name):
                 view = local_view()
                 if dest_name in needed_tensors:
                     prepared_tensor_to_rollout[dest_name] = view
@@ -597,16 +589,16 @@ class GRPOTrainer(Trainer):
             return False
 
         if self.policy_to_rollout_insts is None:
-            param = self.model.sorted_params
+            param_key_n_rank = self.model.sorted_param_key_n_rank
             self.policy_to_rollout_insts = (
                 self.parallel_mapper.generate_policy_to_rollout_insts(
-                    param, self.global_rank
+                    param_key_n_rank, self.global_rank
                 )
             )
             self.p2r_related_ranks = [set() for _ in range(command.src_replica_size)]
             for rank in range(command.src_replica_size):
                 insts_at_rank = self.parallel_mapper.generate_policy_to_rollout_insts(
-                    param, rank
+                    param_key_n_rank, rank
                 )
                 for i in insts_at_rank:
                     p_rank, r_rank, _, _, _ = i
@@ -676,24 +668,23 @@ class GRPOTrainer(Trainer):
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
         with torch.cuda.stream(self.train_stream):
-            prepared_tensors_to_rollout = self.precollect_parameters_for_sync()
+            pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
+                self.pre_P2R_collect_parameters()
+            )
             for inst in self.policy_to_rollout_insts:
-                p_rank, r_rank, tensor_split_strategys, dest_name, shape = inst
+                p_rank, r_rank, tensor_split_strategys, dest_name, _ = inst
                 if dest_name not in self.map_w_from_policy_to_rollout:
                     raise RuntimeError(
                         f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
                     )
                 local_view = self.map_w_from_policy_to_rollout[dest_name]
-                if dest_name in prepared_tensors_to_rollout:
-                    local_view = prepared_tensors_to_rollout[dest_name]
+                if dest_name in pre_P2R_collected_tensors:
+                    local_view = pre_P2R_collected_tensors[dest_name]
                 elif isinstance(local_view, Callable):
                     local_view = local_view()
                 else:
                     pass
 
-                assert (
-                    local_view.nelement() == int(np.prod(shape))
-                ), f"Number of elements mismatch: {local_view.nelement()} != {np.prod(shape)} for {dest_name}"
                 view = (
                     slice_tensor_with_strategies(local_view, tensor_split_strategys)
                     .contiguous()

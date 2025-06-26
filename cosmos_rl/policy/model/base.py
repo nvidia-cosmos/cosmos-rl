@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union, Callable
 import torch
 from functools import cached_property
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -31,20 +31,18 @@ class BaseModel(ABC):
         return next(self.parameters()).device
 
     @cached_property
-    def sorted_params(self) -> List[Tuple[str, Tuple[int]]]:
+    def sorted_param_key_n_rank(self) -> List[Tuple[str, int]]:
         """
-        Returns the state dict of the model and visual model, along with the sorted parameters information.
-        The sorted parameters information is a list of tuples, where each tuple contains the parameter name and its shape.
-        The state dicts are obtained from the model and visual model respectively.
+        Return sorted parameter tensor name and their rank of local view.
         """
-        sorted_params_info = []
+        sorted_key_n_rank = []
         for k, v in self.named_parameters():
             k = self.map_local_key_to_hf_key(k)
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
-            sorted_params_info.append((k, local_view.shape))
-        sorted_params_info.sort(key=lambda x: x[0])
-        return sorted_params_info
+            sorted_key_n_rank.append((k, local_view.ndim))
+        sorted_key_n_rank.sort(key=lambda x: x[0])
+        return sorted_key_n_rank
 
     @torch.no_grad()
     def maybe_decompose_weights_to_hf_naming(self, name, param):
@@ -56,9 +54,12 @@ class BaseModel(ABC):
         """
         yield name, param
 
-    def tensor_precollect_required_for_sync(self, name: str) -> bool:
+    def pre_P2R_gather_required_for_sync(self, name: str) -> bool:
         """
-        Check if the tensor sync precollect is required for the given name.
+        For P->R weight sync, some weights need to be pre-collected before first `nccl_send/recv` instruction.
+        To not be messed up with the following `nccl_send/recv` instructions,
+        pre-collect those weights before first `nccl_send/recv` instruction.
+
         Args:
             name (str): The name of the tensor.
         Returns:
@@ -149,14 +150,14 @@ class BaseModel(ABC):
         raise NotImplementedError
 
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Tuple[int], torch.Tensor]]:
+    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         """
         Get the local view of the tensors from the state dict.
         This method retrieves the state dict of the model, clears the weight names,
-        and returns a list of tuples containing the destination name, shape, and local view of each tensor.
+        and returns a list of tuples containing the destination name, and either a tensor or a callable returning a tensor.
         Returns:
-            List[Tuple[str, Tuple[int], torch.Tensor]]: A list of tuples containing the destination name,
-            shape, and local view of each tensor.
+            List[Tuple[str, Union[torch.Tensor, Callable]]]: A list of tuples containing the destination name,
+            and either a tensor or a callable returning a tensor.
         """
         raise NotImplementedError
 

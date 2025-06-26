@@ -13,8 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.rollout.weight_mapper.registry import register_class, WeightMapper
-from transformers import AutoConfig
+from cosmos_rl.rollout.weight_mapper.registry import WeightMapper
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
 )
@@ -27,32 +26,24 @@ from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
     get_rollout_parallelism_strategy,
 )
-import cosmos_rl.utils.util as util
 
 
-@register_class("qwen2_5_vl", n_model=2)
+@WeightMapper.register_class("qwen2_5_vl", n_model=2)
 class QwenVL25WeightMapper(WeightMapper):
     def __init__(self, hf_config_path: str):
         super().__init__(hf_config_path)
-        self.qwen_config = util.retry(AutoConfig.from_pretrained)(hf_config_path)
-        self.prefix_str = None
-        assert isinstance(self.qwen_config, Qwen2_5_VLConfig)
+        assert isinstance(self.config, Qwen2_5_VLConfig)
 
         self.kv_head_ratio = (
-            self.qwen_config.num_attention_heads // self.qwen_config.num_key_value_heads
+            self.config.num_attention_heads // self.config.num_key_value_heads
         )
-        self.head_dim = (
-            self.qwen_config.hidden_size // self.qwen_config.num_attention_heads
-        )
+        self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
-    def name_p2r(self, policy_weight_name: str) -> str:
-        raise NotImplementedError("QwenVL25WeightMapper does not support name_p2r")
-
-    def name_to_hf(self, rollout_weight_name: str) -> str:
+    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
         # convert from rollout weight name to policy weight name
         return Qwen2_5_VLConditionalModel.map_local_key_to_hf_key(rollout_weight_name)
 
-    def split_qkv_weight(self, name, weight: torch.Tensor):
+    def __rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         # visual
         if "visual" in name:
             # split qkv weight for visual
@@ -80,7 +71,7 @@ class QwenVL25WeightMapper(WeightMapper):
         v_weight = weight[unit_dim * (self.kv_head_ratio + 1) :]
         return q_weight, k_weight, v_weight
 
-    def split_gate_proj_weight(self, name, weight: torch.Tensor):
+    def _split_gate_proj_weight(self, name, weight: torch.Tensor):
         # gate_proj and up_proj in vllm is already split.
         # weight has shape [2 * x, hidden_dim]
         dim_0 = weight.shape[0]
@@ -88,56 +79,58 @@ class QwenVL25WeightMapper(WeightMapper):
         up_proj_weight = weight[dim_0 // 2 :]
         return gate_proj_weight, up_proj_weight
 
-    def custom_generate_compatible_map(self, model: Qwen2_5_VLForConditionalGeneration):
+    def rollout_prepare_recv_impl(self, model: Qwen2_5_VLForConditionalGeneration):
         assert isinstance(model, Qwen2_5_VLForConditionalGeneration)
-        compatible_list = []
-        compatible_weight_map = {}
+        recv_key_n_rank_list = []
+        vllm_weight_inplace_view_map = {}
         for param_name, param in model.named_parameters():
-            compatible_key = self.name_to_hf(param_name)
+            compatible_key = self._rollout_vllm_name_to_hf(param_name)
             if "qkv_proj" in compatible_key:
-                q_weight, k_weight, v_weight = self.split_qkv_weight(
+                q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
                     compatible_key, param
                 )
                 q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
                 k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
                 v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
-                compatible_weight_map[q_proj_weight_key] = q_weight
-                compatible_list.append((q_proj_weight_key, q_weight.shape))
-                compatible_weight_map[k_proj_weight_key] = k_weight
-                compatible_list.append((k_proj_weight_key, k_weight.shape))
-                compatible_weight_map[v_proj_weight_key] = v_weight
-                compatible_list.append((v_proj_weight_key, v_weight.shape))
+                vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
+                recv_key_n_rank_list.append((q_proj_weight_key, q_weight.ndim))
+                vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
+                recv_key_n_rank_list.append((k_proj_weight_key, k_weight.ndim))
+                vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
+                recv_key_n_rank_list.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in compatible_key:
                 # split gate and up proj
-                gate_proj_weight, up_proj_weight = self.split_gate_proj_weight(
+                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
                     compatible_key, param
                 )
                 gate_proj_weight_key = compatible_key.replace(
                     "gate_up_proj", "gate_proj"
                 )
-                compatible_weight_map[gate_proj_weight_key] = gate_proj_weight
-                compatible_list.append((gate_proj_weight_key, gate_proj_weight.shape))
+                vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
+                recv_key_n_rank_list.append(
+                    (gate_proj_weight_key, gate_proj_weight.ndim)
+                )
 
                 up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
-                compatible_weight_map[up_proj_weight_key] = up_proj_weight
-                compatible_list.append((up_proj_weight_key, up_proj_weight.shape))
+                vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
+                recv_key_n_rank_list.append((up_proj_weight_key, up_proj_weight.ndim))
             elif "qkv" in compatible_key and "visual" in compatible_key:
-                q_weight, k_weight, v_weight = self.split_qkv_weight(
+                q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
                     compatible_key, param
                 )
                 q_visual_proj_weight_key = compatible_key.replace("qkv", "q")
                 k_visual_proj_weight_key = compatible_key.replace("qkv", "k")
                 v_visual_proj_weight_key = compatible_key.replace("qkv", "v")
-                compatible_weight_map[q_visual_proj_weight_key] = q_weight
-                compatible_list.append((q_visual_proj_weight_key, q_weight.shape))
-                compatible_weight_map[k_visual_proj_weight_key] = k_weight
-                compatible_list.append((k_visual_proj_weight_key, k_weight.shape))
-                compatible_weight_map[v_visual_proj_weight_key] = v_weight
-                compatible_list.append((v_visual_proj_weight_key, v_weight.shape))
+                vllm_weight_inplace_view_map[q_visual_proj_weight_key] = q_weight
+                recv_key_n_rank_list.append((q_visual_proj_weight_key, q_weight.ndim))
+                vllm_weight_inplace_view_map[k_visual_proj_weight_key] = k_weight
+                recv_key_n_rank_list.append((k_visual_proj_weight_key, k_weight.ndim))
+                vllm_weight_inplace_view_map[v_visual_proj_weight_key] = v_weight
+                recv_key_n_rank_list.append((v_visual_proj_weight_key, v_weight.ndim))
             else:
-                compatible_weight_map[compatible_key] = param
-                compatible_list.append((compatible_key, param.shape))
-        return compatible_weight_map, compatible_list
+                vllm_weight_inplace_view_map[compatible_key] = param
+                recv_key_n_rank_list.append((compatible_key, param.ndim))
+        return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     def name_to_model_index(self, dest_name: str) -> int:
         if "lm_head.weight" == dest_name:
@@ -151,18 +144,18 @@ class QwenVL25WeightMapper(WeightMapper):
         else:
             raise ValueError(f"Unsupported weight: {dest_name}")
 
-    def get_rollout_parallelism(self, parallelism_config: ParallelismConfig):
-        return [parallelism_config, parallelism_config]
+    def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
+        return [replica_parallelism, replica_parallelism]
 
-    def get_policy_parallelism(self, parallelism_config: ParallelismConfig):
-        parallelism_config_new = copy.copy(parallelism_config)
-        assert parallelism_config.tp_size != -1
+    def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
+        parallelism_config_new = copy.copy(replica_parallelism)
+        assert replica_parallelism.tp_size != -1
         if parallelism_config_new.dp_shard_size != -1:
             parallelism_config_new.dp_shard_size = (
-                parallelism_config.dp_shard_size * parallelism_config.tp_size
+                replica_parallelism.dp_shard_size * replica_parallelism.tp_size
             )
         parallelism_config_new.tp_size = 1
-        return [parallelism_config, parallelism_config_new]
+        return [replica_parallelism, parallelism_config_new]
 
     def get_policy_parallelism_strategy(self):
         return [
