@@ -773,7 +773,7 @@ class PolicyStatusManager:
 
                 if "console" in self.config.logging.logger:
                     logger.info(
-                        f"[Controller] Step: {self.current_step}/{self.total_steps}, Reward Mean: {report_data['train/reward_mean']:.4f}, Reward Std: {report_data['train/reward_std']:.4f}, Reward Max: {report_data['train/reward_max']:.4f}, Reward Min: {report_data['train/reward_min']:.4f}, Completion Length Mean: {report_data['train/completion_length_mean']:.2f}, Completion Length Max: {report_data['train/completion_length_max']:.2f}"
+                        f"Step: {self.current_step}/{self.total_steps}, Reward Mean: {report_data['train/reward_mean']:.4f}, Reward Std: {report_data['train/reward_std']:.4f}, Reward Max: {report_data['train/reward_max']:.4f}, Reward Min: {report_data['train/reward_min']:.4f}, Completion Length Mean: {report_data['train/completion_length_mean']:.2f}, Completion Length Max: {report_data['train/completion_length_max']:.2f}"
                     )
 
 
