@@ -323,10 +323,12 @@ class PolicyStatusManager:
                     rollout_status_manager.rollout_replicas.values(),
                     key=lambda x: x.start_time,
                 )
+                valid_rollout_replicas = []
                 for r in sorted_rollout_replicas:
                     if r.all_atoms_arrived:
-                        any_valid_rollout_replica = r
-                        break
+                        valid_rollout_replicas.append(r)
+                        if any_valid_rollout_replica is None:
+                            any_valid_rollout_replica = r
                 if any_valid_rollout_replica:
                     command.PolicyToRolloutUnicastCommand.trigger(
                         src_replica=current_policy_replica,
@@ -337,6 +339,17 @@ class PolicyStatusManager:
                         total_steps=None,
                         redis_handler=self.redis_handler,
                     )
+                    if (
+                        len(valid_rollout_replicas)
+                        >= config.rollout.parallelism.n_init_replicas
+                    ):
+                        command.RolloutToRolloutBroadcastCommand.trigger(
+                            src_replica=any_valid_rollout_replica,
+                            dst_replicas=valid_rollout_replicas,
+                            weight_step=None,
+                            total_steps=None,
+                            redis_handler=self.redis_handler,
+                        )
                     logger.info(
                         f"[Controller] Trigger PolicyToRolloutUnicastCommand to {any_valid_rollout_replica.name} via Policy registration"
                     )
@@ -971,18 +984,16 @@ class RolloutStatusManager:
                 # to broadcast weights
                 any_loaded_policy_replica = replica
                 break
-        if any_loaded_policy_replica is None:
-            logger.info(
-                "No weight-loaded policy replica exists, will be rescheduled after first policy replica is loaded"
-            )
-            return
 
         # First P->R Unicast if the policy is ready and all rollout replicas are not ready
-        if all(
-            [
-                not replica.weights_loaded_in_view_of_command
-                for replica in valid_replicas
-            ]
+        if (
+            all(
+                [
+                    not replica.weights_loaded_in_view_of_command
+                    for replica in valid_replicas
+                ]
+            )
+            and any_loaded_policy_replica is not None
         ):
             command.PolicyToRolloutUnicastCommand.trigger(
                 src_replica=any_loaded_policy_replica,
@@ -998,7 +1009,7 @@ class RolloutStatusManager:
             )
         else:
             logger.info(
-                "[Controller] No valid policy replicas found in Rollout registration, skip PolicyToRolloutUnicastCommand"
+                "[Controller] No valid policy replicas found in Rollout registration or some rollout already get weight from policy, skip PolicyToRolloutUnicastCommand"
             )
 
         was_already_initialized = self.rollout_init_done
@@ -1023,15 +1034,14 @@ class RolloutStatusManager:
                     # to broadcast weights
                     any_loaded_rollout_replica = replica
                     break
-            assert any_loaded_rollout_replica is not None
-            command.RolloutToRolloutBroadcastCommand.trigger(
-                src_replica=any_loaded_rollout_replica,
-                dst_replicas=valid_replicas,
-                weight_step=None,
-                total_steps=None,
-                redis_handler=self.redis_handler,
-            )
-
+            if any_loaded_rollout_replica is not None:
+                command.RolloutToRolloutBroadcastCommand.trigger(
+                    src_replica=any_loaded_rollout_replica,
+                    dst_replicas=valid_replicas,
+                    weight_step=None,
+                    total_steps=None,
+                    redis_handler=self.redis_handler,
+                )
         elif not self.rollout_init_done:
             assert len(valid_replicas) < config.rollout.parallelism.n_init_replicas
             logger.info(

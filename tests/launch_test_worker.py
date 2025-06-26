@@ -507,7 +507,7 @@ def run_dummy_policy():
         self.model_ready = True
 
     def dummy_execute_policy_to_rollout_unicast(self, command):
-        return True
+        return False
 
     GRPOTrainer.train = dummy_train_grpo
     GRPOTrainer.model_load_from_hf = dummy_model_load_from_hf
@@ -529,9 +529,15 @@ def run_dummy_rollout():
     def dummy_sync_weight_from_policy(self, command):
         self.state.set_weight_synced()
 
+    def dummy_rollout2rollout_broadcast(self, broadcast_command):
+        if broadcast_command.replica_should_stop():
+            self.shutdown_signal.set()
+
     def get_rollout_command_handler(cls, command_type):
         if command_type == PolicyToRolloutUnicastCommand:
             return dummy_sync_weight_from_policy
+        elif command_type == PolicyToPolicyUnicastCommand:
+            return dummy_rollout2rollout_broadcast
         return cls.rollout_command_handler_registry.get_command_handler(command_type)
 
     vLLMRolloutWorker.get_rollout_command_handler = get_rollout_command_handler
