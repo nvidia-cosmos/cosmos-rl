@@ -71,7 +71,6 @@ RUN pip install -r /workspace/cosmos_rl/requirements.txt
 FROM base AS package
 
 COPY setup.py /workspace/cosmos_rl/setup.py
-COPY CMakeLists.txt /workspace/cosmos_rl/CMakeLists.txt
 COPY tools /workspace/cosmos_rl/tools
 COPY configs /workspace/cosmos_rl/configs
 COPY cosmos_rl /workspace/cosmos_rl/cosmos_rl

@@ -345,7 +345,6 @@ def nccl_broadcast(
         _stream_ptr(stream),
     )
 
-    # wrap with enqueue-timeout monitoring
     _submit_nccl(lambda: comm, timeout_ms)
 
 
@@ -368,7 +367,6 @@ def nccl_send(
         _stream_ptr(stream),
     )
 
-    # wrap with enqueue-timeout monitoring
     _submit_nccl(lambda: comm, timeout_ms)
 
 
@@ -391,7 +389,6 @@ def nccl_recv(
         _stream_ptr(stream),
     )
 
-    # wrap with enqueue-timeout monitoring
     _submit_nccl(lambda: comm, timeout_ms)
 
 
@@ -417,7 +414,6 @@ def nccl_allreduce(
         _stream_ptr(stream),
     )
 
-    # wrap with enqueue-timeout monitoring
     _submit_nccl(lambda: comm, timeout_ms)
 
 
@@ -441,7 +437,6 @@ def nccl_alltoall(
         _stream_ptr(stream),
     )
 
-    # wrap with enqueue-timeout monitoring
     _submit_nccl(lambda: comm, timeout_ms)
 
 
