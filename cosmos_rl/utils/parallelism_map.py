@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
-from typing import Dict, List, Tuple, Callable, Any
 import torch
+from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
+from typing import Dict, List, Tuple, Callable, Any, Optional
+from cosmos_rl.rollout.weight_mapper.base import WeightMapper
 
 
 class DimRankInfo:
@@ -122,7 +123,7 @@ class ParallelTopoMapper:
         rollout_world_size: int,
         policy_parallelism_strategy: Callable,
         rollout_parallelism_strategy: Callable,
-        model_config: Any,
+        hf_config: Any,
     ):
         """
         Initialize the ParallelTopoMap with the given parallelism configurations.
@@ -133,7 +134,7 @@ class ParallelTopoMapper:
         :param rollout_world_size: The world size for the rollout.
         :param policy_parallelism_strategy: The strategy for the policy parallelism.
         :param rollout_parallelism_strategy: The strategy for the rollout parallelism.
-        :param model_config: The model configuration.
+        :param hf_config: The huggingface config.
         """
         self.policy_parallelism = ParallelDims.from_config_for_analysis(
             policy_parallelism, poilcy_world_size
@@ -147,7 +148,7 @@ class ParallelTopoMapper:
         self.policy_parallelism_strategy = policy_parallelism_strategy
         self.rollout_parallelism_strategy = rollout_parallelism_strategy
         self.calculate_sharing_map()
-        self.model_config = model_config
+        self.hf_config = hf_config
 
     def get_full_rank_in_policy(self, global_rank: int) -> Dict[str, DimRankInfo]:
         """
@@ -588,12 +589,12 @@ class ParallelTopoMapper:
         for dest_name, shape in params:
             p_split_dim_map, p_dim_to_parallel, p_pp_rank = (
                 self.policy_parallelism_strategy(
-                    shape, dest_name, self.policy_parallelism, self.model_config
+                    shape, dest_name, self.policy_parallelism, self.hf_config
                 )
             )
             r_split_dim_map, r_dim_to_parallel, r_pp_rank = (
                 self.rollout_parallelism_strategy(
-                    shape, dest_name, self.rollout_parallelism, self.model_config
+                    shape, dest_name, self.rollout_parallelism, self.hf_config
                 )
             )
             p_rank = global_rank
@@ -646,12 +647,12 @@ class ParallelTopoMapper:
         for dest_name, shape in params:
             p_split_dim_map, p_dim_to_parallel, p_pp_rank = (
                 self.policy_parallelism_strategy(
-                    shape, dest_name, self.policy_parallelism, self.model_config
+                    shape, dest_name, self.policy_parallelism, self.hf_config
                 )
             )
             r_split_dim_map, r_dim_to_parallel, r_pp_rank = (
                 self.rollout_parallelism_strategy(
-                    shape, dest_name, self.rollout_parallelism, self.model_config
+                    shape, dest_name, self.rollout_parallelism, self.hf_config
                 )
             )
             dim_to_parallel = ParallelTopoMapper.merge_dim_to_parallel(
@@ -703,12 +704,9 @@ class ParallelTopoMapperGroup:
         global_rollout_parallelism: ParallelismConfig,
         poilcy_world_size: int,
         rollout_world_size: int,
-        model_config: Any,
-        model_path: str,
+        hf_config: Any,
+        weight_mapper: Optional[WeightMapper] = None,
     ):
-        # policy_parallelism_strategy: List[Callable],
-        # rollout_parallelism_strategy: List[Callable],
-        # ):
         """
         Initialize the ParallelTopoMapperGroup with the given parallelism configurations.
 
@@ -716,15 +714,16 @@ class ParallelTopoMapperGroup:
         :param rollout_parallelism: The parallelism configuration for the rollout.
         :param poilcy_world_size: The world size for the policy.
         :param rollout_world_size: The world size for the rollout.
-        :param model_config: The model configuration.
-        :param model_path: The path to the model.
+        :param hf_config: The huggingface config.
         """
-        self.model_config = model_config
-        model_type = model_config.model_type
-        from cosmos_rl.rollout.weight_mapper.registry import WeightMapper
+        self.hf_config = hf_config
+        model_type = hf_config.model_type
 
-        weight_mapper_fn, n_model = WeightMapper.get_weight_mapper(model_type)
-        self.weight_mapper = weight_mapper_fn(model_path)
+        if weight_mapper is None:
+            weight_mapper_fn = WeightMapper.get_weight_mapper(model_type)
+            self.weight_mapper = weight_mapper_fn(hf_config)
+        else:
+            self.weight_mapper = weight_mapper
 
         # The replica has its single global parallelism config
         # But there may be different parallelism strategies executed by different model parts
@@ -741,20 +740,25 @@ class ParallelTopoMapperGroup:
         # the param tensor of a give name.
         policy_strategies = self.weight_mapper.get_policy_parallelism_strategy()
         rollout_strategies = self.weight_mapper.get_rollout_parallelism_strategy()
-        for i in range(n_model):
-            # logger.info(
-            #     f"Policy parallelism config: {policy_config[i]}, Rollout parallelism config: {rollout_config[i]}"
-            #     f"Policy parallelism strategy: {policy_strategies[i]}, Rollout parallelism strategy: {rollout_strategies[i]}"
-            # )
+
+        assert (
+            len(policy_configs)
+            == len(rollout_configs)
+            == len(policy_strategies)
+            == len(rollout_strategies)
+        )
+        for p_config, r_config, p_strategy, r_strategy in zip(
+            policy_configs, rollout_configs, policy_strategies, rollout_strategies
+        ):
             self.mapper_group.append(
                 ParallelTopoMapper(
-                    policy_configs[i],
-                    rollout_configs[i],
+                    p_config,
+                    r_config,
                     poilcy_world_size,
                     rollout_world_size,
-                    policy_strategies[i],
-                    rollout_strategies[i],
-                    model_config,
+                    p_strategy,
+                    r_strategy,
+                    hf_config,
                 )
             )
 

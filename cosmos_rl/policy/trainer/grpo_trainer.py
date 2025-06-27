@@ -563,7 +563,9 @@ class GRPOTrainer(Trainer):
         for dest_name, local_view in self.map_w_from_policy_to_rollout.items():
             if isinstance(
                 local_view, Callable
-            ) and self.model.pre_P2R_gather_required_for_sync(dest_name):
+            ) and self.model.weight_mapper.policy_pre_P2R_gather_required_for_sync(
+                dest_name
+            ):
                 view = local_view()
                 if dest_name in needed_tensors:
                     prepared_tensor_to_rollout[dest_name] = view
@@ -578,8 +580,8 @@ class GRPOTrainer(Trainer):
                 self.config.rollout.parallelism,
                 self.world_size,
                 command.dst_replica_size,
-                self.hf_config,
-                self.config.policy.model_name_or_path,
+                hf_config=self.hf_config,
+                weight_mapper=self.model.weight_mapper,
             )
         if not command.src_replica_name == self.replica_name:
             logger.error(

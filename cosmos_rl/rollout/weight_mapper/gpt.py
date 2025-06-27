@@ -14,28 +14,34 @@
 # limitations under the License.
 
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
-from cosmos_rl.policy.model.gpt import GPT
 import torch
 from typing import List, Tuple, Dict
-from cosmos_rl.rollout.weight_mapper.registry import WeightMapper
+from cosmos_rl.rollout.weight_mapper.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
     get_rollout_parallelism_strategy,
 )
+from cosmos_rl.utils import util
+from transformers import AutoConfig
+from cosmos_rl.policy.model.gpt import GPT
+from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
+    DecoderOnlyLLMDataPacker,
+)
 
 
-@WeightMapper.register_class(["qwen2", "qwen3"])
+@WeightMapper.register_class(GPT.supported_model_types())
 class GPTWeightMapper(WeightMapper):
-    def __init__(self, hf_config_path: str):
-        super().__init__(hf_config_path)
+    def __init__(self, hf_config: AutoConfig):
+        super().__init__(hf_config)
         self.kv_head_ratio = (
             self.config.num_attention_heads // self.config.num_key_value_heads
         )
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
     def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
-        return GPT.map_local_key_to_hf_key(rollout_weight_name)
+        # Happen to be the same as policy name mapping.
+        return self.policy_map_local_key_to_hf_key(rollout_weight_name)
 
     def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         # weight has shape [q_num_heads * head_dim + k_num_heads * head_dim + v_num_heads * head_dim, hidden_dim]
@@ -105,6 +111,13 @@ class GPTWeightMapper(WeightMapper):
 
         return vllm_weight_inplace_view_map, recv_key_n_shape_list
 
+    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+        name = util.clear_weight_name(name)
+        if not name == "lm_head.weight":
+            if not name.startswith("model."):
+                name = "model." + name
+        return name
+
     def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
         return [replica_parallelism]
 
@@ -116,3 +129,6 @@ class GPTWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("gpt")]
+
+    def data_packer(self) -> DecoderOnlyLLMDataPacker:
+        return DecoderOnlyLLMDataPacker()

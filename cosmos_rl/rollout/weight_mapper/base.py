@@ -13,26 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Type, Tuple, List, Union
+from typing import Dict, Type, Tuple, List, Union, Any
 import torch
 from torch import nn
 from cosmos_rl.utils.parallelism import ParallelismConfig
-from cosmos_rl.utils.parallelism_map import (
-    DimRankInfo,
-)
 from abc import ABC, abstractmethod
 from cosmos_rl.utils.pynccl import nccl_recv
 from transformers import AutoConfig
-import cosmos_rl.utils.util as util
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 
 class WeightMapper(ABC):
     _MODEL_WEIGHT_MAPPER_REGISTRY: Dict[str, Tuple[Type["WeightMapper"], int]] = {}
 
-    def __init__(self, hf_config_path: str):
+    def __init__(self, hf_config: AutoConfig):
         logger.info(f"WeightMapper: {type(self).__name__} is being initialized.")
-        self.config = util.retry(AutoConfig.from_pretrained)(hf_config_path)
+        self.config = hf_config
         self.vllm_weight_inplace_view_map: Dict[str, torch.Tensor] = None
         self.recv_key_n_rank_list: List[Tuple[str, Tuple[int]]]
 
@@ -51,7 +48,7 @@ class WeightMapper(ABC):
     def recv_weight_shard(
         self,
         global_rank_of_rollout: int,
-        inst: Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]],
+        inst: Tuple[int, int, Dict[int, Any], str, Tuple[int]],
         communicator_index: Dict[int, int],
         do_weight_sync_check: bool = False,
     ):
@@ -96,6 +93,34 @@ class WeightMapper(ABC):
 
         return recv_tensor.numel() * recv_tensor.element_size()
 
+    def data_packer(self) -> DataPacker:
+        # Do not add `@abstractmethod` here
+        # because user-provided data packer is also allowed
+        raise NotImplementedError
+
+    @torch.no_grad()
+    def policy_maybe_decompose_weights_to_hf_naming(self, name, param):
+        """
+        Decompose the weights of the model parameters into fine-grained weights
+        This is especially useful for models with non-symmetric parameter layout than the original HuggingFace one
+        For example, MoE experts' weights are stacked in the 0th dimension,
+        while they are stored in different keys in the original HuggingFace naming convention
+        """
+        yield name, param
+
+    def policy_pre_P2R_gather_required_for_sync(self, name: str) -> bool:
+        """
+        For P->R weight sync, some weights need to be pre-collected before first `nccl_send/recv` instruction.
+        To not be messed up with the following `nccl_send/recv` instructions,
+        pre-collect those weights before first `nccl_send/recv` instruction.
+
+        Args:
+            name (str): The name of the tensor.
+        Returns:
+            bool: True if the tensor sync precollect is required, False otherwise.
+        """
+        return False
+
     @abstractmethod
     def rollout_prepare_recv_impl(
         self, model: nn.Module
@@ -109,6 +134,10 @@ class WeightMapper(ABC):
 
     def name_to_model_index(self, dest_name: str) -> int:
         return 0
+
+    @abstractmethod
+    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+        pass
 
     @abstractmethod
     def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
@@ -132,7 +161,6 @@ class WeightMapper(ABC):
         reg_key: Union[str, List[str]],
         *,
         allow_override: bool = False,
-        n_model: int = 1,
     ):
         if isinstance(reg_key, str):
             reg_key = [reg_key]
@@ -141,13 +169,13 @@ class WeightMapper(ABC):
             for key in reg_key:
                 if not allow_override and key in cls._MODEL_WEIGHT_MAPPER_REGISTRY:
                     raise ValueError(f"Class '{key}' is already registered.")
-                cls._MODEL_WEIGHT_MAPPER_REGISTRY[key] = (cls, n_model)
+                cls._MODEL_WEIGHT_MAPPER_REGISTRY[key] = cls
             return cls
 
         return decorator
 
     @classmethod
-    def get_weight_mapper(cls, model_type: str) -> Tuple[Type["WeightMapper"], int]:
+    def get_weight_mapper(cls, model_type: str) -> Type["WeightMapper"]:
         if model_type not in cls._MODEL_WEIGHT_MAPPER_REGISTRY:
             raise ValueError(f"ModelType '{model_type}' is not supported now.")
 

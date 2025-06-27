@@ -30,7 +30,6 @@ from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
-from cosmos_rl.policy.model import get_data_packer
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_REGISTER_SUFFIX,
     COSMOS_API_UNREGISTER_SUFFIX,
@@ -100,7 +99,7 @@ class CommMixin:
             self.data_packer = user_data_packer
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
-            self.data_packer = get_data_packer(self.config)
+            self.data_packer = self.model.weight_mapper.data_packer()
             logger.info(f"Using default data packer: {self.data_packer}")
         self.data_packer.setup(self.config, self.tokenizer)
 
@@ -113,7 +112,7 @@ class CommMixin:
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )
         else:
-            self.val_data_packer = get_data_packer(self.config)
+            self.val_data_packer = self.model.weight_mapper.data_packer()
             logger.info(f"Using default validation data packer: {self.val_data_packer}")
         self.val_data_packer.setup(self.config, self.tokenizer)
 

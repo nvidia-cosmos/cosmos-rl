@@ -19,11 +19,19 @@ import torch
 from functools import cached_property
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from transformers import AutoConfig
+from torch import nn
 
 
-class BaseModel(ABC):
+class BaseModel(nn.Module, ABC):
+    def __init__(self, hf_config: AutoConfig):
+        super().__init__()
+        from cosmos_rl.rollout.weight_mapper.base import WeightMapper
+
+        self.weight_mapper = WeightMapper.get_weight_mapper(
+            self.supported_model_types()[0]
+        )(hf_config)
+
     def current_device(self):
         """
         Get the current device of the model
@@ -37,35 +45,12 @@ class BaseModel(ABC):
         """
         sorted_key_n_rank = []
         for k, v in self.named_parameters():
-            k = self.map_local_key_to_hf_key(k)
+            k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
             sorted_key_n_rank.append((k, local_view.ndim))
         sorted_key_n_rank.sort(key=lambda x: x[0])
         return sorted_key_n_rank
-
-    @torch.no_grad()
-    def maybe_decompose_weights_to_hf_naming(self, name, param):
-        """
-        Decompose the weights of the model parameters into fine-grained weights
-        This is especially useful for models with non-symmetric parameter layout than the original HuggingFace one
-        For example, MoE experts' weights are stacked in the 0th dimension,
-        while they are stored in different keys in the original HuggingFace naming convention
-        """
-        yield name, param
-
-    def pre_P2R_gather_required_for_sync(self, name: str) -> bool:
-        """
-        For P->R weight sync, some weights need to be pre-collected before first `nccl_send/recv` instruction.
-        To not be messed up with the following `nccl_send/recv` instructions,
-        pre-collect those weights before first `nccl_send/recv` instruction.
-
-        Args:
-            name (str): The name of the tensor.
-        Returns:
-            bool: True if the tensor sync precollect is required, False otherwise.
-        """
-        return False
 
     """
     Abstract methods
@@ -136,11 +121,6 @@ class BaseModel(ABC):
 
     @classmethod
     @abstractmethod
-    def map_local_key_to_hf_key(self, key: str) -> str:
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
     def from_pretrained(
         cls,
         hf_config: AutoConfig,
@@ -171,11 +151,6 @@ class BaseModel(ABC):
         Returns:
             tuple[int, int]: The number of parameters and flops of the model.
         """
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
-    def data_packer(cls) -> DataPacker:
         raise NotImplementedError
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):

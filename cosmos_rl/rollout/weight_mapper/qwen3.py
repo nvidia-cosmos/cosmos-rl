@@ -13,21 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
+import re
 import torch
 from typing import List, Tuple, Dict
-from cosmos_rl.rollout.weight_mapper.registry import WeightMapper
+from cosmos_rl.rollout.weight_mapper.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
     get_rollout_parallelism_strategy,
 )
+from cosmos_rl.utils import util
+from transformers import AutoConfig
+from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
+from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
+    DecoderOnlyLLMDataPacker,
+)
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 
 
-@WeightMapper.register_class("qwen3_moe")
+@WeightMapper.register_class(Qwen3MoE.supported_model_types())
 class Qwen3MoeWeightMapper(WeightMapper):
-    def __init__(self, hf_config_path: str):
-        super().__init__(hf_config_path)
+    def __init__(self, hf_config: AutoConfig):
+        super().__init__(hf_config)
         self.kv_head_ratio = (
             self.config.num_attention_heads // self.config.num_key_value_heads
         )
@@ -111,6 +118,34 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
+    @torch.no_grad()
+    def policy_maybe_decompose_weights_to_hf_naming(
+        self, name, expert_weight: torch.Tensor
+    ):
+        if match := re.search(
+            r"model\.layers\.(\d+)\.mlp\.(up_proj|gate_proj|down_proj)\.(weight)", name
+        ):
+            layer_id = int(match.group(1))
+            w_name = match.group(2)
+            n_experts = expert_weight.shape[0]
+            for expert_id in range(n_experts):
+                single_expert_weight = (
+                    expert_weight[expert_id].transpose(0, 1).contiguous()
+                )
+                yield (
+                    f"model.layers.{layer_id}.mlp.experts.{expert_id}.{w_name}.weight",
+                    single_expert_weight,
+                )
+        else:
+            yield name, expert_weight
+
+    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+        name = util.clear_weight_name(name)
+        if not name == "lm_head.weight":
+            if not name.startswith("model."):
+                name = "model." + name
+        return name
+
     def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
         return [replica_parallelism]
 
@@ -122,3 +157,6 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("qwen3_moe")]
+
+    def data_packer(self) -> DecoderOnlyLLMDataPacker:
+        return DecoderOnlyLLMDataPacker()

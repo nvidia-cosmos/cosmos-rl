@@ -128,7 +128,6 @@ class TestPolicy:
             policy_world_size,
             rollout_world_size,
             self.model,
-            self.model.model_path,
         )
         self.replica_name = name
         self.rollouts_comm = rollouts_comm
@@ -171,7 +170,6 @@ class TestRollout:
             policy_world_size,
             rollout_world_size,
             self.model,
-            self.model.model_path,
         )
         self.weight_mapper = self.parallel_mapper.weight_mapper
         compatibale_map = self.model.sharded_tensors

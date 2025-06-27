@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .registry import WeightMapper
+from .base import WeightMapper
 from .gpt import GPTWeightMapper
 from .qwen_vl_2_5 import QwenVL25WeightMapper
 from .qwen3 import Qwen3MoeWeightMapper

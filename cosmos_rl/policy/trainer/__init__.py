@@ -62,7 +62,6 @@ class Trainer(CommMixin):
             config.policy.model_name_or_path,
             trust_remote_code=True,
         )
-        self.init_comm()
 
         self.hf_config = util.retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path,
@@ -106,6 +105,7 @@ class Trainer(CommMixin):
             torch.cuda.empty_cache()
             self.model_parts = model.separate_model_parts()
             self.model = model
+            self.init_comm()
 
         except Exception as e:
             import traceback
@@ -220,7 +220,7 @@ class Trainer(CommMixin):
 
         for name, param in self.model.named_parameters():
             # First map the key from local to hf naming convention
-            name = self.model.map_local_key_to_hf_key(name)
+            name = self.model.weight_mapper.policy_map_local_key_to_hf_key(name)
             if trainable_only and not param.requires_grad:
                 continue
             is_dtensor = isinstance(param, torch.distributed.tensor.DTensor)
@@ -229,7 +229,10 @@ class Trainer(CommMixin):
 
             pp_rank, pp_size = self.parallel_dims.pp_coord
 
-            for _name, _param in self.model.maybe_decompose_weights_to_hf_naming(
+            for (
+                _name,
+                _param,
+            ) in self.model.weight_mapper.policy_maybe_decompose_weights_to_hf_naming(
                 name, param
             ):
                 tensor_size = get_tensor_size(_param)

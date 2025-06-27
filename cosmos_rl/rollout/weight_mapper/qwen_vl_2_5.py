@@ -13,25 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.rollout.weight_mapper.registry import WeightMapper
+from cosmos_rl.rollout.weight_mapper.base import WeightMapper
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
 )
 from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
 import torch
 import copy
+import re
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
     get_rollout_parallelism_strategy,
 )
+from cosmos_rl.utils import util
+from transformers import AutoConfig
+from cosmos_rl.dispatcher.data.packer.qwen2_5_vlm_data_packer import (
+    Qwen2_5_VLM_DataPacker,
+)
 
 
-@WeightMapper.register_class("qwen2_5_vl", n_model=2)
+@WeightMapper.register_class(Qwen2_5_VLConditionalModel.supported_model_types())
 class QwenVL25WeightMapper(WeightMapper):
-    def __init__(self, hf_config_path: str):
-        super().__init__(hf_config_path)
+    def __init__(self, hf_config: AutoConfig):
+        super().__init__(hf_config)
         assert isinstance(self.config, Qwen2_5_VLConfig)
 
         self.kv_head_ratio = (
@@ -40,8 +46,8 @@ class QwenVL25WeightMapper(WeightMapper):
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
     def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
-        # convert from rollout weight name to policy weight name
-        return Qwen2_5_VLConditionalModel.map_local_key_to_hf_key(rollout_weight_name)
+        # Happen to be the same as policy name mapping.
+        return self.policy_map_local_key_to_hf_key(rollout_weight_name)
 
     def __rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         # visual
@@ -132,6 +138,36 @@ class QwenVL25WeightMapper(WeightMapper):
                 recv_key_n_rank_list.append((compatible_key, param.ndim))
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
+    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+        name = util.clear_weight_name(name)
+        if name.startswith("language_model."):
+            name = name.replace("language_model.", "")
+        if name == "model.lm_head.weight":
+            name = "lm_head.weight"
+        return name
+
+    def policy_pre_P2R_gather_required_for_sync(self, name: str) -> bool:
+        """
+        For P->R weight sync, we need to first all-gather vision encoder qkv weights from all ranks.
+        To not be messed up with the following `nccl_send/recv` instructions,
+        pre-collect those weights before first `nccl_send/recv` instruction.
+
+        Args:
+            name (str): The name of the tensor.
+        Returns:
+            bool: True if the tensor sync precollect is required, False otherwise.
+        """
+        is_visual = name.startswith("visual.")
+        # Handle qkv weights for separate q, k, v tensors
+        if (
+            match := re.search(  # noqa: F841
+                r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
+                name,
+            )
+        ) is not None and is_visual:
+            return True
+        return False
+
     def name_to_model_index(self, dest_name: str) -> int:
         if dest_name in ["lm_head.weight", "lm_head.bias"]:
             return 0
@@ -166,3 +202,6 @@ class QwenVL25WeightMapper(WeightMapper):
             get_rollout_parallelism_strategy("gpt"),
             get_rollout_parallelism_strategy("qwen2_5_vl"),
         ]
+
+    def data_packer(self) -> Qwen2_5_VLM_DataPacker:
+        return Qwen2_5_VLM_DataPacker()

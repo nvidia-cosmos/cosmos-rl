@@ -36,9 +36,6 @@ from cosmos_rl.policy.model.qwen2_5_vl.weight_converter import (
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
-from cosmos_rl.dispatcher.data.packer.qwen2_5_vlm_data_packer import (
-    Qwen2_5_VLM_DataPacker,
-)
 from functools import cached_property
 import re
 from functools import partial
@@ -847,10 +844,9 @@ class Qwen2_5_VLModel(nn.Module):
         )
 
 
-class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
-    def __init__(self, config):
-        super().__init__()
-        # save the config into a toml file
+class Qwen2_5_VLConditionalModel(BaseModel):
+    def __init__(self, config: Qwen2_5_VL_LM_Args):
+        super().__init__(config.hf_config)
         self.config = config
         self.visual = Qwen2_5_VisionTransformerPretrainedModel(config.encoder_args)
         self.model = Qwen2_5_VLModel(config.lm_args)
@@ -1512,20 +1508,11 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
             transforms.append((dest_name, local_view))
         return transforms
 
-    @classmethod
-    def map_local_key_to_hf_key(cls, name: str) -> str:
-        name = clear_weight_name(name)
-        if name.startswith("language_model."):
-            name = name.replace("language_model.", "")
-        if name == "model.lm_head.weight":
-            name = "lm_head.weight"
-        return name
-
     @cached_property
     def sorted_hf_key_n_rank(self) -> List[Tuple[str, int]]:
         sorted_key_n_rank = []
         for k, v in self.named_parameters():
-            k = self.map_local_key_to_hf_key(k)
+            k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             if k.startswith("visual.") and "qkv" in k:
                 # For visual model, we need to split qkv weights
@@ -1542,32 +1529,6 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
                 sorted_key_n_rank.append((k, local_view.ndim))
         sorted_key_n_rank.sort(key=lambda x: x[0])
         return sorted_key_n_rank
-
-    def pre_P2R_gather_required_for_sync(self, name: str) -> bool:
-        """
-        For P->R weight sync, we need to first all-gather vision encoder qkv weights from all ranks.
-        To not be messed up with the following `nccl_send/recv` instructions,
-        pre-collect those weights before first `nccl_send/recv` instruction.
-
-        Args:
-            name (str): The name of the tensor.
-        Returns:
-            bool: True if the tensor sync precollect is required, False otherwise.
-        """
-        is_visual = name.startswith("visual.")
-        # Handle qkv weights for separate q, k, v tensors
-        if (
-            match := re.search(  # noqa: F841
-                r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
-                name,
-            )
-        ) is not None and is_visual:
-            return True
-        return False
-
-    @classmethod
-    def data_packer(cls) -> Qwen2_5_VLM_DataPacker:
-        return Qwen2_5_VLM_DataPacker()
 
     @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:

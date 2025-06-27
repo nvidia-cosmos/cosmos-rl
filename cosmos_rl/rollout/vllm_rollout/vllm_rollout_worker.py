@@ -191,8 +191,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path
         )
-        weight_mapper_cls, _ = WeightMapper.get_weight_mapper(hf_config.model_type)
-        self.weight_mapper = weight_mapper_cls(self.config.policy.model_name_or_path)
+        self.weight_mapper = WeightMapper.get_weight_mapper(hf_config.model_type)(
+            hf_config
+        )
         self.model_config = hf_config
 
         atexit.register(self.handle_shutdown)
@@ -348,7 +349,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 command.src_replica_size,
                 self.world_size,
                 self.model_config,
-                self.config.policy.model_name_or_path,
             )
 
         # get the nccl_unique_id from the controller
