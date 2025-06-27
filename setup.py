@@ -68,7 +68,5 @@ setup(
         ],
     },
     install_requires=requirements,
-    ext_modules=[CMakeExtension('cosmos_rl._cpp', sourcedir='.')],
-    cmdclass=dict(build_ext=CMakeBuild),
     zip_safe=False,
 )
