@@ -93,7 +93,9 @@ class TestPolicyToRollout(unittest.TestCase):
                     stdout, stderr = process.communicate()
 
                     # Check if process completed successfully
-                    assert process.returncode == 0, f"Process failed: {stderr.decode()}"
+                    assert (
+                        process.returncode == 0
+                    ), f"Process failed: {stderr.decode() if stderr else ''}"
 
             finally:
                 # Ensure process is terminated
