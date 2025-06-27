@@ -52,7 +52,7 @@ class TestParallelMap(unittest.TestCase):
             rollout_world_size=r_world_size,
             policy_parallelism_strategy=get_policy_parallelism_strategy(model_type),
             rollout_parallelism_strategy=get_rollout_parallelism_strategy(model_type),
-            model_config=TestModelType(),
+            hf_config=TestModelType(),
         )
         layers = [
             ("model.layers.9.input_layernorm.weight", torch.Size([1024])),
