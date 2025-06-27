@@ -249,6 +249,13 @@ class NCCLLibrary:
         # it is better not to call it at all.
         # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
         Function("ncclCommDestroy", ncclResult_t, [ncclComm_t]),
+        # NCCL async error query & abort (for enqueue-timeout protection)
+        Function(
+            "ncclCommGetAsyncError",
+            ncclResult_t,
+            [ncclComm_t, ctypes.POINTER(ncclResult_t)],
+        ),
+        Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -430,6 +437,17 @@ class NCCLLibrary:
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
+
+    # ------------------ new helpers for HA ------------------
+
+    def ncclCommGetAsyncError(self, comm: ncclComm_t) -> int:
+        err = ncclResult_t()
+        self._funcs["ncclCommGetAsyncError"](comm, ctypes.byref(err))
+        return int(err.value)
+
+    def ncclCommAbort(self, comm: ncclComm_t) -> None:
+        # abort can return error itself; ignore it to avoid masking original issue
+        self._funcs["ncclCommAbort"](comm)
 
 
 __all__ = [
