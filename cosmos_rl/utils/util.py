@@ -272,13 +272,16 @@ def update_dataclass_with_dict(dc_instance, config_data):
     if config_data is None:
         raise RuntimeError("Got null config.")
     for key, value in config_data.items():
-        current_value = getattr(dc_instance, key)
-        if dataclasses.is_dataclass(current_value):
-            if value is None:
-                continue
-            update_dataclass_with_dict(current_value, value)
+        if hasattr(dc_instance, key):
+            current_value = getattr(dc_instance, key)
+            if dataclasses.is_dataclass(current_value):
+                if value is None:
+                    continue
+                update_dataclass_with_dict(current_value, value)
+            else:
+                setattr(dc_instance, key, value)
         else:
-            setattr(dc_instance, key, value)
+            logger.warning(f"Key {key} not found in {dc_instance}")
 
 
 def list_to_b64(lst) -> str:
