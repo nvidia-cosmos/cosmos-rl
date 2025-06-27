@@ -63,7 +63,7 @@ class GPTWeightMapper(WeightMapper):
         up_proj_weight = weight[dim_0 // 2 :]
         return gate_proj_weight, up_proj_weight
 
-    def rollout_prepare_recv_impl(
+    def rollout_prepare_recv(
         self, model: Qwen2ForCausalLM
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
         assert (

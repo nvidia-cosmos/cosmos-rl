@@ -85,7 +85,7 @@ class QwenVL25WeightMapper(WeightMapper):
         up_proj_weight = weight[dim_0 // 2 :]
         return gate_proj_weight, up_proj_weight
 
-    def rollout_prepare_recv_impl(self, model: Qwen2_5_VLForConditionalGeneration):
+    def rollout_prepare_recv(self, model: Qwen2_5_VLForConditionalGeneration):
         assert isinstance(model, Qwen2_5_VLForConditionalGeneration)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
@@ -168,7 +168,7 @@ class QwenVL25WeightMapper(WeightMapper):
             return True
         return False
 
-    def name_to_model_index(self, dest_name: str) -> int:
+    def name_to_model_part_index(self, dest_name: str) -> int:
         if dest_name in ["lm_head.weight", "lm_head.bias"]:
             return 0
         elif dest_name.startswith("visual."):

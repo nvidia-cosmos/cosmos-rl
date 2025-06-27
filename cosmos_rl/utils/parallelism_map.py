@@ -762,7 +762,7 @@ class ParallelTopoMapperGroup:
                 )
             )
 
-    def _sort_params_by_model_index(
+    def _cluster_params_by_model_part(
         self, params: List[Tuple[str, int]]
     ) -> List[List[Tuple[str, int]]]:
         """
@@ -774,7 +774,7 @@ class ParallelTopoMapperGroup:
             return [params]
         x = [[] for _ in self.mapper_group]
         for name, rank in params:
-            idx = self.weight_mapper.name_to_model_index(name)
+            idx = self.weight_mapper.name_to_model_part_index(name)
             x[idx].append((name, rank))
         return x
 
@@ -783,7 +783,7 @@ class ParallelTopoMapperGroup:
         hf_key_n_rank: List[Tuple[str, int]],
         global_rank: int,
     ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        x = self._sort_params_by_model_index(hf_key_n_rank)
+        x = self._cluster_params_by_model_part(hf_key_n_rank)
         insts = []
         for model_index, p in enumerate(x):
             insts.extend(
@@ -796,7 +796,7 @@ class ParallelTopoMapperGroup:
     def prepare_rollout_from_policy_manifest(
         self, hf_key_n_rank: List[Tuple[str, int]], rollout_rank: int
     ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        x = self._sort_params_by_model_index(hf_key_n_rank)
+        x = self._cluster_params_by_model_part(hf_key_n_rank)
         insts = []
         for model_index, p in enumerate(x):
             insts.extend(

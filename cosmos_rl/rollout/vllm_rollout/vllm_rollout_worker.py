@@ -20,7 +20,7 @@ import threading
 from queue import Queue
 import atexit
 import types
-from typing import List, Tuple, Optional, Callable, Any
+from typing import List, Tuple, Optional, Callable, Any, Dict
 from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase
@@ -44,6 +44,7 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
     nccl_broadcast,
+    nccl_recv,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
@@ -60,6 +61,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_VALIDATION_REPORT_SUFFIX,
 )
 from vllm import SamplingParams
+
 
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
@@ -332,6 +334,51 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         nccl_group_id = b64_to_list(base64_nccl_group_id)
         return nccl_group_id
 
+    def recv_weight_shard(
+        self,
+        global_rank_of_rollout: int,
+        manifest: Tuple[int, int, Dict[int, Any], str, Tuple[int]],
+        communicator_index: Dict[int, int],
+        do_weight_sync_check: bool = False,
+    ):
+        p_rank, r_rank, tensor_split_strategys, dest_name, _ = manifest
+        assert r_rank == global_rank_of_rollout
+
+        target_tensor = self.vllm_weight_inplace_view_map[dest_name]
+
+        view = target_tensor.cosmos_slice(tensor_split_strategys)
+
+        if do_weight_sync_check:
+            cloned_target_tensor = target_tensor.clone()
+            # clear the current view
+            view.zero_()
+
+        recv_tensor = None
+        if view.is_contiguous():
+            recv_tensor = view
+        else:
+            # new a temp tensor
+            recv_tensor = torch.empty_like(view)
+
+        nccl_recv(recv_tensor, p_rank, communicator_index[p_rank])
+
+        # inplace copy
+        if not view.is_contiguous():
+            view.copy_(recv_tensor)
+
+        if do_weight_sync_check:
+            # If the weight sync between Policy and Rollout is correct, the
+            # `target_tensor` would have no change.
+            # TODO: (lms) When we support quantization in rollout side,
+            # we should handle the numerical error of quantized weight, not
+            # just apply `torch.allclose` simply.
+            if not torch.allclose(cloned_target_tensor, target_tensor):
+                raise ValueError(
+                    f"Weight sync check failed after weight sync instruction: {manifest}"
+                )
+
+        return recv_tensor.numel() * recv_tensor.element_size()
+
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
@@ -353,12 +400,14 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # get the nccl_unique_id from the controller
         communicator_index = {}
-        recv_param_key_n_rank_list = self.weight_mapper.rollout_prepare_recv(
-            self.get_underlying_model()
-        )
+        if not hasattr(self, "vllm_weight_inplace_view_map"):
+            self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
+                self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+            )
+            self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
 
         insts = self.parallel_mapper.prepare_rollout_from_policy_manifest(
-            recv_param_key_n_rank_list, self.global_rank
+            self.recv_param_key_n_rank_list, self.global_rank
         )
 
         related_ranks = [set() for _ in range(command.dst_replica_size)]
@@ -409,7 +458,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # st = time.time()
             total_bytes_received = 0
             for inst in insts:
-                total_bytes_received += self.weight_mapper.recv_weight_shard(
+                total_bytes_received += self.recv_weight_shard(
                     self.global_rank,
                     inst,
                     communicator_index,

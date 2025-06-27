@@ -72,7 +72,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         up_proj_weight = weight[:, dim_1 // 2 :]
         return gate_proj_weight, up_proj_weight
 
-    def rollout_prepare_recv_impl(
+    def rollout_prepare_recv(
         self, model: Qwen3MoeForCausalLM
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
         assert isinstance(model, Qwen3MoeForCausalLM)
