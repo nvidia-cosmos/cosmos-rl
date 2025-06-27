@@ -21,8 +21,7 @@ from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.algo.reward import gsm8k_reward_fn
 from transformers import AutoTokenizer
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import DecoderOnlyLLMDataPacker
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.utils.modelscope import modelscope_load_dataset
 from cosmos_rl.utils.logging import logger
 

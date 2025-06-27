@@ -20,7 +20,6 @@ from functools import cached_property
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers import AutoConfig
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -157,7 +156,3 @@ class BaseModel(torch.nn.Module, ABC):
         raise NotImplementedError(
             "This func should not be called in BaseModel instance."
         )
-
-    @classmethod
-    def data_packer(cls) -> DataPacker:
-        raise NotImplementedError

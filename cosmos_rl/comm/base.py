@@ -26,10 +26,12 @@ from urllib.parse import urljoin
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 from cosmos_rl.utils.network_util import make_request_with_retry, get_local_ip
 from cosmos_rl.dispatcher.command import CommandRegistry, Command
+from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
+import cosmos_rl.utils.util as util
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_REGISTER_SUFFIX,
     COSMOS_API_UNREGISTER_SUFFIX,
@@ -37,6 +39,7 @@ from cosmos_rl.utils.api_suffix import (
 )
 import base64
 import cloudpickle
+from transformers import AutoConfig
 
 
 class CommMixin:
@@ -92,6 +95,10 @@ class CommMixin:
                 sft_user_dataset.setup(self.config, self.tokenizer)
             self.sft_user_dataset = sft_user_dataset
 
+        hf_config = util.retry(AutoConfig.from_pretrained)(
+            self.config.policy.model_name_or_path, trust_remote_code=True
+        )
+
         user_data_packer = metadata.get("user_data_packer", None)
         if user_data_packer:
             user_data_packer = base64.b64decode(user_data_packer)
@@ -99,7 +106,7 @@ class CommMixin:
             self.data_packer = user_data_packer
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
-            self.data_packer = self.model.__class__.data_packer()
+            self.data_packer = DataPacker.get_default_data_packer(hf_config.model_type)
             logger.info(f"Using default data packer: {self.data_packer}")
         self.data_packer.setup(self.config, self.tokenizer)
 
@@ -112,7 +119,9 @@ class CommMixin:
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )
         else:
-            self.val_data_packer = self.model.__class__.data_packer()
+            self.val_data_packer = DataPacker.get_default_data_packer(
+                hf_config.model_type
+            )
             logger.info(f"Using default validation data packer: {self.val_data_packer}")
         self.val_data_packer.setup(self.config, self.tokenizer)
 

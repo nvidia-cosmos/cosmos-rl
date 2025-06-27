@@ -44,9 +44,6 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
 from transformers.activations import ACT2FN
 from functools import cached_property, partial
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
 
 
 class DeepseekV3RMSNorm(nn.Module):
@@ -1313,7 +1310,3 @@ class DeepseekV3MoEModel(BaseModel):
         #     raise ValueError(
         #         f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
         #     )
-
-    @classmethod
-    def data_packer(cls) -> DecoderOnlyLLMDataPacker:
-        return DecoderOnlyLLMDataPacker()

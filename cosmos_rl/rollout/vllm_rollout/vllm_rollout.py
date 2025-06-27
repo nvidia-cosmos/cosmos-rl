@@ -28,7 +28,7 @@ from cosmos_rl.rollout.vllm_rollout.vllm_patch import (
     patch_vllm_model_to_reload_weight,
 )
 from cosmos_rl.policy.config import RolloutConfig
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer import DataPacker
 
 
 def vllm_version_check(rollout_config: RolloutConfig):

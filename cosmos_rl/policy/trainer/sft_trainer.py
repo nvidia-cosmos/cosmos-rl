@@ -34,7 +34,7 @@ import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.cache as cache
 from transformers import AutoTokenizer
 from datasets import concatenate_datasets
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer import DataPacker
 import functools
 import os
 from typing import Optional, Dict, Any

@@ -15,14 +15,6 @@
 
 import torch
 
-cuda_device_props = torch.cuda.get_device_properties()
-# currently torch._grouped_mm is only available on nightly build
-use_torch_group_gemm_impl = (
-    cuda_device_props.major == 9
-    and cuda_device_props.minor == 0
-    and hasattr(torch, "_grouped_mm")
-)
-
 
 class FakeGroupMMBackwardCheck(torch.autograd.Function):
     @staticmethod
@@ -116,7 +108,20 @@ def run_group_gemm_3rd_party(
     return hidden_outputs
 
 
+use_torch_group_gemm_impl = None
+
+
 def group_gemm_imp():
+    global use_torch_group_gemm_impl
+    if use_torch_group_gemm_impl is None:
+        cuda_device_props = torch.cuda.get_device_properties()
+        # currently torch._grouped_mm is only available on nightly build
+        use_torch_group_gemm_impl = (
+            cuda_device_props.major == 9
+            and cuda_device_props.minor == 0
+            and hasattr(torch, "_grouped_mm")
+        )
+
     # Use torch implemetation if torch._grouped_mm is available, otherwise use 3rd party implementation
     return (
         run_group_gemm_hopper if use_torch_group_gemm_impl else run_group_gemm_3rd_party

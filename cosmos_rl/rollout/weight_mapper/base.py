@@ -87,7 +87,7 @@ class WeightMapper(ABC):
 
     @classmethod
     def register_class(
-        cls,
+        x,
         reg_key: Union[str, List[str]],
         *,
         allow_override: bool = False,
@@ -97,16 +97,19 @@ class WeightMapper(ABC):
 
         def decorator(cls: Type) -> Type:
             for key in reg_key:
-                if not allow_override and key in cls._MODEL_WEIGHT_MAPPER_REGISTRY:
+                if (
+                    not allow_override
+                    and key in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY
+                ):
                     raise ValueError(f"Class '{key}' is already registered.")
-                cls._MODEL_WEIGHT_MAPPER_REGISTRY[key] = cls
+                WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY[key] = cls
             return cls
 
         return decorator
 
     @classmethod
     def get_weight_mapper(cls, model_type: str) -> Type["WeightMapper"]:
-        if model_type not in cls._MODEL_WEIGHT_MAPPER_REGISTRY:
+        if model_type not in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY:
             raise ValueError(f"ModelType '{model_type}' is not supported now.")
 
-        return cls._MODEL_WEIGHT_MAPPER_REGISTRY[model_type]
+        return WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY[model_type]

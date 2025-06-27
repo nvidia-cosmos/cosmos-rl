@@ -36,9 +36,6 @@ from cosmos_rl.policy.model.qwen2_5_vl.weight_converter import (
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
-from cosmos_rl.dispatcher.data.packer.qwen2_5_vlm_data_packer import (
-    Qwen2_5_VLM_DataPacker,
-)
 from functools import cached_property
 import re
 from functools import partial
@@ -1554,7 +1551,3 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             raise ValueError(
                 f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
             )
-
-    @classmethod
-    def data_packer(cls) -> Qwen2_5_VLM_DataPacker:
-        return Qwen2_5_VLM_DataPacker()

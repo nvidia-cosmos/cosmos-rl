@@ -14,12 +14,14 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Type, Union
 from transformers import AutoTokenizer
 from cosmos_rl.policy.config import Config
 
 
 class DataPacker(ABC):
+    _MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY: Dict[str, Type["DataPacker"]] = {}
+
     """
     This is where dataset item is transformed into the format required by the rollout engine (e.g. vllm)
     for example:
@@ -29,6 +31,35 @@ class DataPacker(ABC):
             "multi_modal_data": {"video": ...},
           } for multi-modal model
     """
+
+    @classmethod
+    def register(
+        cls, model_types: Union[str, List[str]], *, allow_override: bool = False
+    ):
+        if isinstance(model_types, str):
+            model_types = [model_types]
+        else:
+            model_types = list(model_types)
+
+        def decorator(subclass):
+            for model_type in model_types:
+                if (
+                    not allow_override
+                    and model_type in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY
+                ):
+                    raise ValueError(
+                        f"DataPacker for {model_type} is already registered"
+                    )
+                DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type] = subclass
+            return subclass
+
+        return decorator
+
+    @classmethod
+    def get_default_data_packer(cls, model_type: str) -> Type["DataPacker"]:
+        if model_type not in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY:
+            raise ValueError(f"DataPacker for {model_type} is not registered")
+        return DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]()
 
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         """
