@@ -32,7 +32,7 @@ from cosmos_rl.policy.model.base import BaseModel
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
 from flash_attn import flash_attn_func

@@ -26,7 +26,7 @@ from cosmos_rl.utils.checkpoint import (
 from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationConfig
 from cosmos_rl.policy.trainer.optm import build_optimizers, build_lr_schedulers
 from cosmos_rl.policy.model import BaseModel
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 from cosmos_rl.utils.wandb_logger import is_wandb_available, init_wandb
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.protocol import Role

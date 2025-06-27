@@ -14,8 +14,7 @@
 # limitations under the License.
 
 import os
-from dataclasses import asdict
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 
@@ -75,7 +74,7 @@ def init_wandb(config: CosmosConfig, parallel_dims: ParallelDims = None):
     run = wandb.init(
         project=config.logging.project_name,
         name=experiment_name,
-        config=asdict(config),
+        config=config.model_dump(),
         dir=output_dir,
         id=config.train.timestamp,  # Use timestamp as the run ID
         resume="allow",

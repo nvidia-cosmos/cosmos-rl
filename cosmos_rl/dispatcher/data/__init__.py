@@ -15,7 +15,7 @@
 
 from torch.utils.data import Dataset
 from datasets import concatenate_datasets
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 from cosmos_rl.utils.util import load_data_from_disk_or_hf
 from cosmos_rl.utils.logging import logger
 from typing import Optional, Any, List

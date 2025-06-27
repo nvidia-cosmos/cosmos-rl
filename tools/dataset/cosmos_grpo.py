@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
 import cosmos_rl.utils.util as util
-from cosmos_rl.policy.config import Config
+from cosmos_rl.config import Config
 from cosmos_rl.dispatcher.algo.reward import single_choice_reward_fn, format_reward_fn
 from transformers import AutoTokenizer
 from cosmos_rl.utils.util import basename_from_modelpath

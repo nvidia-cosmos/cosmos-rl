@@ -33,7 +33,7 @@ Here we attach the `BytedTsinghua-SIA/DAPO-Math-17k <https://huggingface.co/data
     from torch.utils.data import Dataset
     from datasets import load_dataset
     from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
-    from cosmos_rl.policy.config import Config
+    from cosmos_rl.config import Config
     from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
     from transformers import AutoTokenizer
     from torch.utils.data import ConcatDataset
@@ -107,7 +107,7 @@ Save this file to `./custom_controller_entry.py`
     from torch.utils.data import Dataset
     from datasets import load_dataset
     from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
-    from cosmos_rl.policy.config import Config
+    from cosmos_rl.config import Config
     from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
     from transformers import AutoTokenizer
     from torch.utils.data import ConcatDataset
@@ -175,7 +175,7 @@ Here we just reuse the pre-deined LLM data packer to demonstrate how to pass you
     from torch.utils.data import Dataset
     from datasets import load_dataset
     from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
-    from cosmos_rl.policy.config import Config
+    from cosmos_rl.config import Config
     from cosmos_rl.dispatcher.algo.reward import gsm8k_reward_fn
     from transformers import AutoTokenizer
     from cosmos_rl.dispatcher.data.packer import DataPacker, DecoderOnlyLLMDataPacker

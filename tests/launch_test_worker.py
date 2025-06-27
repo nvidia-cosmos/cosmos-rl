@@ -44,7 +44,7 @@ from cosmos_rl.utils.distributed import (
 )
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.pynccl import (

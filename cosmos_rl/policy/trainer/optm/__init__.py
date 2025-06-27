@@ -19,7 +19,7 @@ import copy
 import torch
 import torch.nn as nn
 from torch.optim.optimizer import Optimizer
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.checkpoint.state_dict import (
     get_optimizer_state_dict,

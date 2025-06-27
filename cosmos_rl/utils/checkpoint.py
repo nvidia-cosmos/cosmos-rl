@@ -22,13 +22,12 @@ import random
 import shutil
 import numpy as np
 import concurrent.futures as futures
-from dataclasses import asdict
 from botocore.exceptions import ClientError
 from botocore.config import Config as BotoConfig
 from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 
 
 def upload_file_to_s3(
@@ -198,7 +197,7 @@ class CheckpointMananger:
         with open(
             os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir, "cosmos_config"), "w"
         ) as f:
-            f.write(json.dumps(asdict(self.config), indent=4))
+            f.write(json.dumps(self.config.model_dump(), indent=4))
         extra_info = {
             "rng_state": self.get_rng_state(),
             "step": step,

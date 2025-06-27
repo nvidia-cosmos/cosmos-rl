@@ -16,7 +16,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Type, Union
 from transformers import AutoTokenizer
-from cosmos_rl.policy.config import Config
+from cosmos_rl.config import Config
 
 
 class DataPacker(ABC):

@@ -16,7 +16,7 @@
 from dataclasses import dataclass
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.policy.config import ParallelismConfig
+from cosmos_rl.config import ParallelismConfig
 import contextlib
 from typing import Generator, Optional, List
 import torch

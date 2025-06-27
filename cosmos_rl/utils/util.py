@@ -225,65 +225,6 @@ def parse_collection(s):
         return None
 
 
-def update_dataclass(dc_instance, form, prefix=""):
-    """
-    Recursively update the dataclass instance based on form data.
-    The form keys are built as nested keys
-    """
-    for f in dataclasses.fields(dc_instance):
-        if f.metadata.get("skip_ui", False):
-            continue
-
-        field_name = f.name
-        full_key = f"{prefix}.{field_name}" if prefix else field_name
-        value = getattr(dc_instance, field_name)
-
-        # Handle train_policy field specially
-        if field_name == "train_policy" and hasattr(dc_instance, "train_policy"):
-            # The train_policy instance is already set to the correct type (SFT or GRPO)
-            # Just update its fields
-            update_dataclass(value, form, prefix=full_key)
-            continue
-
-        if dataclasses.is_dataclass(value):
-            update_dataclass(value, form, prefix=full_key)
-        else:
-            form_value = form.get(full_key)
-            if form_value is None:
-                if f.type == bool:
-                    new_value = False
-                else:
-                    continue
-            elif f.type == bool:
-                new_value = form_value.lower() == "true"
-            elif f.type == int:
-                new_value = int(form_value)
-            elif f.type == float:
-                new_value = float(form_value)
-            elif f.type == tuple:
-                new_value = tuple(map(float, form_value.split(",")))
-            else:
-                parsed_set = parse_collection(form_value)
-                new_value = parsed_set if parsed_set is not None else form_value
-            setattr(dc_instance, field_name, new_value)
-
-
-def update_dataclass_with_dict(dc_instance, config_data):
-    if config_data is None:
-        raise RuntimeError("Got null config.")
-    for key, value in config_data.items():
-        if hasattr(dc_instance, key):
-            current_value = getattr(dc_instance, key)
-            if dataclasses.is_dataclass(current_value):
-                if value is None:
-                    continue
-                update_dataclass_with_dict(current_value, value)
-            else:
-                setattr(dc_instance, key, value)
-        else:
-            logger.warning(f"Key {key} not found in {dc_instance}")
-
-
 def list_to_b64(lst) -> str:
     # for int64_t listy to base64
     byte_data = struct.pack(f"{len(lst)}q", *lst)

@@ -25,7 +25,7 @@ from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import (
     COSMOS_ROLLOUT_STEP_INTERVAL,

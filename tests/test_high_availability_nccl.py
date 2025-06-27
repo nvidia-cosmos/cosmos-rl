@@ -32,7 +32,7 @@ from cosmos_rl.utils import constant
 from cosmos_rl.utils.network_util import make_request_with_retry, get_local_ip
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.dispatcher.command import Command, BuildMeshCommand
-from cosmos_rl.policy.config import Config
+from cosmos_rl.config import Config
 from cosmos_rl.utils.distributed import get_controller_metadata
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
 from cosmos_rl.comm.base import CommMixin

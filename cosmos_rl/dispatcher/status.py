@@ -21,7 +21,7 @@ from typing import Dict, List, Iterator, Any, Optional
 from torch.utils.data import DataLoader
 from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.policy.config import Config
+from cosmos_rl.config import Config
 from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role
 import cosmos_rl.dispatcher.command as command

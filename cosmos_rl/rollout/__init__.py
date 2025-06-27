@@ -17,7 +17,7 @@ import os
 import torch
 
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.dispatcher.protocol import Role
 import cosmos_rl.utils.util as util

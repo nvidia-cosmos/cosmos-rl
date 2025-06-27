@@ -35,6 +35,7 @@ Main Features
 
    quickstart/installation
    quickstart/single_node_example
+   quickstart/configuration
    quickstart/dataflow
    quickstart/customization
 

@@ -24,7 +24,7 @@ from torchao.float8 import convert_to_float8_training
 from torchao.float8 import Float8LinearConfig
 from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
 
-from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import is_cuda_compatible, torch_version_at_least
 from cosmos_rl.utils.logging import logger

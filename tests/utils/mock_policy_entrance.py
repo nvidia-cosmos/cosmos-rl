@@ -29,7 +29,7 @@ from cosmos_rl.utils.distributed import (
 )
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.policy.config import Config as PolicyConfig
+from cosmos_rl.config import Config as PolicyConfig
 
 try:
     # for policy and rollout nccl env consistency
@@ -100,7 +100,7 @@ def run_train():
         )
 
     cosmos_config = PolicyConfig.from_dict(metadata["config"])
-    logger.info(f"[Policy] Loaded configuration: {cosmos_config.key_values()}")
+    logger.info(f"[Policy] Loaded configuration: {cosmos_config.model_dump()}")
 
     parallel_dims = ParallelDims.from_config(
         parallesim_config=cosmos_config.policy.parallelism
