@@ -2,6 +2,7 @@ import torch
 
 import triton
 import triton.language as tl
+from cosmos_rl.utils.logging import logger
 
 
 @triton.jit
@@ -33,10 +34,23 @@ def _compute_logprobs_forward(
     start_addr_of_token = (
         full_logits_ptr + bsz_idx * max_len * vocab_size + token_idx * vocab_size
     )
-    index_of_token = tl.load(input_ids_ptr + bsz_idx * max_len + token_idx)  # int32
+    index_of_logit = tl.load(input_ids_ptr + bsz_idx * max_len + token_idx)  # int32
     bsz_cu_seqlen = tl.load(cu_seqlens + bsz_idx)
     addr_of_logprobs = logprobs_ptr + bsz_cu_seqlen + token_idx - seqlen_start_idx
     addr_of_sumexp = sumexp_ptr + bsz_cu_seqlen + token_idx - seqlen_start_idx
+    # Compute max_logit, for numerical stability
+    # If not, we can remove this max_logit computation.
+    max_logits = tl.zeros((BLOCK_SIZE,), dtype=tl.float32) - float("inf")
+    for i in range(0, vocab_size, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        mask = offset < vocab_size
+        x = tl.load(
+            start_addr_of_token + offset,
+            mask=mask,
+            other=-float("inf"),
+        ).to(tl.float32)
+        max_logits = tl.maximum(max_logits, x)
+    max_logit = tl.max(max_logits)  # scalar
 
     # Compute sumexp
     sum_exp = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
@@ -44,17 +58,31 @@ def _compute_logprobs_forward(
         offset = i + tl.arange(0, BLOCK_SIZE)
         mask = offset < vocab_size
         x = tl.load(
-            start_addr_of_token + i + tl.arange(0, BLOCK_SIZE),
+            start_addr_of_token + offset,
             mask=mask,
             other=-float("inf"),
         ).to(tl.float32)
+        x = x - max_logit  # subtract max_logit for numerical stability
         sum_exp += tl.exp(x)
 
+    # Now compute logsum_exp, for numerical stability
     sum_exp_total = tl.sum(sum_exp)
-    logsum_exp = tl.log(sum_exp_total)
+    logsum_exp = tl.log(sum_exp_total) + max_logit
     tl.store(addr_of_sumexp, logsum_exp)
 
-    logit_of_current_token = tl.load(start_addr_of_token + index_of_token).to(
+    # [1, 1, vocab_size]
+    # [0, 0, index_of_logit]
+    # for i in range(0, vocab_size, BLOCK_SIZE):
+    #     offset = i + tl.arange(0, BLOCK_SIZE)
+    #     load_mask = offset < vocab_size
+    #     logit_of_current_token = tl.load(start_addr_of_token + offset, mask=load_mask, other=0).to(tl.float32)
+    #     logprob_of_current_token = logit_of_current_token - logsum_exp
+
+    #     store_mask = offset == index_of_logit
+    #     new_offset = tl.zeros_like(offset)
+    #     tl.store(addr_of_logprobs + new_offset, logprob_of_current_token, mask=store_mask)
+
+    logit_of_current_token = tl.load(start_addr_of_token + index_of_logit).to(
         tl.float32
     )  # scalar
     # compute softmax_logsumexp
@@ -100,7 +128,7 @@ def _compute_logprobs_backward(
     )
     gradient_output = tl.load(
         addr_of_gradient_output
-    )  # scalar, gradient of the logit with index `index_of_token`
+    )  # scalar, gradient of the logit with index `index_of_logit`
 
     # [1, 1, vocab_size]
     addr_of_gradient_full_logits = (
@@ -109,7 +137,7 @@ def _compute_logprobs_backward(
         + token_idx * vocab_size
     )
 
-    index_of_token = tl.load(input_ids_ptr + bsz_idx * max_len + token_idx)  # int32
+    index_of_logit = tl.load(input_ids_ptr + bsz_idx * max_len + token_idx)  # int32
 
     for i in range(0, vocab_size, BLOCK_SIZE):
         offset = i + tl.arange(0, BLOCK_SIZE)
@@ -126,7 +154,7 @@ def _compute_logprobs_backward(
 
         # gradient_x_i = gradient_output_i - exp(o_i) * sum_j(gradient_output_j)
         gradient_output_block = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
-        tl.where(offset == index_of_token, gradient_output, gradient_output_block)
+        tl.where(offset == index_of_logit, gradient_output, gradient_output_block)
 
         gradient_input_block = (
             gradient_output_block - exp_log_softmax_output * gradient_output
@@ -169,6 +197,9 @@ class TritonComputeLogprobs(torch.autograd.Function):
             int_logprob_masks.size(1) - 1 - reversed_int_logprob_masks.argmax(dim=-1)
         )
 
+        logger.info(f"LMS: seqlen_start_idx: {seqlen_start_idx}")
+        logger.info(f"LMS: seqlen_end_idx: {seqlen_end_idx}")
+
         sum_exp = torch.zeros(
             (n_logprob_tokens), dtype=torch.float32, device=full_logits.device
         )
@@ -189,6 +220,7 @@ class TritonComputeLogprobs(torch.autograd.Function):
             vocab_size,
             BLOCK_SIZE=BLOCK_SIZE,
         )
+        logger.info(f"LMS: sum_exp: {sum_exp}")
         ctx.save_for_backward(
             input_ids,
             full_logits,

@@ -407,6 +407,9 @@ def selective_log_softmax(logits, index):
             ).squeeze(-1)
             per_token_logps.append(row_per_token_logps)
         per_token_logps = torch.stack(per_token_logps)
+    logger.info(
+        f"LMS: shape of per_token_logps: {per_token_logps.shape}, value: {per_token_logps}"
+    )
     return per_token_logps
 
 
@@ -998,13 +1001,6 @@ def compute_logprobs(
     # [batch_size, max_len]
     # accumulation
     logprob_masks = minibatch["logprob_masks"]
-    logger.info(
-        f"LMS: input_ids_batch shape: {input_ids_batch.shape}, logprob_masks shape: {logprob_masks.shape}"
-    )
-    logger.info(
-        f"LMS: input_ids_batch dtype: {input_ids_batch.dtype}, logprob_masks dtype: {logprob_masks.dtype}"
-    )
-    logger.info(f"LMS: input_ids_batch: {input_ids_batch}")
     # [batch_size, max_len]
     # advantages_of_interest = advantages * logprob_masks
 
@@ -1016,7 +1012,4 @@ def compute_logprobs(
         full_logits.shape[:2] == shifted_input_ids.shape[:2]
     ), f"Logits shape {full_logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
     logps = selective_log_softmax(full_logits, shifted_input_ids) * logprob_masks
-    logger.info(
-        f"LMS: logps shape: {logps.shape}, logprob_masks shape: {logprob_masks.shape}"
-    )
     return logps, logprob_masks
