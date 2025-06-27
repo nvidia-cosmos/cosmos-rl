@@ -16,7 +16,8 @@ import os
 import threading
 import time
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Callable
+import queue
 
 import torch
 from torch.cuda import Stream
@@ -71,6 +72,70 @@ def _current_ctx():
     if hasattr(_tls, "stack") and _tls.stack:  # type: ignore[attr-defined]
         return _tls.stack[-1]  # type: ignore[attr-defined]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Lightweight async enqueue monitoring (Python worker)
+# ---------------------------------------------------------------------------
+
+
+class _Task:
+    __slots__ = ("functor", "timeout_ms", "done", "timed_out")
+
+    def __init__(self, functor: Callable[[], ncclComm_t], timeout_ms: int):
+        self.functor = functor
+        self.timeout_ms = timeout_ms
+        self.done = threading.Event()
+        self.timed_out = threading.Event()
+
+
+_task_q: "queue.Queue[_Task]" = queue.Queue()
+_worker_started = False
+
+
+def _ensure_worker():
+    global _worker_started
+    if _worker_started:
+        return
+
+    def _worker_loop():
+        while True:
+            task: _Task = _task_q.get()
+            comm: ncclComm_t | None = None
+            try:
+                comm = task.functor()
+                deadline = time.monotonic() + task.timeout_ms / 1000.0
+                # Poll async error status.
+                while time.monotonic() < deadline:
+                    err = _nccl.ncclCommGetAsyncError(comm)
+                    # 0 == ncclSuccess
+                    if err == 0:
+                        break
+                    # 2 == ncclInProgress (others are immediate errors)
+                    if err != 2:
+                        break
+                    time.sleep(0.001)
+                else:
+                    _nccl.ncclCommAbort(comm)
+                    task.timed_out.set()
+            except Exception:
+                task.timed_out.set()
+            finally:
+                task.done.set()
+
+    t = threading.Thread(target=_worker_loop, daemon=True, name="pynccl-worker")
+    t.start()
+    _worker_started = True
+
+
+def _submit_nccl(functor: Callable[[], ncclComm_t], timeout_ms: Optional[int]):
+    """Run NCCL host call in worker thread, monitor enqueue-timeout."""
+    _ensure_worker()
+    task = _Task(functor, _get_timeout_ms(timeout_ms))
+    _task_q.put(task)
+    task.done.wait()
+    if task.timed_out.is_set():
+        raise RuntimeError("NCCL enqueue timed out (worker detection)")
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +293,10 @@ def nccl_abort(comm_idx: int):
     """Abort (destroy) communicator comm_idx."""
     comm = _comm_store.get(comm_idx, (None, None, None))[0]
     if comm is not None:
-        _nccl.ncclCommDestroy(comm)
+        try:
+            _nccl.ncclCommAbort(comm)
+        except Exception:
+            _nccl.ncclCommDestroy(comm)
         logger.warning(f"[NCCL] Aborted communicator idx={comm_idx}")
     _comm_store.pop(comm_idx, None)
 
@@ -277,6 +345,9 @@ def nccl_broadcast(
         _stream_ptr(stream),
     )
 
+    # wrap with enqueue-timeout monitoring
+    _submit_nccl(lambda: comm, timeout_ms)
+
 
 def nccl_send(
     tensor: torch.Tensor,
@@ -297,6 +368,9 @@ def nccl_send(
         _stream_ptr(stream),
     )
 
+    # wrap with enqueue-timeout monitoring
+    _submit_nccl(lambda: comm, timeout_ms)
+
 
 def nccl_recv(
     tensor: torch.Tensor,
@@ -316,6 +390,9 @@ def nccl_recv(
         comm,
         _stream_ptr(stream),
     )
+
+    # wrap with enqueue-timeout monitoring
+    _submit_nccl(lambda: comm, timeout_ms)
 
 
 def nccl_allreduce(
@@ -340,6 +417,9 @@ def nccl_allreduce(
         _stream_ptr(stream),
     )
 
+    # wrap with enqueue-timeout monitoring
+    _submit_nccl(lambda: comm, timeout_ms)
+
 
 def nccl_alltoall(
     sendbuff: torch.Tensor,
@@ -360,6 +440,9 @@ def nccl_alltoall(
         comm,
         _stream_ptr(stream),
     )
+
+    # wrap with enqueue-timeout monitoring
+    _submit_nccl(lambda: comm, timeout_ms)
 
 
 # Compatibility helper (legacy API surface)
