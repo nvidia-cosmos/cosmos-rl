@@ -72,43 +72,34 @@ class TestParallelMap(unittest.TestCase):
             ("model.embed_tokens.weight", torch.Size([75968, 2048])),
         ]
         global_rank = 5
-        insts = mapper.generate_policy_to_rollout_insts(
-            params=layers, global_rank=int(global_rank)
+        insts = mapper.policy_to_rollout_manifest(
+            params=[(x[0], len(x[1])) for x in layers], global_rank=int(global_rank)
         )
         r_rank_max = 0
         layer_idx = 0
         for inst in insts:
-            p_rank, r_rank, tensor_split_strategys, dest_name, shape = inst
-            local_view = torch.zeros(shape).to("cuda")
-            view = local_view.cosmos_slice(tensor_split_strategys)
-            assert (view.eq(0).all()).item()
-            view.copy_(torch.ones(view.shape).to("cuda"))
-            assert (view.eq(1).all()).item()
-            new_view = local_view.cosmos_slice(tensor_split_strategys)
-            assert (new_view.eq(1).all()).item()
+            p_rank, r_rank, tensor_split_strategys, dest_name, _ = inst
             assert p_rank == global_rank
             while layers[layer_idx][0] != dest_name:
                 r_rank_max = 0
                 layer_idx += 1
-            assert layers[layer_idx][1] == shape
             assert layers[layer_idx][0] == dest_name
             assert r_rank >= r_rank_max
             if r_rank > r_rank_max:
                 r_rank_max = r_rank
 
         global_rank = 2
-        insts = mapper.generate_rollout_from_policy_insts(
-            params=layers, rollout_rank=int(global_rank)
+        insts = mapper.rollout_from_policy_manifest(
+            params=[(x[0], len(x[1])) for x in layers], rollout_rank=int(global_rank)
         )
         p_rank_max = 0
         layer_idx = 0
         for inst in insts:
-            p_rank, r_rank, tensor_split_strategys, dest_name, shape = inst
+            p_rank, r_rank, tensor_split_strategys, dest_name, _ = inst
             assert r_rank == global_rank
             while layers[layer_idx][0] != dest_name:
                 p_rank_max = 0
                 layer_idx += 1
-            assert layers[layer_idx][1] == shape
             assert layers[layer_idx][0] == dest_name
             assert p_rank >= p_rank_max
             if p_rank > p_rank_max:
