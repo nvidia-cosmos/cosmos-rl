@@ -112,23 +112,16 @@ def main():
         config = toml.load(f)
     min_n_gpus_policy = (
         config['policy']['parallelism']['tp_size']
-        * config['policy']['parallelism']['dp_replicate_size']
         * config['policy']['parallelism']['pp_size']
         * config['policy']['parallelism']['cp_size']
     )
     min_n_gpus_rollout = (
         config['rollout']['parallelism']['tp_size']
-        * config['rollout']['parallelism']['dp_replicate_size']
         * config['rollout']['parallelism']['pp_size']
-        * config['rollout']['parallelism']['cp_size']
     )
     if config['policy']['parallelism']['dp_shard_size'] >= 1:
         min_n_gpus_policy = (
             min_n_gpus_policy * config['policy']['parallelism']['dp_shard_size']
-        )
-    if config['rollout']['parallelism']['dp_shard_size'] >= 1:
-        min_n_gpus_rollout = (
-            min_n_gpus_rollout * config['rollout']['parallelism']['dp_shard_size']
         )
 
     policy_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(args.ngpu_per_node, min_n_gpus_policy, args.n_policy_replicas, "policy")
