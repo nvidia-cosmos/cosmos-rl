@@ -81,7 +81,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
 
         input_ids = self.tokenizer(
             prompt, add_special_tokens=False
-        ).input_ids  # Don't pad yet
+        ).input_ids  # not padded yet
 
         completion_ids = self.tokenizer(completion, add_special_tokens=False).input_ids
 

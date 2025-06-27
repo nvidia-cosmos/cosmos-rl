@@ -47,6 +47,7 @@ from cosmos_rl.utils.util import (
     msgunpack_c_long,
     fix_data_type_size,
     masked_mean,
+    compute_logprobs,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
@@ -66,7 +67,6 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
     COSMOS_API_POLICY_TRAIN_ACK_SUFFIX,
 )
-from cosmos_rl.utils.util import selective_log_softmax
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
@@ -84,6 +84,12 @@ def compute_loss(
     config: CosmosConfig,
     logprob_masks: torch.Tensor,  # of shape `[batch_size, max_len]`
 ) -> torch.Tensor:
+    logger.info(
+        f"LMS: current_token_logps shape: {current_token_logps.shape}, old_per_token_logps shape: {old_per_token_logps.shape}, ref_per_token_logps shape: {ref_per_token_logps.shape if ref_per_token_logps is not None else 'None'}, current_advantages shape: {current_advantages.shape}, logprob_masks shape: {logprob_masks.shape}"
+    )
+    logger.info(
+        f"LMS: current_token_logps dtype: {current_token_logps.dtype}, old_per_token_logps dtype: {old_per_token_logps.dtype}, ref_per_token_logps dtype: {ref_per_token_logps.dtype if ref_per_token_logps is not None else 'None'}, current_advantages dtype: {current_advantages.dtype}, logprob_masks dtype: {logprob_masks.dtype}"
+    )
     assert (
         current_token_logps.shape == current_advantages.shape
     ), "current_token_logps and current_advantages should have the same shape"
@@ -119,7 +125,7 @@ def compute_loss(
     if config.train.train_policy.aipo_rho is not None:
         # Due to the asynchronous update of the reference model, the rollout is not necessarily
         # the exact previous iterate of latest policy. So a more natural motivation is correct
-        # for the off-policyness of samples generated under previous policy, to contruct
+        # for the off-policyness of samples generated under previous policy, to construct
         # approximate on-policy update to latest policy.
         # A difference from double-sided clipping of PPO, we use one-sided clipping.
         rho = config.train.train_policy.aipo_rho
@@ -999,28 +1005,16 @@ class GRPOTrainer(Trainer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute the per-token log probabilities and advantages
+
+        Args:
+            minibatch: a dictionary containing the input_ids and logprob_masks
+            full_logits: the logits of the model
+
+        Returns:
+            logps: the per-token log probabilities
+            logprob_masks: the logprob_masks
         """
-        assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
-        assert (
-            "logprob_masks" in minibatch
-        ), "logprob_masks is required for computing logprobs"
-        # [batch_size, max_len]
-        input_ids_batch = minibatch["input_ids"]
-        # [batch_size, max_len]
-        logprob_masks = minibatch["logprob_masks"]
-
-        # [batch_size, max_len]
-        # advantages_of_interest = advantages * logprob_masks
-
-        # Shift token_ids
-        shifted_input_ids = torch.empty_like(input_ids_batch)
-        shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
-        shifted_input_ids[:, -1] = 0
-        assert (
-            full_logits.shape[:2] == shifted_input_ids.shape[:2]
-        ), f"Logits shape {full_logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
-        logps = selective_log_softmax(full_logits, shifted_input_ids) * logprob_masks
-        return logps, logprob_masks
+        return compute_logprobs(minibatch, full_logits)
 
     def _swap_model_state_dict(self):
         kl_beta = self.config.train.train_policy.kl_beta

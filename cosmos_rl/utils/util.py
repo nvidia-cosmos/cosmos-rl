@@ -30,7 +30,7 @@ import asyncio
 from functools import wraps
 from msgpack import ExtType
 from tqdm import tqdm
-from typing import List
+from typing import List, Dict, Any, Tuple
 import torch
 import pynvml
 from contextlib import contextmanager
@@ -972,3 +972,51 @@ def create_async_task(coro):
     strong_refs.add(task)
     task.add_done_callback(strong_refs.discard)
     return task
+
+
+def compute_logprobs(
+    minibatch: Dict[str, Any],
+    full_logits: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute the per-token log probabilities and advantages
+
+    Args:
+        minibatch: a dictionary containing the input_ids and logprob_masks
+        full_logits: the logits of the model
+
+    Returns:
+        logps: the per-token log probabilities
+        logprob_masks: the logprob_masks
+    """
+    assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
+    assert (
+        "logprob_masks" in minibatch
+    ), "logprob_masks is required for computing logprobs"
+    # [batch_size, max_len]
+    input_ids_batch = minibatch["input_ids"]
+    # [batch_size, max_len]
+    # accumulation
+    logprob_masks = minibatch["logprob_masks"]
+    logger.info(
+        f"LMS: input_ids_batch shape: {input_ids_batch.shape}, logprob_masks shape: {logprob_masks.shape}"
+    )
+    logger.info(
+        f"LMS: input_ids_batch dtype: {input_ids_batch.dtype}, logprob_masks dtype: {logprob_masks.dtype}"
+    )
+    logger.info(f"LMS: input_ids_batch: {input_ids_batch}")
+    # [batch_size, max_len]
+    # advantages_of_interest = advantages * logprob_masks
+
+    # Shift token_ids
+    shifted_input_ids = torch.empty_like(input_ids_batch)
+    shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
+    shifted_input_ids[:, -1] = 0
+    assert (
+        full_logits.shape[:2] == shifted_input_ids.shape[:2]
+    ), f"Logits shape {full_logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+    logps = selective_log_softmax(full_logits, shifted_input_ids) * logprob_masks
+    logger.info(
+        f"LMS: logps shape: {logps.shape}, logprob_masks shape: {logprob_masks.shape}"
+    )
+    return logps, logprob_masks
