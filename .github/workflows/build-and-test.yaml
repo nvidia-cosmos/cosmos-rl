@@ -60,5 +60,5 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker stop "${{ steps.tests.outputs.image_tag }}" || true
+          docker stop "${{ steps.tests.outputs.container_id }}" || true
           docker rmi -f "${{ steps.vars.outputs.image_tag }}" || true
