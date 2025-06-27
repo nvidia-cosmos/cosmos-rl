@@ -113,5 +113,7 @@ class TestParallelMap(unittest.TestCase):
             assert p_rank >= p_rank_max
             if p_rank > p_rank_max:
                 p_rank_max = p_rank
+
+
 if __name__ == "__main__":
     unittest.main()
