@@ -5,7 +5,7 @@ import triton.language as tl
 
 
 @triton.jit
-def compute_logprobs_forward(
+def _compute_logprobs_forward(
     input_ids_ptr,  # [bsz, max_len]
     full_logits_ptr,  # [bsz, max_len, vocab_size]
     seqlen_start_idx_ptr,  # [bsz]
@@ -64,7 +64,8 @@ def compute_logprobs_forward(
     )
 
 
-def compute_logprobs_backward(
+@triton.jit
+def _compute_logprobs_backward(
     gradient_output_ptr,  # [n_logprob_tokens]
     gradient_full_logits_ptr,  # [bsz, max_len, vocab_size]
     input_ids_ptr,  # [bsz, max_len]
@@ -176,7 +177,7 @@ class TritonComputeLogprobs(torch.autograd.Function):
         MAX_FUSED_SIZE = 65536 // full_logits.element_size()
         BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(vocab_size))
         grid = (bsz * max_len,)
-        compute_logprobs_forward[grid](
+        _compute_logprobs_forward[grid](
             input_ids,  # [bsz, max_len]
             full_logits,  # [bsz, max_len, vocab_size]
             seqlen_start_idx,  # [bsz,]
@@ -190,7 +191,6 @@ class TritonComputeLogprobs(torch.autograd.Function):
         )
         ctx.save_for_backward(
             input_ids,
-            logprob_masks,
             full_logits,
             seqlen_start_idx,
             seqlen_end_idx,
@@ -200,11 +200,11 @@ class TritonComputeLogprobs(torch.autograd.Function):
         return logprobs, cu_seqlens
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_cu_seqlens):
+        # https://math.stackexchange.com/questions/4258008/derivative-of-the-log-softmax-function
         # https://stackoverflow.com/questions/35304393/trying-to-understand-code-that-computes-the-gradient-wrt-to-the-input-for-logsof
         (
             input_ids,
-            logprob_masks,
             full_logits,
             seqlen_start_idx,
             seqlen_end_idx,
@@ -219,7 +219,7 @@ class TritonComputeLogprobs(torch.autograd.Function):
         MAX_FUSED_SIZE = 65536 // full_logits.element_size()
         BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(vocab_size))
         grid = (bsz * max_len,)
-        compute_logprobs_backward[grid](
+        _compute_logprobs_backward[grid](
             grad_output,  # [n_logprob_tokens,]
             gradient_full_logits,  # [bsz, max_len, vocab_size]
             input_ids,  # [bsz, max_len]
@@ -233,4 +233,4 @@ class TritonComputeLogprobs(torch.autograd.Function):
             BLOCK_SIZE=BLOCK_SIZE,
         )
 
-        return (gradient_full_logits, None)
+        return (None, None, gradient_full_logits)

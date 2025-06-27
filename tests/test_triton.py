@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Tuple
 from cosmos_rl.utils.util import compute_logprobs
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.config import GrpoConfig
-from cosmos_rl.triton_ops._compute_loss import triton_compute_logprobs_forward
+from cosmos_rl.triton_ops._compute_loss import TritonComputeLogprobs
 
 # PROMPT_LEN_MAX = 1024
 # COMPLETION_LEN_MAX = 4096
@@ -122,7 +122,7 @@ def compute_normal_logprobs(mini_batch, full_logits):
 
 
 def compute_triton_logprobs(mini_batch, full_logits):
-    triton_logprobs, cu_seqlens = triton_compute_logprobs_forward(
+    triton_logprobs, cu_seqlens = TritonComputeLogprobs.apply(
         mini_batch["input_ids"],
         mini_batch["logprob_masks"],
         full_logits,
@@ -159,11 +159,13 @@ def test_computing_logprobs_and_loss():
 
     print("Triton")
     # Triton forward
-    triton_logprobs, cu_seqlens = triton_compute_logprobs_forward(
-        mini_batch["input_ids"],
-        mini_batch["logprob_masks"],
+    triton_logprobs, cu_seqlens = compute_triton_logprobs(
+        mini_batch,
         full_logits,
     )
+
+    triton_mean = triton_logprobs.mean()
+    triton_mean.backward()
 
     for i in range(bsz):
         batch_i_logprobs_normal = normal_logps[i]  # [seqlen,]

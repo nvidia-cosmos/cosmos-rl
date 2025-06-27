@@ -84,12 +84,6 @@ def compute_loss(
     config: CosmosConfig,
     logprob_masks: torch.Tensor,  # of shape `[batch_size, max_len]`
 ) -> torch.Tensor:
-    logger.info(
-        f"LMS: current_token_logps shape: {current_token_logps.shape}, old_per_token_logps shape: {old_per_token_logps.shape}, ref_per_token_logps shape: {ref_per_token_logps.shape if ref_per_token_logps is not None else 'None'}, current_advantages shape: {current_advantages.shape}, logprob_masks shape: {logprob_masks.shape}"
-    )
-    logger.info(
-        f"LMS: current_token_logps dtype: {current_token_logps.dtype}, old_per_token_logps dtype: {old_per_token_logps.dtype}, ref_per_token_logps dtype: {ref_per_token_logps.dtype if ref_per_token_logps is not None else 'None'}, current_advantages dtype: {current_advantages.dtype}, logprob_masks dtype: {logprob_masks.dtype}"
-    )
     assert (
         current_token_logps.shape == current_advantages.shape
     ), "current_token_logps and current_advantages should have the same shape"
