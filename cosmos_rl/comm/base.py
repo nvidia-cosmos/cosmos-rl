@@ -99,7 +99,7 @@ class CommMixin:
             self.data_packer = user_data_packer
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
-            self.data_packer = self.model.weight_mapper.data_packer()
+            self.data_packer = self.model.__class__.data_packer()
             logger.info(f"Using default data packer: {self.data_packer}")
         self.data_packer.setup(self.config, self.tokenizer)
 
@@ -112,7 +112,7 @@ class CommMixin:
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )
         else:
-            self.val_data_packer = self.model.weight_mapper.data_packer()
+            self.val_data_packer = self.model.__class__.data_packer()
             logger.info(f"Using default validation data packer: {self.val_data_packer}")
         self.val_data_packer.setup(self.config, self.tokenizer)
 

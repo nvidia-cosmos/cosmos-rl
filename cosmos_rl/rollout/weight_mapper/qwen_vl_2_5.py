@@ -29,9 +29,6 @@ from cosmos_rl.utils.parallelism_registry import (
 )
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from cosmos_rl.dispatcher.data.packer.qwen2_5_vlm_data_packer import (
-    Qwen2_5_VLM_DataPacker,
-)
 
 
 @WeightMapper.register_class(Qwen2_5_VLConditionalModel.supported_model_types())
@@ -202,6 +199,3 @@ class QwenVL25WeightMapper(WeightMapper):
             get_rollout_parallelism_strategy("gpt"),
             get_rollout_parallelism_strategy("qwen2_5_vl"),
         ]
-
-    def data_packer(self) -> Qwen2_5_VLM_DataPacker:
-        return Qwen2_5_VLM_DataPacker()

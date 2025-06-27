@@ -20,9 +20,6 @@ from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
 
 
 @WeightMapper.register_class(DeepseekV3MoEModel.supported_model_types())
@@ -53,6 +50,3 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         raise NotImplementedError
-
-    def data_packer(self) -> DecoderOnlyLLMDataPacker:
-        return DecoderOnlyLLMDataPacker()

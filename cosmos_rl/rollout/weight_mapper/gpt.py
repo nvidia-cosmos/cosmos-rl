@@ -25,9 +25,6 @@ from cosmos_rl.utils.parallelism_registry import (
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 from cosmos_rl.policy.model.gpt import GPT
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
 
 
 @WeightMapper.register_class(GPT.supported_model_types())
@@ -129,6 +126,3 @@ class GPTWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("gpt")]
-
-    def data_packer(self) -> DecoderOnlyLLMDataPacker:
-        return DecoderOnlyLLMDataPacker()

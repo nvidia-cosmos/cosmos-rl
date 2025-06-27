@@ -25,9 +25,6 @@ from cosmos_rl.utils.parallelism_registry import (
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 
 
@@ -157,6 +154,3 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("qwen3_moe")]
-
-    def data_packer(self) -> DecoderOnlyLLMDataPacker:
-        return DecoderOnlyLLMDataPacker()

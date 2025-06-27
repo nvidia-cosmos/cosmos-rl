@@ -19,7 +19,6 @@ from cosmos_rl.utils.parallelism import ParallelismConfig
 from abc import ABC, abstractmethod
 from transformers import AutoConfig
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 
 class WeightMapper(ABC):
@@ -28,11 +27,6 @@ class WeightMapper(ABC):
     def __init__(self, hf_config: AutoConfig):
         logger.info(f"WeightMapper: {type(self).__name__} is being initialized.")
         self.config = hf_config
-
-    def data_packer(self) -> DataPacker:
-        # Do not add `@abstractmethod` here
-        # because user-provided data packer is also allowed
-        raise NotImplementedError
 
     @torch.no_grad()
     def policy_maybe_decompose_weights_to_hf_naming(self, name, param):
