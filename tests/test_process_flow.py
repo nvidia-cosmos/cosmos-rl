@@ -27,7 +27,6 @@ class TestProcessFlow(unittest.TestCase):
         """Test grpo all processes exit cleanly."""
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 2
-        tools_dir = os.path.join(cur_dir, "..", "cosmos_rl", "launcher")
         port = util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
@@ -45,9 +44,7 @@ class TestProcessFlow(unittest.TestCase):
         ) as tmpfile:
             toml.dump(config, tmpfile)
             tmpfile_toml = tmpfile.name
-        controller_cmd = (
-            f"{os.path.join(tools_dir, 'launch_controller.sh')} --config {tmpfile_toml}"
-        )
+        controller_cmd = f"{sys.executable} -m cosmos_rl.dispatcher.run_web_panel --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"
         controller_process = subprocess.Popen(
             controller_cmd,
@@ -113,7 +110,6 @@ class TestProcessFlow(unittest.TestCase):
         """Test sft all processes exit cleanly."""
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         world_size = 2
-        tools_dir = os.path.join(cur_dir, "..", "cosmos_rl", "launcher")
         port = util.find_available_port(8123)
         config_path = os.path.join(
             cur_dir,
@@ -131,9 +127,7 @@ class TestProcessFlow(unittest.TestCase):
         ) as tmpfile:
             toml.dump(config, tmpfile)
             tmpfile_toml = tmpfile.name
-        controller_cmd = (
-            f"{os.path.join(tools_dir, 'launch_controller.sh')} --config {tmpfile_toml}"
-        )
+        controller_cmd = f"{sys.executable} -m cosmos_rl.dispatcher.run_web_panel --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"
         controller_process = subprocess.Popen(
             controller_cmd,
