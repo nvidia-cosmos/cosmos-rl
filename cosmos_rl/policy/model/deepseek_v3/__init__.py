@@ -42,9 +42,6 @@ from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
 from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
 from transformers.activations import ACT2FN
 from functools import cached_property, partial
 
@@ -805,7 +802,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         return output
 
 
-class DeepseekV3MoEModel(nn.Module, BaseModel):
+class DeepseekV3MoEModel(BaseModel):
     """
     DeepseekV3MoEModel Module
 
@@ -827,7 +824,7 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
         return ["deepseek_v3"]
 
     def __init__(self, model_args: DeepseekV3MoeArgs):
-        super().__init__()
+        super().__init__(model_args.hf_config)
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
@@ -1304,37 +1301,6 @@ class DeepseekV3MoEModel(nn.Module, BaseModel):
             traceback.print_exc()
             raise e
         return model
-
-    @classmethod
-    def map_local_key_to_hf_key(cls, name: str) -> str:
-        name = clear_weight_name(name)
-        if not name == "lm_head.weight":
-            if not name.startswith("model."):
-                name = "model." + name
-        return name
-
-    @torch.no_grad()
-    def maybe_decompose_weights_to_hf_naming(self, name, expert_weight: torch.Tensor):
-        # if match := re.search(
-        #     r"model\.layers\.(\d+)\.mlp\.(up_proj|gate_proj|down_proj)\.(weight)", name
-        # ):
-        #     layer_id = int(match.group(1))
-        #     w_name = match.group(2)
-        #     n_experts = expert_weight.shape[0]
-        #     for expert_id in range(n_experts):
-        #         single_expert_weight = (
-        #             expert_weight[expert_id].transpose(0, 1).contiguous()
-        #         )
-        #         yield (
-        #             f"model.layers.{layer_id}.mlp.experts.{expert_id}.{w_name}.weight",
-        #             single_expert_weight,
-        #         )
-        # else:
-        yield name, expert_weight
-
-    @classmethod
-    def data_packer(cls) -> DecoderOnlyLLMDataPacker:
-        return DecoderOnlyLLMDataPacker()
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         raise NotImplementedError(

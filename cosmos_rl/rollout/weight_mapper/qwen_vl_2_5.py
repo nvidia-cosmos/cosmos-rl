@@ -85,11 +85,11 @@ class QwenVL25WeightMapper(WeightMapper):
         up_proj_weight = weight[dim_0 // 2 :]
         return gate_proj_weight, up_proj_weight
 
-    def rollout_prepare_recv(self, model: Qwen2_5_VLForConditionalGeneration):
-        assert isinstance(model, Qwen2_5_VLForConditionalGeneration)
+    def rollout_prepare_recv(self, vllm_model: Qwen2_5_VLForConditionalGeneration):
+        assert isinstance(vllm_model, Qwen2_5_VLForConditionalGeneration)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
-        for param_name, param in model.named_parameters():
+        for param_name, param in vllm_model.named_parameters():
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
             if "qkv_proj" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(

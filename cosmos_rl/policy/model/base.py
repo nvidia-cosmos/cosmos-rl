@@ -26,7 +26,7 @@ from torch import nn
 class BaseModel(nn.Module, ABC):
     def __init__(self, hf_config: AutoConfig):
         super().__init__()
-        from cosmos_rl.rollout.weight_mapper.base import WeightMapper
+        from cosmos_rl.rollout.weight_mapper import WeightMapper
 
         self.weight_mapper = WeightMapper.get_weight_mapper(
             self.supported_model_types()[0]

@@ -73,12 +73,12 @@ class Qwen3MoeWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self, model: Qwen3MoeForCausalLM
+        self, vllm_model: Qwen3MoeForCausalLM
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
-        assert isinstance(model, Qwen3MoeForCausalLM)
+        assert isinstance(vllm_model, Qwen3MoeForCausalLM)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
-        for param_name, param in model.named_parameters():
+        for param_name, param in vllm_model.named_parameters():
             param_name_hf = self._rollout_vllm_name_to_hf(param_name)
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:

@@ -64,14 +64,14 @@ class GPTWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self, model: Qwen2ForCausalLM
+        self, vllm_model: Qwen2ForCausalLM
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
         assert (
-            "qwen" in type(model).__name__.lower()
-        ), f"model is not a QwenForCausalLM: {type(model).__name__}"
+            "qwen" in type(vllm_model).__name__.lower()
+        ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
-        for param_name, param in model.named_parameters():
+        for param_name, param in vllm_model.named_parameters():
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
             # logger.info(f"[Rollout] compatible_key: {compatible_key}")
             if "qkv_proj" in compatible_key:

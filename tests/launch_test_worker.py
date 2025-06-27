@@ -180,7 +180,7 @@ class TestRollout:
         }
         self.ref_compatibale_map = compatibale_map
 
-        def rollout_prepare_recv(self, model):
+        def rollout_prepare_recv(self, vllm_model):
             self.vllm_weight_inplace_view_map = compatibale_map
             self.recv_key_n_rank_list = compatibale_list
             return operate_compatibale_map, compatibale_list

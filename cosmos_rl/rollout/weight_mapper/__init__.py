@@ -16,11 +16,13 @@
 from .base import WeightMapper
 from .gpt import GPTWeightMapper
 from .qwen_vl_2_5 import QwenVL25WeightMapper
-from .qwen3 import Qwen3MoeWeightMapper
+from .qwen3_moe import Qwen3MoeWeightMapper
+from .deepseek_v3 import DeepseekV3MoEWeightMapper
 
 __all__ = [
     "WeightMapper",
     "GPTWeightMapper",
     "QwenVL25WeightMapper",
     "Qwen3MoeWeightMapper",
+    "DeepseekV3MoEWeightMapper",
 ]

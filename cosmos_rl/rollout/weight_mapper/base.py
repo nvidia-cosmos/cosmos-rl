@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Type, Tuple, List, Union
+from typing import Dict, Type, Tuple, List, Union, Any
 import torch
-from torch import nn
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from abc import ABC, abstractmethod
 from transformers import AutoConfig
@@ -60,7 +59,7 @@ class WeightMapper(ABC):
 
     @abstractmethod
     def rollout_prepare_recv(
-        self, model: nn.Module
+        self, vllm_model: Any
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, int]]]:
         """
         Rollout prepare recv list for P2R weight sync:
