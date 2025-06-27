@@ -775,7 +775,7 @@ class GRPOTrainer(Trainer):
             )
 
         # Train ACK
-        if is_master_rank(self.parallel_dims, self.global_rank) and not is_fake_step:
+        if is_master_rank(self.parallel_dims, self.global_rank):
             try:
                 make_request_with_retry(
                     partial(
@@ -783,6 +783,7 @@ class GRPOTrainer(Trainer):
                         json={
                             "replica_name": self.replica_name,
                             "weight_step": command.global_step,
+                            "total_steps": command.total_steps,
                             "profile_finished": self.profiler.check_finished(),
                             "report_data": report_data,
                         },

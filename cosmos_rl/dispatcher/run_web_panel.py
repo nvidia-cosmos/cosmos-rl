@@ -430,11 +430,13 @@ async def train_ack(request: TrainAckRequest):
     try:
         replicaname = request.replica_name
         step = request.weight_step
+        total_steps = request.total_steps
         profile_finished = request.profile_finished
         report_data = request.report_data
         controller.policy_status_manager.train_ack(
             replicaname,
             step,
+            total_steps,
             profile_finished,
             report_data,
             controller.rollout_status_manager,

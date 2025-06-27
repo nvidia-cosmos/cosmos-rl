@@ -45,6 +45,7 @@ class HandshakeAcceptorRequest(BaseModel):
 class TrainAckRequest(BaseModel):
     replica_name: str
     weight_step: int
+    total_steps: int
     # For profiling
     profile_finished: bool = False
     # For logger report data
