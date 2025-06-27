@@ -262,11 +262,11 @@ class GRPOTrainer(Trainer):
                 self.fetch_command_thread.join()
                 self.fetch_command_thread = None
 
-            if self.heartbeat_thread is not None:
+            if hasattr(self, "heartbeat_thread") and self.heartbeat_thread is not None:
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
 
-            if self.upload_thread is not None:
+            if hasattr(self, "upload_thread") and self.upload_thread is not None:
                 logger.info("[Policy] Waiting for upload thread to finish...")
                 self.upload_thread.join()
                 logger.info("[Policy] Upload thread finished.")
