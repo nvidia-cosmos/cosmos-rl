@@ -61,7 +61,7 @@ class TestFp8(unittest.TestCase):
         ]
         for quant_recipe, dp_shard in params:
             with self.subTest(quant_recipe=quant_recipe, dp_shard=dp_shard):
-                # right now expoect NotImplementedError for dynamic scaling
+                # right now expect NotImplementedError for delayed scaling
                 with self.assertRaises(NotImplementedError):
                     self._test_fp8_model_converter_delayed_scaling(
                         quant_recipe=quant_recipe, dp_shard=dp_shard

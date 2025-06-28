@@ -65,12 +65,15 @@ RUN pip install -U pip setuptools wheel packaging
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
 RUN pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
-RUN pip install torchao==0.11.0 vllm==0.9.1 flash-attn==2.8.0.post2
-RUN pip install https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl
 
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 COPY constraints.txt /workspace/cosmos_rl/constraints.txt
-RUN pip install -r /workspace/cosmos_rl/requirements.txt
+RUN pip install \
+    torchao==0.11.0 \
+    vllm==0.9.1 \
+    flash-attn==2.8.0.post2 \
+    https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl \
+    -r /workspace/cosmos_rl/requirements.txt
 
 FROM base AS package
 
