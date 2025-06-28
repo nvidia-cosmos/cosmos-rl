@@ -70,7 +70,7 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_comm,
     nccl_send,
 )
-from cosmos_rl.utils.util import triton_compute_logprobs
+from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
 
 
 def compute_loss(
@@ -84,6 +84,7 @@ def compute_loss(
     config: CosmosConfig,
     logprob_masks: torch.Tensor,  # of shape `[batch_size, max_len]`
 ) -> torch.Tensor:
+    # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
     current_advantages = torch.masked_select(current_advantages, logprob_masks)
 
     assert (
@@ -1021,7 +1022,7 @@ class GRPOTrainer(Trainer):
             logps: the per-token log probabilities
             logprob_masks: the logprob_masks
         """
-        return triton_compute_logprobs(minibatch, full_logits)
+        return logprobs_computing(minibatch, full_logits, use_triton=True)
 
     def _swap_model_state_dict(self):
         kl_beta = self.config.train.train_policy.kl_beta
