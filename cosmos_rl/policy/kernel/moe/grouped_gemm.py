@@ -50,7 +50,7 @@ class FakeGroupMMBackwardCheck(torch.autograd.Function):
         return grad_x, grad_w, None, None
 
 
-class GroupedGemm_fanshiqing(torch.autograd.Function):
+class FallbackGroupedGemmImpl(torch.autograd.Function):
     @staticmethod
     def forward(ctx, a, b, batch_sizes, trans_b):
         assert backend is not None, "grouped_gemm is not available."
@@ -118,14 +118,14 @@ def run_group_gemm_3rd_party(
 ):
     sizes_cpu = m_sizes.cpu().to(torch.int64)
 
-    gate_proj = GroupedGemm_fanshiqing.apply(
+    gate_proj = FallbackGroupedGemmImpl.apply(
         contig_tokens,
         gate_weight,
         sizes_cpu,
         False,
     )
 
-    up_proj = GroupedGemm_fanshiqing.apply(
+    up_proj = FallbackGroupedGemmImpl.apply(
         contig_tokens,
         up_weight,
         sizes_cpu,
@@ -136,7 +136,7 @@ def run_group_gemm_3rd_party(
     hidden_outputs = act_fn(gate_proj) * up_proj
 
     # Run the third GEMM (down projection)
-    hidden_outputs = GroupedGemm_fanshiqing.apply(
+    hidden_outputs = FallbackGroupedGemmImpl.apply(
         hidden_outputs,
         down_weight,
         sizes_cpu,
