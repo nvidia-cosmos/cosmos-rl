@@ -61,3 +61,24 @@ Total `8*4 + 4*2 = 40` GPUs are used. (5 `8xH100` nodes will be allocated for th
 
 For more details about DGXC-Lepton, please refer to :doc:`../multinodes/dgxc_lepton`
 
+Slurm job example
+:::::::::::::::::::::::
+
+Cosmos slurm Job takes care of the number of GPU required by each policy and rollout replica. It will calculate and allocate the number of total nodes necessary to launch the job, then allocate and launch the job on the slurm cluster.
+
+>>> python tools/slurm/dispatch_job.py \
+        --ngpu-per-node 8 \
+        --n-policy-replicas 8 \
+        --n-rollout-replicas 4  \
+        --config-path configs/qwen2-5/qwen2-5-32b-p-fsdp2-tp4-r-tp4-pp1-grpo-gsm8k.toml \
+        --repo-root-path ${YOUR_COSMOS_REPO_PATH} \
+        --output-root-path ${YOUR_COSMOS_LOG_OUTPUT_PATH} \
+        --cosmos-container ${YOUR_COSMOS_SQSQ_PATH} \
+        --slurm-partition ${YOUR_SLURM_PARTITION} \
+        --slurm-account ${YOUR_SLURM_ACCOUNT} \
+        tools/dataset/gsm8k_grpo.py
+
+Total `8*8 + 4*4 = 64` GPUs are used. (8 `8xH100` nodes will be allocated for this job)
+
+For more details about Slurm job submission, please refer to :doc:`../multinodes/slurm`
+
