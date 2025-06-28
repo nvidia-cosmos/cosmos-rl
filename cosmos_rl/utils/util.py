@@ -46,7 +46,7 @@ import functools
 from cosmos_rl.utils.logging import logger
 from safetensors import safe_open
 from cosmos_rl.utils.constant import CACHE_DIR
-from cosmos_rl.triton_ops._compute_loss import TritonComputeLogprobs
+from cosmos_rl.triton_ops.logprobs import TritonComputeLogprobs
 
 
 def create_cached_dir_if_needed():
