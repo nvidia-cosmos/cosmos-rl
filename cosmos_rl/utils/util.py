@@ -938,6 +938,30 @@ def find_maximal_prefix_groups(
     return result
 
 
+def add_nan_checks(model):
+    """
+    Add nan checks to the model.
+    """
+    for name, param in model.named_parameters():
+        if not param.requires_grad or not param.is_leaf:
+            continue
+
+        # factory to capture the current name in a closure
+        def make_hook(param_name):
+            def hook(grad):
+                if isinstance(grad, torch.distributed.Tensor.DTensor):
+                    grad = grad.to_local()
+                if torch.isnan(grad).any():
+                    msg = f"NaN detected in gradient of {param_name}"
+                    raise RuntimeError(msg)
+                return grad  # must return the (possibly modified) grad
+
+            return hook
+
+        param.register_hook(make_hook(name))
+        logger.info(f"Added nan check for {name}")
+
+
 # Util func to create an asyncio task with proper cleanup
 strong_refs = set()
 

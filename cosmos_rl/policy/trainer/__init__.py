@@ -106,7 +106,7 @@ class Trainer(CommMixin):
             self.model_parts = model.separate_model_parts()
             self.model = model
             self.init_comm()
-
+            # util.add_nan_checks(model)
         except Exception as e:
             import traceback
 
