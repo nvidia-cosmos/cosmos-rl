@@ -804,7 +804,9 @@ class GRPOTrainer(Trainer):
         # Add nccl allreduce operations for all parameters and necessary states.
         """
         for model_part in self.model_parts:
-            # Do allreduce of gradient in all policy replicas.
+            # Model part may use same physical mesh for different logical mesh,
+            # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
+            # So we need to do allreduce for each model part
             if model_part is not None:
                 dist_util.gradient_reduce_across_dp_replicas_(
                     [p for p in model_part.parameters()], self.inter_policy_nccl

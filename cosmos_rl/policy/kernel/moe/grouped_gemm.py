@@ -15,6 +15,15 @@
 
 import torch
 
+try:
+    from grouped_gemm import backend
+except ImportError:
+    print(
+        "grouped_gemm is not available. To enable grouped_gemm, please run:"
+        "pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
+    )
+    backend = None
+
 
 class FakeGroupMMBackwardCheck(torch.autograd.Function):
     @staticmethod
@@ -34,7 +43,44 @@ class FakeGroupMMBackwardCheck(torch.autograd.Function):
         grad_w = torch._grouped_mm(
             x.transpose(-2, -1), grad_output, m_offsets, out_dtype=out_dtype
         )
+        # Fault due to grouped_gemm, where aligned memory is not used which may contains nan
+        # Check https://github.com/pytorch/pytorch/issues/154557
+        grad_x = torch.nan_to_num(grad_x, nan=0.0)
+        grad_w = torch.nan_to_num(grad_w, nan=0.0)
         return grad_x, grad_w, None, None
+
+
+class GroupedGemm_fanshiqing(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a, b, batch_sizes, trans_b):
+        assert backend is not None, "grouped_gemm is not available."
+        assert (
+            torch.count_nonzero(batch_sizes) != 0
+        ), "Input batch_sizes should not be all zeros!"
+        ctx.save_for_backward(a, b, batch_sizes)
+        ctx.trans_b = trans_b
+        return backend.gmm(a, b, batch_sizes, trans_a=False, trans_b=trans_b)
+
+    @staticmethod
+    def backward(ctx, grad):
+        grad = grad.contiguous()
+        a, b, batch_sizes = ctx.saved_tensors
+        trans_b = ctx.trans_b
+
+        agrad = None
+        if ctx.needs_input_grad[0]:
+            agrad = backend.gmm(
+                grad, b, batch_sizes, trans_a=False, trans_b=not trans_b
+            )
+
+        bgrad = None
+        if ctx.needs_input_grad[1]:
+            lhs, rhs = (grad, a) if trans_b else (a, grad)
+            bgrad = backend.gmm(lhs, rhs, batch_sizes, trans_a=True, trans_b=False)
+        # Fault due to grouped_gemm, where aligned memory is not used which may contains nan
+        agrad = torch.nan_to_num(agrad, nan=0.0)
+        bgrad = torch.nan_to_num(bgrad, nan=0.0)
+        return agrad, bgrad, None, None
 
 
 def run_group_gemm_hopper(
@@ -70,40 +116,31 @@ def run_group_gemm_hopper(
 def run_group_gemm_3rd_party(
     contig_tokens, m_sizes, m_offsets, gate_weight, up_weight, down_weight, act_fn
 ):
-    try:
-        from grouped_gemm import ops
-    except ImportError:
-        print(
-            "grouped_gemm is not available. Please run:"
-            "pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
-        )
-        raise
-
     sizes_cpu = m_sizes.cpu().to(torch.int64)
 
-    gate_proj = ops.gmm(
+    gate_proj = GroupedGemm_fanshiqing.apply(
         contig_tokens,
         gate_weight,
         sizes_cpu,
-        trans_b=False,
+        False,
     )
 
-    up_proj = ops.gmm(
+    up_proj = GroupedGemm_fanshiqing.apply(
         contig_tokens,
         up_weight,
         sizes_cpu,
-        trans_b=False,
+        False,
     )
 
     # Apply activation
     hidden_outputs = act_fn(gate_proj) * up_proj
 
     # Run the third GEMM (down projection)
-    hidden_outputs = ops.gmm(
+    hidden_outputs = GroupedGemm_fanshiqing.apply(
         hidden_outputs,
         down_weight,
         sizes_cpu,
-        trans_b=False,
+        False,
     )
     return hidden_outputs
 
