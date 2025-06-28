@@ -1,6 +1,6 @@
 .. _slurm-launch-job:
 
-Launch Job via Slurm
+Slurm Job
 ====================
 
 We provide a script to easily launch training jobs via Slurm on a cluster. For example, to launch a job with 1 policy replica, 2 rollout replicas, and 8 GPUs per node, use the following command:

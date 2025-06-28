@@ -49,4 +49,4 @@ The full arguments for `dispatch_job.py` are as follows:
 | --output-root-path     | str                      | Yes      |   -            | Path to the output root.                                                    |
 | --cosmos-container     | str                      | Yes      |   -            | Path to the cosmos container.                                               |
 | --extra-sbatch-args    | str                      | No       | ["--gres=gpu:8"] | Extra #SBATCH arguments.                                              |
-| launcher               | str                      | No       | cosmos_rl.dispatcher.run_web_panel | Launcher to use for dataset related operations, a custom launcher can be provided for custom dataset and reward functions injection. (Check in tools/dataset)                                              |
+| launcher               | str (positional)         | No       | cosmos_rl.dispatcher.run_web_panel | Launcher to use for dataset related operations, a custom launcher can be provided for custom dataset and reward functions injection. (Check in tools/dataset)                                              |
