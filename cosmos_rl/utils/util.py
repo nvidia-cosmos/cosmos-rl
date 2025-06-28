@@ -46,6 +46,7 @@ import functools
 from cosmos_rl.utils.logging import logger
 from safetensors import safe_open
 from cosmos_rl.utils.constant import CACHE_DIR
+from cosmos_rl.triton_ops._compute_loss import TritonComputeLogprobs
 
 
 def create_cached_dir_if_needed():
@@ -407,9 +408,6 @@ def selective_log_softmax(logits, index):
             ).squeeze(-1)
             per_token_logps.append(row_per_token_logps)
         per_token_logps = torch.stack(per_token_logps)
-    logger.info(
-        f"LMS: shape of per_token_logps: {per_token_logps.shape}, value: {per_token_logps}"
-    )
     return per_token_logps
 
 
@@ -980,6 +978,7 @@ def create_async_task(coro):
 def compute_logprobs(
     minibatch: Dict[str, Any],
     full_logits: torch.Tensor,
+    use_triton: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the per-token log probabilities and advantages
@@ -1011,5 +1010,11 @@ def compute_logprobs(
     assert (
         full_logits.shape[:2] == shifted_input_ids.shape[:2]
     ), f"Logits shape {full_logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
-    logps = selective_log_softmax(full_logits, shifted_input_ids) * logprob_masks
-    return logps, logprob_masks
+    if use_triton:
+        loss, cu_seqlens = TritonComputeLogprobs.apply(
+            shifted_input_ids, logprob_masks, full_logits
+        )
+        return loss, cu_seqlens
+    else:
+        logps = selective_log_softmax(full_logits, shifted_input_ids) * logprob_masks
+        return logps, logprob_masks

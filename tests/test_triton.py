@@ -3,17 +3,15 @@ import torch
 from typing import List, Dict, Any, Tuple
 
 from cosmos_rl.utils.util import compute_logprobs
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.config import GrpoConfig
-from cosmos_rl.triton_ops._compute_loss import TritonComputeLogprobs
 
-# PROMPT_LEN_MAX = 1024
-# COMPLETION_LEN_MAX = 4096
-# VOCAB_SIZE = 152064
+PROMPT_LEN_MAX = 1024
+COMPLETION_LEN_MAX = 4096
+VOCAB_SIZE = 152064
 
-PROMPT_LEN_MAX = 128
-COMPLETION_LEN_MAX = 256
-VOCAB_SIZE = 1024
+# Below are only for kernel debugging
+# PROMPT_LEN_MAX = 1
+# COMPLETION_LEN_MAX = 4
+# VOCAB_SIZE = 8
 
 
 def simulate_samples(
@@ -34,12 +32,12 @@ def simulate_samples(
     # generate prompt_ids and completion_ids
     for prompt_len in prompt_lens:
         prompt_ids.append(
-            [random.randint(1, VOCAB_SIZE - 1) for _ in range(prompt_len)]
+            [random.randint(1, VOCAB_SIZE - 2) for _ in range(prompt_len)]
         )
 
     for completion_len in completion_lens:
         completion_ids.append(
-            [random.randint(1, VOCAB_SIZE - 1) for _ in range(completion_len)]
+            [random.randint(1, VOCAB_SIZE - 2) for _ in range(completion_len)]
         )
 
     # generate logprob_masks and input_ids
@@ -65,7 +63,9 @@ def simulate_samples(
 
 
 def simulate_pad_samples(
-    samples: List[Tuple[List[int], List[int]]], max_len: int, pad_token_id: int = 1
+    samples: List[Tuple[List[int], List[int]]],
+    max_len: int,
+    pad_token_id: int = VOCAB_SIZE - 1,
 ) -> torch.Tensor:
     """
     Pad samples to the same length. simulate `policy_collate_fn` in DataPacker.
@@ -117,67 +117,53 @@ def simulate_generate_mini_batch(
 
 
 def compute_normal_logprobs(mini_batch, full_logits):
-    logps, logprob_masks = compute_logprobs(mini_batch, full_logits)
+    logps, logprob_masks = compute_logprobs(mini_batch, full_logits, use_triton=False)
     return logps, logprob_masks
 
 
-def compute_triton_logprobs(mini_batch, full_logits):
-    triton_logprobs, cu_seqlens = TritonComputeLogprobs.apply(
-        mini_batch["input_ids"],
-        mini_batch["logprob_masks"],
-        full_logits,
-    )
-    return triton_logprobs, cu_seqlens
-
-
-def test_computing_logprobs_and_loss():
-    # instantiate a GRPOTrainer
-    cosmos_config = CosmosConfig()
-    cosmos_config.train.train_policy = GrpoConfig()
-
-    bsz = 6
-
+def test_computing_logprobs_and_loss(bsz: int = 6):
     samples = simulate_samples(bsz=bsz, n_ignore_prefix_tokens=0)
     mini_batch, max_len_from_samples = simulate_generate_mini_batch(samples)
 
+    logprob_masks = mini_batch["logprob_masks"]
+
     # now generate the full logits
     full_logits = torch.randn(bsz, max_len_from_samples, VOCAB_SIZE).cuda().bfloat16()
-    # triton_full_logits = full_logits.clone()
+
+    triton_full_logits = full_logits.clone()
+    triton_full_logits.requires_grad = True
     triton_mini_batch = {}
     for k, v in mini_batch.items():
         triton_mini_batch[k] = v.clone()
 
-    print("Normal")
     full_logits.requires_grad = True
     # compute logprobs
-
     normal_logps, logprob_masks = compute_normal_logprobs(mini_batch, full_logits)
+    selected_normal_logprobs = torch.masked_select(normal_logps, logprob_masks)
 
-    normal_mean = normal_logps.mean()
-    print(f"normal_mean: {normal_mean}")
+    normal_mean = selected_normal_logprobs.mean()
     normal_mean.backward()
 
-    print("Triton")
     # Triton forward
-    triton_logprobs, cu_seqlens = compute_triton_logprobs(
-        mini_batch,
-        full_logits,
+    triton_logprobs, cu_seqlens = compute_logprobs(
+        triton_mini_batch,
+        triton_full_logits,
+        use_triton=True,
     )
 
     triton_mean = triton_logprobs.mean()
     triton_mean.backward()
 
-    for i in range(bsz):
-        batch_i_logprobs_normal = normal_logps[i]  # [seqlen,]
-        mask_of_i = logprob_masks[i]  # [seqlen,]
-        normal_logprobs_of_i = torch.masked_select(batch_i_logprobs_normal, mask_of_i)
+    assert torch.allclose(normal_mean, triton_mean)
 
-        start_idx = cu_seqlens[i]
-        end_idx = cu_seqlens[i + 1]
-        batch_i_logprobs_triton = triton_logprobs[start_idx:end_idx]
+    # Forward compare
+    assert torch.allclose(selected_normal_logprobs, triton_logprobs)
 
-        assert normal_logprobs_of_i.numel() == batch_i_logprobs_triton.numel()
-        # assert torch.allclose(normal_logprobs_of_i, batch_i_logprobs_triton)
+    # backward compare
+    # Gradient values are small, so we lossen the tolerance
+    assert torch.allclose(
+        full_logits.grad, triton_full_logits.grad, atol=1e-3, rtol=1e-2
+    )
 
 
 if __name__ == "__main__":

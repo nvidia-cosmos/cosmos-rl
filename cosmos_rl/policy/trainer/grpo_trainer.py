@@ -70,7 +70,7 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_comm,
     nccl_send,
 )
-from cosmos_rl.triton_ops._compute_loss import TritonComputeLogprobs
+from cosmos_rl.utils.util import triton_compute_logprobs
 
 
 def compute_loss(
@@ -1021,10 +1021,7 @@ class GRPOTrainer(Trainer):
             logps: the per-token log probabilities
             logprob_masks: the logprob_masks
         """
-        return TritonComputeLogprobs.apply(
-            minibatch["input_ids"], minibatch["logprob_masks"], full_logits
-        )
-        # return compute_logprobs(minibatch, full_logits)
+        return triton_compute_logprobs(minibatch, full_logits)
 
     def _swap_model_state_dict(self):
         kl_beta = self.config.train.train_policy.kl_beta

@@ -2,7 +2,6 @@ import torch
 
 import triton
 import triton.language as tl
-from cosmos_rl.utils.logging import logger
 
 
 @triton.jit
@@ -70,18 +69,6 @@ def _compute_logprobs_forward(
     logsum_exp = tl.log(sum_exp_total) + max_logit
     tl.store(addr_of_sumexp, logsum_exp)
 
-    # [1, 1, vocab_size]
-    # [0, 0, index_of_logit]
-    # for i in range(0, vocab_size, BLOCK_SIZE):
-    #     offset = i + tl.arange(0, BLOCK_SIZE)
-    #     load_mask = offset < vocab_size
-    #     logit_of_current_token = tl.load(start_addr_of_token + offset, mask=load_mask, other=0).to(tl.float32)
-    #     logprob_of_current_token = logit_of_current_token - logsum_exp
-
-    #     store_mask = offset == index_of_logit
-    #     new_offset = tl.zeros_like(offset)
-    #     tl.store(addr_of_logprobs + new_offset, logprob_of_current_token, mask=store_mask)
-
     logit_of_current_token = tl.load(start_addr_of_token + index_of_logit).to(
         tl.float32
     )  # scalar
@@ -117,7 +104,7 @@ def _compute_logprobs_backward(
     bsz_cu_seqlen = tl.load(cu_seqlens + bsz_idx)
 
     addr_of_sumexp = sumexp_ptr + bsz_cu_seqlen + token_idx - seqlen_start_idx
-    sum_exp_total = tl.load(addr_of_sumexp)
+    logsum_exp = tl.load(addr_of_sumexp)
 
     start_addr_of_token = (
         full_logits_ptr + bsz_idx * max_len * vocab_size + token_idx * vocab_size
@@ -126,7 +113,7 @@ def _compute_logprobs_backward(
     addr_of_gradient_output = (
         gradient_output_ptr + bsz_cu_seqlen + token_idx - seqlen_start_idx
     )
-    gradient_output = tl.load(
+    gradient_output_of_single_logit = tl.load(
         addr_of_gradient_output
     )  # scalar, gradient of the logit with index `index_of_logit`
 
@@ -145,23 +132,28 @@ def _compute_logprobs_backward(
 
         # recompute the output of log_softmax
         x = tl.load(
-            start_addr_of_token + i + tl.arange(0, BLOCK_SIZE),
+            start_addr_of_token + offset,
             mask=mask,
             other=0,
         ).to(tl.float32)
-        log_softmax_output = x - sum_exp_total
+        log_softmax_output = x - logsum_exp
         exp_log_softmax_output = tl.exp(log_softmax_output)
-
+        # https://math.stackexchange.com/questions/4258008/derivative-of-the-log-softmax-function
+        # https://stackoverflow.com/questions/35304393/trying-to-understand-code-that-computes-the-gradient-wrt-to-the-input-for-logsof
         # gradient_x_i = gradient_output_i - exp(o_i) * sum_j(gradient_output_j)
         gradient_output_block = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
-        tl.where(offset == index_of_logit, gradient_output, gradient_output_block)
-
-        gradient_input_block = (
-            gradient_output_block - exp_log_softmax_output * gradient_output
+        gradient_output_block = tl.where(
+            offset == index_of_logit,
+            gradient_output_of_single_logit,
+            gradient_output_block,
         )
 
+        gradient_input_block = (
+            gradient_output_block
+            - exp_log_softmax_output * gradient_output_of_single_logit
+        )
         tl.store(
-            addr_of_gradient_full_logits + i + tl.arange(0, BLOCK_SIZE),
+            addr_of_gradient_full_logits + offset,
             gradient_input_block,
             mask=mask,
         )
@@ -177,11 +169,6 @@ class TritonComputeLogprobs(torch.autograd.Function):
         assert (
             full_logits.shape[:2] == input_ids.shape[:2]
         ), "full_logits should have the same shape as input_ids"
-
-        shift_input_ids = torch.empty_like(input_ids)
-        shift_input_ids[:, :-1] = input_ids[:, 1:]
-        shift_input_ids[:, -1] = 0
-
         n_logprob_tokens = logprob_masks.sum()
         logprobs = torch.empty(
             n_logprob_tokens, dtype=full_logits.dtype, device=full_logits.device
@@ -196,9 +183,6 @@ class TritonComputeLogprobs(torch.autograd.Function):
         seqlen_end_idx = (
             int_logprob_masks.size(1) - 1 - reversed_int_logprob_masks.argmax(dim=-1)
         )
-
-        logger.info(f"LMS: seqlen_start_idx: {seqlen_start_idx}")
-        logger.info(f"LMS: seqlen_end_idx: {seqlen_end_idx}")
 
         sum_exp = torch.zeros(
             (n_logprob_tokens), dtype=torch.float32, device=full_logits.device
@@ -220,7 +204,6 @@ class TritonComputeLogprobs(torch.autograd.Function):
             vocab_size,
             BLOCK_SIZE=BLOCK_SIZE,
         )
-        logger.info(f"LMS: sum_exp: {sum_exp}")
         ctx.save_for_backward(
             input_ids,
             full_logits,
@@ -233,8 +216,6 @@ class TritonComputeLogprobs(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output, grad_cu_seqlens):
-        # https://math.stackexchange.com/questions/4258008/derivative-of-the-log-softmax-function
-        # https://stackoverflow.com/questions/35304393/trying-to-understand-code-that-computes-the-gradient-wrt-to-the-input-for-logsof
         (
             input_ids,
             full_logits,
