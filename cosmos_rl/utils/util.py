@@ -989,7 +989,8 @@ def compute_logprobs(
 
     Returns:
         logps: the per-token log probabilities
-        logprob_masks: the logprob_masks
+        cu_seqlens: the cumulative sequence lengths if use_triton is True
+        logprob_masks: the logprob_masks if use_triton is False
     """
     assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
     assert (
