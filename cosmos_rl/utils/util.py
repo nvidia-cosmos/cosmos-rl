@@ -46,7 +46,6 @@ import functools
 from cosmos_rl.utils.logging import logger
 from safetensors import safe_open
 from cosmos_rl.utils.constant import CACHE_DIR
-from cosmos_rl.triton_ops.logprobs import TritonComputeLogprobs
 
 
 def create_cached_dir_if_needed():
@@ -978,7 +977,6 @@ def create_async_task(coro):
 def compute_logprobs(
     minibatch: Dict[str, Any],
     full_logits: torch.Tensor,
-    use_triton: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the per-token log probabilities and advantages
@@ -989,8 +987,7 @@ def compute_logprobs(
 
     Returns:
         logps: the per-token log probabilities
-        cu_seqlens: the cumulative sequence lengths if use_triton is True
-        logprob_masks: the logprob_masks if use_triton is False
+        cu_seqlens: the cumulative sequence lengths of the logps
     """
     assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
     assert (
@@ -1011,11 +1008,16 @@ def compute_logprobs(
     assert (
         full_logits.shape[:2] == shifted_input_ids.shape[:2]
     ), f"Logits shape {full_logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
-    if use_triton:
-        loss, cu_seqlens = TritonComputeLogprobs.apply(
-            shifted_input_ids, logprob_masks, full_logits
-        )
-        return loss, cu_seqlens
-    else:
-        logps = selective_log_softmax(full_logits, shifted_input_ids) * logprob_masks
-        return logps, logprob_masks
+    # select the effective logits
+    bsz, _, _ = full_logits.shape
+    effective_logits = full_logits[logprob_masks]  # [n_logprob_tokens, vocab_size]
+    effective_input_ids = shifted_input_ids[logprob_masks]  # [n_logprob_tokens,]
+    masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
+    cu_seqlens = torch.zeros(
+        bsz + 1, dtype=torch.int32, device=full_logits.device
+    )  # [bsz + 1,]
+    cu_seqlens[1:] = torch.cumsum(masked_seqlens, dim=0)
+    logps = selective_log_softmax(
+        effective_logits, effective_input_ids
+    )  # [n_logprob_tokens,]
+    return logps, cu_seqlens

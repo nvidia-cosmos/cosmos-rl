@@ -1022,7 +1022,7 @@ class GRPOTrainer(Trainer):
             logps: the per-token log probabilities
             logprob_masks: the logprob_masks
         """
-        return logprobs_computing(minibatch, full_logits, use_triton=True)
+        return logprobs_computing(minibatch, full_logits)
 
     def _swap_model_state_dict(self):
         kl_beta = self.config.train.train_policy.kl_beta
