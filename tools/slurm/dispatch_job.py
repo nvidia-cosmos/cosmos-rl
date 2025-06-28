@@ -105,7 +105,14 @@ def main():
     parser.add_argument("--output-root-path", type=str, required=True, help="Path to the output root")
     parser.add_argument("--cosmos-container", type=str, required=True, help="Path to the cosmos container")
     parser.add_argument("--extra-sbatch-args", type=str, nargs="*", default=["--gres=gpu:8"], help="Extra #SBATCH arguments")
-    parser.add_argument("--launcher", type=str, default="cosmos_rl.dispatcher.run_web_panel", help="Launcher to use")
+    parser.add_argument(
+        "launcher",
+        nargs="?",  # “?” means 0 or 1 occurrences
+        default="cosmos_rl.dispatcher.run_web_panel",
+        help="The launcher to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom launcher can be provided for custom dataset and reward functions injection.",
+    )
+
+
     args = parser.parse_args()
 
     with open(args.config_path, "r") as f:
