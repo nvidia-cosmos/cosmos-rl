@@ -82,16 +82,7 @@ def parallelize(
         Why we need to apply compile after AC wrapping and before FSDP?
         https://github.com/pytorch/torchtitan/issues/472#issuecomment-2242200809
         """
-        # FIXME: (lms) For ulysses, an error will be raised by torch.compile:
-        # ... torch._dynamo.exc.Unsupported: Graph break due to unsupported builtin None.pybind11_object.__new__.
-        # This is caused by the custom SeqAllToAll in ulysses.py
-        # Related torch issue: https://github.com/pytorch/pytorch/issues/149586
-        # tmp workaround is set fullgraph to False. Figure it out later.
-        if parallel_dims.cp_enabled:
-            logger.warning(
-                "torch.compile and CP will have some issues, temporarily set `fullgraph` to False to bypass the issue. This may cause performance degradation."
-            )
-        apply_compile(model, not parallel_dims.cp_enabled)
+        apply_compile(model)
 
     reshard_after_forward_policy = config.train.fsdp_reshard_after_forward
     # For visual model, TP mesh should be merged into DP_Shard

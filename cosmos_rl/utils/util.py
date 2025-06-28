@@ -949,12 +949,13 @@ def add_nan_checks(model):
         # factory to capture the current name in a closure
         def make_hook(param_name):
             def hook(grad):
-                if isinstance(grad, torch.distributed.Tensor.DTensor):
+                origin_grad = grad
+                if isinstance(grad, torch.distributed.tensor.DTensor):
                     grad = grad.to_local()
                 if torch.isnan(grad).any():
                     msg = f"NaN detected in gradient of {param_name}"
                     raise RuntimeError(msg)
-                return grad  # must return the (possibly modified) grad
+                return origin_grad  # must return the (possibly modified) grad
 
             return hook
 

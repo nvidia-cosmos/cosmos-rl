@@ -80,11 +80,7 @@ def parallelize(
         # This is caused by the custom SeqAllToAll in ulysses.py
         # Related torch issue: https://github.com/pytorch/pytorch/issues/149586
         # tmp workaround is set fullgraph to False. Figure it out later.
-        if parallel_dims.cp_enabled:
-            logger.warning(
-                "torch.compile and CP will have some issues, temporarily set `fullgraph` to False to bypass the issue. This may cause performance degradation."
-            )
-        apply_compile(model, not parallel_dims.cp_enabled)
+        apply_compile(model)
 
     if (
         parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled

@@ -36,39 +36,52 @@ def all_to_all_tensor(
     async_op: bool = False,
 ) -> torch.Tensor:
     """
-    This function performs an all-to-all communication operation on a tensor.
-    It splits the input tensor into `cp_world_size` parts along the specified scatter dimension,
-    and then performs an all-to-all communication operation on these parts.
-    The output is a tensor of the same shape as the input, but with the specified gather dimension
-    concatenated.
-
-    Args:
-        local_input (torch.Tensor): The input tensor to be scattered and gathered.
-        scatter_dim (int): The dimension along which to scatter the input tensor.
-        gather_dim (int): The dimension along which to gather the scattered tensor.
-        cp_mesh (DeviceMesh): The device mesh to use for the all-to-all communication.
-        async_op (bool, optional): Whether to perform the operation asynchronously. Defaults to False.
-
-    Returns:
-        torch.Tensor: The output tensor of the same shape as the input, but with the specified gather dimension concatenated.
+    All‐to‐all via all_to_all_single.
+    Splits `local_input` along scatter_dim into cp_world_size pieces,
+    exchanges them, then concatenates received pieces along gather_dim.
+    Returns a tensor or, if async_op=True, returns a callable that waits and returns.
     """
     group = cp_mesh.get_group()
-    cp_world_size = cp_mesh.size()
-    input_list = [
-        t.contiguous()
-        for t in torch.tensor_split(local_input, cp_world_size, scatter_dim)
-    ]
-    output_list = [torch.empty_like(input_list[0]) for _ in range(cp_world_size)]
-    comm = dist.all_to_all(output_list, input_list, group=group, async_op=async_op)
+    world_size = cp_mesh.size()
+    # 1) Split into per‐rank chunks and record each chunk's shape & numel
+    splits = torch.tensor_split(local_input, world_size, dim=scatter_dim)
+    split_shapes = [s.shape for s in splits]
+    split_nelems = [s.numel() for s in splits]
+
+    # 2) Flatten & concat all send‐chunks into one 1‐D tensor
+    flat_input = torch.cat([s.contiguous().view(-1) for s in splits], dim=0)
+    flat_output = torch.empty_like(flat_input)
+
+    # 3) Exchange
+    work = dist.all_to_all_single(
+        flat_output,  # output
+        flat_input,  # input
+        output_split_sizes=split_nelems,
+        input_split_sizes=split_nelems,
+        group=group,
+        async_op=async_op,
+    )
+
+    # helper to rebuild & cat along gather_dim
+    def _build_result():
+        out_chunks = []
+        offset = 0
+        for shape, ne in zip(split_shapes, split_nelems):
+            chunk = flat_output[offset : offset + ne].view(shape)
+            out_chunks.append(chunk)
+            offset += ne
+        return torch.cat(out_chunks, dim=gather_dim).contiguous()
+
     if async_op:
 
-        def wait():
-            comm.wait()
-            return torch.cat(output_list, dim=gather_dim).contiguous()
+        def wait_and_get():
+            work.wait()
+            return _build_result()
 
-        return wait
+        return wait_and_get
 
-    return torch.cat(output_list, dim=gather_dim).contiguous()
+    # synchronous
+    return _build_result()
 
 
 def all_gather_tensor(
