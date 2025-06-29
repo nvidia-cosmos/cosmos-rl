@@ -133,10 +133,16 @@ class _Task:
 
 _task_q: "queue.Queue[_Task]" = queue.Queue()
 _worker_started = False
+_worker_thread: Optional[threading.Thread] = None
 
 
 def _ensure_worker():
-    global _worker_started
+    """Guarantee that a background worker thread exists and is alive."""
+    global _worker_started, _worker_thread
+
+    if _worker_started and (_worker_thread is None or not _worker_thread.is_alive()):
+        _worker_started = False
+
     if _worker_started:
         return
 
@@ -153,11 +159,20 @@ def _ensure_worker():
                     # 0 == ncclSuccess
                     if err == 0:
                         break
-                    # 2 == ncclInProgress (others are immediate errors)
-                    if err != 2:
-                        break
-                    time.sleep(0.001)
+                    # 7 == ncclInProgress (others are immediate errors)
+                    if err == 7:
+                        time.sleep(0.001)
+                        continue
+                    # handle other errors
+                    logger.error(
+                        "NCCL: async error detected, non-blocking enqueue failed"
+                    )
+                    _nccl.ncclCommAbort(comm)
+                    task.timed_out.set()
+                    break
                 else:
+                    # enqueue-timeout
+                    logger.error("NCCL: non-blocking enqueue timed out")
                     _nccl.ncclCommAbort(comm)
                     task.timed_out.set()
             except Exception:
@@ -165,8 +180,10 @@ def _ensure_worker():
             finally:
                 task.done.set()
 
-    t = threading.Thread(target=_worker_loop, daemon=True, name="pynccl-worker")
-    t.start()
+    _worker_thread = threading.Thread(
+        target=_worker_loop, daemon=True, name="pynccl-worker"
+    )
+    _worker_thread.start()
     _worker_started = True
 
 
@@ -177,7 +194,7 @@ def _submit_nccl(functor: Callable[[], ncclComm_t], timeout_ms: Optional[int]):
     _task_q.put(task)
     task.done.wait()
     if task.timed_out.is_set():
-        raise RuntimeError("NCCL enqueue timed out (worker detection)")
+        raise RuntimeError("NCCL: non-blocking enqueue timed out")
 
 
 # ---------------------------------------------------------------------------
@@ -235,45 +252,34 @@ def _get_timeout_ms(user_timeout: Optional[int] = None) -> int:
 def nccl_timeout_watchdog(
     *, wait_stream: bool = False, timeout_ms: Optional[int] = None
 ):
-    """Context-manager that aborts all NCCL comms if block exceeds timeout_ms.
+    """Light-weight watchdog around a block of NCCL calls."""
 
-    Parameters
-    ----------
-    wait_stream : bool
-        If True the watchdog measures kernel completion time by synchronising
-        the CUDA stream before evaluating the timeout.  If False it measures
-        enqueue latency only.
-    timeout_ms : int | None
-        Custom timeout; falls back to `COSMOS_NCCL_TIMEOUT_MS` when None.
-    """
     timeout_ms = _get_timeout_ms(timeout_ms)
 
-    # push new context
     ctx = _push_ctx()
 
-    # Record a CPU‐side monotonic timestamp as the authoritative timeout reference.
     start_ts = time.monotonic()
+    cur_stream = torch.cuda.current_stream()
 
-    def _timeout_action():
-        if wait_stream:
-            evt = torch.cuda.Event()
-            evt.record()
+    def _do_abort():
+        ctx["abort"] = True
+        logger.error(
+            f"[Watchdog] NCCL block exceeded {timeout_ms} ms. Aborting its communicators."
+        )
+        for cid in set(ctx.get("comm_ids", [])):
+            try:
+                nccl_abort(cid)
+            except Exception:
+                pass
 
-            while not evt.query():
-                if (time.monotonic() - start_ts) * 1000.0 >= timeout_ms:
-                    ctx["abort"] = True
-                    logger.error(
-                        f"[Watchdog] NCCL block exceeded {timeout_ms} ms "
-                        "(kernel-completion latency on current stream). Will abort its communicators."
-                    )
-                    break
-                # Yield the GIL briefly to avoid busy-waiting.
-                time.sleep(0.001)
+    timer: Optional[threading.Timer] = None
 
-    timer = threading.Timer(timeout_ms / 1000.0, _timeout_action)
-    timer.start()
+    if not wait_stream:
+        timer = threading.Timer(timeout_ms / 1000.0, _do_abort)
+        timer.daemon = True
+        timer.start()
 
-    exc = None
+    exc: BaseException | None = None
     try:
         yield
     except BaseException as e:
@@ -281,16 +287,40 @@ def nccl_timeout_watchdog(
         ctx["abort"] = True
         raise
     finally:
-        timer.cancel()
+        if timer is not None:
+            timer.cancel()
+
+        timeout_hit = False
+
+        if wait_stream and exc is None:
+            evt = torch.cuda.Event()
+            evt.record(cur_stream)
+
+            while True:
+                if evt.query():
+                    # Stream completely flushed.
+                    break
+
+                elapsed_ms = (time.monotonic() - start_ts) * 1000.0
+                if not timeout_hit and elapsed_ms >= timeout_ms:
+                    timeout_hit = True
+                    _do_abort()
+                    break
+
+                time.sleep(0.001)  # cooperative yield
+
+        # Pop the context and perform a final abort cleanup if required.
         popped = _pop_ctx()
-        if popped and popped["abort"]:
-            for cid in set(popped["comm_ids"]):
+        if popped and popped.get("abort"):
+            for cid in set(popped.get("comm_ids", [])):
                 try:
                     nccl_abort(cid)
                 except Exception:
                     pass
-        if exc is not None:
-            pass
+        if timeout_hit and exc is None:
+            raise RuntimeError(
+                "NCCL operation exceeded watchdog timeout and was aborted"
+            )
 
 
 # ---------------------------------------------------------------------------
