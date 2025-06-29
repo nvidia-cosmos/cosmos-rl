@@ -1002,6 +1002,7 @@ def compute_logprobs(
     effective_logits = torch.gather(
         full_logits,
     )  # [n_logprob_tokens, vocab_size]
+    effective_logits = full_logits[logprob_masks]  # [n_logprob_tokens, vocab_size]
     effective_input_ids = shifted_input_ids[logprob_masks]  # [n_logprob_tokens,]
     masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
     cu_seqlens = torch.zeros(
