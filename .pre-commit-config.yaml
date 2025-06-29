@@ -9,7 +9,7 @@ repos:
       files: ^(cosmos_rl|scripts|tests|tools)/
     # Run the formatter.
     - id: ruff-format
-      files: ^(cosmos_rl|scripts|tests|tools/launch_all.py)/
+      files: ^(cosmos_rl|scripts|tests|tools)/
 - repo: https://github.com/pocc/pre-commit-hooks
   rev: v1.3.5
   hooks:

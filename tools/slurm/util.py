@@ -17,6 +17,7 @@ import json
 from typing import List, Literal
 from dataclasses import dataclass, asdict
 
+
 @dataclass
 class ReplicaLaunchMetadata:
     # The number of nodes for the specific replica
@@ -30,12 +31,20 @@ class ReplicaLaunchMetadata:
     # The number of GPUs visible to the specific replica
     visible_gpus: List[int]
 
-    def __init__(self, nnode: int, role: Literal["policy", "rollout"], rendezvous_node: int, rendezvous_port: int, visible_gpus: List[int]):
+    def __init__(
+        self,
+        nnode: int,
+        role: Literal["policy", "rollout"],
+        rendezvous_node: int,
+        rendezvous_port: int,
+        visible_gpus: List[int],
+    ):
         self.nnode = nnode
         self.role = role
         self.rendezvous_node = rendezvous_node
         self.rendezvous_port = rendezvous_port
         self.visible_gpus = visible_gpus
+
 
 @dataclass
 class NodeLaunchMetadata:
@@ -50,6 +59,9 @@ class NodeLaunchMetadata:
     @staticmethod
     def from_json_list(json_str: str) -> List["NodeLaunchMetadata"]:
         dicts = json.loads(json_str)
-        return [NodeLaunchMetadata(
-            colocation=[ReplicaLaunchMetadata(**x) for x in d["colocation"]]
-        ) for d in dicts]
+        return [
+            NodeLaunchMetadata(
+                colocation=[ReplicaLaunchMetadata(**x) for x in d["colocation"]]
+            )
+            for d in dicts
+        ]

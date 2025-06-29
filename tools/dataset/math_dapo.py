@@ -23,19 +23,23 @@ from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_rew
 from transformers import AutoTokenizer
 from torch.utils.data import ConcatDataset
 
+
 class MathDapoDataset(Dataset):
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        '''
+        """
         This method is optional and get called by launcher after being mounted
         `config`: config;
         `tokenizer`: tokenizer;
-        '''
+        """
         self.config = config
         self.tokenizer = tokenizer
 
         # This demo is only for DAPO-Math-17k dataset
         assert "DAPO-Math-17k" in config.train.train_policy.dataset.name
-        self.dataset = load_dataset(config.train.train_policy.dataset.name, config.train.train_policy.dataset.subset)
+        self.dataset = load_dataset(
+            config.train.train_policy.dataset.name,
+            config.train.train_policy.dataset.subset,
+        )
         if config.train.train_policy.dataset.split:
             if isinstance(config.train.train_policy.dataset.split, list):
                 dataset_list = []
@@ -50,7 +54,7 @@ class MathDapoDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
-        '''
+        """
         For DecoderOnlyLLMDataPacker, it should either return:
         - raw text prompt to be converted into input_ids by both rollout and policy models;
         - conversation format:
@@ -63,26 +67,37 @@ class MathDapoDataset(Dataset):
             ...
         ]
         ```
-        '''
-        assert hasattr(self, "tokenizer"), "`self.tokenizer` should be set by the launcher"
+        """
+        assert hasattr(
+            self, "tokenizer"
+        ), "`self.tokenizer` should be set by the launcher"
         conversation = self.dataset[idx]["prompt"]
         assert isinstance(
             conversation, list
         ), f"Prompt should be a string, but got {type(conversation)}， {conversation}"
-        
+
         # return the conversation to be converted into input_ids by the data packer
         return conversation
 
     def get_reference_answer(self, idx: int) -> Any:
-        '''
+        """
         This is mandatory for GRPO to get a reference answer for reward computation.
-        '''
+        """
         return self.dataset[idx]["reward_model"]["ground_truth"]
 
-def custom_reward_fn(to_be_evaluated: str, reference: Optional[Any] = None, *args, **kwargs) -> float:
+
+def custom_reward_fn(
+    to_be_evaluated: str, reference: Optional[Any] = None, *args, **kwargs
+) -> float:
     assert isinstance(reference, str), "Reference answer should be a string"
-    reward = sum([direct_math_reward_fn(to_be_evaluated, reference, *args, **kwargs), overlong_reward_fn(to_be_evaluated, reference, *args, **kwargs)])
+    reward = sum(
+        [
+            direct_math_reward_fn(to_be_evaluated, reference, *args, **kwargs),
+            overlong_reward_fn(to_be_evaluated, reference, *args, **kwargs),
+        ]
+    )
     return reward
+
 
 if __name__ == "__main__":
     launch_dispatcher(
