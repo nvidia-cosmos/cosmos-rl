@@ -75,4 +75,4 @@ COPY tools /workspace/cosmos_rl/tools
 COPY configs /workspace/cosmos_rl/configs
 COPY cosmos_rl /workspace/cosmos_rl/cosmos_rl
 
-RUN cd /workspace/cosmos_rl && pip install -e . && cd -
+RUN pip install -e /workspace/cosmos_rl

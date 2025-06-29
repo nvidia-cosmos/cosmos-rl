@@ -25,9 +25,7 @@ setup(
     name="cosmos_rl",
     version="0.1.1",
     packages=setuptools.find_packages(),
-    package_data={
-        "cosmos_rl": ["launcher/*.sh"]
-    },
+    package_data={"cosmos_rl": ["launcher/*.sh"]},
     entry_points={
         "console_scripts": [
             "cosmos-rl = cosmos_rl.launcher.launch_all:main",
