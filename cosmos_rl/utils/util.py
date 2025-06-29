@@ -30,7 +30,7 @@ import asyncio
 from functools import wraps
 from msgpack import ExtType
 from tqdm import tqdm
-from typing import List, Dict, Any, Tuple
+from typing import List, Tuple
 import torch
 import pynvml
 from contextlib import contextmanager
@@ -975,8 +975,9 @@ def create_async_task(coro):
 
 
 def compute_logprobs(
-    minibatch: Dict[str, Any],
-    full_logits: torch.Tensor,
+    input_ids_batch: torch.Tensor,  # [batch_size, max_len]
+    logprob_masks: torch.Tensor,  # [batch_size, max_len],
+    full_logits: torch.Tensor,  # [batch_size, max_len, vocab_size]
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the per-token log probabilities and advantages
@@ -989,18 +990,6 @@ def compute_logprobs(
         logps: the per-token log probabilities
         cu_seqlens: the cumulative sequence lengths of the logps
     """
-    assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
-    assert (
-        "logprob_masks" in minibatch
-    ), "logprob_masks is required for computing logprobs"
-    # [batch_size, max_len]
-    input_ids_batch = minibatch["input_ids"]
-    # [batch_size, max_len]
-    # accumulation
-    logprob_masks = minibatch["logprob_masks"]
-    # [batch_size, max_len]
-    # advantages_of_interest = advantages * logprob_masks
-
     # Shift token_ids
     shifted_input_ids = torch.empty_like(input_ids_batch)
     shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
@@ -1008,9 +997,11 @@ def compute_logprobs(
     assert (
         full_logits.shape[:2] == shifted_input_ids.shape[:2]
     ), f"Logits shape {full_logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
-    # select the effective logits
     bsz, _, _ = full_logits.shape
-    effective_logits = full_logits[logprob_masks]  # [n_logprob_tokens, vocab_size]
+    # select the effective logits
+    effective_logits = torch.gather(
+        full_logits,
+    )  # [n_logprob_tokens, vocab_size]
     effective_input_ids = shifted_input_ids[logprob_masks]  # [n_logprob_tokens,]
     masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
     cu_seqlens = torch.zeros(

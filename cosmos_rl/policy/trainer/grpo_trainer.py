@@ -1022,7 +1022,13 @@ class GRPOTrainer(Trainer):
             logps: the per-token log probabilities
             logprob_masks: the logprob_masks
         """
-        return logprobs_computing(minibatch, full_logits)
+        assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
+        assert (
+            "logprob_masks" in minibatch
+        ), "logprob_masks is required for computing logprobs"
+        return logprobs_computing(
+            minibatch["input_ids"], minibatch["logprob_masks"], full_logits
+        )
 
     def _swap_model_state_dict(self):
         kl_beta = self.config.train.train_policy.kl_beta
