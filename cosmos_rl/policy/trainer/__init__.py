@@ -25,7 +25,7 @@ from cosmos_rl.utils.checkpoint import (
 )
 from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationConfig
 from cosmos_rl.policy.trainer.optm import build_optimizers, build_lr_schedulers
-from cosmos_rl.policy.model import build_model
+from cosmos_rl.policy.model import BaseModel
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.wandb_logger import is_wandb_available, init_wandb
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -80,7 +80,7 @@ class Trainer(CommMixin):
 
         self.train_stream = torch.cuda.current_stream()
         self.train_event_queue = deque()
-        model = build_model(config)
+        model = BaseModel.build_model(config)
 
         # FP8 settings
         with torch.device("meta"):

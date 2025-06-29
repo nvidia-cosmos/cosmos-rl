@@ -14,12 +14,14 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Tuple, Union, Callable
+from typing import Optional, List, Tuple, Union, Callable, Dict, Type
 import torch
 from functools import cached_property
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers import AutoConfig
+from cosmos_rl.utils.logging import logger
+import cosmos_rl.utils.util as util
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -156,3 +158,48 @@ class BaseModel(torch.nn.Module, ABC):
         raise NotImplementedError(
             "This func should not be called in BaseModel instance."
         )
+
+    _MODEL_REGISTRY: Dict[str, Type] = {}
+
+    @classmethod
+    def register(cls, *, allow_override: bool = False):
+        def decorator(cls: Type) -> Type:
+            model_types = cls.supported_model_types()
+            if isinstance(model_types, str):
+                model_types = [model_types]
+
+            for model_type in model_types:
+                if not allow_override and model_type in BaseModel._MODEL_REGISTRY:
+                    raise ValueError(f"Model {model_type} is already registered.")
+                BaseModel._MODEL_REGISTRY[model_type] = cls
+            return cls
+
+        return decorator
+
+    @classmethod
+    def build_model(cls, config: CosmosConfig):
+        model_name_or_path = config.policy.model_name_or_path
+        model = None
+        hf_config = util.retry(AutoConfig.from_pretrained)(
+            model_name_or_path, trust_remote_code=True
+        )
+        if hf_config.model_type not in BaseModel._MODEL_REGISTRY:
+            raise ValueError(f"Model {hf_config.model_type} not supported.")
+        model_cls = BaseModel._MODEL_REGISTRY[hf_config.model_type]
+
+        with torch.device("meta"):
+            with util.cosmos_default_dtype(config.train.param_torch_dtype):
+                try:
+                    model = model_cls.from_pretrained(
+                        hf_config,
+                        model_name_or_path,
+                        max_position_embeddings=config.policy.model_max_length,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to load model {model_name_or_path} with error: {e}"
+                    )
+                    raise e
+        if model is None:
+            raise ValueError(f"Model {model_name_or_path} not supported.")
+        return model

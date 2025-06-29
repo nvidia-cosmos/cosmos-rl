@@ -363,6 +363,7 @@ class GPTBlock(nn.Module):
         return out
 
 
+@BaseModel.register()
 class GPT(BaseModel):
     """
     GPT Module

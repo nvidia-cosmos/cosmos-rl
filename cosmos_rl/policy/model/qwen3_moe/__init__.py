@@ -599,6 +599,7 @@ class Qwen3MoEBlock(nn.Module):
         return out
 
 
+@BaseModel.register()
 class Qwen3MoE(BaseModel):
     """
     Qwen3MoE Module

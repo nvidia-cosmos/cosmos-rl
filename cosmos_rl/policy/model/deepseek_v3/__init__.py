@@ -802,6 +802,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         return output
 
 
+@BaseModel.register()
 class DeepseekV3MoEModel(BaseModel):
     """
     DeepseekV3MoEModel Module
