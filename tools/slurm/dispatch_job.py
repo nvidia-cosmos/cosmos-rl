@@ -17,6 +17,7 @@ import logging
 from typing import List, Literal
 import os
 import sys
+
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from util import NodeLaunchMetadata, ReplicaLaunchMetadata
 import argparse
@@ -28,28 +29,36 @@ import toml
 
 logging.basicConfig(level=logging.INFO)
 
-def compute_nodes(n_gpu_per_node: int, n_gpu_per_replica: int, n_replicas: int, role: Literal["policy", "rollout"]) -> List[NodeLaunchMetadata]:
-    '''
+
+def compute_nodes(
+    n_gpu_per_node: int,
+    n_gpu_per_replica: int,
+    n_replicas: int,
+    role: Literal["policy", "rollout"],
+) -> List[NodeLaunchMetadata]:
+    """
     Compute the number of nodes required for a given number of GPUs per replica and the number of replicas.
 
     If multiple replicas are colocated on the same node, the visible GPUs for each replica are computed.
-    
+
     Returns:
         A list of NodeLaunchMetadata, one for each node.
-    '''
+    """
     n_nodes = 0
     rendezvous_port = 29345
 
     node_launch_metadata = []
     if n_gpu_per_replica >= n_gpu_per_node:
-        assert n_gpu_per_replica % n_gpu_per_node == 0, f"Number of GPUs per policy must be a multiple of {n_gpu_per_node}"
+        assert (
+            n_gpu_per_replica % n_gpu_per_node == 0
+        ), f"Number of GPUs per policy must be a multiple of {n_gpu_per_node}"
         n_policy_nodes = n_replicas * (n_gpu_per_replica // n_gpu_per_node)
 
         rendezvous_node = 0
         for i_node in range(n_policy_nodes):
             if i_node % (n_gpu_per_replica // n_gpu_per_node) == 0:
                 rendezvous_node = i_node
-            
+
             replica_launch_meta = [
                 # Only one replica per node, no colocation or rendezvous conflicts
                 ReplicaLaunchMetadata(
@@ -57,17 +66,21 @@ def compute_nodes(n_gpu_per_node: int, n_gpu_per_replica: int, n_replicas: int, 
                     role=role,
                     rendezvous_node=rendezvous_node,
                     rendezvous_port=rendezvous_port,
-                    visible_gpus=list(range(0, n_gpu_per_node))
+                    visible_gpus=list(range(0, n_gpu_per_node)),
                 )
             ]
-            node_launch_metadata.append(NodeLaunchMetadata(colocation=replica_launch_meta))
+            node_launch_metadata.append(
+                NodeLaunchMetadata(colocation=replica_launch_meta)
+            )
     else:
         possible_gpu_per_replica = []
         for divisor in range(1, n_gpu_per_node):
             if n_gpu_per_node % divisor == 0:
                 possible_gpu_per_replica.append(divisor)
 
-        assert n_gpu_per_replica in possible_gpu_per_replica, f"Number of GPUs per policy must be one of {possible_gpu_per_replica}, got {n_gpu_per_replica}."
+        assert (
+            n_gpu_per_replica in possible_gpu_per_replica
+        ), f"Number of GPUs per policy must be one of {possible_gpu_per_replica}, got {n_gpu_per_replica}."
         n_policy_nodes = math.ceil(n_replicas * n_gpu_per_replica / n_gpu_per_node)
 
         replica_counter = 0
@@ -75,13 +88,21 @@ def compute_nodes(n_gpu_per_node: int, n_gpu_per_replica: int, n_replicas: int, 
             replica_launch_meta = []
             local_replica_counter = 0
             while replica_counter < n_replicas:
-                replica_launch_meta.append(ReplicaLaunchMetadata(
-                    nnode=1,
-                    role=role,
-                    rendezvous_node=i_node, # Always on the same node
-                    rendezvous_port=rendezvous_port + replica_counter, # To avoid conflicts with other replicas on the same node
-                    visible_gpus=list(range(local_replica_counter * n_gpu_per_replica, (local_replica_counter + 1) * n_gpu_per_replica))
-                ))
+                replica_launch_meta.append(
+                    ReplicaLaunchMetadata(
+                        nnode=1,
+                        role=role,
+                        rendezvous_node=i_node,  # Always on the same node
+                        rendezvous_port=rendezvous_port
+                        + replica_counter,  # To avoid conflicts with other replicas on the same node
+                        visible_gpus=list(
+                            range(
+                                local_replica_counter * n_gpu_per_replica,
+                                (local_replica_counter + 1) * n_gpu_per_replica,
+                            )
+                        ),
+                    )
+                )
                 replica_counter += 1
                 local_replica_counter += 1
                 if replica_counter == n_replicas:
@@ -89,24 +110,63 @@ def compute_nodes(n_gpu_per_node: int, n_gpu_per_replica: int, n_replicas: int, 
                 elif local_replica_counter * n_gpu_per_replica >= n_gpu_per_node:
                     # Dispatch left to next node
                     break
-            node_launch_metadata.append(NodeLaunchMetadata(colocation=replica_launch_meta))
+            node_launch_metadata.append(
+                NodeLaunchMetadata(colocation=replica_launch_meta)
+            )
     n_nodes += n_policy_nodes
 
     return node_launch_metadata
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-name", type=str, default="cosmos_job")
-    parser.add_argument("--ngpu-per-node", type=int, default=8, help="Number of GPUs per compute node.")
-    parser.add_argument("--n-policy-replicas", type=int, default=1, help="Number of policy replicas to launch")
-    parser.add_argument("--n-rollout-replicas", type=int, default=1, help="Number of rollout replicas to launch")
-    parser.add_argument("--slurm-partition", type=str, default="batch", help="SLURM partition to use")
-    parser.add_argument("--slurm-account", type=str, default="sw_aidot", help="SLURM account to use")
-    parser.add_argument("--config-path", type=str, required=True, help="Path to the controller config file")
-    parser.add_argument("--repo-root-path", type=str, required=True, help="Path to the repository root")
-    parser.add_argument("--output-root-path", type=str, required=True, help="Path to the output root")
-    parser.add_argument("--cosmos-container", type=str, required=True, help="Path to the cosmos container")
-    parser.add_argument("--extra-sbatch-args", type=str, nargs="*", default=["--gres=gpu:8"], help="Extra #SBATCH arguments")
+    parser.add_argument(
+        "--ngpu-per-node", type=int, default=8, help="Number of GPUs per compute node."
+    )
+    parser.add_argument(
+        "--n-policy-replicas",
+        type=int,
+        default=1,
+        help="Number of policy replicas to launch",
+    )
+    parser.add_argument(
+        "--n-rollout-replicas",
+        type=int,
+        default=1,
+        help="Number of rollout replicas to launch",
+    )
+    parser.add_argument(
+        "--slurm-partition", type=str, default="batch", help="SLURM partition to use"
+    )
+    parser.add_argument(
+        "--slurm-account", type=str, default="sw_aidot", help="SLURM account to use"
+    )
+    parser.add_argument(
+        "--config-path",
+        type=str,
+        required=True,
+        help="Path to the controller config file",
+    )
+    parser.add_argument(
+        "--repo-root-path", type=str, required=True, help="Path to the repository root"
+    )
+    parser.add_argument(
+        "--output-root-path", type=str, required=True, help="Path to the output root"
+    )
+    parser.add_argument(
+        "--cosmos-container",
+        type=str,
+        required=True,
+        help="Path to the cosmos container",
+    )
+    parser.add_argument(
+        "--extra-sbatch-args",
+        type=str,
+        nargs="*",
+        default=["--gres=gpu:8"],
+        help="Extra #SBATCH arguments",
+    )
     parser.add_argument(
         "launcher",
         nargs="?",  # “?” means 0 or 1 occurrences
@@ -114,28 +174,31 @@ def main():
         help="The launcher to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom launcher can be provided for custom dataset and reward functions injection.",
     )
 
-
     args = parser.parse_args()
 
     with open(args.config_path, "r") as f:
         config = toml.load(f)
     min_n_gpus_policy = (
-        config['policy']['parallelism']['tp_size']
-        * config['policy']['parallelism']['pp_size']
-        * config['policy']['parallelism']['cp_size']
+        config["policy"]["parallelism"]["tp_size"]
+        * config["policy"]["parallelism"]["pp_size"]
+        * config["policy"]["parallelism"]["cp_size"]
     )
     min_n_gpus_rollout = (
-        config['rollout']['parallelism']['tp_size']
-        * config['rollout']['parallelism']['pp_size']
+        config["rollout"]["parallelism"]["tp_size"]
+        * config["rollout"]["parallelism"]["pp_size"]
     )
-    if config['policy']['parallelism']['dp_shard_size'] >= 1:
+    if config["policy"]["parallelism"]["dp_shard_size"] >= 1:
         min_n_gpus_policy = (
-            min_n_gpus_policy * config['policy']['parallelism']['dp_shard_size']
+            min_n_gpus_policy * config["policy"]["parallelism"]["dp_shard_size"]
         )
 
-    policy_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(args.ngpu_per_node, min_n_gpus_policy, args.n_policy_replicas, "policy")
-    rollout_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(args.ngpu_per_node, min_n_gpus_rollout, args.n_rollout_replicas, "rollout")
-    
+    policy_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
+        args.ngpu_per_node, min_n_gpus_policy, args.n_policy_replicas, "policy"
+    )
+    rollout_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
+        args.ngpu_per_node, min_n_gpus_rollout, args.n_rollout_replicas, "rollout"
+    )
+
     n_policy_nodes = len(policy_node_launch_metadata)
     n_rollout_nodes = len(rollout_node_launch_metadata)
 
@@ -150,7 +213,9 @@ def main():
         "SLURM_JOB_NAME": args.job_name,
         "CONFIG_PATH": args.config_path,
         "LAUNCHER": args.launcher,
-        "EXTRA_SBATCH_ARGS": "\n".join(f"#SBATCH {arg}" for arg in args.extra_sbatch_args),
+        "EXTRA_SBATCH_ARGS": "\n".join(
+            f"#SBATCH {arg}" for arg in args.extra_sbatch_args
+        ),
     }
 
     # Environment variables
@@ -159,11 +224,16 @@ def main():
         "NUM_ROLLOUT_NODES": f"{n_rollout_nodes}",
         "TOTAL_NODES": f"{n_policy_nodes + n_rollout_nodes}",
     }
-    
+
     # Read the template relative to the current file
-    with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "cosmos_rl_job_multi_node.sh"), "r") as f:
+    with open(
+        os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), "cosmos_rl_job_multi_node.sh"
+        ),
+        "r",
+    ) as f:
         template = f.read()
-    
+
     # Replace the template variables
     for key, value in template_vars.items():
         template = template.replace(f"[[{key}]]", value)
@@ -176,13 +246,18 @@ def main():
 
     env = os.environ.copy()
     env.update(env_vars)
-    env["NODE_LAUNCH_METADATA_POLICY"] = json.dumps([x.to_json() for x in policy_node_launch_metadata])
-    env["NODE_LAUNCH_METADATA_ROLLOUT"] = json.dumps([x.to_json() for x in rollout_node_launch_metadata])
+    env["NODE_LAUNCH_METADATA_POLICY"] = json.dumps(
+        [x.to_json() for x in policy_node_launch_metadata]
+    )
+    env["NODE_LAUNCH_METADATA_ROLLOUT"] = json.dumps(
+        [x.to_json() for x in rollout_node_launch_metadata]
+    )
     proc = subprocess.Popen(["sbatch", temp_file.name], env=env)
     proc.wait()
     if proc.returncode != 0:
         logging.error(f"Failed to submit job: {proc.returncode}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

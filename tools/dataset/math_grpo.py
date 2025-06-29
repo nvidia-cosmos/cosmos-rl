@@ -27,25 +27,30 @@ from cosmos_rl.utils.logging import logger
 
 class MathDataset(Dataset):
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        '''
+        """
         This method is optional and get called by launcher after being mounted
         `config`: config;
         `tokenizer`: tokenizer;
-        '''
+        """
         self.config = config
         self.tokenizer = tokenizer
-        modelscope_dataset_if_enabled = modelscope_load_dataset(config.train.train_policy.dataset.name, subset_name="default", split='train')
+        modelscope_dataset_if_enabled = modelscope_load_dataset(
+            config.train.train_policy.dataset.name, subset_name="default", split="train"
+        )
         if modelscope_dataset_if_enabled is None:
-            self.dataset = load_dataset("DigitalLearningGmbH/MATH-lighteval", "default", split="train")
+            self.dataset = load_dataset(
+                "DigitalLearningGmbH/MATH-lighteval", "default", split="train"
+            )
         else:
             self.dataset = modelscope_dataset_if_enabled
-
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
-        assert hasattr(self, "tokenizer"), "`self.tokenizer` should be set by the launcher"
+        assert hasattr(
+            self, "tokenizer"
+        ), "`self.tokenizer` should be set by the launcher"
         question = self.dataset[idx]["problem"]
         assert isinstance(
             question, str
@@ -54,7 +59,8 @@ class MathDataset(Dataset):
         conversation = [
             {
                 "role": "user",
-                "content": question + " Let's think step by step and output the final answer within \\boxed{}.",
+                "content": question
+                + " Let's think step by step and output the final answer within \\boxed{}.",
             }
         ]
         prompt = self.tokenizer.apply_chat_template(
@@ -65,26 +71,31 @@ class MathDataset(Dataset):
         return prompt
 
     def get_reference_answer(self, idx: int) -> Any:
-        '''
+        """
         This is mandatory for GRPO to get a reference answer for reward computation.
-        '''
+        """
         return self.dataset[idx]["solution"]
 
 
 class MathValDataset(MathDataset):
-    '''
+    """
     This is a validation dataset for Math, which is used to evaluate the performance of the model.
     It should be used in the launcher to evaluate the model during training.
-    '''
+    """
+
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         if not config.train.enable_validation:
-            logger.warning("Validation is not enabled in the config. Skipping setup for MathValDataset.")
+            logger.warning(
+                "Validation is not enabled in the config. Skipping setup for MathValDataset."
+            )
             return
 
         self.config = config
         self.tokenizer = tokenizer
 
-        self.dataset = load_dataset(config.validation.dataset.name, config.validation.dataset.subset)
+        self.dataset = load_dataset(
+            config.validation.dataset.name, config.validation.dataset.subset
+        )
         if config.validation.dataset.split:
             if isinstance(config.validation.dataset.split, list):
                 dataset_list = []
@@ -94,6 +105,7 @@ class MathValDataset(MathDataset):
             else:
                 assert isinstance(config.validation.dataset.split, str)
                 self.dataset = self.dataset[config.validation.dataset.split]
+
 
 # string normalization from https://github.com/EleutherAI/lm-evaluation-harness/blob/master/lm_eval/tasks/hendrycks_math.py
 def is_equiv(str1, str2, verbose=False):
@@ -155,7 +167,6 @@ def last_boxed_only_string(string):
 
 
 def strip_string(string):
-
     def fix_fracs(string):
         substrs = string.split("\\frac")
         new_str = substrs[0]
@@ -287,7 +298,9 @@ def strip_string(string):
     return string
 
 
-def custom_reward_fn(to_be_evaluated: str, reference: Optional[Any] = None, *args, **kwargs) -> float:
+def custom_reward_fn(
+    to_be_evaluated: str, reference: Optional[Any] = None, *args, **kwargs
+) -> float:
     assert isinstance(reference, str), "Reference answer should be a string"
     reward = 0.0
     try:
@@ -305,55 +318,65 @@ def custom_reward_fn(to_be_evaluated: str, reference: Optional[Any] = None, *arg
 
 
 class MathDataPacker(DataPacker):
-    '''
+    """
     This is a demo data packer that wraps the underlying data packer of the selected model.
     This is meaningless for this example, but useful for explaining:
         - how dataset data is processed and collated into a mini-batch for rollout engine;
         - how rollout output is processed and collated into a mini-batch for policy model;
-    '''
+    """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Check source code of DecoderOnlyLLMDataPacker to see how it's implemented
         self.underlying_data_packer = DecoderOnlyLLMDataPacker()
 
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        '''
+        """
         This method is optional and get called by launcher after being mounted
         `config`: config;
         `tokenizer`: tokenizer;
-        '''
+        """
         super().setup(config, tokenizer, *args, **kwargs)
         self.underlying_data_packer.setup(config, tokenizer, *args, **kwargs)
 
     def get_rollout_input(self, item: Any) -> Any:
-        '''
+        """
         Convert dataset item into what rollout engine (e.g. vllm) expects
-        '''
+        """
         return self.underlying_data_packer.get_rollout_input(item)
 
     def rollout_collate_fn(self, items: List[Any]) -> Any:
-        '''
+        """
         Collate the rollout inputs into a mini-batch for rollout engine
-        '''
+        """
         return self.underlying_data_packer.rollout_collate_fn(items)
 
-    def get_policy_input(self, item: Any, rollout_output: str, n_ignore_prefix_tokens: int = 0) -> Any:
-        '''
+    def get_policy_input(
+        self, item: Any, rollout_output: str, n_ignore_prefix_tokens: int = 0
+    ) -> Any:
+        """
         Process samples & rollout output before collating them into a mini-batch
-        '''
-        return self.underlying_data_packer.get_policy_input(item, rollout_output, n_ignore_prefix_tokens)
+        """
+        return self.underlying_data_packer.get_policy_input(
+            item, rollout_output, n_ignore_prefix_tokens
+        )
 
     def policy_compute_max_len(self, processed_samples: List[Any]) -> int:
-        '''
+        """
         Compute the maximum sequence length of the mini-batch
-        '''
+        """
         return self.underlying_data_packer.policy_compute_max_len(processed_samples)
 
-    def policy_collate_fn(self, processed_samples: List[Any], computed_max_len: int) -> Dict[str, Any]:
-        '''
+    def policy_collate_fn(
+        self, processed_samples: List[Any], computed_max_len: int
+    ) -> Dict[str, Any]:
+        """
         Collate the mini-batch into the kwargs required by the policy model
-        '''
-        return self.underlying_data_packer.policy_collate_fn(processed_samples, computed_max_len)
+        """
+        return self.underlying_data_packer.policy_collate_fn(
+            processed_samples, computed_max_len
+        )
+
 
 if __name__ == "__main__":
     dataset = MathDataset()

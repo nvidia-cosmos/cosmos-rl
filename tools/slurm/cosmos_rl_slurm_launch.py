@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-'''
+"""
 This script is launched by slurm job.
-'''
+"""
 
 import argparse
 import logging
@@ -24,6 +24,7 @@ import subprocess
 import time
 import os
 import sys
+
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from util import NodeLaunchMetadata
 
@@ -32,13 +33,17 @@ logging.basicConfig(level=logging.INFO)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--type", type=str, required=True, choices=["policy", "rollout"])
+    parser.add_argument(
+        "--type", type=str, required=True, choices=["policy", "rollout"]
+    )
     args = parser.parse_args()
 
     node_list = os.environ["LOCAL_NODE_LIST"].split(" ")
     COSMOS_CONTROLLER_HOST = os.environ["COSMOS_CONTROLLER_HOST"]
     self_node = os.environ["SLURMD_NODENAME"]
-    node_launch_metadata: List[NodeLaunchMetadata] = NodeLaunchMetadata.from_json_list(os.environ[f"NODE_LAUNCH_METADATA_{args.type.upper()}"])
+    node_launch_metadata: List[NodeLaunchMetadata] = NodeLaunchMetadata.from_json_list(
+        os.environ[f"NODE_LAUNCH_METADATA_{args.type.upper()}"]
+    )
 
     # Either the policy or rollout nodes
     logging.info(f"COSMOS_CONTROLLER_HOST: {COSMOS_CONTROLLER_HOST}")
@@ -55,14 +60,35 @@ if __name__ == "__main__":
         visible_gpus = replica_launch_metadata.visible_gpus
         nnode = replica_launch_metadata.nnode
 
-        logging.info(f"Rendezvous node: {rendezvous_node}, rendezvous port: {rendezvous_port}, visible GPUs: {visible_gpus}")
-        env  = os.environ.copy()
+        logging.info(
+            f"Rendezvous node: {rendezvous_node}, rendezvous port: {rendezvous_port}, visible GPUs: {visible_gpus}"
+        )
+        env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in visible_gpus)
         env["VLLM_DISABLE_COMPILE_CACHE"] = "1"
-        replica_launch_script = os.path.join(os.path.dirname(__file__), "..", "..", "cosmos_rl", "launcher", "launch_replica.sh")
-        cmds.append([replica_launch_script, "--type", args.type, "--rdzv-endpoint", f"{rendezvous_node}:{rendezvous_port}", "--ngpus", str(len(visible_gpus)), "--nnodes", str(nnode)])
+        replica_launch_script = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "cosmos_rl",
+            "launcher",
+            "launch_replica.sh",
+        )
+        cmds.append(
+            [
+                replica_launch_script,
+                "--type",
+                args.type,
+                "--rdzv-endpoint",
+                f"{rendezvous_node}:{rendezvous_port}",
+                "--ngpus",
+                str(len(visible_gpus)),
+                "--nnodes",
+                str(nnode),
+            ]
+        )
         envs.append(env)
-    
+
     procs = [subprocess.Popen(cmd, env=env) for cmd, env in zip(cmds, envs)]
     # block until every process finishes, and propagate any non-zero exit codes
     exit_code = 0
@@ -92,6 +118,4 @@ if __name__ == "__main__":
                 sys.exit(1)
         # Small sleep to prevent busy waiting
         time.sleep(0.1)
-    sys.exit(exit_code)              # mimic “all-good” or the first failure
-
-
+    sys.exit(exit_code)  # mimic “all-good” or the first failure
