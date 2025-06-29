@@ -6,7 +6,7 @@ repos:
     # Run the linter.
     - id: ruff
       args: [ --fix ]
-      files: ^(cosmos_rl|scripts|tests|tools/launch_all.py)/
+      files: ^(cosmos_rl|scripts|tests|tools)/
     # Run the formatter.
     - id: ruff-format
       files: ^(cosmos_rl|scripts|tests|tools/launch_all.py)/

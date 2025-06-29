@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import json
-import copy
 from typing import List, Literal
 from dataclasses import dataclass, asdict
 

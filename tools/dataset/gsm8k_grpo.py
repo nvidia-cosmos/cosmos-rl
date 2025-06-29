@@ -15,7 +15,7 @@
 
 
 from typing import Optional, Any, List, Dict
-from torch.utils.data import Dataset, ConcatDataset, Subset
+from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
 from cosmos_rl.policy.config import Config

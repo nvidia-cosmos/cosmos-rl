@@ -15,7 +15,7 @@
 
 import os
 from typing import Optional, Any, List, Dict
-from torch.utils.data import Dataset, ConcatDataset, Subset
+from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
 import cosmos_rl.utils.util as util
@@ -81,8 +81,7 @@ class CosmosGRPODataset(Dataset):
             Return a tuple of (prompt, reference answer)
         '''
         payload = self.dataset[idx]
-        grpo_config = self.config.train.train_policy
-        
+
         system_prompt = ""
 
         choices = payload["qa_pairs"]["index2ans"]

@@ -81,7 +81,6 @@ class CosmosSFTDataset(Dataset):
             Return a tuple of (prompt, reference answer)
         '''
         payload = self.dataset[idx]
-        grpo_config = self.config.train.train_policy
         conversations = copy.deepcopy(payload['conversations'])
 
         for conv in conversations:

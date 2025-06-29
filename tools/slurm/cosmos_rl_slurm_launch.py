@@ -20,9 +20,12 @@ This script is launched by slurm job.
 import argparse
 import logging
 from typing import List
-import subprocess, time
-import os, sys; sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from util import NodeLaunchMetadata, ReplicaLaunchMetadata
+import subprocess
+import time
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from util import NodeLaunchMetadata
 
 
 logging.basicConfig(level=logging.INFO)
