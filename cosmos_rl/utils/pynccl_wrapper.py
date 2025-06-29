@@ -1,31 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-# This file is a pure Python wrapper for the NCCL library.
-# The main purpose is to use NCCL combined with CUDA graph.
-# Before writing this script, we tried the following approach:
-# 1. We tried to use `cupy`, it calls NCCL correctly, but `cupy` itself
-#  often gets stuck when initializing the NCCL communicator.
-# 2. We tried to use `torch.distributed`, but `torch.distributed.all_reduce`
-#  contains many other potential cuda APIs, that are not allowed during
-#  capturing the CUDA graph. For further details, please check
-# https://discuss.pytorch.org/t/pytorch-cudagraph-with-nccl-operation-failed/ .
 #
-# Another rejected idea is to write a C/C++ binding for NCCL. It is usually
-# doable, but we often encounter issues related with nccl versions, and need
-# to switch between different versions of NCCL. See
-# https://github.com/NVIDIA/nccl/issues/1234 for more details.
-# A C/C++ binding is not flexible enough to handle this. It requires
-# recompilation of the code every time we want to switch between different
-# versions. This current implementation, with a **pure** Python wrapper, is
-# more flexible. We can easily switch between different versions of NCCL by
-# changing the environment variable `VLLM_NCCL_SO_PATH`, or the `so_file`
-# variable in the code.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import ctypes
-import platform
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.distributed import ReduceOp
@@ -263,40 +253,28 @@ class NCCLLibrary:
     path_to_library_cache: dict[str, Any] = {}
 
     # class attribute to store the mapping from library path
-    #  to the corresponding dictionary
-    path_to_dict_mapping: dict[str, dict[str, Any]] = {}
+    #  to the corresponding functions
+    path_to_funcs_mapping: dict[str, dict[str, Any]] = {}
 
-    def __init__(self, so_file: Optional[str] = None):
-        so_file = so_file or "libnccl.so.2"
-
+    def __init__(self, so_file: str):
         try:
-            if so_file not in NCCLLibrary.path_to_dict_mapping:
+            if so_file not in NCCLLibrary.path_to_library_cache:
                 lib = ctypes.CDLL(so_file)
                 NCCLLibrary.path_to_library_cache[so_file] = lib
             self.lib = NCCLLibrary.path_to_library_cache[so_file]
-        except Exception as e:
-            logger.error(
-                "Failed to load NCCL library from %s. "
-                "It is expected if you are not running on NVIDIA/AMD GPUs."
-                "Otherwise, the nccl library might not exist, be corrupted "
-                "or it does not support the current platform %s. "
-                "If you already have the library, please set the "
-                "environment variable VLLM_NCCL_SO_PATH"
-                " to point to the correct nccl library path.",
-                so_file,
-                platform.platform(),
-            )
-            raise e
+        except Exception:
+            logger.error(f"Failed to load so file: {so_file} from NCCL library. ")
+            raise
 
-        if so_file not in NCCLLibrary.path_to_dict_mapping:
+        if so_file not in NCCLLibrary.path_to_funcs_mapping:
             _funcs: dict[str, Any] = {}
             for func in NCCLLibrary.exported_functions:
                 f = getattr(self.lib, func.name)
                 f.restype = func.restype
                 f.argtypes = func.argtypes
                 _funcs[func.name] = f
-            NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
-        self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
+            NCCLLibrary.path_to_funcs_mapping[so_file] = _funcs
+        self._funcs = NCCLLibrary.path_to_funcs_mapping[so_file]
 
     def ncclGetErrorString(self, result: ncclResult_t) -> str:
         return self._funcs["ncclGetErrorString"](result).decode("utf-8")

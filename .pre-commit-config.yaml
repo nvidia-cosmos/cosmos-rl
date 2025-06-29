@@ -6,10 +6,10 @@ repos:
     # Run the linter.
     - id: ruff
       args: [ --fix ]
-      files: ^(setup.py|cosmos_rl|tests|tools/launch_all.py)/
+      files: ^(setup.py|cosmos_rl/|tests/|tools/)
     # Run the formatter.
     - id: ruff-format
-      files: ^(setup.py|cosmos_rl|tests|tools/launch_all.py)/
+      files: ^(setup.py|cosmos_rl/|tests/|tools/)
 - repo: https://github.com/pocc/pre-commit-hooks
   rev: v1.3.5
   hooks:

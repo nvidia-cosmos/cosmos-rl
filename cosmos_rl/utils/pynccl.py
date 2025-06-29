@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Pure-Python (ctypes) NCCL backend for ``cosmos_rl``.
 
 A lightweight software watchdog is included.  When the duration of any NCCL
@@ -12,6 +25,7 @@ raised.
 
 from __future__ import annotations
 
+import glob
 import os
 import threading
 import time
@@ -35,10 +49,38 @@ from cosmos_rl.utils.pynccl_wrapper import (
 
 from cosmos_rl.utils.logging import logger
 
+
 # ---------------------------------------------------------------------------
 # NCCL ctypes binding instance (shared)
 # ---------------------------------------------------------------------------
-_nccl = NCCLLibrary()
+def _find_nccl_so_file() -> str:
+    """Find the libnccl.so* shared object file from the nvidia-nccl-cu* package."""
+
+    # we assume `nvidia-nccl-cu*` python package is installed next to the torch
+    # package (under site-packages directory)
+    torch_dir = os.path.dirname(torch.__file__)
+    nvidia_nccl_dir = os.path.join(os.path.dirname(torch_dir), "nvidia", "nccl")
+    if not os.path.isdir(nvidia_nccl_dir):
+        raise RuntimeError(
+            f"Could not find `nvidia-nccl-cu*` package directory: {nvidia_nccl_dir}"
+            "Please install the `nvidia-nccl-cu*` package."
+        )
+    # find the so files in nvidia-nccl directory
+    so_files = glob.glob(os.path.join(nvidia_nccl_dir, "lib", "libnccl.so*"))
+    # filter out the symbolic links
+    so_files = [f for f in so_files if not os.path.islink(f)]
+    if len(so_files) != 1:
+        raise RuntimeError(
+            f"Expected exactly one libnccl.so* file in {nvidia_nccl_dir}/lib, "
+            f"but found {len(so_files)}: {so_files}. Please check your installation."
+        )
+
+    so_file = so_files[0]
+    logger.debug(f"[NCCL] Using NCCL shared object: {so_file}")
+    return so_file
+
+
+_nccl = NCCLLibrary(so_file=_find_nccl_so_file())
 
 # Mapping: comm_idx -> (ncclComm_t, my_rank, world_size)
 _comm_store: Dict[int, Tuple[ncclComm_t, int, int]] = {}
