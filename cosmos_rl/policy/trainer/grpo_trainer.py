@@ -262,18 +262,18 @@ class GRPOTrainer(Trainer):
                 self.fetch_command_thread.join()
                 self.fetch_command_thread = None
 
-            if hasattr(self, "upload_thread") and self.upload_thread is not None:
-                logger.info("[Policy] Waiting for upload thread to finish...")
-                self.upload_thread.join()
-                logger.info("[Policy] Upload thread finished.")
-                self.upload_thread = None
-
             if hasattr(self, "heartbeat_thread") and self.heartbeat_thread is not None:
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
 
             # Manually unregister from controller
             self.unregister_from_controller()
+
+            if hasattr(self, "upload_thread") and self.upload_thread is not None:
+                logger.info("[Policy] Waiting for upload thread to finish...")
+                self.upload_thread.join()
+                logger.info("[Policy] Upload thread finished.")
+                self.upload_thread = None
 
             # TODO(jiaxin)
             # The background threads are daemon threads, so that they will exit when the main thread exits
