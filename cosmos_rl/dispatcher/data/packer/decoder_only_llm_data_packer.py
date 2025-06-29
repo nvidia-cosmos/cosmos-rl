@@ -4,6 +4,7 @@ import torch
 from cosmos_rl.policy.model.gpt import GPT
 from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
 from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
+from cosmos_rl.policy.model.hf_llm import HFLLMModel
 
 
 @DataPacker.register(
@@ -11,6 +12,7 @@ from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
         *GPT.supported_model_types(),
         *DeepseekV3MoEModel.supported_model_types(),
         *Qwen3MoE.supported_model_types(),
+        *HFLLMModel.supported_model_types(),
     ]
 )
 class DecoderOnlyLLMDataPacker(DataPacker):

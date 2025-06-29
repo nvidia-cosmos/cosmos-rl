@@ -62,6 +62,13 @@ class Trainer(CommMixin):
             config.policy.model_name_or_path,
             trust_remote_code=True,
         )
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.convert_tokens_to_ids(
+                self.tokenizer.eos_token
+            )
+            logger.warning(
+                f"Tokenizer for {config.policy.model_name_or_path} has no pad token id, using eos token id as pad_token_id({self.tokenizer.pad_token_id})"
+            )
 
         self.hf_config = util.retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path,
@@ -105,7 +112,7 @@ class Trainer(CommMixin):
             torch.cuda.empty_cache()
             self.model_parts = model.separate_model_parts()
             self.model = model
-            self.init_comm()
+            self.init_comm(model.use_hfllm_type)
             # util.add_nan_checks(model)
         except Exception as e:
             import traceback

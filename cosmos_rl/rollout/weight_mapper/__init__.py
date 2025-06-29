@@ -18,6 +18,7 @@ from .gpt import GPTWeightMapper
 from .qwen_vl_2_5 import QwenVL25WeightMapper
 from .qwen3_moe import Qwen3MoeWeightMapper
 from .deepseek_v3 import DeepseekV3MoEWeightMapper
+from .hf_llm import HFLLMWeightMapper
 
 __all__ = [
     "WeightMapper",
@@ -25,4 +26,5 @@ __all__ = [
     "QwenVL25WeightMapper",
     "Qwen3MoeWeightMapper",
     "DeepseekV3MoEWeightMapper",
+    "HFLLMWeightMapper",
 ]
