@@ -112,7 +112,7 @@ def convert_weight_from_hf(
 
 @register_parallelism_strategy("gpt")
 def map_weight_parallel_dims(
-    shape: Tuple[int], dest_name: str, parallel_dims: ParallelDims, model_config: Any
+    n_dim: int, dest_name: str, parallel_dims: ParallelDims, model_config: Any
 ) -> Tuple[Dict[str, int], Dict[int, list], int]:
     tp_size = parallel_dims.tp
     dp_shard_size = parallel_dims.dp_shard * parallel_dims.cp
@@ -162,7 +162,7 @@ def map_weight_parallel_dims(
                 r"layers\.(\d+)\.self_attn\.(o_proj)\.(weight|bias)", dest_name
             )
         ) is not None:
-            dims_map[dim] = len(shape) - 1
+            dims_map[dim] = n_dim - 1
         elif (
             match := re.search(  # noqa: F841
                 r"layers\.(\d+)\.mlp\.(up_proj|gate_proj)\.(weight|bias)", dest_name
@@ -174,7 +174,7 @@ def map_weight_parallel_dims(
                 r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", dest_name
             )
         ) is not None:
-            dims_map[dim] = len(shape) - 1
+            dims_map[dim] = n_dim - 1
         elif (
             match := re.search(  # noqa: F841
                 r"layers\.(\d+)\.post_attention_layernorm\.(weight|bias)", dest_name

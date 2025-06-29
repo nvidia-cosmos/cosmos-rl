@@ -43,6 +43,7 @@ Main Features
 
    multinodes/overview
    multinodes/dgxc_lepton
+   multinodes/slurm
 
 
 .. toctree::

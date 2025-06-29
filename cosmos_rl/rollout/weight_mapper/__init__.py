@@ -13,14 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .registry import get_weight_mapper
-from .qwen import QwenWeightMapper
+from .base import WeightMapper
+from .gpt import GPTWeightMapper
 from .qwen_vl_2_5 import QwenVL25WeightMapper
-from .qwen3 import Qwen3MoeWeightMapper
+from .qwen3_moe import Qwen3MoeWeightMapper
+from .deepseek_v3 import DeepseekV3MoEWeightMapper
 
 __all__ = [
-    "get_weight_mapper",
-    "QwenWeightMapper",
+    "WeightMapper",
+    "GPTWeightMapper",
     "QwenVL25WeightMapper",
     "Qwen3MoeWeightMapper",
+    "DeepseekV3MoEWeightMapper",
 ]

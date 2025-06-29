@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 as base
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
@@ -68,7 +68,7 @@ COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 COPY constraints.txt /workspace/cosmos_rl/constraints.txt
 RUN pip install -r /workspace/cosmos_rl/requirements.txt
 
-FROM base as package
+FROM base AS package
 
 COPY setup.py /workspace/cosmos_rl/setup.py
 COPY tools /workspace/cosmos_rl/tools

@@ -38,7 +38,7 @@ model_gradient_checkpointing = true
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "echo"
+project_name = "cosmos_rl"
 experiment_name = "qwen-32b-gsm8k-grpo"
 
 [train.train_policy]
@@ -73,7 +73,7 @@ cp_size = 1
 dp_shard_size = 1
 pp_size = 1
 dp_replicate_size = 1
-cp_rotate_method = "allgather"
+
 
 [policy.parallelism]
 n_init_replicas = 1
@@ -82,7 +82,7 @@ cp_size = 1
 dp_shard_size = 2
 pp_size = 1
 dp_replicate_size = 1
-cp_rotate_method = "allgather"
+
 
 [validation]
 temperature = 0.0

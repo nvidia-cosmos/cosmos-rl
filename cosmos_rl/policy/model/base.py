@@ -14,16 +14,23 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Tuple, Callable, Union
+from typing import Optional, List, Tuple, Union, Callable
 import torch
 from functools import cached_property
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from transformers import AutoConfig
 
 
-class BaseModel(ABC):
+class BaseModel(torch.nn.Module, ABC):
+    def __init__(self, hf_config: AutoConfig):
+        super().__init__()
+        from cosmos_rl.rollout.weight_mapper import WeightMapper
+
+        self.weight_mapper = WeightMapper.get_weight_mapper(
+            self.supported_model_types()[0]
+        )(hf_config)
+
     def current_device(self):
         """
         Get the current device of the model
@@ -31,40 +38,18 @@ class BaseModel(ABC):
         return next(self.parameters()).device
 
     @cached_property
-    def sorted_params(self) -> List[Tuple[str, Tuple[int]]]:
+    def sorted_hf_key_n_rank(self) -> List[Tuple[str, int]]:
         """
-        Returns the state dict of the model and visual model, along with the sorted parameters information.
-        The sorted parameters information is a list of tuples, where each tuple contains the parameter name and its shape.
-        The state dicts are obtained from the model and visual model respectively.
+        Return sorted parameter tensor name and their rank of local view.
         """
-        sorted_params_info = []
+        sorted_key_n_rank = []
         for k, v in self.named_parameters():
-            k = self.map_local_key_to_hf_key(k)
+            k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
-            sorted_params_info.append((k, local_view.shape))
-        sorted_params_info.sort(key=lambda x: x[0])
-        return sorted_params_info
-
-    @torch.no_grad()
-    def maybe_decompose_weights_to_hf_naming(self, name, param):
-        """
-        Decompose the weights of the model parameters into fine-grained weights
-        This is especially useful for models with non-symmetric parameter layout than the original HuggingFace one
-        For example, MoE experts' weights are stacked in the 0th dimension,
-        while they are stored in different keys in the original HuggingFace naming convention
-        """
-        yield name, param
-
-    def tensor_precollect_required_for_sync(self, name: str) -> bool:
-        """
-        Check if the tensor sync precollect is required for the given name.
-        Args:
-            name (str): The name of the tensor.
-        Returns:
-            bool: True if the tensor sync precollect is required, False otherwise.
-        """
-        return False
+            sorted_key_n_rank.append((k, local_view.ndim))
+        sorted_key_n_rank.sort(key=lambda x: x[0])
+        return sorted_key_n_rank
 
     """
     Abstract methods
@@ -135,11 +120,6 @@ class BaseModel(ABC):
 
     @classmethod
     @abstractmethod
-    def map_local_key_to_hf_key(self, key: str) -> str:
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
     def from_pretrained(
         cls,
         hf_config: AutoConfig,
@@ -148,28 +128,15 @@ class BaseModel(ABC):
     ) -> "BaseModel":
         raise NotImplementedError
 
-    @abstractmethod
-    def weight_sync_transform_by_key(
-        cls, dest_name: str
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        """
-        Get the local view of the tensor from the state dict
-        Args:
-            name (str): The name of the tensor to be retrieved.
-        Returns:
-            torch.Tensor: The tensor corresponding to the given name.
-        """
-        raise NotImplementedError
-
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Tuple[int], torch.Tensor]]:
+    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         """
         Get the local view of the tensors from the state dict.
         This method retrieves the state dict of the model, clears the weight names,
-        and returns a list of tuples containing the destination name, shape, and local view of each tensor.
+        and returns a list of tuples containing the destination name, and either a tensor or a callable returning a tensor.
         Returns:
-            List[Tuple[str, Tuple[int], torch.Tensor]]: A list of tuples containing the destination name,
-            shape, and local view of each tensor.
+            List[Tuple[str, Union[torch.Tensor, Callable]]]: A list of tuples containing the destination name,
+            and either a tensor or a callable returning a tensor.
         """
         raise NotImplementedError
 
@@ -185,7 +152,7 @@ class BaseModel(ABC):
         """
         raise NotImplementedError
 
-    @classmethod
-    @abstractmethod
-    def data_packer(cls) -> DataPacker:
-        raise NotImplementedError
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        raise NotImplementedError(
+            "This func should not be called in BaseModel instance."
+        )

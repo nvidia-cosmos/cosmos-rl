@@ -105,30 +105,30 @@ def main():
     parser.add_argument("--output-root-path", type=str, required=True, help="Path to the output root")
     parser.add_argument("--cosmos-container", type=str, required=True, help="Path to the cosmos container")
     parser.add_argument("--extra-sbatch-args", type=str, nargs="*", default=["--gres=gpu:8"], help="Extra #SBATCH arguments")
-    parser.add_argument("--launcher", type=str, default="cosmos_rl.dispatcher.run_web_panel", help="Launcher to use")
+    parser.add_argument(
+        "launcher",
+        nargs="?",  # “?” means 0 or 1 occurrences
+        default="cosmos_rl.dispatcher.run_web_panel",
+        help="The launcher to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom launcher can be provided for custom dataset and reward functions injection.",
+    )
+
+
     args = parser.parse_args()
 
     with open(args.config_path, "r") as f:
         config = toml.load(f)
     min_n_gpus_policy = (
         config['policy']['parallelism']['tp_size']
-        * config['policy']['parallelism']['dp_replicate_size']
         * config['policy']['parallelism']['pp_size']
         * config['policy']['parallelism']['cp_size']
     )
     min_n_gpus_rollout = (
         config['rollout']['parallelism']['tp_size']
-        * config['rollout']['parallelism']['dp_replicate_size']
         * config['rollout']['parallelism']['pp_size']
-        * config['rollout']['parallelism']['cp_size']
     )
     if config['policy']['parallelism']['dp_shard_size'] >= 1:
         min_n_gpus_policy = (
             min_n_gpus_policy * config['policy']['parallelism']['dp_shard_size']
-        )
-    if config['rollout']['parallelism']['dp_shard_size'] >= 1:
-        min_n_gpus_rollout = (
-            min_n_gpus_rollout * config['rollout']['parallelism']['dp_shard_size']
         )
 
     policy_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(args.ngpu_per_node, min_n_gpus_policy, args.n_policy_replicas, "policy")

@@ -41,9 +41,6 @@ from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
 from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property, partial
 from flash_attn import flash_attn_func
@@ -180,18 +177,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=2):
     return q_embed, k_embed
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -216,6 +201,7 @@ class Attention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
+        self.attn_func = flash_attn_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -284,7 +270,7 @@ class Attention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
 
-        output = flash_attn_func(xq, xk, xv, causal=True)
+        output = self.attn_func(xq, xk, xv, causal=True)
         # output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
         # output = output.transpose(
         #     1, 2
@@ -613,7 +599,7 @@ class Qwen3MoEBlock(nn.Module):
         return out
 
 
-class Qwen3MoE(nn.Module, BaseModel):
+class Qwen3MoE(BaseModel):
     """
     Qwen3MoE Module
 
@@ -635,7 +621,7 @@ class Qwen3MoE(nn.Module, BaseModel):
         return ["qwen3_moe"]
 
     def __init__(self, model_args: Qwen3MoeArgs):
-        super().__init__()
+        super().__init__(model_args.hf_config)
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
@@ -980,23 +966,16 @@ class Qwen3MoE(nn.Module, BaseModel):
             else f()
         )
 
-    def weight_sync_transform_by_key(
-        self, dest_name: str
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        self_state_dict = self.state_dict()
-        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        return self.weight_sync_transform_by_key_internal(dest_name, self_state_dict)
-
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Tuple[int], torch.Tensor]]:
+    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         self_state_dict = self.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         transforms = []
-        for dest_name, shape in self.sorted_params:
+        for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, self_state_dict
             )
-            transforms.append((dest_name, shape, local_view))
+            transforms.append((dest_name, local_view))
         return transforms
 
     @classmethod
@@ -1081,36 +1060,11 @@ class Qwen3MoE(nn.Module, BaseModel):
         return model
 
     @classmethod
-    def map_local_key_to_hf_key(cls, name: str) -> str:
-        name = clear_weight_name(name)
-        if not name == "lm_head.weight":
-            if not name.startswith("model."):
-                name = "model." + name
-        return name
-
-    @torch.no_grad()
-    def maybe_decompose_weights_to_hf_naming(self, name, expert_weight: torch.Tensor):
-        if match := re.search(
-            r"model\.layers\.(\d+)\.mlp\.(up_proj|gate_proj|down_proj)\.(weight)", name
-        ):
-            layer_id = int(match.group(1))
-            w_name = match.group(2)
-            n_experts = expert_weight.shape[0]
-            for expert_id in range(n_experts):
-                single_expert_weight = (
-                    expert_weight[expert_id].transpose(0, 1).contiguous()
-                )
-                yield (
-                    f"model.layers.{layer_id}.mlp.experts.{expert_id}.{w_name}.weight",
-                    single_expert_weight,
-                )
-        else:
-            yield name, expert_weight
-
-    @classmethod
-    def data_packer(cls) -> DecoderOnlyLLMDataPacker:
-        return DecoderOnlyLLMDataPacker()
-
-    @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:
         return ["lm_head"]
+
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
+            raise ValueError(
+                f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+            )

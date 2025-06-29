@@ -35,9 +35,6 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
 from flash_attn import flash_attn_func
 
 
@@ -171,18 +168,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=2):
     return q_embed, k_embed
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -207,6 +192,7 @@ class Attention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
+        self.attn_func = flash_attn_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -275,7 +261,7 @@ class Attention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
 
-        output = flash_attn_func(xq, xk, xv, causal=True)
+        output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
@@ -377,7 +363,7 @@ class GPTBlock(nn.Module):
         return out
 
 
-class GPT(nn.Module, BaseModel):
+class GPT(BaseModel):
     """
     GPT Module
 
@@ -399,7 +385,8 @@ class GPT(nn.Module, BaseModel):
         return ["llama", "qwen2", "qwen3"]
 
     def __init__(self, model_args: GPTArgs):
-        super().__init__()
+        super().__init__(model_args.hf_config)
+
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
@@ -650,23 +637,16 @@ class GPT(nn.Module, BaseModel):
         local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
         return local_view
 
-    def weight_sync_transform_by_key(
-        self, dest_name: str
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        self_state_dict = self.state_dict()
-        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        return self.weight_sync_transform_by_key_internal(dest_name, self_state_dict)
-
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Tuple[int], torch.Tensor]]:
+    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         self_state_dict = self.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         transforms = []
-        for dest_name, shape in self.sorted_params:
+        for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, self_state_dict
             )
-            transforms.append((dest_name, shape, local_view))
+            transforms.append((dest_name, local_view))
         return transforms
 
     @classmethod
@@ -748,17 +728,11 @@ class GPT(nn.Module, BaseModel):
         return model
 
     @classmethod
-    def map_local_key_to_hf_key(cls, name: str) -> str:
-        name = clear_weight_name(name)
-        if not name == "lm_head.weight":
-            if not name.startswith("model."):
-                name = "model." + name
-        return name
-
-    @classmethod
-    def data_packer(cls) -> DecoderOnlyLLMDataPacker:
-        return DecoderOnlyLLMDataPacker()
-
-    @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:
         return ["lm_head"]
+
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
+            raise ValueError(
+                f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+            )

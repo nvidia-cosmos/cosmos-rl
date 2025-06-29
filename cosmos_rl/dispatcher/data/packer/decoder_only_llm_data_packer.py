@@ -1,8 +1,18 @@
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from typing import List, Any, Dict, Union
 import torch
+from cosmos_rl.policy.model.gpt import GPT
+from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
+from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
 
 
+@DataPacker.register(
+    [
+        *GPT.supported_model_types(),
+        *DeepseekV3MoEModel.supported_model_types(),
+        *Qwen3MoE.supported_model_types(),
+    ]
+)
 class DecoderOnlyLLMDataPacker(DataPacker):
     """
     Data protocol & processing logic for the decoder only LLM for SFT and RL training.

@@ -272,13 +272,16 @@ def update_dataclass_with_dict(dc_instance, config_data):
     if config_data is None:
         raise RuntimeError("Got null config.")
     for key, value in config_data.items():
-        current_value = getattr(dc_instance, key)
-        if dataclasses.is_dataclass(current_value):
-            if value is None:
-                continue
-            update_dataclass_with_dict(current_value, value)
+        if hasattr(dc_instance, key):
+            current_value = getattr(dc_instance, key)
+            if dataclasses.is_dataclass(current_value):
+                if value is None:
+                    continue
+                update_dataclass_with_dict(current_value, value)
+            else:
+                setattr(dc_instance, key, value)
         else:
-            setattr(dc_instance, key, value)
+            logger.warning(f"Key {key} not found in {dc_instance}")
 
 
 def list_to_b64(lst) -> str:
@@ -763,13 +766,6 @@ def retry(func=None, *, max_retry=10, max_delay=30.0):
     return decorator
 
 
-def seperate_nccl_comm_needed():
-    """
-    Check if separate NCCL communications needed to prevent hang.
-    """
-    return False
-
-
 def write_redis_config(port, logfile, file_path="/opt/redis_config.conf"):
     """
     Write the redis config file.
@@ -940,6 +936,31 @@ def find_maximal_prefix_groups(
                 if not has_deeper:
                     result[prefix] = list(node.idxs)
     return result
+
+
+def add_nan_checks(model):
+    """
+    Add nan checks to the model.
+    """
+    for name, param in model.named_parameters():
+        if not param.requires_grad or not param.is_leaf:
+            continue
+
+        # factory to capture the current name in a closure
+        def make_hook(param_name):
+            def hook(grad):
+                origin_grad = grad
+                if isinstance(grad, torch.distributed.tensor.DTensor):
+                    grad = grad.to_local()
+                if torch.isnan(grad).any():
+                    msg = f"NaN detected in gradient of {param_name}"
+                    raise RuntimeError(msg)
+                return origin_grad  # must return the (possibly modified) grad
+
+            return hook
+
+        param.register_hook(make_hook(name))
+        logger.info(f"Added nan check for {name}")
 
 
 # Util func to create an asyncio task with proper cleanup

@@ -21,7 +21,8 @@ from multiprocessing import shared_memory
 import numpy as np
 import torch.distributed as dist
 import toml
-
+from transformers import AutoConfig
+from typing import Tuple, Dict, Any
 
 import threading
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
@@ -64,7 +65,7 @@ class TestModel:
     num_hidden_layers = 16
 
     def __init__(self, device, parallel_dims):
-        self.sorted_params = [
+        self.sorted_hf_key_n_rank = [
             ("model.layers.9.input_layernorm.weight", torch.Size([1024])),
             ("model.layers.9.mlp.down_proj.weight", torch.Size([1024, 11008])),
             ("model.layers.9.mlp.gate_proj.weight", torch.Size([5504, 2048])),
@@ -81,7 +82,9 @@ class TestModel:
             ("model.norm.weight", torch.Size([1024])),
             ("model.embed_tokens.weight", torch.Size([75968, 2048])),
         ]
-        self.sorted_params.sort(key=lambda x: x[0])
+        self.sorted_hf_key_n_rank.sort(key=lambda x: x[0])
+
+        self.config = AutoConfig.from_pretrained(self.model_path)
         self.device = device
         self.parallel_dims = parallel_dims
         self.tensors = [
@@ -92,7 +95,7 @@ class TestModel:
                 .to(self.device)
                 * 0.001,
             )
-            for k, v in self.sorted_params
+            for k, v in self.sorted_hf_key_n_rank
         ]
         self.sharded_tensors = {}
         for k, v in self.tensors:
@@ -100,7 +103,7 @@ class TestModel:
                 v, k, self.model_type, self.parallel_dims
             )[1]
         self.sorted_sharded_params = [
-            (k, self.sharded_tensors[k].shape) for k, _ in self.sorted_params
+            (k, self.sharded_tensors[k].ndim) for k, _ in self.sorted_hf_key_n_rank
         ]
 
 
@@ -127,21 +130,20 @@ class TestPolicy:
             rollout_parallelism_config,
             policy_world_size,
             rollout_world_size,
-            self.model,
-            self.model.model_path,
+            self.model.config,
         )
         self.replica_name = name
         self.rollouts_comm = rollouts_comm
         self.policy_to_rollout_insts = None
         self.map_w_from_policy_to_rollout = self.model.sharded_tensors
-        self.model.sorted_params = self.model.sorted_sharded_params
+        self.model.sorted_hf_key_n_rank = self.model.sorted_sharded_params
         self.p2r_nccl_uuids = rollouts_comm
         self.train_stream = torch.cuda.Stream()
 
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
 
-    def precollect_parameters_for_sync(self):
+    def pre_P2R_collect_parameters(self):
         return {}
 
 
@@ -170,8 +172,7 @@ class TestRollout:
             rollout_parallelism_config,
             policy_world_size,
             rollout_world_size,
-            self.model,
-            self.model.model_path,
+            self.model.config,
         )
         self.weight_mapper = self.parallel_mapper.weight_mapper
         compatibale_map = self.model.sharded_tensors
@@ -182,22 +183,67 @@ class TestRollout:
         }
         self.ref_compatibale_map = compatibale_map
 
-        def custom_generate_compatible_map(self, model):
-            self.compatible_weight_map = compatibale_map
-            self.compatible_list = compatibale_list
+        def rollout_prepare_recv(self, vllm_model):
+            self.vllm_weight_inplace_view_map = compatibale_map
+            self.recv_key_n_rank_list = compatibale_list
             return operate_compatibale_map, compatibale_list
 
         self.operate_compatibale_map = operate_compatibale_map
-        self.weight_mapper.generate_compatible_map = types.MethodType(
-            custom_generate_compatible_map, self.weight_mapper
+        self.weight_mapper.rollout_prepare_recv = types.MethodType(
+            rollout_prepare_recv, self.weight_mapper
         )
-        self.weight_synced_event = threading.Event()
         self.inference_stream = torch.cuda.Stream()
+        self.state = vLLMRolloutWorker.State()
+
+    def recv_weight_shard(
+        self,
+        global_rank_of_rollout: int,
+        manifest: Tuple[int, int, Dict[int, Any], str, Tuple[int]],
+        communicator_index: Dict[int, int],
+        do_weight_sync_check: bool = False,
+    ):
+        p_rank, r_rank, tensor_split_strategys, dest_name, _ = manifest
+        assert r_rank == global_rank_of_rollout
+
+        target_tensor = self.vllm_weight_inplace_view_map[dest_name]
+
+        view = target_tensor.cosmos_slice(tensor_split_strategys)
+
+        if do_weight_sync_check:
+            cloned_target_tensor = target_tensor.clone()
+            # clear the current view
+            view.zero_()
+
+        recv_tensor = None
+        if view.is_contiguous():
+            recv_tensor = view
+        else:
+            # new a temp tensor
+            recv_tensor = torch.empty_like(view)
+
+        nccl_recv(recv_tensor, p_rank, communicator_index[p_rank])
+
+        # inplace copy
+        if not view.is_contiguous():
+            view.copy_(recv_tensor)
+
+        if do_weight_sync_check:
+            # If the weight sync between Policy and Rollout is correct, the
+            # `target_tensor` would have no change.
+            # TODO: (lms) When we support quantization in rollout side,
+            # we should handle the numerical error of quantized weight, not
+            # just apply `torch.allclose` simply.
+            if not torch.allclose(cloned_target_tensor, target_tensor):
+                raise ValueError(
+                    f"Weight sync check failed after weight sync instruction: {manifest}"
+                )
+
+        return recv_tensor.numel() * recv_tensor.element_size()
 
     def get_underlying_model(self):
         return None
 
-    def sync_weight_from_policy(self, command: PolicyToRolloutUnicastCommand):
+    def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
 
 
@@ -280,10 +326,10 @@ def run_rollout_recv_from_policy(shm_name, shm_size, rank):
             ROLLOUT_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
         )
-        rollout.sync_weight_from_policy = types.MethodType(
-            vLLMRolloutWorker.sync_weight_from_policy, rollout
+        rollout.policy_to_rollout_unicast = types.MethodType(
+            vLLMRolloutWorker.policy_to_rollout_unicast, rollout
         )
-        rollout.sync_weight_from_policy(command)
+        rollout.policy_to_rollout_unicast(command)
         rollout.inference_stream.synchronize()
 
         for k, v in rollout.operate_compatibale_map.items():
@@ -333,12 +379,7 @@ def policy_to_policy_sync_common(
 
         # Construct the model and trainer
         cur_dir = os.path.dirname(os.path.abspath(__file__))
-        config_path = os.path.join(
-            os.path.dirname(cur_dir),
-            "configs",
-            "qwen2-5",
-            "qwen2-5-3b-p-fsdp1-tp2-r-tp2-pp1-grpo.toml",
-        )
+        config_path = os.path.join(cur_dir, "configs", "test_simple_grpo.toml")
 
         with open(config_path, "r") as f:
             config_dict = toml.load(f)
@@ -361,7 +402,7 @@ def policy_to_policy_sync_common(
             def __init__(self, comm_idx):
                 self.comm_idx = comm_idx
 
-            def get_rank(self, replica_name: str):
+            def get_replica_rank(self, replica_name: str):
                 if replica_name in replica_name_to_rank:
                     return replica_name_to_rank[replica_name]
                 else:
@@ -370,15 +411,15 @@ def policy_to_policy_sync_common(
                     )
 
             def broadcast(self, tensor: torch.Tensor, src_replica: str):
-                src_rank = self.get_rank(src_replica)
+                src_rank = self.get_replica_rank(src_replica)
                 nccl_broadcast(tensor, src_rank, self.comm_idx)
 
             def send(self, tensor: torch.Tensor, dst_replica: str):
-                dst_rank = self.get_rank(dst_replica)
+                dst_rank = self.get_replica_rank(dst_replica)
                 nccl_send(tensor, dst_rank, self.comm_idx)
 
             def recv(self, tensor: torch.Tensor, src_replica: str):
-                src_rank = self.get_rank(src_replica)
+                src_rank = self.get_replica_rank(src_replica)
                 nccl_recv(tensor, src_rank, self.comm_idx)
 
             def shutdown(self):
@@ -389,6 +430,7 @@ def policy_to_policy_sync_common(
         CommMixin.start_heartbeat = dummy
         CommMixin.replica_name = policy_name
         CommMixin.remote_hosts = ["localhost:0"]
+        CommMixin.shutdown_signal = threading.Event()
         policy = GRPOTrainer(cosmos_config, parallel_dims)
         policy.model_load_from_hf()
         policy.replica_name = policy_name
@@ -452,7 +494,7 @@ def run_policy_unicast_to_policy(shm_names, shm_size, rank, send):
     """Run as a policy process to perform unicast to another policy process"""
     policy_src_name = "policy_src"
     policy_dst_name = "policy_dst"
-    command = PolicyToPolicyUnicastCommand(policy_src_name, policy_dst_name, "")
+    command = PolicyToPolicyUnicastCommand(policy_src_name, policy_dst_name)
     nccl_rank = 0 if send else 1
     nccl_size = 2
     replica_name_to_rank = {policy_src_name: 0, policy_dst_name: 1}
@@ -476,7 +518,7 @@ def run_policy_broadcast_to_policy(shm_names, shm_size, rank, total_rep, self_re
     policy_name = "policy_" + str(self_rep)
     policy_src = "policy_0"
     policy_dsts = ["policy_" + str(rep) for rep in range(total_rep)]
-    command = PolicyToPolicyBroadcastCommand(policy_src, policy_dsts, "")
+    command = PolicyToPolicyBroadcastCommand(policy_src, policy_dsts)
     nccl_rank = self_rep
     nccl_size = total_rep
     replica_name_to_rank = {"policy_" + str(i): i for i in range(total_rep)}
@@ -499,16 +541,21 @@ def run_dummy_policy():
     """Run as a dummy policy process for testing"""
     from cosmos_rl.policy.train import run_train
 
-    def dummy_train(self):
+    def dummy_train_grpo(
+        self, current_step: int, total_steps: int, remain_samples_num: int
+    ):
+        return {}
+
+    def dummy_train_sft(self):
         pass
 
     def dummy_model_load_from_hf(self):
         self.model_ready = True
 
     def dummy_execute_policy_to_rollout_unicast(self, command):
-        return True
+        return False
 
-    GRPOTrainer.train = dummy_train
+    GRPOTrainer.train = dummy_train_grpo
     GRPOTrainer.model_load_from_hf = dummy_model_load_from_hf
 
     def get_policy_command_handler(cls, command_type):
@@ -517,7 +564,7 @@ def run_dummy_policy():
         return cls.policy_command_handler_registry.get_command_handler(command_type)
 
     GRPOTrainer.get_policy_command_handler = get_policy_command_handler
-    SFTTrainer.train = dummy_train
+    SFTTrainer.train = dummy_train_sft
     run_train()
 
 
@@ -526,20 +573,19 @@ def run_dummy_rollout():
     from cosmos_rl.rollout.rollout_entrance import run_rollout
 
     def dummy_sync_weight_from_policy(self, command):
-        self.weight_synced_event.set()
+        self.state.set_weight_synced()
 
-    def generate(self):
-        prompt_id_and_payload_list = self._prompt_queue.get()
-        payloads = [x[1] for x in prompt_id_and_payload_list]
-        completions_per_prompt = [[x] for x in payloads]
-        return completions_per_prompt, prompt_id_and_payload_list
+    def dummy_rollout2rollout_broadcast(self, broadcast_command):
+        if broadcast_command.replica_should_stop():
+            self.shutdown_signal.set()
 
     def get_rollout_command_handler(cls, command_type):
         if command_type == PolicyToRolloutUnicastCommand:
             return dummy_sync_weight_from_policy
+        elif command_type == PolicyToPolicyUnicastCommand:
+            return dummy_rollout2rollout_broadcast
         return cls.rollout_command_handler_registry.get_command_handler(command_type)
 
-    vLLMRolloutWorker.generate = generate
     vLLMRolloutWorker.get_rollout_command_handler = get_rollout_command_handler
 
     def dummy_init(self, config, tokenizer, **kwargs):
@@ -551,6 +597,20 @@ def run_dummy_rollout():
             llm_engine = Llm_engine()
 
         self.rollout_engine = Rollout_engine()
+        self.eos_token_ids = [0]
+
+        def rollout_generation(
+            self,
+            prompt_id_and_payload_list,
+            stream,
+            data_packer,
+            sampling_params,
+        ):
+            payloads = [x[1] for x in prompt_id_and_payload_list]
+            completions_per_prompt = [[x] for x in payloads]
+            return completions_per_prompt
+
+        self.rollout_generation = types.MethodType(rollout_generation, self)
 
     vLLMRollout.__init__ = dummy_init
     run_rollout()

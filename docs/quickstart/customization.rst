@@ -178,8 +178,7 @@ Here we just reuse the pre-deined LLM data packer to demonstrate how to pass you
     from cosmos_rl.policy.config import Config
     from cosmos_rl.dispatcher.algo.reward import gsm8k_reward_fn
     from transformers import AutoTokenizer
-    from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import DecoderOnlyLLMDataPacker
-    from cosmos_rl.dispatcher.data.packer.base import DataPacker
+    from cosmos_rl.dispatcher.data.packer import DataPacker, DecoderOnlyLLMDataPacker
     from cosmos_rl.utils.modelscope import modelscope_load_dataset
 
     class GSM8kDataset(Dataset):

@@ -36,9 +36,6 @@ from cosmos_rl.policy.model.qwen2_5_vl.weight_converter import (
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
-from cosmos_rl.dispatcher.data.packer.qwen2_5_vlm_data_packer import (
-    Qwen2_5_VLM_DataPacker,
-)
 from functools import cached_property
 import re
 from functools import partial
@@ -253,6 +250,7 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
+        self.attn_func = F.scaled_dot_product_attention
 
     def forward(
         self,
@@ -272,7 +270,7 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
-        attn_output = F.scaled_dot_product_attention(
+        attn_output = self.attn_func(
             q,
             k,
             v,
@@ -650,18 +648,6 @@ def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim
     return q_embed, k_embed
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Qwen2_5_VLAttention(nn.Module):
     """
     Multi-head attention module.
@@ -692,6 +678,7 @@ class Qwen2_5_VLAttention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
+        self.attn_func = flash_attn_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -744,7 +731,7 @@ class Qwen2_5_VLAttention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = apply_multimodal_rotary_pos_emb(xq, xk, cos, sin, self.mrope_section)
 
-        output = flash_attn_func(xq, xk, xv, causal=True)
+        output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
@@ -857,10 +844,9 @@ class Qwen2_5_VLModel(nn.Module):
         )
 
 
-class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
-    def __init__(self, config):
-        super().__init__()
-        # save the config into a toml file
+class Qwen2_5_VLConditionalModel(BaseModel):
+    def __init__(self, config: Qwen2_5_VL_LM_Args):
+        super().__init__(config.hf_config)
         self.config = config
         self.visual = Qwen2_5_VisionTransformerPretrainedModel(config.encoder_args)
         self.model = Qwen2_5_VLModel(config.lm_args)
@@ -1503,24 +1489,8 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
         local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
         return local_view
 
-    def weight_sync_transform_by_key(
-        self, dest_name: str
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        lm_state_dict = self.model.state_dict()
-        if self.visual is not None:
-            visual_state_dict = self.visual.state_dict()
-        else:
-            visual_state_dict = {}
-        lm_state_dict = {clear_weight_name(k): v for k, v in lm_state_dict.items()}
-        visual_state_dict = {
-            clear_weight_name(k): v for k, v in visual_state_dict.items()
-        }
-        return self.weight_sync_transform_by_key_internal(
-            dest_name, lm_state_dict, visual_state_dict
-        )
-
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Tuple[int], torch.Tensor]]:
+    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         lm_state_dict = self.model.state_dict()
         if self.visual is not None:
             visual_state_dict = self.visual.state_dict()
@@ -1531,32 +1501,18 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
             clear_weight_name(k): v for k, v in visual_state_dict.items()
         }
         transforms = []
-        for dest_name, shape in self.sorted_params:
+        for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, lm_state_dict, visual_state_dict
             )
-            transforms.append((dest_name, shape, local_view))
+            transforms.append((dest_name, local_view))
         return transforms
 
-    @classmethod
-    def map_local_key_to_hf_key(cls, name: str) -> str:
-        name = clear_weight_name(name)
-        if name.startswith("language_model."):
-            name = name.replace("language_model.", "")
-        if name == "model.lm_head.weight":
-            name = "lm_head.weight"
-        return name
-
     @cached_property
-    def sorted_params(self) -> List[Tuple[str, Tuple[int]]]:
-        """
-        Returns the state dict of the model and visual model, along with the sorted parameters information.
-        The sorted parameters information is a list of tuples, where each tuple contains the parameter name and its shape.
-        The state dicts are obtained from the model and visual model respectively.
-        """
-        sorted_params_info = []
+    def sorted_hf_key_n_rank(self) -> List[Tuple[str, int]]:
+        sorted_key_n_rank = []
         for k, v in self.named_parameters():
-            k = self.map_local_key_to_hf_key(k)
+            k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             if k.startswith("visual.") and "qkv" in k:
                 # For visual model, we need to split qkv weights
@@ -1565,37 +1521,14 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
                 q_view = local_view[:unit_dim]
                 k_view = local_view[unit_dim : 2 * unit_dim]
                 v_view = local_view[2 * unit_dim :]
-                sorted_params_info.append((k.replace("qkv", "q"), q_view.shape))
-                sorted_params_info.append((k.replace("qkv", "k"), k_view.shape))
-                sorted_params_info.append((k.replace("qkv", "v"), v_view.shape))
+                sorted_key_n_rank.append((k.replace("qkv", "q"), q_view.ndim))
+                sorted_key_n_rank.append((k.replace("qkv", "k"), k_view.ndim))
+                sorted_key_n_rank.append((k.replace("qkv", "v"), v_view.ndim))
             else:
                 local_view = v.to_local() if is_dist_tensor else v
-                sorted_params_info.append((k, local_view.shape))
-        sorted_params_info.sort(key=lambda x: x[0])
-        return sorted_params_info
-
-    def tensor_precollect_required_for_sync(self, name: str) -> bool:
-        """
-        Check if the tensor sync precollect is required for the given name.
-        Args:
-            name (str): The name of the tensor.
-        Returns:
-            bool: True if the tensor sync precollect is required, False otherwise.
-        """
-        is_visual = name.startswith("visual.")
-        # Handle qkv weights for separate q, k, v tensors
-        if (
-            match := re.search(  # noqa: F841
-                r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
-                name,
-            )
-        ) is not None and is_visual:
-            return True
-        return False
-
-    @classmethod
-    def data_packer(cls) -> Qwen2_5_VLM_DataPacker:
-        return Qwen2_5_VLM_DataPacker()
+                sorted_key_n_rank.append((k, local_view.ndim))
+        sorted_key_n_rank.sort(key=lambda x: x[0])
+        return sorted_key_n_rank
 
     @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:
@@ -1606,3 +1539,15 @@ class Qwen2_5_VLConditionalModel(nn.Module, BaseModel):
             "visual",
         ]  # Filter Linear in visual out, they will corrupt the FP8 Linear.
         return llm + visual
+
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        visual_n_heads = self.config.encoder_args.n_heads
+        llm_n_heads = self.config.lm_args.n_heads
+        cp_compatible = (
+            visual_n_heads % (cp_size * tp_size) == 0
+            and llm_n_heads % (cp_size * tp_size) == 0
+        )
+        if not cp_compatible:
+            raise ValueError(
+                f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+            )

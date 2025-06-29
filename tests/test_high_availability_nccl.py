@@ -67,7 +67,7 @@ output_dir = "{WORK_DIR}"
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "cosmos_rl_job"
+project_name = "cosmos_rl"
 experiment_name = "None"
 
 [train.train_policy]

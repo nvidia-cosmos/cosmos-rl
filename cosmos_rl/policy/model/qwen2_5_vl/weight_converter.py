@@ -21,8 +21,8 @@ import torch
 import re
 from typing import Tuple, Dict, Any
 from cosmos_rl.utils.parallelism_registry import (
-    register_rollout_parallelism_strategy,
-    register_policy_parallelism_strategy,
+    register_parallelism_strategy,
+    ParallelismStrategyRole,
 )
 
 
@@ -66,9 +66,9 @@ def convert_weight_from_hf(
     return dest_name, shard.contiguous()
 
 
-@register_rollout_parallelism_strategy("qwen2_5_vl")
+@register_parallelism_strategy("qwen2_5_vl", role=ParallelismStrategyRole.ROLLOUT)
 def map_weight_parallel_dims(
-    shape: Tuple[int], dest_name: str, parallel_dims: ParallelDims, model_config: Any
+    n_dim: int, dest_name: str, parallel_dims: ParallelDims, model_config: Any
 ) -> Tuple[Dict[str, int], Dict[int, list], int]:
     tp_size = parallel_dims.tp
     dp_shard_size = parallel_dims.dp_shard * parallel_dims.cp
@@ -91,7 +91,7 @@ def map_weight_parallel_dims(
         ) is not None:
             dims_map[dim] = 0
         elif (match := re.search(r"merger\.mlp\.2\.weight", dest_name)) is not None:  # noqa: F841
-            dims_map[dim] = len(shape) - 1
+            dims_map[dim] = n_dim - 1
         elif (match := re.search(r"merger\.mlp\.2\.bias", dest_name)) is not None:  # noqa: F841
             pass
         elif (
@@ -105,7 +105,7 @@ def map_weight_parallel_dims(
         elif (
             match := re.search(r"blocks\.(\d+)\.attn\.proj\.weight", dest_name)  # noqa: F841
         ) is not None:
-            dims_map[dim] = len(shape) - 1
+            dims_map[dim] = n_dim - 1
         elif (
             match := re.search(r"blocks\.(\d+)\.attn\.proj\.bias", dest_name)  # noqa: F841
         ) is not None:
@@ -119,7 +119,7 @@ def map_weight_parallel_dims(
         elif (
             match := re.search(r"blocks\.(\d+)\.mlp\.down_proj\.weight", dest_name)  # noqa: F841
         ) is not None:
-            dims_map[dim] = len(shape) - 1
+            dims_map[dim] = n_dim - 1
         elif (
             match := re.search(r"blocks\.(\d+)\.mlp\.down_proj\.bias", dest_name)  # noqa: F841
         ) is not None:
@@ -151,9 +151,9 @@ def map_weight_parallel_dims(
     return dims_map, tensor_dim_to_parallel_map, pp_rank
 
 
-@register_policy_parallelism_strategy("qwen2_5_vl")
+@register_parallelism_strategy("qwen2_5_vl", role=ParallelismStrategyRole.POLICY)
 def map_weight_parallel_dims_no_visual_tp(
-    shape: Tuple[int], dest_name: str, parallel_dims: ParallelDims, model_config: Any
+    n_dim: int, dest_name: str, parallel_dims: ParallelDims, model_config: Any
 ) -> Tuple[Dict[str, int], Dict[int, list], int]:
     tp_size = parallel_dims.tp
     dp_shard_size = parallel_dims.dp_shard * parallel_dims.cp

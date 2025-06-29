@@ -56,7 +56,7 @@ if __name__ == "__main__":
         env  = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in visible_gpus)
         env["VLLM_DISABLE_COMPILE_CACHE"] = "1"
-        replica_launch_script = os.path.join(os.path.dirname(__file__), "..", "launch_replica.sh")
+        replica_launch_script = os.path.join(os.path.dirname(__file__), "..", "..", "cosmos_rl", "launcher", "launch_replica.sh")
         cmds.append([replica_launch_script, "--type", args.type, "--rdzv-endpoint", f"{rendezvous_node}:{rendezvous_port}", "--ngpus", str(len(visible_gpus)), "--nnodes", str(nnode)])
         envs.append(env)
     

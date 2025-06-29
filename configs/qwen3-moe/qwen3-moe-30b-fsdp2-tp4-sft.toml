@@ -11,7 +11,7 @@ optm_impl = "foreach"
 optm_weight_decay = 0.01
 optm_betas = [0.9, 0.999]
 optm_warmup_steps = 20
-optm_grad_norm_clip = 1.0
+optm_grad_norm_clip = 0.0
 async_tp_enabled = false
 compile = false
 param_dtype = "bfloat16"
@@ -28,7 +28,7 @@ model_gradient_checkpointing = true
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "cosmos_rl_job"
+project_name = "cosmos_rl"
 experiment_name = "None"
 
 [train.train_policy]
@@ -51,4 +51,4 @@ cp_size = 1
 dp_shard_size = 2
 pp_size = 1
 dp_replicate_size = 1
-cp_rotate_method = "allgather"
+

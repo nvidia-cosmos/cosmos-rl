@@ -20,7 +20,7 @@ import threading
 from queue import Queue
 import atexit
 import types
-from typing import List, Tuple, Optional, Callable, Any
+from typing import List, Tuple, Optional, Callable, Any, Dict
 from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase
@@ -44,11 +44,12 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
     nccl_broadcast,
+    nccl_recv,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
-from cosmos_rl.rollout.weight_mapper import get_weight_mapper
+from cosmos_rl.rollout.weight_mapper import WeightMapper
 from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -60,6 +61,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_VALIDATION_REPORT_SUFFIX,
 )
 from vllm import SamplingParams
+
 
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
@@ -191,10 +193,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path
         )
-        model_type = hf_config.model_type
-        weight_mapper_cls = get_weight_mapper(model_type)
-        self.weight_mapper = weight_mapper_cls(self.config.policy.model_name_or_path)
-        self.model_type = model_type
+        self.weight_mapper = WeightMapper.get_weight_mapper(hf_config.model_type)(
+            hf_config
+        )
         self.model_config = hf_config
 
         atexit.register(self.handle_shutdown)
@@ -333,6 +334,51 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         nccl_group_id = b64_to_list(base64_nccl_group_id)
         return nccl_group_id
 
+    def recv_weight_shard(
+        self,
+        global_rank_of_rollout: int,
+        manifest: Tuple[int, int, Dict[int, Any], str, Tuple[int]],
+        communicator_index: Dict[int, int],
+        do_weight_sync_check: bool = False,
+    ):
+        p_rank, r_rank, tensor_split_strategys, dest_name, _ = manifest
+        assert r_rank == global_rank_of_rollout
+
+        target_tensor = self.vllm_weight_inplace_view_map[dest_name]
+
+        view = target_tensor.cosmos_slice(tensor_split_strategys)
+
+        if do_weight_sync_check:
+            cloned_target_tensor = target_tensor.clone()
+            # clear the current view
+            view.zero_()
+
+        recv_tensor = None
+        if view.is_contiguous():
+            recv_tensor = view
+        else:
+            # new a temp tensor
+            recv_tensor = torch.empty_like(view)
+
+        nccl_recv(recv_tensor, p_rank, communicator_index[p_rank])
+
+        # inplace copy
+        if not view.is_contiguous():
+            view.copy_(recv_tensor)
+
+        if do_weight_sync_check:
+            # If the weight sync between Policy and Rollout is correct, the
+            # `target_tensor` would have no change.
+            # TODO: (lms) When we support quantization in rollout side,
+            # we should handle the numerical error of quantized weight, not
+            # just apply `torch.allclose` simply.
+            if not torch.allclose(cloned_target_tensor, target_tensor):
+                raise ValueError(
+                    f"Weight sync check failed after weight sync instruction: {manifest}"
+                )
+
+        return recv_tensor.numel() * recv_tensor.element_size()
+
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
@@ -341,7 +387,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         This is Policy -> Rollout replica. Will only happen between
         a pair of policy and rollout replica.
         """
-        need_sep_comm = util.seperate_nccl_comm_needed()
         if command.dst_replica_name != self.replica_name:
             return
         if self.parallel_mapper is None:
@@ -351,19 +396,18 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 command.src_replica_size,
                 self.world_size,
                 self.model_config,
-                self.config.policy.model_name_or_path,
             )
 
         # get the nccl_unique_id from the controller
         communicator_index = {}
-        _, compatible_list = self.weight_mapper.generate_compatible_map(
-            self.get_underlying_model()
-        )
-        # same as policy
-        compatible_list.sort(key=lambda x: x[0])
+        if not hasattr(self, "vllm_weight_inplace_view_map"):
+            self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
+                self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+            )
+            self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
 
-        insts = self.parallel_mapper.generate_rollout_from_policy_insts(
-            compatible_list, self.global_rank
+        insts = self.parallel_mapper.prepare_rollout_from_policy_manifest(
+            self.recv_param_key_n_rank_list, self.global_rank
         )
 
         related_ranks = [set() for _ in range(command.dst_replica_size)]
@@ -375,8 +419,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             nccl_unique_id_key = (
                 command.src_replica_name + "_" + command.dst_replica_name
             )
-            if need_sep_comm:
-                nccl_unique_id_key += f"_{p_rank}_{self.global_rank}"
             if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
                 logger.debug(
                     f"[Rollout] Reusing cached communicator for {nccl_unique_id_key}"
@@ -400,12 +442,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # p_rank is the rank in policy, r_rank is the rank in rollout
                 communicator_index[p_rank] = create_nccl_comm(
                     nccl_group_id,
-                    1
-                    if need_sep_comm
-                    else (self.global_rank + command.src_replica_size),
-                    2
-                    if need_sep_comm
-                    else (self.world_size + command.src_replica_size),
+                    self.global_rank + command.src_replica_size,
+                    self.world_size + command.src_replica_size,
                 )
                 # cache the communicator index
                 self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (
@@ -420,7 +458,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # st = time.time()
             total_bytes_received = 0
             for inst in insts:
-                total_bytes_received += self.weight_mapper.recv_weight_shard(
+                total_bytes_received += self.recv_weight_shard(
                     self.global_rank,
                     inst,
                     communicator_index,
@@ -617,6 +655,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
                 )
             except Exception as e:
+                import traceback
+
+                traceback.print_exc()
                 logger.error(f"[Rollout] Command execution failed: {str(e)}")
 
     def send_end_signal(self, url_suffix: str):

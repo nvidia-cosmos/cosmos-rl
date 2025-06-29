@@ -1,8 +1,6 @@
-import pytest
+import unittest
 
 from torch import nn
-
-
 from cosmos_rl.utils.fp8.fp8_util import (
     FP8ModelConverter,
     IS_TORCH_COMPATIBLE_WITH_FP8,
@@ -28,75 +26,99 @@ class DemoModel(nn.Module):
         return []
 
 
-@pytest.mark.parametrize("quant_recipe", ["rowwise", "tensorwise"])
-@pytest.mark.parametrize("dp_shard", [1, 2])
-def test_fp8_model_converter_delayed_scaling(quant_recipe, dp_shard):
-    if not IS_TORCH_COMPATIBLE_WITH_FP8:
-        pytest.skip("FP8 is not supported for this version of PyTorch")
-
-    demo_model = DemoModel(input_dim=1024, output_dim=512, intermediate_dim=1024)
-    config = CosmosConfig(
-        train=TrainingConfig(
-            fp8=FP8Config(
-                enable_fp8=True, quant_recipe=quant_recipe, fp8_recipe="delayed_scaling"
+@unittest.skipIf(
+    not IS_TORCH_COMPATIBLE_WITH_FP8, "FP8 is not supported for this version of PyTorch"
+)
+class TestFp8(unittest.TestCase):
+    def _test_fp8_model_converter_delayed_scaling(self, quant_recipe, dp_shard):
+        demo_model = DemoModel(input_dim=1024, output_dim=512, intermediate_dim=1024)
+        config = CosmosConfig(
+            train=TrainingConfig(
+                fp8=FP8Config(
+                    enable_fp8=True,
+                    quant_recipe=quant_recipe,
+                    fp8_recipe="delayed_scaling",
+                )
             )
         )
-    )
-    # Mock the parallel_dims
-    tp_size = 2
-    parallel_dims = ParallelDims(
-        dp_replicate=1,
-        dp_shard=dp_shard,
-        cp=1,
-        tp=tp_size,
-        pp=1,
-        world_size=dp_shard * tp_size,
-        pp_dynamic_shape=False,
-    )
-    with pytest.raises(NotImplementedError):
+        # Mock the parallel_dims
+        tp_size = 2
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=dp_shard,
+            cp=1,
+            tp=tp_size,
+            pp=1,
+            world_size=dp_shard * tp_size,
+            pp_dynamic_shape=False,
+        )
         converter = FP8ModelConverter(config, parallel_dims)
         converter.convert_model(demo_model)
 
+    def test_fp8_model_converter_delayed_scaling(self):
+        params = [
+            ("rowwise", 1),
+            ("tensorwise", 1),
+            ("rowwise", 2),
+            ("tensorwise", 2),
+        ]
+        for quant_recipe, dp_shard in params:
+            with self.subTest(quant_recipe=quant_recipe, dp_shard=dp_shard):
+                self._test_fp8_model_converter_delayed_scaling(
+                    quant_recipe=quant_recipe, dp_shard=dp_shard
+                )
 
-@pytest.mark.parametrize("quant_recipe", ["rowwise", "tensorwise"])
-@pytest.mark.parametrize("fp8_recipe", ["dynamic_scaling"])
-@pytest.mark.parametrize("dp_shard", [1, 2])
-def test_fp8_model_converter(quant_recipe, fp8_recipe, dp_shard):
-    if not IS_TORCH_COMPATIBLE_WITH_FP8:
-        pytest.skip("FP8 is not supported for this version of PyTorch")
+    def test_fp8_model_converter(self):
+        params = [
+            ("rowwise", "dynamic_scaling", 1),
+            ("tensorwise", "dynamic_scaling", 1),
+            ("rowwise", "dynamic_scaling", 2),
+            ("tensorwise", "dynamic_scaling", 2),
+        ]
+        for quant_recipe, fp8_recipe, dp_shard in params:
+            with self.subTest(
+                quant_recipe=quant_recipe, fp8_recipe=fp8_recipe, dp_shard=dp_shard
+            ):
+                self._test_fp8_model_converter(
+                    quant_recipe=quant_recipe,
+                    fp8_recipe=fp8_recipe,
+                    dp_shard=dp_shard,
+                )
 
-    demo_model = DemoModel(input_dim=1024, output_dim=512, intermediate_dim=1024)
-    config = CosmosConfig(
-        train=TrainingConfig(
-            fp8=FP8Config(
-                enable_fp8=True, quant_recipe=quant_recipe, fp8_recipe=fp8_recipe
+    def _test_fp8_model_converter(self, quant_recipe, fp8_recipe, dp_shard):
+        demo_model = DemoModel(input_dim=1024, output_dim=512, intermediate_dim=1024)
+        config = CosmosConfig(
+            train=TrainingConfig(
+                fp8=FP8Config(
+                    enable_fp8=True, quant_recipe=quant_recipe, fp8_recipe=fp8_recipe
+                )
             )
         )
-    )
-    # Mock the parallel_dims
-    tp_size = 2
-    parallel_dims = ParallelDims(
-        dp_replicate=1,
-        dp_shard=dp_shard,
-        cp=1,
-        tp=tp_size,
-        pp=1,
-        world_size=dp_shard * tp_size,
-        pp_dynamic_shape=False,
-    )
-    config.train.fp8.quant_recipe = quant_recipe
-    config.train.fp8.fp8_recipe = fp8_recipe
+        # Mock the parallel_dims
+        tp_size = 2
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=dp_shard,
+            cp=1,
+            tp=tp_size,
+            pp=1,
+            world_size=dp_shard * tp_size,
+            pp_dynamic_shape=False,
+        )
+        config.train.fp8.quant_recipe = quant_recipe
+        config.train.fp8.fp8_recipe = fp8_recipe
 
-    try:
         converter = FP8ModelConverter(config, parallel_dims)
         converter.convert_model(demo_model)
-    except Exception as e:
-        pytest.fail(f"Failed to Pass FP8 conversion: {e}")
 
-    # Check the model is converted
-    assert isinstance(
-        demo_model.linear, Float8Linear
-    ), f"Got type: {type(demo_model.linear)}"
-    assert isinstance(
-        demo_model.linear2, Float8Linear
-    ), f"Got type: {type(demo_model.linear2)}"
+        # Check the model is converted
+        assert isinstance(
+            demo_model.linear, Float8Linear
+        ), f"Got type: {type(demo_model.linear)}"
+        assert isinstance(
+            demo_model.linear2, Float8Linear
+        ), f"Got type: {type(demo_model.linear2)}"
+
+
+if __name__ == "__main__":
+    unittest.main()

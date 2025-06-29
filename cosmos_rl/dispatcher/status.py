@@ -165,7 +165,9 @@ class PolicyStatusManager:
         num_policy_replicas = len(self.get_all_atoms_arrived_replicas())
         if num_policy_replicas > 0:
             num_remaining_samples = (
-                explicit_num_remaining_samples or self.remain_samples_num
+                explicit_num_remaining_samples
+                if explicit_num_remaining_samples is not None
+                else self.remain_samples_num
             )
             self.total_steps = self.current_step + num_remaining_samples // (
                 self.config.train.train_batch_per_replica * num_policy_replicas
@@ -323,10 +325,12 @@ class PolicyStatusManager:
                     rollout_status_manager.rollout_replicas.values(),
                     key=lambda x: x.start_time,
                 )
+                valid_rollout_replicas = []
                 for r in sorted_rollout_replicas:
                     if r.all_atoms_arrived:
-                        any_valid_rollout_replica = r
-                        break
+                        valid_rollout_replicas.append(r)
+                        if any_valid_rollout_replica is None:
+                            any_valid_rollout_replica = r
                 if any_valid_rollout_replica:
                     command.PolicyToRolloutUnicastCommand.trigger(
                         src_replica=current_policy_replica,
@@ -337,6 +341,17 @@ class PolicyStatusManager:
                         total_steps=None,
                         redis_handler=self.redis_handler,
                     )
+                    if (
+                        len(valid_rollout_replicas)
+                        >= config.rollout.parallelism.n_init_replicas
+                    ):
+                        command.RolloutToRolloutBroadcastCommand.trigger(
+                            src_replica=any_valid_rollout_replica,
+                            dst_replicas=valid_rollout_replicas,
+                            weight_step=None,
+                            total_steps=None,
+                            redis_handler=self.redis_handler,
+                        )
                     logger.info(
                         f"[Controller] Trigger PolicyToRolloutUnicastCommand to {any_valid_rollout_replica.name} via Policy registration"
                     )
@@ -571,6 +586,7 @@ class PolicyStatusManager:
         self,
         replica_name: str,
         step: int,
+        total_steps: int,
         profile_finished: bool,
         report_data: Dict[str, Any],
         rollout_status_manager: "RolloutStatusManager",
@@ -587,7 +603,7 @@ class PolicyStatusManager:
             # All replicas have been reduced, trigger allreduce
             need_sync_weight = step % self.config.train.sync_weight_interval == 0
             # If the current step is the last step, we need to sync weight always to act as ending signal
-            need_sync_weight = need_sync_weight or step == self.total_steps
+            need_sync_weight = need_sync_weight or step == total_steps
             # If validation is enabled, we need to sync weight every validation step
             if self.config.train.enable_validation:
                 need_sync_weight = need_sync_weight or (
@@ -601,43 +617,52 @@ class PolicyStatusManager:
 
             # Sum and report data
             if self.config.logging.logger:
-                total_loss_avg = np.mean(
-                    [data["train/loss_avg"] for data in self.report_data_list]
-                )
-                total_loss_max = np.max(
-                    [data["train/loss_max"] for data in self.report_data_list]
-                )
-                total_learning_rate = self.report_data_list[0]["train/learning_rate"]
-                train_step = self.report_data_list[0]["train_step"]
-                total_steps = self.total_steps
-                if train_step > 1:
-                    total_iter_time_avg = np.mean(
-                        [data["train/iteration_time"] for data in self.report_data_list]
+                try:
+                    total_loss_avg = np.mean(
+                        [data["train/loss_avg"] for data in self.report_data_list]
                     )
-                self.report_data_list = []
-
-                if "wandb" in self.config.logging.logger and is_wandb_available():
+                    total_loss_max = np.max(
+                        [data["train/loss_max"] for data in self.report_data_list]
+                    )
+                    total_learning_rate = self.report_data_list[0][
+                        "train/learning_rate"
+                    ]
+                    train_step = self.report_data_list[0]["train_step"]
                     if train_step > 1:
+                        total_iter_time_avg = np.mean(
+                            [
+                                data["train/iteration_time"]
+                                for data in self.report_data_list
+                            ]
+                        )
+                    self.report_data_list = []
+
+                    if "wandb" in self.config.logging.logger and is_wandb_available():
+                        if train_step > 1:
+                            log_wandb(
+                                data={"train/pre_iteration_time": total_iter_time_avg},
+                                step=train_step,
+                            )
+
                         log_wandb(
-                            data={"train/pre_iteration_time": total_iter_time_avg},
+                            data={
+                                "train/loss_avg": total_loss_avg,
+                                "train/loss_max": total_loss_max,
+                                "train/learning_rate": total_learning_rate,
+                            },
                             step=train_step,
                         )
-
-                    log_wandb(
-                        data={
-                            "train/loss_avg": total_loss_avg,
-                            "train/loss_max": total_loss_max,
-                            "train/learning_rate": total_learning_rate,
-                        },
-                        step=train_step,
-                    )
-                if "console" in self.config.logging.logger:
-                    if train_step > 1:
-                        logger.debug(
-                            f"Step: {train_step-1}/{total_steps}, Iteration time: {total_iter_time_avg:2f} s"
+                    if "console" in self.config.logging.logger:
+                        if train_step > 1:
+                            logger.debug(
+                                f"Step: {train_step-1}/{total_steps}, Iteration time: {total_iter_time_avg:2f} s"
+                            )
+                        logger.info(
+                            f"Step: {train_step}/{total_steps}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}."
                         )
-                    logger.info(
-                        f"Step: {train_step}/{total_steps}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}."
+                except Exception as e:
+                    logger.warning(
+                        f"[Controller] Warning reporting training results: {e}"
                     )
 
             # All replicas have been reduced, trigger weight sync
@@ -652,12 +677,18 @@ class PolicyStatusManager:
 
             # P->R & R->R
             if need_sync_weight:
-                self.trigger_weight_sync(any_loaded_replica, rollout_status_manager)
+                self.trigger_weight_sync(
+                    any_loaded_replica, rollout_status_manager, step, total_steps
+                )
             # Trigger next step training if data is available
             self.try_trigger_data_fetch_and_training()
 
     def trigger_weight_sync(
-        self, policy_replica: Replica, rollout_status_manager: "RolloutStatusManager"
+        self,
+        policy_replica: Replica,
+        rollout_status_manager: "RolloutStatusManager",
+        current_step: int,
+        total_steps: int,
     ):
         any_loaded_rollout_replica = None
         valid_rollout_replicas = []
@@ -676,16 +707,16 @@ class PolicyStatusManager:
             dst_replica=any_loaded_rollout_replica,
             src_replica_size=self.policy_atoms_in_replica,
             dst_replica_size=rollout_status_manager.rollout_atoms_in_replica,
-            weight_step=self.current_step,
-            total_steps=self.total_steps,
+            weight_step=current_step,
+            total_steps=total_steps,
             redis_handler=self.redis_handler,
         )
 
         command.RolloutToRolloutBroadcastCommand.trigger(
             src_replica=any_loaded_rollout_replica,
             dst_replicas=valid_rollout_replicas,
-            weight_step=self.current_step,
-            total_steps=self.total_steps,
+            weight_step=current_step,
+            total_steps=total_steps,
             redis_handler=self.redis_handler,
         )
 
@@ -971,18 +1002,16 @@ class RolloutStatusManager:
                 # to broadcast weights
                 any_loaded_policy_replica = replica
                 break
-        if any_loaded_policy_replica is None:
-            logger.info(
-                "No weight-loaded policy replica exists, will be rescheduled after first policy replica is loaded"
-            )
-            return
 
         # First P->R Unicast if the policy is ready and all rollout replicas are not ready
-        if all(
-            [
-                not replica.weights_loaded_in_view_of_command
-                for replica in valid_replicas
-            ]
+        if (
+            all(
+                [
+                    not replica.weights_loaded_in_view_of_command
+                    for replica in valid_replicas
+                ]
+            )
+            and any_loaded_policy_replica is not None
         ):
             command.PolicyToRolloutUnicastCommand.trigger(
                 src_replica=any_loaded_policy_replica,
@@ -998,7 +1027,7 @@ class RolloutStatusManager:
             )
         else:
             logger.info(
-                "[Controller] No valid policy replicas found in Rollout registration, skip PolicyToRolloutUnicastCommand"
+                "[Controller] No valid policy replicas found in Rollout registration or some rollout already get weight from policy, skip PolicyToRolloutUnicastCommand"
             )
 
         was_already_initialized = self.rollout_init_done
@@ -1023,15 +1052,14 @@ class RolloutStatusManager:
                     # to broadcast weights
                     any_loaded_rollout_replica = replica
                     break
-            assert any_loaded_rollout_replica is not None
-            command.RolloutToRolloutBroadcastCommand.trigger(
-                src_replica=any_loaded_rollout_replica,
-                dst_replicas=valid_replicas,
-                weight_step=None,
-                total_steps=None,
-                redis_handler=self.redis_handler,
-            )
-
+            if any_loaded_rollout_replica is not None:
+                command.RolloutToRolloutBroadcastCommand.trigger(
+                    src_replica=any_loaded_rollout_replica,
+                    dst_replicas=valid_replicas,
+                    weight_step=None,
+                    total_steps=None,
+                    redis_handler=self.redis_handler,
+                )
         elif not self.rollout_init_done:
             assert len(valid_replicas) < config.rollout.parallelism.n_init_replicas
             logger.info(

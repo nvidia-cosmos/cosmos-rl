@@ -15,23 +15,26 @@
 
 import os
 import time
+import unittest
+
 from cosmos_rl.utils.cache import DiskCache
 
 
-def test_disk_cache():
-    cache_dir = "/tmp/test_cache"
+class TestDiskCache(unittest.TestCase):
+    def test_disk_cache(self):
+        cache_dir = "/tmp/test_cache"
 
-    cache = DiskCache(cache_dir)
-    cache.set(0, "test")
-    # wait for the cache to be saved
-    time.sleep(1)
+        cache = DiskCache(cache_dir)
+        cache.set(0, "test")
+        # wait for the cache to be saved
+        time.sleep(1)
 
-    assert cache.get(0) == "test"
+        assert cache.get(0) == "test"
 
-    # test clean
-    cache.clear()
-    assert not os.path.exists(cache_dir)
+        # test clean
+        cache.clear()
+        assert not os.path.exists(cache_dir)
 
 
 if __name__ == "__main__":
-    test_disk_cache()
+    unittest.main()

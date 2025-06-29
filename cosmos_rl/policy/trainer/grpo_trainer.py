@@ -17,7 +17,6 @@ from cosmos_rl.policy.trainer import Trainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
-    create_context_parallel_ctx,
 )
 import torch
 import inspect
@@ -51,7 +50,6 @@ from cosmos_rl.utils.util import (
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
-    slice_tensor_with_strategies,
 )
 from functools import cached_property
 from typing import List, Callable, Dict, Any, Tuple, Optional
@@ -59,7 +57,8 @@ import types
 from functools import partial
 import msgpack
 from cosmos_rl.utils.network_util import make_request_with_retry
-from cosmos_rl.utils.util import is_master_rank, seperate_nccl_comm_needed
+from cosmos_rl.utils.ulysses import slice_input_for_ulysses
+from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.dispatcher.replica import Rollout
@@ -263,17 +262,18 @@ class GRPOTrainer(Trainer):
                 self.fetch_command_thread.join()
                 self.fetch_command_thread = None
 
-            if self.heartbeat_thread is not None:
+            if hasattr(self, "heartbeat_thread") and self.heartbeat_thread is not None:
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
 
-            if self.upload_thread is not None:
+            # Manually unregister from controller
+            self.unregister_from_controller()
+
+            if hasattr(self, "upload_thread") and self.upload_thread is not None:
                 logger.info("[Policy] Waiting for upload thread to finish...")
                 self.upload_thread.join()
                 logger.info("[Policy] Upload thread finished.")
                 self.upload_thread = None
-            # Manually unregister from controller
-            self.unregister_from_controller()
 
             # TODO(jiaxin)
             # The background threads are daemon threads, so that they will exit when the main thread exits
@@ -547,25 +547,15 @@ class GRPOTrainer(Trainer):
         and replacing certain substrings in the parameter names.
         """
         name_to_transform = {}
-        assert len(self.model.sorted_params) > 0, "No sorted parameters found."
-        for info in self.model.weight_sync_transforms:
-            name, shape, transform_block = info
-            # Condition is relaxed from shape matching to number of elements matching because the tensor may be transposed/reshaped
-            if isinstance(transform_block, Callable):
-                mapped_tensor = transform_block()
-            elif isinstance(transform_block, torch.Tensor):
-                mapped_tensor = transform_block
-            else:
-                raise ValueError(
-                    f"Transform block is not a callable or tensor: {transform_block}"
-                )
-            assert (
-                mapped_tensor.nelement() == int(np.prod(shape))
-            ), f"Number of elements mismatch: {mapped_tensor.nelement()} != {np.prod(shape)} for {name}"
+        assert len(self.model.sorted_hf_key_n_rank) > 0, "No sorted parameters found."
+        for name, transform_block in self.model.weight_sync_transforms:
+            assert isinstance(transform_block, Callable) or isinstance(
+                transform_block, torch.Tensor
+            )
             name_to_transform[name] = transform_block
         return name_to_transform
 
-    def precollect_parameters_for_sync(self):
+    def pre_P2R_collect_parameters(self):
         needed_tensors = []
         for inst in self.policy_to_rollout_insts:
             dest_name = inst[3]
@@ -574,7 +564,9 @@ class GRPOTrainer(Trainer):
         for dest_name, local_view in self.map_w_from_policy_to_rollout.items():
             if isinstance(
                 local_view, Callable
-            ) and self.model.tensor_precollect_required_for_sync(dest_name):
+            ) and self.model.weight_mapper.policy_pre_P2R_gather_required_for_sync(
+                dest_name
+            ):
                 view = local_view()
                 if dest_name in needed_tensors:
                     prepared_tensor_to_rollout[dest_name] = view
@@ -582,8 +574,6 @@ class GRPOTrainer(Trainer):
 
     @Trainer.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        need_sep_comm = seperate_nccl_comm_needed()
-
         assert command.src_replica_size == self.world_size
         if self.parallel_mapper is None:
             self.parallel_mapper = ParallelTopoMapperGroup(
@@ -591,39 +581,41 @@ class GRPOTrainer(Trainer):
                 self.config.rollout.parallelism,
                 self.world_size,
                 command.dst_replica_size,
-                self.hf_config,
-                self.config.policy.model_name_or_path,
+                hf_config=self.hf_config,
+                weight_mapper=self.model.weight_mapper,
             )
-        send = command.src_replica_name == self.replica_name
-        if not send:
+        if not command.src_replica_name == self.replica_name:
+            logger.error(
+                f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
+            )
             return False
 
         if self.policy_to_rollout_insts is None:
-            param = self.model.sorted_params
-            insts = self.parallel_mapper.generate_policy_to_rollout_insts(
-                param, self.global_rank
+            # Ordered list of (hf_key, tensor_dim)
+            hf_key_n_rank: List[Tuple[str, int]] = self.model.sorted_hf_key_n_rank
+            self.policy_to_rollout_insts = (
+                self.parallel_mapper.prepare_policy_to_rollout_manifest(
+                    hf_key_n_rank, self.global_rank
+                )
             )
-            self.policy_to_rollout_insts = insts
             self.p2r_related_ranks = [set() for _ in range(command.src_replica_size)]
             for rank in range(command.src_replica_size):
-                insts_at_rank = self.parallel_mapper.generate_policy_to_rollout_insts(
-                    param, rank
+                insts_at_rank = self.parallel_mapper.prepare_policy_to_rollout_manifest(
+                    hf_key_n_rank, rank
                 )
                 for i in insts_at_rank:
                     p_rank, r_rank, _, _, _ = i
                     self.p2r_related_ranks[rank].add(r_rank)
 
         comm_id = {}
+        # Create nccl id for one policy replica to another rollout replica
         for p_rank in range(command.src_replica_size):
             for r_rank in sorted(self.p2r_related_ranks[p_rank]):
                 mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-                if need_sep_comm:
-                    mesh_key += f"_{p_rank}_{r_rank}"
 
                 if mesh_key not in self.p2r_nccl_uuids:
                     nccl_uuid = None
                     if self.global_rank == 0:
-                        # initialize nccl handle for building mesh among policies
                         # Only create nccl group id in rank 0.
                         nccl_uuid = create_nccl_uid()
                         base64_nccl_group_id = list_to_b64(nccl_uuid)
@@ -652,8 +644,6 @@ class GRPOTrainer(Trainer):
 
         for r_rank in sorted(self.p2r_related_ranks[self.global_rank]):
             mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-            if need_sep_comm:
-                mesh_key += f"_{self.global_rank}_{r_rank}"
             if mesh_key not in self.rollouts_comm:
                 assert mesh_key in self.p2r_nccl_uuids
                 nccl_uuid = self.p2r_nccl_uuids[mesh_key]
@@ -662,10 +652,8 @@ class GRPOTrainer(Trainer):
                 )
                 comm_id[r_rank] = create_nccl_comm(
                     nccl_uuid,
-                    0 if need_sep_comm else self.global_rank,
-                    2
-                    if need_sep_comm
-                    else (self.world_size + command.dst_replica_size),
+                    self.global_rank,
+                    self.world_size + command.dst_replica_size,
                 )
                 logger.debug(
                     f"[Policy] `P2R` nccl comm: {comm_id[r_rank]} for `P2R` with mesh_key: {mesh_key} is created."
@@ -676,24 +664,6 @@ class GRPOTrainer(Trainer):
         assert (
             self.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."
-        # Check the model parameters for sync consistency
-        # This is a sanity check to make sure the model parameters are consistent
-        # Commenting out for now, since it is time consuming and not necessary
-        # for name, shape in self.model.sorted_params():
-        #     local_view = self.model.weight_sync_transform_by_key(name)
-        #     sync_view = self.get_parameter_to_sync(name)
-        #     assert local_view.data_ptr() == sync_view.data_ptr(), (
-        #         f"Data pointer mismatch: {local_view.data_ptr()} != {sync_view.data_ptr()} for {name}"
-        #     )
-        #     assert local_view.shape == shape, (
-        #         f"Shape mismatch: {local_view.shape} != {shape} for {name}"
-        #     )
-        #     assert sync_view.shape == shape, (
-        #         f"Shape mismatch: {sync_view.shape} != {shape} for {name}"
-        #     )
-        #     assert local_view.dtype == sync_view.dtype, (
-        #         f"Data type mismatch: {local_view.dtype} != {sync_view.dtype} for {name}"
-        #     )
         st = time.time()
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
@@ -701,30 +671,30 @@ class GRPOTrainer(Trainer):
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
         with torch.cuda.stream(self.train_stream):
-            prepared_tensors_to_rollout = self.precollect_parameters_for_sync()
+            pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
+                self.pre_P2R_collect_parameters()
+            )
             for inst in self.policy_to_rollout_insts:
-                p_rank, r_rank, tensor_split_strategys, dest_name, shape = inst
+                p_rank, r_rank, tensor_split_strategys, dest_name, _ = inst
                 if dest_name not in self.map_w_from_policy_to_rollout:
-                    raise Exception(
-                        f"[Policy] {dest_name} not in map_w_from_policy_to_rollout. Please call execute_policy_to_rollout_unicast_preparation first."
+                    raise RuntimeError(
+                        f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
                     )
                 local_view = self.map_w_from_policy_to_rollout[dest_name]
-                if dest_name in prepared_tensors_to_rollout:
-                    local_view = prepared_tensors_to_rollout[dest_name]
+                if dest_name in pre_P2R_collected_tensors:
+                    local_view = pre_P2R_collected_tensors[dest_name]
                 elif isinstance(local_view, Callable):
                     local_view = local_view()
-                assert (
-                    local_view.nelement() == int(np.prod(shape))
-                ), f"Number of elements mismatch: {local_view.nelement()} != {np.prod(shape)} for {dest_name}"
+                else:
+                    pass
+
                 view = (
-                    slice_tensor_with_strategies(local_view, tensor_split_strategys)
-                    .contiguous()
-                    .cuda()
+                    local_view.cosmos_slice(tensor_split_strategys).contiguous().cuda()
                 )
                 assert self.global_rank == p_rank
                 nccl_send(
                     view,
-                    1 if need_sep_comm else (self.world_size + r_rank),
+                    self.world_size + r_rank,
                     comm_id[r_rank],
                 )
                 total_bytes_sent += view.numel() * view.element_size()
@@ -806,7 +776,7 @@ class GRPOTrainer(Trainer):
             )
 
         # Train ACK
-        if is_master_rank(self.parallel_dims, self.global_rank) and not is_fake_step:
+        if is_master_rank(self.parallel_dims, self.global_rank):
             try:
                 make_request_with_retry(
                     partial(
@@ -814,6 +784,7 @@ class GRPOTrainer(Trainer):
                         json={
                             "replica_name": self.replica_name,
                             "weight_step": command.global_step,
+                            "total_steps": command.total_steps,
                             "profile_finished": self.profiler.check_finished(),
                             "report_data": report_data,
                         },
@@ -834,7 +805,9 @@ class GRPOTrainer(Trainer):
         # Add nccl allreduce operations for all parameters and necessary states.
         """
         for model_part in self.model_parts:
-            # Do allreduce of gradient in all policy replicas.
+            # Model part may use same physical mesh for different logical mesh,
+            # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
+            # So we need to do allreduce for each model part
             if model_part is not None:
                 dist_util.gradient_reduce_across_dp_replicas_(
                     [p for p in model_part.parameters()], self.inter_policy_nccl
@@ -1116,8 +1089,6 @@ class GRPOTrainer(Trainer):
 
         # user_info_keys = list(kwargs.keys())
         advantages_t = torch.tensor(advantages_list).to(self.device)
-        # Currently, we only support no cp parallelism for policy training.
-        assert not self.parallel_dims.cp_enabled
         batch_size = len(rollouts)
         mini_batch_size = (
             min(self.mini_batch, batch_size) if self.mini_batch > 0 else batch_size
@@ -1205,175 +1176,179 @@ class GRPOTrainer(Trainer):
                                 ):
                                     user_mini_batch[k] = v.to(self.device)
 
+                            # input_ids are different across ranks in dp_shard_cp
                             position_ids, input_ids, pos_seq_dim = (
                                 self.model.get_position_ids(**user_mini_batch)
                             )
                             acc_n_tokens += np.prod(input_ids.shape)
                             user_mini_batch["position_ids"] = position_ids
-                            cp_context = (
-                                create_context_parallel_ctx(
-                                    cp_mesh=self.parallel_dims.mesh["cp"],
-                                    cp_buffers=[
-                                        input_ids,
-                                        user_mini_batch["position_ids"],
-                                    ],
-                                    cp_seq_dims=[1, pos_seq_dim],
-                                    cp_no_restore_buffers={
-                                        input_ids,
-                                        user_mini_batch["position_ids"],
-                                    },
-                                    cp_rotate_method=self.config.policy.parallelism.cp_rotate_method,
+
+                            input_ids_before_cp = user_mini_batch["input_ids"]
+                            position_ids_before_cp = user_mini_batch["position_ids"]
+
+                            if self.parallel_dims.cp_enabled:
+                                input_ids, position_ids = slice_input_for_ulysses(
+                                    input_ids,
+                                    position_ids,
+                                    self.parallel_dims.mesh["cp"],
                                 )
-                                if self.parallel_dims.cp_enabled
-                                else None
-                            )
-                            with self.context(cp_context):
-                                if self.parallel_dims.pp_enabled:
-                                    if pp_last_stage:
-                                        if (
-                                            self.old_per_token_logps[local_mini_step]
-                                            is None
-                                        ):
-                                            assert (
-                                                i_mu == 0
-                                            ), "Only first `mu_iteration` should append `old_per_token_logps`"
-                                        else:
-                                            assert (
-                                                i_mu > 0
-                                            ), "Only `mu_iteration > 0` should reuse `old_per_token_logps`"
-                                            assert (
-                                                len(
-                                                    self.old_per_token_logps[
-                                                        local_mini_step
-                                                    ]
-                                                )
-                                                == n_microbatches
-                                            )
+                                user_mini_batch["position_ids"] = position_ids
+                                user_mini_batch["input_ids"] = input_ids
 
-                                    # [mini_batch_size, 1]: indicating the index of mini-batch
-                                    mini_batch_ids_cpu = torch.Tensor(
-                                        [[local_mini_step]] * mini_batch_size
-                                    ).int()
-                                    micro_batch_ids_list = []
-                                    for i in range(mini_batch_size):
-                                        micro_batch_ids_list.append(
-                                            [
-                                                i
-                                                // self.config.policy.parallelism.pp_micro_batch_size
-                                            ]
-                                        )
-                                    micro_batch_ids_cpu = torch.Tensor(
-                                        micro_batch_ids_list
-                                    ).int()
-                                    loss_scaling_cpu = torch.tensor(
-                                        [
-                                            [
-                                                1
-                                                / num_mini_batch
-                                                / self.config.policy.parallelism.pp_micro_batch_size
-                                            ]
-                                        ]
-                                        * mini_batch_size,
-                                        dtype=torch.float32,
-                                    )
-                                    is_computing_ref_cpu = torch.tensor(
-                                        [is_computing_ref] * mini_batch_size,
-                                        dtype=torch.bool,
-                                    )
-
-                                    pp_first_stage = self.parallel_dims.pp_coord[0] == 0
-                                    # Pipeline Parallel forward / backward inside step() call
-                                    losses = [] if pp_last_stage else None
-                                    if pp_last_stage:
-                                        # Inject the `mini-batch` and `micro-batch` ids to the input so that the last stage can know which microbatch it is processing
-                                        user_mini_batch["mini_batch_ids"] = (
-                                            mini_batch_ids_cpu
-                                        )
-                                        user_mini_batch["micro_batch_ids"] = (
-                                            micro_batch_ids_cpu
-                                        )
-                                        user_mini_batch["loss_scaling"] = (
-                                            loss_scaling_cpu
-                                        )
-                                        user_mini_batch["is_computing_ref"] = (
-                                            is_computing_ref_cpu
-                                        )
-                                    if pp_first_stage or pp_last_stage:
-                                        # First/Last stage: pass all inputs
-                                        self.pp_scheduler.step(
-                                            **user_mini_batch,
-                                            advantages=minibatched_advantages,
-                                            losses=losses,
-                                            target=torch.empty(
-                                                [mini_batch_size, 1], device=self.device
-                                            ),
-                                        )
-                                    else:
-                                        # Middle stages: forward data from previous stage
-                                        self.pp_scheduler.step(
-                                            position_ids=position_ids
-                                        )
-
-                                    if is_computing_ref:
-                                        # Continue to next mini-batch since loss is not needed for reference model
-                                        continue
-                                    else:
-                                        loss = (
-                                            torch.mean(torch.stack(losses)).to(
-                                                self.device
-                                            )
-                                            if pp_last_stage
-                                            else torch.tensor(
-                                                [-1.0], device=self.device
-                                            )
-                                        )
-                                else:
-                                    raw_logits = self.model(**user_mini_batch)
+                            if self.parallel_dims.pp_enabled:
+                                if pp_last_stage:
                                     if (
-                                        self.config.train.train_policy.temperature
-                                        > 1e-6
+                                        self.old_per_token_logps[local_mini_step]
+                                        is None
                                     ):
-                                        raw_logits = (
-                                            raw_logits
-                                            / self.config.train.train_policy.temperature
-                                        )
-
-                                    current_per_token_logprobs, logprob_masks = (
-                                        self.compute_logprobs(
-                                            user_mini_batch,
-                                            full_logits=raw_logits,
-                                        )
-                                    )
-                                    current_advantages = (
-                                        logprob_masks * minibatched_advantages
-                                    )
-
-                                    # Compute ref per-token logprobs if needed
-                                    if is_computing_ref:
                                         assert (
                                             i_mu == 0
-                                        ), "Only first iteration should compute ref"
-                                        self.ref_per_token_logps[local_mini_step] = (
+                                        ), "Only first `mu_iteration` should append `old_per_token_logps`"
+                                    else:
+                                        assert (
+                                            i_mu > 0
+                                        ), "Only `mu_iteration > 0` should reuse `old_per_token_logps`"
+                                        assert (
+                                            len(
+                                                self.old_per_token_logps[
+                                                    local_mini_step
+                                                ]
+                                            )
+                                            == n_microbatches
+                                        )
+
+                                # [mini_batch_size, 1]: indicating the index of mini-batch
+                                mini_batch_ids_cpu = torch.Tensor(
+                                    [[local_mini_step]] * mini_batch_size
+                                ).int()
+                                micro_batch_ids_list = []
+                                for i in range(mini_batch_size):
+                                    micro_batch_ids_list.append(
+                                        [
+                                            i
+                                            // self.config.policy.parallelism.pp_micro_batch_size
+                                        ]
+                                    )
+                                micro_batch_ids_cpu = torch.Tensor(
+                                    micro_batch_ids_list
+                                ).int()
+                                loss_scaling_cpu = torch.tensor(
+                                    [
+                                        [
+                                            1
+                                            / num_mini_batch
+                                            / self.config.policy.parallelism.pp_micro_batch_size
+                                        ]
+                                    ]
+                                    * mini_batch_size,
+                                    dtype=torch.float32,
+                                )
+                                is_computing_ref_cpu = torch.tensor(
+                                    [is_computing_ref] * mini_batch_size,
+                                    dtype=torch.bool,
+                                )
+
+                                pp_first_stage = self.parallel_dims.pp_coord[0] == 0
+                                # Pipeline Parallel forward / backward inside step() call
+                                losses = [] if pp_last_stage else None
+                                if pp_last_stage:
+                                    # Inject the `mini-batch` and `micro-batch` ids to the input so that the last stage can know which microbatch it is processing
+                                    user_mini_batch["mini_batch_ids"] = (
+                                        mini_batch_ids_cpu
+                                    )
+                                    user_mini_batch["micro_batch_ids"] = (
+                                        micro_batch_ids_cpu
+                                    )
+                                    user_mini_batch["loss_scaling"] = loss_scaling_cpu
+                                    user_mini_batch["is_computing_ref"] = (
+                                        is_computing_ref_cpu
+                                    )
+                                if pp_first_stage or pp_last_stage:
+                                    # First/Last stage: pass all inputs
+                                    kwargs = {}
+                                    if self.parallel_dims.cp_enabled:
+                                        # This is for recover these two tensors after ulysses
+                                        kwargs["input_ids_before_cp"] = (
+                                            input_ids_before_cp
+                                        )
+                                        kwargs["position_ids_before_cp"] = (
+                                            position_ids_before_cp
+                                        )
+
+                                    self.pp_scheduler.step(
+                                        **user_mini_batch,
+                                        advantages=minibatched_advantages,
+                                        losses=losses,
+                                        target=torch.empty(
+                                            [mini_batch_size, 1], device=self.device
+                                        ),
+                                        **kwargs,
+                                    )
+                                else:
+                                    # Middle stages: forward data from previous stage
+                                    self.pp_scheduler.step(position_ids=position_ids)
+
+                                if is_computing_ref:
+                                    # Continue to next mini-batch since loss is not needed for reference model
+                                    continue
+                                else:
+                                    loss = (
+                                        torch.mean(torch.stack(losses)).to(self.device)
+                                        if pp_last_stage
+                                        else torch.tensor([-1.0], device=self.device)
+                                    )
+                            else:
+                                raw_logits = self.model(**user_mini_batch)
+
+                                if self.parallel_dims.cp_enabled:
+                                    # reset the position ids and input ids
+                                    user_mini_batch["position_ids"] = (
+                                        position_ids_before_cp
+                                    )
+                                    user_mini_batch["input_ids"] = input_ids_before_cp
+
+                                if self.config.train.train_policy.temperature > 1e-6:
+                                    raw_logits = (
+                                        raw_logits
+                                        / self.config.train.train_policy.temperature
+                                    )
+
+                                current_per_token_logprobs, logprob_masks = (
+                                    self.compute_logprobs(
+                                        user_mini_batch,
+                                        full_logits=raw_logits,
+                                    )
+                                )
+                                current_advantages = (
+                                    logprob_masks * minibatched_advantages
+                                )
+
+                                # Compute ref per-token logprobs if needed
+                                if is_computing_ref:
+                                    assert (
+                                        i_mu == 0
+                                    ), "Only first iteration should compute ref"
+                                    self.ref_per_token_logps[local_mini_step] = (
+                                        current_per_token_logprobs.detach()
+                                    )
+                                    # Skip the rest of the loop
+                                    local_mini_step += 1
+                                    continue
+                                else:
+                                    if (
+                                        self.old_per_token_logps[local_mini_step]
+                                        is None
+                                    ):
+                                        assert (
+                                            i_mu == 0
+                                        ), "Only first iteration should append `old_per_token_logps`"
+                                        self.old_per_token_logps[local_mini_step] = (
                                             current_per_token_logprobs.detach()
                                         )
-                                        # Skip the rest of the loop
-                                        local_mini_step += 1
-                                        continue
                                     else:
-                                        if (
-                                            self.old_per_token_logps[local_mini_step]
-                                            is None
-                                        ):
-                                            assert (
-                                                i_mu == 0
-                                            ), "Only first iteration should append `old_per_token_logps`"
-                                            self.old_per_token_logps[
-                                                local_mini_step
-                                            ] = current_per_token_logprobs.detach()
-                                        else:
-                                            assert (
-                                                i_mu > 0
-                                            ), "Only inner iteration should reuse `old_per_token_logps`"
+                                        assert (
+                                            i_mu > 0
+                                        ), "Only inner iteration should reuse `old_per_token_logps`"
 
                                     loss, kl_loss = compute_loss(
                                         current_per_token_logprobs,
@@ -1510,6 +1485,8 @@ class GRPOTrainer(Trainer):
         return fake_compute_loss
 
 
+# TODO: (lms) May be it's better to register this func as a hook to the last stage model.
+# That way is more clean. I think it's feasible but need to be compatible with torch Pipelie schedule.
 def _swizzle_pp_grpo_forward(
     trainer: GRPOTrainer, ori_forward: Callable, config: CosmosConfig, *args, **kwargs
 ):
@@ -1546,9 +1523,17 @@ def _swizzle_pp_grpo_forward(
         # remove the first `n_args` arguments from kwargs
         signature = list(inspect.signature(ori_forward).parameters.keys())[:n_args]
         for key in signature:
-            kwargs.pop(key)
+            if key in kwargs:
+                kwargs.pop(key)
 
     raw_logits = ori_forward(*args, **kwargs)
+
+    # recover the input ids and position ids
+    if "input_ids_before_cp" in kwargs:
+        user_input["input_ids"] = kwargs["input_ids_before_cp"]
+    if "position_ids_before_cp" in kwargs:
+        user_input["position_ids"] = kwargs["position_ids_before_cp"]
+
     if config.train.train_policy.temperature > 1e-6:
         raw_logits = raw_logits / config.train.train_policy.temperature
     # [n_tokens, n_vocab]
@@ -1583,7 +1568,7 @@ def _swizzle_pp_grpo_forward(
         assert isinstance(old_per_token_logprobs, torch.Tensor)
         assert (
             old_per_token_logprobs.ndim == 2
-        ), f"old_per_token_logprobs.ndim: {old_per_token_logprobs.ndim}, while it should be 1"
+        ), f"old_per_token_logprobs.ndim: {old_per_token_logprobs.ndim}, while it should be 2"
         assert (
             old_per_token_logprobs.shape == current_per_token_logprobs.shape
         ), f"old_per_token_logprobs.shape: {old_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
@@ -1605,7 +1590,7 @@ def _swizzle_pp_grpo_forward(
         ]
         assert (
             ref_per_token_logprobs.ndim == 2
-        ), f"ref_per_token_logprobs.ndim: {ref_per_token_logprobs.ndim}, while it should be 1"
+        ), f"ref_per_token_logprobs.ndim: {ref_per_token_logprobs.ndim}, while it should be 2"
         assert (
             ref_per_token_logprobs.shape == current_per_token_logprobs.shape
         ), f"ref_per_token_logprobs.shape: {ref_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"

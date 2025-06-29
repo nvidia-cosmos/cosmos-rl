@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
-from typing import Dict, List, Tuple, Callable, Any
 import torch
+from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
+from typing import Dict, List, Tuple, Callable, Any, Optional
+from cosmos_rl.rollout.weight_mapper.base import WeightMapper
 
 
 class DimRankInfo:
@@ -88,7 +89,7 @@ def slice_tensor_with_strategy(
 
 
 def slice_tensor_with_strategies(
-    tensor: torch.Tensor, strategys: Dict[int, DimRankInfo]
+    self: torch.Tensor, strategys: Dict[int, DimRankInfo]
 ) -> torch.Tensor:
     """
     Slices the tensor according to the given strategies.
@@ -96,10 +97,13 @@ def slice_tensor_with_strategies(
     :param strategys: A dictionary mapping dimension indices to DimRankInfo objects.
     :return: The sliced tensor.
     """
-    view = tensor
+    view = self
     for idx, split in strategys.items():
         view = slice_tensor_with_strategy(view, idx, split)
     return view
+
+
+torch.Tensor.cosmos_slice = slice_tensor_with_strategies
 
 
 class ParallelTopoMapper:
@@ -119,7 +123,7 @@ class ParallelTopoMapper:
         rollout_world_size: int,
         policy_parallelism_strategy: Callable,
         rollout_parallelism_strategy: Callable,
-        model_config: Any,
+        hf_config: Any,
     ):
         """
         Initialize the ParallelTopoMap with the given parallelism configurations.
@@ -130,7 +134,7 @@ class ParallelTopoMapper:
         :param rollout_world_size: The world size for the rollout.
         :param policy_parallelism_strategy: The strategy for the policy parallelism.
         :param rollout_parallelism_strategy: The strategy for the rollout parallelism.
-        :param model_config: The model configuration.
+        :param hf_config: The huggingface config.
         """
         self.policy_parallelism = ParallelDims.from_config_for_analysis(
             policy_parallelism, poilcy_world_size
@@ -144,7 +148,7 @@ class ParallelTopoMapper:
         self.policy_parallelism_strategy = policy_parallelism_strategy
         self.rollout_parallelism_strategy = rollout_parallelism_strategy
         self.calculate_sharing_map()
-        self.model_config = model_config
+        self.hf_config = hf_config
 
     def get_full_rank_in_policy(self, global_rank: int) -> Dict[str, DimRankInfo]:
         """
@@ -569,7 +573,7 @@ class ParallelTopoMapper:
                     merged[idx].append(d)
         return merged
 
-    def generate_policy_to_rollout_insts(
+    def policy_to_rollout_manifest(
         self,
         params: List[Tuple[str, Tuple[int]]],
         global_rank: int,
@@ -585,12 +589,12 @@ class ParallelTopoMapper:
         for dest_name, shape in params:
             p_split_dim_map, p_dim_to_parallel, p_pp_rank = (
                 self.policy_parallelism_strategy(
-                    shape, dest_name, self.policy_parallelism, self.model_config
+                    shape, dest_name, self.policy_parallelism, self.hf_config
                 )
             )
             r_split_dim_map, r_dim_to_parallel, r_pp_rank = (
                 self.rollout_parallelism_strategy(
-                    shape, dest_name, self.rollout_parallelism, self.model_config
+                    shape, dest_name, self.rollout_parallelism, self.hf_config
                 )
             )
             p_rank = global_rank
@@ -627,7 +631,7 @@ class ParallelTopoMapper:
                             )
         return policy_to_rollput_insts
 
-    def generate_rollout_from_policy_insts(
+    def rollout_from_policy_manifest(
         self,
         params: List[Tuple[str, Tuple[int]]],
         rollout_rank: int,
@@ -643,12 +647,12 @@ class ParallelTopoMapper:
         for dest_name, shape in params:
             p_split_dim_map, p_dim_to_parallel, p_pp_rank = (
                 self.policy_parallelism_strategy(
-                    shape, dest_name, self.policy_parallelism, self.model_config
+                    shape, dest_name, self.policy_parallelism, self.hf_config
                 )
             )
             r_split_dim_map, r_dim_to_parallel, r_pp_rank = (
                 self.rollout_parallelism_strategy(
-                    shape, dest_name, self.rollout_parallelism, self.model_config
+                    shape, dest_name, self.rollout_parallelism, self.hf_config
                 )
             )
             dim_to_parallel = ParallelTopoMapper.merge_dim_to_parallel(
@@ -696,16 +700,13 @@ class ParallelTopoMapperGroup:
 
     def __init__(
         self,
-        policy_parallelism: ParallelismConfig,
-        rollout_parallelism: ParallelismConfig,
+        global_policy_parallelism: ParallelismConfig,
+        global_rollout_parallelism: ParallelismConfig,
         poilcy_world_size: int,
         rollout_world_size: int,
-        model_config: Any,
-        model_path: str,
+        hf_config: Any,
+        weight_mapper: Optional[WeightMapper] = None,
     ):
-        # policy_parallelism_strategy: List[Callable],
-        # rollout_parallelism_strategy: List[Callable],
-        # ):
         """
         Initialize the ParallelTopoMapperGroup with the given parallelism configurations.
 
@@ -713,65 +714,57 @@ class ParallelTopoMapperGroup:
         :param rollout_parallelism: The parallelism configuration for the rollout.
         :param poilcy_world_size: The world size for the policy.
         :param rollout_world_size: The world size for the rollout.
-        :param model_config: The model configuration.
-        :param model_path: The path to the model.
+        :param hf_config: The huggingface config.
         """
-        connverted = {
-            "gpt": "qwen2",
-        }
-        self.model_config = model_config
-        model_type = model_config.model_type
-        if model_type in connverted:
-            model_type = connverted[model_type]
+        self.hf_config = hf_config
+        model_type = hf_config.model_type
 
-        from cosmos_rl.rollout.weight_mapper.registry import get_weight_mapper
+        if weight_mapper is None:
+            weight_mapper_fn = WeightMapper.get_weight_mapper(model_type)
+            self.weight_mapper = weight_mapper_fn(hf_config)
+        else:
+            self.weight_mapper = weight_mapper
 
-        self.weight_mapper = get_weight_mapper(model_type)(model_path)
-        model_num = {"qwen2_5_vl": 2}
-
-        policy_config = self.weight_mapper.get_policy_parallelism(policy_parallelism)
-        rollout_config = self.weight_mapper.get_rollout_parallelism(rollout_parallelism)
+        # The replica has its single global parallelism config
+        # But there may be different parallelism strategies executed by different model parts
+        # For example: VLM has 2 parts: the visual encoder and the language encoder.
+        #   the visual encoder may merge TP and DP meshes, while the language encoder may not
+        policy_configs: List[ParallelismConfig] = (
+            self.weight_mapper.get_policy_parallelism(global_policy_parallelism)
+        )
+        rollout_configs: List[ParallelismConfig] = (
+            self.weight_mapper.get_rollout_parallelism(global_rollout_parallelism)
+        )
 
         # Note: policy_strategies and rollout_strategies callable to decide if or how to parallel
         # the param tensor of a give name.
         policy_strategies = self.weight_mapper.get_policy_parallelism_strategy()
         rollout_strategies = self.weight_mapper.get_rollout_parallelism_strategy()
-        n_model = model_num.get(model_type, 1)
-        for i in range(n_model):
-            # logger.info(
-            #     f"Policy parallelism config: {policy_config[i]}, Rollout parallelism config: {rollout_config[i]}"
-            #     f"Policy parallelism strategy: {policy_strategies[i]}, Rollout parallelism strategy: {rollout_strategies[i]}"
-            # )
+
+        assert (
+            len(policy_configs)
+            == len(rollout_configs)
+            == len(policy_strategies)
+            == len(rollout_strategies)
+        )
+        for p_config, r_config, p_strategy, r_strategy in zip(
+            policy_configs, rollout_configs, policy_strategies, rollout_strategies
+        ):
             self.mapper_group.append(
                 ParallelTopoMapper(
-                    policy_config[i],
-                    rollout_config[i],
+                    p_config,
+                    r_config,
                     poilcy_world_size,
                     rollout_world_size,
-                    policy_strategies[i],
-                    rollout_strategies[i],
-                    model_config,
+                    p_strategy,
+                    r_strategy,
+                    hf_config,
                 )
             )
 
-    def generate_policy_to_rollout_insts_for_index(
-        self,
-        params: List[Tuple[str, Tuple[int]]],
-        global_rank: int,
-        index: int = 0,
-    ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        return self.mapper_group[index].generate_policy_to_rollout_insts(
-            params, global_rank
-        )
-
-    def generate_rollout_from_policy_insts_for_index(
-        self, params: List[Tuple[str, Tuple[int]]], rollout_rank: int, index: int
-    ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        return self.mapper_group[index].generate_rollout_from_policy_insts(
-            params, rollout_rank
-        )
-
-    def resort_params(self, params: List[Tuple[str, Tuple[int]]]):
+    def _cluster_params_by_model_part(
+        self, params: List[Tuple[str, int]]
+    ) -> List[List[Tuple[str, int]]]:
         """
         Resort the parameters based on the name mapper.
         :param params: The parameters to resort.
@@ -779,35 +772,35 @@ class ParallelTopoMapperGroup:
         """
         if len(self.mapper_group) == 1:
             return [params]
-        new_params = [[] for _ in self.mapper_group]
-        for name, shape in params:
-            idx = self.weight_mapper.name_to_model_index(name)
-            new_params[idx].append((name, shape))
-        return new_params
+        x = [[] for _ in self.mapper_group]
+        for name, rank in params:
+            idx = self.weight_mapper.name_to_model_part_index(name)
+            x[idx].append((name, rank))
+        return x
 
-    def generate_policy_to_rollout_insts(
+    def prepare_policy_to_rollout_manifest(
         self,
-        params: List[Tuple[str, Tuple[int]]],
+        hf_key_n_rank: List[Tuple[str, int]],
         global_rank: int,
     ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        new_params = self.resort_params(params)
+        x = self._cluster_params_by_model_part(hf_key_n_rank)
         insts = []
-        for index, p in enumerate(new_params):
+        for model_index, p in enumerate(x):
             insts.extend(
-                self.mapper_group[index].generate_policy_to_rollout_insts(
+                self.mapper_group[model_index].policy_to_rollout_manifest(
                     p, global_rank
                 )
             )
         return insts
 
-    def generate_rollout_from_policy_insts(
-        self, params: List[Tuple[str, Tuple[int]]], rollout_rank: int
+    def prepare_rollout_from_policy_manifest(
+        self, hf_key_n_rank: List[Tuple[str, int]], rollout_rank: int
     ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
-        new_params = self.resort_params(params)
+        x = self._cluster_params_by_model_part(hf_key_n_rank)
         insts = []
-        for index, p in enumerate(new_params):
+        for model_index, p in enumerate(x):
             insts.extend(
-                self.mapper_group[index].generate_rollout_from_policy_insts(
+                self.mapper_group[model_index].rollout_from_policy_manifest(
                     p, rollout_rank
                 )
             )

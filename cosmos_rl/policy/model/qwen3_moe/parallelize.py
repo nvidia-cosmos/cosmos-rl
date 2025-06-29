@@ -39,6 +39,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
 from typing import Callable, Optional
 from cosmos_rl.utils.distributed import ReplicateParallel
+from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
 
 
 def parallelize(
@@ -68,8 +69,17 @@ def parallelize(
     if config.policy.model_gradient_checkpointing:
         apply_ac(model)
 
+    if parallel_dims.cp_enabled:
+        apply_cp(model, parallel_dims)
+        logger.info("Applied Context Parallel to the model")
+
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if config.train.compile:
+        # FIXME: (lms) For ulysses, an error will be raised by torch.compile:
+        # ... torch._dynamo.exc.Unsupported: Graph break due to unsupported builtin None.pybind11_object.__new__.
+        # This is caused by the custom SeqAllToAll in ulysses.py
+        # Related torch issue: https://github.com/pytorch/pytorch/issues/149586
+        # tmp workaround is set fullgraph to False. Figure it out later.
         apply_compile(model)
 
     if (
@@ -94,9 +104,6 @@ def parallelize(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
 
         if config.train.fsdp_offload:
             logger.info("Applied CPU Offloading to the model")
@@ -176,6 +183,19 @@ def parallelize(
             return schedule, None
     else:
         return None, None
+
+
+def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
+    """Apply Context Parallel to the model."""
+    cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
+    model.check_cp_compatible(cp_size, tp_size)
+
+    cp_mesh = parallel_dims.mesh["cp"]
+    for _, moe_block in model.layers.items():
+        original_attn_func = moe_block.self_attn.attn_func
+        moe_block.self_attn.attn_func = ulysses_attn_func(original_attn_func, cp_mesh)
+
+    swizzle_cp_forward(model, parallel_dims)
 
 
 def apply_tp_ep(
@@ -456,16 +476,16 @@ def apply_ac(model: nn.Module):
     logger.info("Applied activation checkpointing to the model")
 
 
-def apply_compile(model: nn.Module):
+def apply_compile(model: nn.Module, fullgraph: bool = True):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(transformer_block, fullgraph=True)
+        transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
         model.layers.register_module(layer_id, transformer_block)
 
-    logger.info("Compiling each TransformerBlock with torch.compile")
+    logger.info("Each TransformerBlock compiled with torch.compile")
 
 
 def apply_fsdp(

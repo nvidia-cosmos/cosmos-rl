@@ -37,6 +37,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
+from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
 import os
 from typing import Callable, Optional
 
@@ -70,6 +71,10 @@ def parallelize(
 
     if config.policy.model_gradient_checkpointing:
         apply_ac(model)
+
+    if parallel_dims.cp_enabled:
+        apply_cp(model, parallel_dims)
+        logger.info("Applied Context Parallel to the model")
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if config.train.compile:
@@ -147,9 +152,6 @@ def parallelize(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
 
         if config.train.fsdp_offload:
             logger.info("Applied CPU Offloading to the model")
@@ -249,6 +251,30 @@ def parallelize(
             return schedule, None
     else:
         return None, None
+
+
+def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
+    """Apply Context Parallel to the model."""
+    # check if cp is compatible with model
+    cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
+    model.check_cp_compatible(cp_size, tp_size)
+
+    cp_mesh = parallel_dims.mesh["cp"]
+    # For language
+    for _, transformer_block in model.model.layers.items():
+        original_attn_func = transformer_block.self_attn.attn_func
+        transformer_block.self_attn.attn_func = ulysses_attn_func(
+            original_attn_func, cp_mesh
+        )
+    # For visual model
+    if model.visual is not None:
+        for _, transformer_block in model.visual.blocks.items():
+            original_attn_func = transformer_block.attn.attn_func
+            transformer_block.attn.attn_func = ulysses_attn_func(
+                original_attn_func, cp_mesh
+            )
+
+    swizzle_cp_forward(model, parallel_dims)
 
 
 def apply_tp(
@@ -415,22 +441,22 @@ def apply_ac(model: nn.Module):
     logger.info("Applied activation checkpointing to the model")
 
 
-def apply_compile(model: nn.Module):
+def apply_compile(model: nn.Module, fullgraph: bool = True):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
     for layer_id, transformer_block in model.model.layers.named_children():
-        transformer_block = torch.compile(transformer_block, fullgraph=True)
+        transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
         model.model.layers.register_module(layer_id, transformer_block)
 
     # ``model.visual`` could get deleted by pipeline split
     if model.visual is not None:
         for layer_id, transformer_block in model.visual.blocks.named_children():
-            transformer_block = torch.compile(transformer_block, fullgraph=True)
+            transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
             model.visual.blocks.register_module(layer_id, transformer_block)
 
-    logger.info("Compiling each TransformerBlock with torch.compile")
+    logger.info("Each TransformerBlock compiled with torch.compile")
 
 
 def apply_fsdp(

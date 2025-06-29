@@ -67,6 +67,10 @@ def parallelize(
     if config.policy.model_gradient_checkpointing:
         apply_ac(model)
 
+    if parallel_dims.cp_enabled:
+        apply_cp(model, parallel_dims)
+        logger.info("Applied Context Parallel to the model")
+
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if config.train.compile:
         apply_compile(model)
@@ -175,6 +179,14 @@ def parallelize(
             return schedule, None
     else:
         return None, None
+
+
+def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
+    """Apply Context Parallel to the model."""
+    cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
+    model.check_cp_compatible(cp_size, tp_size)
+
+    # TODO: (lms) Add support for DeepseekV3MoEModel with MLA.
 
 
 def apply_tp_ep(
