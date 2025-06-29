@@ -165,16 +165,23 @@ async def register(request: RegisterRequest):
 
 @app.post(COSMOS_API_UNREGISTER_SUFFIX)
 async def unregister(request: UnregisterRequest):
-    await controller.unregister(request.replica_name)
-    if (
-        (controller.policy_status_manager.training_finished() or not controller.is_rl)
-        and len(controller.policy_status_manager) == 0
-        and len(controller.rollout_status_manager) == 0
-    ):
-        logger.info("[Controller] All replicas are finished, finalizing...")
-        global server
-        server.should_exit = True
-    return {"message": "Unregistered"}
+    try:
+        await controller.unregister(request.replica_name)
+    except Exception as e:
+        logger.error(f"[Controller] Unregister failed: {e}")
+    finally:
+        if (
+            (
+                controller.policy_status_manager.training_finished()
+                or not controller.is_rl
+            )
+            and len(controller.policy_status_manager) == 0
+            and len(controller.rollout_status_manager) == 0
+        ):
+            logger.info("[Controller] All replicas are finished, finalizing...")
+            global server
+            server.should_exit = True
+        return {"message": "Unregistered"}
 
 
 @app.post(COSMOS_API_SET_PROFILE_SUFFIX)
