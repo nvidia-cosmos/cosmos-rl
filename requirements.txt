@@ -1,4 +1,3 @@
-cmake
 fastapi
 uvicorn
 transformers>=4.51.1,!=4.52.*

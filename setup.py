@@ -14,43 +14,9 @@
 # limitations under the License.
 
 import os
-from setuptools import setup, Extension
-from setuptools.command.build_ext import build_ext
-import subprocess
-import sys
+from setuptools import setup
 import setuptools
 
-
-class CMakeExtension(Extension):
-    def __init__(self, name, sourcedir=''):
-        Extension.__init__(self, name, sources=[])
-        self.sourcedir = os.path.abspath(sourcedir)
-
-class CMakeBuild(build_ext):
-    def run(self):
-        try:
-            subprocess.check_output(['cmake', '--version'])
-        except OSError:
-            raise RuntimeError("CMake must be installed to build the following extensions: " +
-                             ", ".join(e.name for e in self.extensions))
-
-        for ext in self.extensions:
-            self.build_extension(ext)
-
-    def build_extension(self, ext):
-        # Pip install the `constraints.txt` as a workaround inside setuptools
-        subprocess.check_call(['pip', 'install', '-r', 'constraints.txt'])
-        extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
-        cmake_args = [
-            '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=' + extdir,
-            '-DPYTHON_EXECUTABLE=' + sys.executable,
-            '-DCMAKE_BUILD_TYPE=Release'
-        ]
-
-        if not os.path.exists(self.build_temp):
-            os.makedirs(self.build_temp)
-        subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp)
-        subprocess.check_call(['cmake', '--build', '.'], cwd=self.build_temp)
 
 with open(os.path.join(os.path.dirname(__file__), "requirements.txt")) as f:
     requirements = f.read().splitlines()
@@ -60,7 +26,7 @@ setup(
     version="0.1.1",
     packages=setuptools.find_packages(),
     package_data={
-        "cosmos_rl": ["**/*.json", "**/*.toml", "launcher/*.sh"]
+        "cosmos_rl": ["launcher/*.sh"]
     },
     entry_points={
         "console_scripts": [
