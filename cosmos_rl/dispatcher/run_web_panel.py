@@ -472,7 +472,11 @@ def main(
     val_dataset: Optional[Dataset] = None,
     val_data_packer: Optional[DataPacker] = None,
     model_module: Optional[str] = None,
+    **kwargs,
 ):
+    logger.warning(
+        f"Params: {list(kwargs.keys())} are not being used in controller initialization."
+    )
     parser = argparse.ArgumentParser(
         description="Run the web panel for the dispatcher."
     )
