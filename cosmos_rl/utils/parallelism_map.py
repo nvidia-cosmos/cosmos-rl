@@ -50,7 +50,11 @@ def slice_tensor_with_strategy(
     )
     dim = view.dim()
     assert idx < view.dim(), f"Invalid index {idx} for {dim}D tensor."
-    slices = [slice(None, None)] * idx + [slice(start, start + length)] + [slice(None, None)] * (dim - idx - 1)
+    slices = (
+        [slice(None, None)] * idx
+        + [slice(start, start + length)]
+        + [slice(None, None)] * (dim - idx - 1)
+    )
     return view[slices]
 
 
