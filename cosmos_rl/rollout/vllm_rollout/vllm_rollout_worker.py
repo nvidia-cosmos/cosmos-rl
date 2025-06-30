@@ -20,7 +20,7 @@ import threading
 from queue import Queue
 import atexit
 import types
-from cosmos_rl.policy.model import BaseModel, WeightMapper
+from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Tuple, Optional, Callable, Any, Dict
 from functools import partial
 from transformers import AutoConfig
@@ -194,7 +194,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.config.policy.model_name_or_path
         )
 
-        if not BaseModel.check_model_type_supported(hf_config.model_type):
+        if not ModelRegistry.check_model_type_supported(hf_config.model_type):
             raise ValueError(f"Model {hf_config.model_type} not supported.")
 
         self.weight_mapper = WeightMapper.get_weight_mapper(hf_config.model_type)(

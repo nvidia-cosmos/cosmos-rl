@@ -16,7 +16,7 @@
 from cosmos_rl.policy.model.gpt import GPT
 from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
 from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
-from cosmos_rl.policy.model.base import BaseModel, WeightMapper
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, WeightMapper
 
 __all__ = [
     "GPT",
@@ -24,4 +24,5 @@ __all__ = [
     "Qwen3MoE",
     "BaseModel",
     "WeightMapper",
+    "ModelRegistry",
 ]

@@ -39,7 +39,7 @@ from cosmos_rl.dispatcher.data.packer.qwen2_5_vlm_data_packer import (
 from cosmos_rl.policy.model.qwen2_5_vl.weight_mapper import QwenVL25WeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.model.base import BaseModel
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
 import re
 from functools import partial
@@ -848,7 +848,7 @@ class Qwen2_5_VLModel(nn.Module):
         )
 
 
-@BaseModel.register(Qwen2_5_VLM_DataPacker, QwenVL25WeightMapper)
+@ModelRegistry.register(Qwen2_5_VLM_DataPacker, QwenVL25WeightMapper)
 class Qwen2_5_VLConditionalModel(BaseModel):
     def __init__(self, config: Qwen2_5_VL_LM_Args):
         super().__init__(config.hf_config)

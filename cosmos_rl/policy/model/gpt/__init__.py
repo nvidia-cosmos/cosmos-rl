@@ -28,7 +28,7 @@ from cosmos_rl.utils.util import (
     retry,
 )
 from safetensors import safe_open
-from cosmos_rl.policy.model.base import BaseModel
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
     DecoderOnlyLLMDataPacker,
 )
@@ -367,7 +367,7 @@ class GPTBlock(nn.Module):
         return out
 
 
-@BaseModel.register(DecoderOnlyLLMDataPacker, GPTWeightMapper)
+@ModelRegistry.register(DecoderOnlyLLMDataPacker, GPTWeightMapper)
 class GPT(BaseModel):
     """
     GPT Module

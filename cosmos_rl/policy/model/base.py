@@ -158,6 +158,8 @@ class BaseModel(torch.nn.Module, ABC):
             "This func should not be called in BaseModel instance."
         )
 
+
+class ModelRegistry:
     _MODEL_REGISTRY: Dict[str, Type] = {}
 
     @classmethod
@@ -168,7 +170,7 @@ class BaseModel(torch.nn.Module, ABC):
         if isinstance(model_types, str):
             model_types = [model_types]
         for model_type in model_types:
-            BaseModel._MODEL_REGISTRY[model_type] = model_cls
+            ModelRegistry._MODEL_REGISTRY[model_type] = model_cls
             WeightMapper.register_class(model_type, weight_mapper_cls)
             DataPacker.register(model_type, data_packer_cls)
             setattr(cls, "__cosmos_data_packer_cls", data_packer_cls)
@@ -190,11 +192,11 @@ class BaseModel(torch.nn.Module, ABC):
             for model_type in model_types:
                 if (
                     not allow_override
-                    and model_type in BaseModel._MODEL_REGISTRY
-                    and BaseModel._MODEL_REGISTRY[model_type] != cls
+                    and model_type in ModelRegistry._MODEL_REGISTRY
+                    and ModelRegistry._MODEL_REGISTRY[model_type] != cls
                 ):
                     raise ValueError(f"Model {model_type} is already registered.")
-                BaseModel._register_model(
+                ModelRegistry._register_model(
                     cls, default_data_packer_cls, default_weight_mapper_cls
                 )
             return cls
@@ -203,7 +205,7 @@ class BaseModel(torch.nn.Module, ABC):
 
     @classmethod
     def check_model_type_supported(cls, model_type: str) -> bool:
-        return model_type in BaseModel._MODEL_REGISTRY
+        return model_type in ModelRegistry._MODEL_REGISTRY
 
     @classmethod
     def build_model(cls, config: CosmosConfig):
@@ -212,9 +214,9 @@ class BaseModel(torch.nn.Module, ABC):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             model_name_or_path, trust_remote_code=True
         )
-        if hf_config.model_type not in BaseModel._MODEL_REGISTRY:
+        if hf_config.model_type not in ModelRegistry._MODEL_REGISTRY:
             raise ValueError(f"Model {hf_config.model_type} not supported.")
-        model_cls = BaseModel._MODEL_REGISTRY[hf_config.model_type]
+        model_cls = ModelRegistry._MODEL_REGISTRY[hf_config.model_type]
 
         with torch.device("meta"):
             with util.cosmos_default_dtype(

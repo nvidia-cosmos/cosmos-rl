@@ -44,7 +44,7 @@ from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
 from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
 from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.model.base import BaseModel
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property, partial
 from flash_attn import flash_attn_func
@@ -603,7 +603,7 @@ class Qwen3MoEBlock(nn.Module):
         return out
 
 
-@BaseModel.register(DecoderOnlyLLMDataPacker, Qwen3MoeWeightMapper)
+@ModelRegistry.register(DecoderOnlyLLMDataPacker, Qwen3MoeWeightMapper)
 class Qwen3MoE(BaseModel):
     """
     Qwen3MoE Module
