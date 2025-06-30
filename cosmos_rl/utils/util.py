@@ -33,7 +33,7 @@ import sys
 from functools import wraps
 from msgpack import ExtType
 from tqdm import tqdm
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 import torch
 import pynvml
 from contextlib import contextmanager
@@ -971,12 +971,17 @@ def compute_logprobs(
     return logps, cu_seqlens
 
 
-def dynamic_import_module(path: str) -> Dict[str, Any]:
+def dynamic_import_module(path: str, attr: Optional[str] = None) -> Dict[str, Any]:
     """
     Dynamically import either:
         - a single .py file
         - a package directory (must contain __init__.py)
     and allow it to use relative imports internally.
+
+    Args:
+        path: the path to the module to import
+        attr: the attribute to import from the module, can be recursive attribute like `model.attr_a.attr_b.attr_c....`
+
     Returns the imported module object.
     """
     path = os.path.abspath(path)
@@ -998,4 +1003,12 @@ def dynamic_import_module(path: str) -> Dict[str, Any]:
         sys.path.insert(0, parent_dir)
     # Now import by name – normal import machinery applies
     module = importlib.import_module(module_name)
+
+    if attr:
+        obj = module
+        for attr_part in attr.split("."):
+            if not hasattr(obj, attr_part):
+                raise ImportError(f"Attribute {attr} not found in {path}")
+            obj = getattr(obj, attr_part)
+        return obj
     return module

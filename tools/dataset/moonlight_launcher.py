@@ -21,5 +21,9 @@ module_path = os.path.join(
 )
 
 if __name__ == "__main__":
-    # Ensure that the module path is accessible on all nodes
-    launch_dispatcher(model_module=module_path)
+    # Ensure
+    # 1. the module path is accessible on all nodes
+    # 2. the model class is exported in `__init__.py`
+    launch_dispatcher(
+        model_module=module_path,
+    )
