@@ -126,7 +126,7 @@ def update_config_if_modelscope(loaded_config: Any):
         revision=loaded_config.train.train_policy.dataset.revision,
     )
 
-    if loaded_config.validation is not None:
+    if loaded_config.validation.dataset.name:
         loaded_config.validation.dataset.name = modelscope_download(
             loaded_config.validation.dataset.name,
             "dataset",
