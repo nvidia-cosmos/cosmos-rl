@@ -74,7 +74,7 @@ class CommMixin:
     ) -> Optional[Callable]:
         return cls.rollout_command_handler_registry.get_command_handler(command_type)
 
-    def init_comm(self):
+    def init_comm(self, use_hfllm_type: bool = False):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
         logger.info(
             f"{self.role} Replica started at global rank {self.global_rank}, with replica name: {self.replica_name}"
@@ -100,13 +100,14 @@ class CommMixin:
         )
 
         user_data_packer = metadata.get("user_data_packer", None)
+        model_type = hf_config.model_type if not use_hfllm_type else "hfllm"
         if user_data_packer:
             user_data_packer = base64.b64decode(user_data_packer)
             user_data_packer = cloudpickle.loads(user_data_packer)
             self.data_packer = user_data_packer
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
-            self.data_packer = DataPacker.get_default_data_packer(hf_config.model_type)
+            self.data_packer = DataPacker.get_default_data_packer(model_type)
             logger.info(f"Using default data packer: {self.data_packer}")
         self.data_packer.setup(self.config, self.tokenizer)
 
@@ -119,9 +120,7 @@ class CommMixin:
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )
         else:
-            self.val_data_packer = DataPacker.get_default_data_packer(
-                hf_config.model_type
-            )
+            self.val_data_packer = DataPacker.get_default_data_packer(model_type)
             logger.info(f"Using default validation data packer: {self.val_data_packer}")
         self.val_data_packer.setup(self.config, self.tokenizer)
 

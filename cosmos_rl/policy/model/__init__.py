@@ -17,6 +17,7 @@ from cosmos_rl.policy.model.gpt import GPT
 from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
 from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
 from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
+from cosmos_rl.policy.model.hf_llm import HFLLMModel
 from cosmos_rl.policy.config import Config as CosmosConfig
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils.logging import logger
@@ -24,7 +25,13 @@ from transformers import AutoConfig
 import torch
 
 
-supported_cls_list = [GPT, Qwen2_5_VLConditionalModel, Qwen3MoE, DeepseekV3MoEModel]
+supported_cls_list = [
+    GPT,
+    Qwen2_5_VLConditionalModel,
+    Qwen3MoE,
+    DeepseekV3MoEModel,
+    HFLLMModel,
+]
 
 
 def build_model(config: CosmosConfig):
@@ -37,13 +44,17 @@ def build_model(config: CosmosConfig):
     with torch.device("meta"):
         with util.cosmos_default_dtype(config.train.param_torch_dtype):
             for model_cls in supported_cls_list:
-                if hf_config.model_type in model_cls.supported_model_types():
+                supported_model_types = model_cls.supported_model_types()
+                use_hfllm_type = supported_model_types[0] == "hfllm"
+                if hf_config.model_type in supported_model_types or use_hfllm_type:
                     try:
                         model = model_cls.from_pretrained(
                             hf_config,
                             model_name_or_path,
                             max_position_embeddings=config.policy.model_max_length,
                         )
+                        model.use_hfllm_type = use_hfllm_type
+
                     except Exception as e:
                         logger.error(
                             f"Failed to load model {model_name_or_path} with error: {e}"
