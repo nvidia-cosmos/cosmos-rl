@@ -3,7 +3,7 @@
 1. `git@github.com:nvidia-cosmos/cosmos-rl.git && cd cosmos-rl` 
 2. Install `sphinx-...` packages
     ``` bash
-    pip install sphinx-autobuild  sphinx_rtd_theme recommonmark sphinx_markdown_tables
+    pip install sphinx-autobuild  sphinx_rtd_theme recommonmark sphinx_markdown_tables sphinx-argparse sphinx-jsonschema
     ```
 
 3.  `make clean && make html` to build the static html files
