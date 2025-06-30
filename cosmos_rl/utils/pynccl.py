@@ -76,7 +76,6 @@ def _find_nccl_so_file() -> str:
         )
 
     so_file = so_files[0]
-    logger.debug(f"[NCCL] Using NCCL shared object: {so_file}")
     return so_file
 
 
@@ -122,112 +121,127 @@ def _current_ctx():
 
 
 class _Task:
-    __slots__ = ("functor", "timeout_ms", "done", "timed_out", "comm_idx")
+    __slots__ = ("functor", "timeout_ms", "done", "timed_out")
 
-    def __init__(
-        self, functor: Callable[[], ncclComm_t], timeout_ms: int, comm_idx: int
-    ):
+    def __init__(self, functor: Callable[[], ncclComm_t], timeout_ms: int):
         self.functor = functor
         self.timeout_ms = timeout_ms
         self.done = threading.Event()
         self.timed_out = threading.Event()
-        self.comm_idx = comm_idx
+
+    # better __repr__ for debug purposes
+    def __repr__(self):  # pragma: no cover
+        return f"<_Task id={id(self)} timeout_ms={self.timeout_ms}>"
 
 
 _task_q: "queue.Queue[_Task]" = queue.Queue()
 _worker_started = False
 _worker_thread: Optional[threading.Thread] = None
+_worker_device: Optional[int] = None  # GPU index used by worker
+
+# A lock to guarantee that the NCCL background worker is only started once
+_worker_init_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Background worker implementation 
+# ---------------------------------------------------------------------------
+
+
+def _worker_loop(device_idx: int):
+    """Background thread that executes queued NCCL host calls on *device_idx*."""
+    torch.cuda.set_device(device_idx)
+
+    while True:
+        task: _Task = _task_q.get()
+        logger.debug(f"[Worker] Got task {task} | queue_size={_task_q.qsize()}")
+
+        comm: ncclComm_t | None = None
+        try:
+            logger.debug(f"[Worker] Executing functor for task {task}")
+            comm = task.functor()
+            logger.debug(f"[Worker] Functor for task {task} returned comm={comm}")
+
+            deadline = time.monotonic() + task.timeout_ms / 1000.0
+            # Poll async error status until success or timeout.
+            while time.monotonic() < deadline:
+                logger.debug(f"[Worker] timing out task {task}")
+                err = _nccl.ncclCommGetAsyncError(comm)
+                logger.debug(f"[Worker] !!!!!!! !!!!! ncclCommGetAsyncError(comm={comm}) = {err}")
+                if err == 0:  # ncclSuccess
+                    logger.debug(f"[Worker] Task {task} async status success")
+                    break
+                if err == 7:  # ncclInProgress
+                    logger.debug(f"[Worker] Task {task} async status in progress")
+                    time.sleep(0.001)
+                    continue
+
+                # Immediate error – abort communicator and mark task failed.
+                logger.error(
+                    f"NCCL: async error detected (err={err}), task {task} failed"
+                )
+                _nccl.ncclCommAbort(comm)
+                task.timed_out.set()
+                break
+            else:
+                # Enqueue timeout hit – abort communicator.
+                logger.error(
+                    f"NCCL: non-blocking enqueue timed out for task {task}"
+                )
+                _nccl.ncclCommAbort(comm)
+                task.timed_out.set()
+        except Exception as e:
+            logger.error(f"[Worker] Exception during task {task}: {e}")
+            task.timed_out.set()
+        finally:
+            task.done.set()
+            logger.debug(
+                f"[Worker] Task {task} done | timed_out={task.timed_out.is_set()}"
+            )
+
+
+def _start_worker(device_idx: int):
+    """Start the NCCL background worker thread exactly once (thread-safe)."""
+    global _worker_started, _worker_thread, _worker_device
+
+    # Double-checked locking pattern to avoid unnecessary acquisition.
+    if _worker_started and _worker_thread is not None and _worker_thread.is_alive():
+        return
+
+    with _worker_init_lock:
+        if _worker_started and _worker_thread is not None and _worker_thread.is_alive():
+            return
+
+        _worker_device = device_idx
+        _worker_thread = threading.Thread(
+            target=_worker_loop,
+            args=(device_idx,),
+            daemon=True,
+            name="pynccl-worker",
+        )
+        _worker_thread.start()
+        _worker_started = True
 
 
 def _ensure_worker():
-    """Guarantee that a background worker thread exists and is alive."""
-    global _worker_started, _worker_thread
-
-    if _worker_started and (_worker_thread is None or not _worker_thread.is_alive()):
-        _worker_started = False
-
-    if _worker_started:
-        return
-
-    def _worker_loop():
-        while True:
-            task: _Task = _task_q.get()
-            comm: ncclComm_t | None = None
-            try:
-                # Check if communicator was aborted before processing
-                if task.comm_idx not in _comm_store:
-                    logger.warning(
-                        f"[Worker] Communicator {task.comm_idx} was aborted, skipping task"
-                    )
-                    task.timed_out.set()
-                    task.done.set()
-                    continue
-
-                comm = task.functor()
-                deadline = time.monotonic() + task.timeout_ms / 1000.0
-                # Poll async error status.
-                while time.monotonic() < deadline:
-                    # Double-check communicator is still valid
-                    if task.comm_idx not in _comm_store:
-                        logger.warning(
-                            f"[Worker] Communicator {task.comm_idx} was aborted during polling"
-                        )
-                        task.timed_out.set()
-                        break
-
-                    try:
-                        err = _nccl.ncclCommGetAsyncError(comm)
-                        # 0 == ncclSuccess
-                        if err == 0:
-                            break
-                        # 7 == ncclInProgress (others are immediate errors)
-                        if err == 7:
-                            time.sleep(0.001)
-                            continue
-                        # handle other errors
-                        logger.error(
-                            f"NCCL: async error detected (err={err}), non-blocking enqueue failed"
-                        )
-                        try:
-                            _nccl.ncclCommAbort(comm)
-                        except Exception:
-                            pass
-                        task.timed_out.set()
-                        break
-                    except Exception as e:
-                        logger.error(f"[Worker] Error in ncclCommGetAsyncError: {e}")
-                        task.timed_out.set()
-                        break
-                else:
-                    # enqueue-timeout
-                    logger.error("NCCL: non-blocking enqueue timed out")
-                    try:
-                        _nccl.ncclCommAbort(comm)
-                    except Exception:
-                        pass
-                    task.timed_out.set()
-            except Exception as e:
-                logger.error(f"[Worker] Exception in worker loop: {e}")
-                task.timed_out.set()
-            finally:
-                task.done.set()
-
-    _worker_thread = threading.Thread(
-        target=_worker_loop, daemon=True, name="pynccl-worker"
-    )
-    _worker_thread.start()
-    _worker_started = True
+    """Legacy shim retained for compatibility – delegates to _start_worker."""
+    _start_worker(torch.cuda.current_device())
 
 
-def _submit_nccl(
-    functor: Callable[[], ncclComm_t], timeout_ms: Optional[int], comm_idx: int
-):
+def _submit_nccl(functor: Callable[[], ncclComm_t], timeout_ms: Optional[int]):
     """Run NCCL host call in worker thread, monitor enqueue-timeout."""
-    _ensure_worker()
-    task = _Task(functor, _get_timeout_ms(timeout_ms), comm_idx)
+    if not _worker_started:
+        raise RuntimeError(
+            "NCCL worker thread not initialized; call create_nccl_comm first."
+        )
+    resolved_timeout = _get_timeout_ms(timeout_ms)
+    task = _Task(functor, resolved_timeout)
     _task_q.put(task)
     task.done.wait()
     if task.timed_out.is_set():
+        cur = _current_ctx()
+        if cur is not None:
+            cur["abort"] = True
         raise RuntimeError("NCCL: non-blocking enqueue timed out")
 
 
@@ -289,6 +303,7 @@ def nccl_timeout_watchdog(
     """Light-weight watchdog around a block of NCCL calls."""
 
     timeout_ms = _get_timeout_ms(timeout_ms)
+    logger.debug("[Watchdog] Entered watchdog context")
 
     ctx = _push_ctx()
 
@@ -300,6 +315,7 @@ def nccl_timeout_watchdog(
         logger.error(
             f"[Watchdog] NCCL block exceeded {timeout_ms} ms. Aborting its communicators."
         )
+        logger.debug(f"[Watchdog] Context comm_ids to abort: {ctx.get('comm_ids', [])}")
         for cid in set(ctx.get("comm_ids", [])):
             try:
                 nccl_abort(cid)
@@ -323,15 +339,18 @@ def nccl_timeout_watchdog(
     finally:
         if timer is not None:
             timer.cancel()
+            logger.debug("[Watchdog] Timer canceled")
 
         timeout_hit = False
 
         if wait_stream and exc is None:
+            logger.debug("[Watchdog] wait_stream=True: flushing current stream")
             evt = torch.cuda.Event()
             evt.record(cur_stream)
 
             while True:
                 if evt.query():
+                    logger.debug("[Watchdog] CUDA stream flushed; exiting wait loop")
                     # Stream completely flushed.
                     break
 
@@ -345,9 +364,11 @@ def nccl_timeout_watchdog(
 
         # Pop the context and perform a final abort cleanup if required.
         popped = _pop_ctx()
+        logger.debug(f"[Watchdog] Context popped. abort={popped and popped.get('abort')}")
         if popped and popped.get("abort"):
             for cid in set(popped.get("comm_ids", [])):
                 try:
+                    logger.debug(f"[Watchdog] Aborting communicator {cid}")
                     nccl_abort(cid)
                 except Exception:
                     pass
@@ -355,6 +376,7 @@ def nccl_timeout_watchdog(
             raise RuntimeError(
                 "NCCL operation exceeded watchdog timeout and was aborted"
             )
+        logger.debug("[Watchdog] Exiting watchdog context")
 
 
 # ---------------------------------------------------------------------------
@@ -372,21 +394,61 @@ def create_nccl_comm(
     uid_chars: List[int], rank: int, world_size: int, timeout_ms: Optional[int] = None
 ) -> int:
     """Create a communicator and return comm_idx handle (int)."""
+    # Start the NCCL background worker exactly once using the caller's CUDA device.
+    _start_worker(torch.cuda.current_device())
+
     uid = ncclUniqueId()
     for i, byte in enumerate(uid_chars):
         uid.internal[i] = byte & 0xFF
-    comm = _nccl.ncclCommInitRank(world_size, uid, rank)
+
+    # Holder to fetch communicator created in worker thread
+    holder: Dict[str, ncclComm_t] = {}
+
+    def _init_functor() -> ncclComm_t:
+        # blocking=0 equivalent not available in wrapper; rely on default
+        comm_local = _nccl.ncclCommInitRank(world_size, uid, rank)
+        holder["comm"] = comm_local
+        return comm_local
+
+    # Run init on worker thread with timeout protection
+    _submit_nccl(_init_functor, timeout_ms)
+
+    comm = holder.get("comm")
+    if comm is None:
+        raise RuntimeError("Failed to create NCCL communicator (worker did not return comm)")
+
     global _next_comm_idx
     comm_idx = _next_comm_idx
     _next_comm_idx += 1
-    # Save communicator handle together with the caller's rank and world size.
     _comm_store[comm_idx] = (comm, rank, world_size)
     logger.info(f"[NCCL] Created communicator idx={comm_idx} rank={rank}/{world_size}")
-    # register communicator with current watchdog context (if any)
+
+    # Register communicator with current watchdog context (if any)
     cur = _current_ctx()
     if cur is not None:
         cur["comm_ids"].append(comm_idx)
+
     return comm_idx
+
+# def create_nccl_comm(
+#     uid_chars: List[int], rank: int, world_size: int, timeout_ms: Optional[int] = None
+# ) -> int:
+#     """Create a communicator and return comm_idx handle (int)."""
+#     uid = ncclUniqueId()
+#     for i, byte in enumerate(uid_chars):
+#         uid.internal[i] = byte & 0xFF
+#     comm = _nccl.ncclCommInitRank(world_size, uid, rank)
+#     global _next_comm_idx
+#     comm_idx = _next_comm_idx
+#     _next_comm_idx += 1
+#     # Save communicator handle together with the caller's rank and world size.
+#     _comm_store[comm_idx] = (comm, rank, world_size)
+#     logger.info(f"[NCCL] Created communicator idx={comm_idx} rank={rank}/{world_size}")
+#     # register communicator with current watchdog context (if any)
+#     cur = _current_ctx()
+#     if cur is not None:
+#         cur["comm_ids"].append(comm_idx)
+#     return comm_idx
 
 
 def get_nccl_comm_nranks(comm_idx: int) -> int:
@@ -441,17 +503,21 @@ def nccl_broadcast(
     sendbuf = _buf(tensor) if my_rank == rank else buffer_type()
     recvbuf = _buf(tensor)
 
-    _nccl.ncclBroadcast(
-        sendbuf,
-        recvbuf,
-        tensor.numel(),
-        _dtype_enum(tensor.dtype),
-        rank,
-        comm,
-        _stream_ptr(stream),
-    )
+    stream_ptr = _stream_ptr(stream)
 
-    _submit_nccl(lambda: comm, timeout_ms, comm_idx)
+    def _broadcast_call():
+        _nccl.ncclBroadcast(
+            sendbuf,
+            recvbuf,
+            tensor.numel(),
+            _dtype_enum(tensor.dtype),
+            rank,
+            comm,
+            stream_ptr,
+        )
+        return comm
+
+    _submit_nccl(_broadcast_call, timeout_ms)
 
 
 def nccl_send(
@@ -464,16 +530,21 @@ def nccl_send(
     """Point-to-point send."""
     _check_tensor(tensor)
     comm = _comm_store[comm_idx][0]
-    _nccl.ncclSend(
-        _buf(tensor),
-        tensor.numel(),
-        _dtype_enum(tensor.dtype),
-        peer,
-        comm,
-        _stream_ptr(stream),
-    )
 
-    _submit_nccl(lambda: comm, timeout_ms, comm_idx)
+    stream_ptr = _stream_ptr(stream)
+
+    def _send_call():
+        _nccl.ncclSend(
+            _buf(tensor),
+            tensor.numel(),
+            _dtype_enum(tensor.dtype),
+            peer,
+            comm,
+            stream_ptr,
+        )
+        return comm
+
+    _submit_nccl(_send_call, timeout_ms)
 
 
 def nccl_recv(
@@ -486,16 +557,21 @@ def nccl_recv(
     """Point-to-point receive."""
     _check_tensor(tensor)
     comm = _comm_store[comm_idx][0]
-    _nccl.ncclRecv(
-        _buf(tensor),
-        tensor.numel(),
-        _dtype_enum(tensor.dtype),
-        peer,
-        comm,
-        _stream_ptr(stream),
-    )
 
-    _submit_nccl(lambda: comm, timeout_ms, comm_idx)
+    stream_ptr = _stream_ptr(stream)
+
+    def _recv_call():
+        _nccl.ncclRecv(
+            _buf(tensor),
+            tensor.numel(),
+            _dtype_enum(tensor.dtype),
+            peer,
+            comm,
+            stream_ptr,
+        )
+        return comm
+
+    _submit_nccl(_recv_call, timeout_ms)
 
 
 def nccl_allreduce(
@@ -510,17 +586,21 @@ def nccl_allreduce(
     _check_tensor(sendbuff)
     _check_tensor(recvbuff)
     comm = _comm_store[comm_idx][0]
-    _nccl.ncclAllReduce(
-        _buf(sendbuff),
-        _buf(recvbuff),
-        sendbuff.numel(),
-        _dtype_enum(sendbuff.dtype),
-        _redop_enum(op),
-        comm,
-        _stream_ptr(stream),
-    )
+    stream_ptr = _stream_ptr(stream)
 
-    _submit_nccl(lambda: comm, timeout_ms, comm_idx)
+    def _allreduce_call():
+        _nccl.ncclAllReduce(
+            _buf(sendbuff),
+            _buf(recvbuff),
+            sendbuff.numel(),
+            _dtype_enum(sendbuff.dtype),
+            _redop_enum(op),
+            comm,
+            stream_ptr,
+        )
+        return comm
+
+    _submit_nccl(_allreduce_call, timeout_ms)
 
 
 def nccl_alltoall(
@@ -534,16 +614,21 @@ def nccl_alltoall(
     _check_tensor(sendbuff)
     _check_tensor(recvbuff)
     comm = _comm_store[comm_idx][0]
-    _nccl.ncclAllGather(
-        _buf(sendbuff),
-        _buf(recvbuff),
-        sendbuff.numel(),
-        _dtype_enum(sendbuff.dtype),
-        comm,
-        _stream_ptr(stream),
-    )
 
-    _submit_nccl(lambda: comm, timeout_ms, comm_idx)
+    stream_ptr = _stream_ptr(stream)
+
+    def _alltoall_call():
+        _nccl.ncclAllGather(
+            _buf(sendbuff),
+            _buf(recvbuff),
+            sendbuff.numel(),
+            _dtype_enum(sendbuff.dtype),
+            comm,
+            stream_ptr,
+        )
+        return comm
+
+    _submit_nccl(_alltoall_call, timeout_ms)
 
 
 # Compatibility helper (legacy API surface)
