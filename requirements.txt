@@ -1,7 +1,7 @@
 cmake
 fastapi
 uvicorn
-transformers>=4.51.1,!=4.52.*,!=4.53.* # 4.52.* have Qwen-VL warnings, 4.53.0 is mismatched with vllm which will raise Qwen2_5_VLProcessor error
+transformers>=4.51.1,!=4.52.*,!=4.53.* # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
 datasets
 pydantic
 math_verify
