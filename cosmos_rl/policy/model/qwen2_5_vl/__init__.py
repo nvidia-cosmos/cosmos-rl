@@ -34,7 +34,7 @@ from cosmos_rl.policy.model.qwen2_5_vl.weight_converter import (
     convert_weight_from_hf,
 )
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.config import Config as CosmosConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
 from functools import cached_property
 import re

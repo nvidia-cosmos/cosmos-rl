@@ -29,7 +29,7 @@ from cosmos_rl.utils.distributed import (
 )
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.config import Config as PolicyConfig
+from cosmos_rl.policy.config import Config as PolicyConfig
 
 try:
     # for policy and rollout nccl env consistency

@@ -27,7 +27,7 @@ from botocore.config import Config as BotoConfig
 from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.config import Config as CosmosConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 
 
 def upload_file_to_s3(

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from cosmos_rl.policy.trainer import Trainer
-from cosmos_rl.config import Config as CosmosConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )

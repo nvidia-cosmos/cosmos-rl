@@ -40,7 +40,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
 from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
 from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
-from cosmos_rl.config import Config as CosmosConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
 from transformers.activations import ACT2FN
 from functools import cached_property, partial

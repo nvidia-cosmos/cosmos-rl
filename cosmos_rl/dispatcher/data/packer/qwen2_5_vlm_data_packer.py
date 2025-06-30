@@ -3,7 +3,7 @@ from typing import List, Any, Dict, Optional
 import torch
 import torch.nn.functional as F
 from cosmos_rl.utils.util import retry
-from cosmos_rl.config import Config
+from cosmos_rl.policy.config import Config
 from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info
 import logging

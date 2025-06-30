@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 import math
 from cosmos_rl.dispatcher.protocol import Role, MESH_NAMES, RegisterRequest
-from cosmos_rl.config import SubProfilerConfig
+from cosmos_rl.policy.config import SubProfilerConfig
 import asyncio
 from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo
 import weakref

@@ -22,7 +22,7 @@ from functools import partial
 import requests
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.config import Config as CosmosConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils.checkpoint import upload_folder_to_s3

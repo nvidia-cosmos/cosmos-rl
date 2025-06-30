@@ -17,7 +17,7 @@ import re
 from math_verify.metric import math_metric
 from math_verify.parser import LatexExtractionConfig, ExprExtractionConfig
 from transformers import PreTrainedTokenizer
-from cosmos_rl.config import Config
+from cosmos_rl.policy.config import Config
 from typing import Union, Callable
 from cosmos_rl.utils.constant import RewardFn
 from cosmos_rl.utils.logging import logger

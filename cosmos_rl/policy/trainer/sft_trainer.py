@@ -17,7 +17,7 @@ from cosmos_rl.policy.trainer import Trainer
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )
-from cosmos_rl.config import (
+from cosmos_rl.policy.config import (
     Config as CosmosConfig,
     SFTDataConfig,
     config_hash,

@@ -5,8 +5,8 @@ from cosmos_rl.utils.fp8.fp8_util import (
     FP8ModelConverter,
     IS_TORCH_COMPATIBLE_WITH_FP8,
 )
-from cosmos_rl.config import Config as CosmosConfig
-from cosmos_rl.config import TrainingConfig, FP8Config
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.config import TrainingConfig, FP8Config
 from cosmos_rl.utils.parallelism import ParallelDims
 
 from torchao.float8.float8_linear import Float8Linear

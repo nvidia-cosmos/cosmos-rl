@@ -18,7 +18,7 @@ from typing import Optional, Any
 from torch.utils.data import Dataset
 from datasets import load_dataset
 from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
-from cosmos_rl.config import Config
+from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
 from transformers import AutoTokenizer
 from torch.utils.data import ConcatDataset

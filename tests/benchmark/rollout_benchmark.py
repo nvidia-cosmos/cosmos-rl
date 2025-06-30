@@ -31,7 +31,7 @@ from typing import List, Tuple
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import init_distributed
-from cosmos_rl.config import Config as CosmosConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data import CosmosDataset
 from cosmos_rl.utils import util

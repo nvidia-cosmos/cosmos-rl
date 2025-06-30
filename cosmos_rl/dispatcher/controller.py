@@ -49,7 +49,7 @@ from cosmos_rl.dispatcher.status import (
     PolicyStatusManager,
     RolloutStatusManager,
 )
-from cosmos_rl.config import Config, SubProfilerConfig
+from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer.base import DataPacker

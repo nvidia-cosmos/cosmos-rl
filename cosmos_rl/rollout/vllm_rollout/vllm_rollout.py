@@ -21,13 +21,13 @@ from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
 from vllm import SamplingParams
 from cosmos_rl.rollout.rollout_base import RolloutBase
-from cosmos_rl.config import Config
+from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.rollout.vllm_rollout.vllm_patch import (
     patch_vllm_model_to_reload_weight,
 )
-from cosmos_rl.config import RolloutConfig
+from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
 
 

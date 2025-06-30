@@ -23,8 +23,8 @@ from transformers import AutoConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils import util
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.config import ParallelismConfig
-from cosmos_rl.config import Config as CosmosConfig
+from cosmos_rl.policy.config import ParallelismConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.gpt import GPT
 import toml
 import random

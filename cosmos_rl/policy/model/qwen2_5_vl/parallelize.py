@@ -35,7 +35,7 @@ from torch.distributed.tensor.parallel import (
 )
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.config import Config as CosmosConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
 from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
 import os

@@ -44,7 +44,7 @@ from cosmos_rl.dispatcher.protocol import (
     SetTracePathRequest,
     NcclErrRequest,
 )
-from cosmos_rl.config import Config as CosmosConfig
+from cosmos_rl.policy.config import Config as CosmosConfig
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import COSMOS_ROLLOUT_SCAN_INTERVAL
@@ -507,7 +507,7 @@ def main(
             config_dict = toml.load(f)
 
         # Ensure CosmosConfig is available (it's imported at the top now)
-        # from cosmos_rl.config import Config as CosmosConfig
+        # from cosmos_rl.policy.config import Config as CosmosConfig
         # Need SFTDataConfig and GrpoConfig for from_dict
 
         loaded_config = CosmosConfig.from_dict(config_dict)
