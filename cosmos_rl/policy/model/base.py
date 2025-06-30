@@ -14,20 +14,21 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Tuple, Union, Callable, Dict, Type, Any
-from functools import cached_property
-from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.policy.config import Config as CosmosConfig
-import cosmos_rl.utils.util as util
+from typing import Optional, List, Tuple, Union, Callable, Dict, Type
 import torch
+from functools import cached_property
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers import AutoConfig
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.utils.logging import logger
+import cosmos_rl.utils.util as util
 
 
 class BaseModel(torch.nn.Module, ABC):
     def __init__(self, hf_config: AutoConfig):
         super().__init__()
+        from cosmos_rl.rollout.weight_mapper import WeightMapper
+
         self.weight_mapper = WeightMapper.get_weight_mapper(
             self.supported_model_types()[0]
         )(hf_config)
@@ -158,54 +159,22 @@ class BaseModel(torch.nn.Module, ABC):
             "This func should not be called in BaseModel instance."
         )
 
-
-class ModelRegistry:
     _MODEL_REGISTRY: Dict[str, Type] = {}
 
     @classmethod
-    def _register_model(
-        cls, model_cls: Type, data_packer_cls: Type, weight_mapper_cls: Type
-    ):
-        model_types = model_cls.supported_model_types()
-        if isinstance(model_types, str):
-            model_types = [model_types]
-        for model_type in model_types:
-            ModelRegistry._MODEL_REGISTRY[model_type] = model_cls
-            WeightMapper.register_class(model_type, weight_mapper_cls)
-            DataPacker.register(model_type, data_packer_cls)
-            setattr(cls, "__cosmos_data_packer_cls", data_packer_cls)
-            setattr(cls, "__cosmos_weight_mapper_cls", weight_mapper_cls)
-
-    @classmethod
-    def register(
-        x,
-        default_data_packer_cls,
-        default_weight_mapper_cls,
-        *,
-        allow_override: bool = False,
-    ):
+    def register(cls, *, allow_override: bool = False):
         def decorator(cls: Type) -> Type:
             model_types = cls.supported_model_types()
             if isinstance(model_types, str):
                 model_types = [model_types]
 
             for model_type in model_types:
-                if (
-                    not allow_override
-                    and model_type in ModelRegistry._MODEL_REGISTRY
-                    and ModelRegistry._MODEL_REGISTRY[model_type] != cls
-                ):
+                if not allow_override and model_type in BaseModel._MODEL_REGISTRY:
                     raise ValueError(f"Model {model_type} is already registered.")
-                ModelRegistry._register_model(
-                    cls, default_data_packer_cls, default_weight_mapper_cls
-                )
+                BaseModel._MODEL_REGISTRY[model_type] = cls
             return cls
 
         return decorator
-
-    @classmethod
-    def check_model_type_supported(cls, model_type: str) -> bool:
-        return model_type in ModelRegistry._MODEL_REGISTRY
 
     @classmethod
     def build_model(cls, config: CosmosConfig):
@@ -214,9 +183,9 @@ class ModelRegistry:
         hf_config = util.retry(AutoConfig.from_pretrained)(
             model_name_or_path, trust_remote_code=True
         )
-        if hf_config.model_type not in ModelRegistry._MODEL_REGISTRY:
+        if hf_config.model_type not in BaseModel._MODEL_REGISTRY:
             raise ValueError(f"Model {hf_config.model_type} not supported.")
-        model_cls = ModelRegistry._MODEL_REGISTRY[hf_config.model_type]
+        model_cls = BaseModel._MODEL_REGISTRY[hf_config.model_type]
 
         with torch.device("meta"):
             with util.cosmos_default_dtype(
@@ -236,100 +205,3 @@ class ModelRegistry:
         if model is None:
             raise ValueError(f"Model {model_name_or_path} not supported.")
         return model
-
-
-class WeightMapper(ABC):
-    _MODEL_WEIGHT_MAPPER_REGISTRY: Dict[str, Tuple[Type["WeightMapper"], int]] = {}
-
-    def __init__(self, hf_config: AutoConfig):
-        logger.info(f"WeightMapper: {type(self).__name__} is being initialized.")
-        self.config = hf_config
-
-    @torch.no_grad()
-    def policy_maybe_decompose_weights_to_hf_naming(self, name, param):
-        """
-        Decompose the weights of the model parameters into fine-grained weights
-        This is especially useful for models with non-symmetric parameter layout than the original HuggingFace one
-        For example, MoE experts' weights are stacked in the 0th dimension,
-        while they are stored in different keys in the original HuggingFace naming convention
-        """
-        yield name, param
-
-    def policy_pre_P2R_gather_required_for_sync(self, name: str) -> bool:
-        """
-        For P->R weight sync, some weights need to be pre-collected before first `nccl_send/recv` instruction.
-        To not be messed up with the following `nccl_send/recv` instructions,
-        pre-collect those weights before first `nccl_send/recv` instruction.
-
-        Args:
-            name (str): The name of the tensor.
-        Returns:
-            bool: True if the tensor sync precollect is required, False otherwise.
-        """
-        return False
-
-    @abstractmethod
-    def rollout_prepare_recv(
-        self, vllm_model: Any
-    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, int]]]:
-        """
-        Rollout prepare recv list for P2R weight sync:
-            - vllm_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
-            - recv_key_n_rank_list: List[Tuple[str, int]]: the list of recv key and its tensor rank
-        """
-        pass
-
-    def name_to_model_part_index(self, dest_name: str) -> int:
-        return 0
-
-    @abstractmethod
-    def policy_map_local_key_to_hf_key(self, name: str) -> str:
-        pass
-
-    @abstractmethod
-    def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
-        pass
-
-    @abstractmethod
-    def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
-        pass
-
-    @abstractmethod
-    def get_policy_parallelism_strategy(self):
-        pass
-
-    @abstractmethod
-    def get_rollout_parallelism_strategy(self):
-        pass
-
-    @classmethod
-    def register_class(
-        x,
-        reg_key: Union[str, List[str]],
-        default_weight_mapper_cls: Type["WeightMapper"],
-        *,
-        allow_override: bool = False,
-    ):
-        if isinstance(reg_key, str):
-            reg_key = [reg_key]
-
-        for model_type in reg_key:
-            if (
-                not allow_override
-                and model_type in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY
-                and WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY[model_type]
-                != default_weight_mapper_cls
-            ):
-                raise ValueError(
-                    f"WeightMapper for '{model_type}' is already registered."
-                )
-            WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY[model_type] = (
-                default_weight_mapper_cls
-            )
-
-    @classmethod
-    def get_weight_mapper(cls, model_type: str) -> Type["WeightMapper"]:
-        if model_type not in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY:
-            raise ValueError(f"ModelType '{model_type}' is not supported now.")
-
-        return WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY[model_type]

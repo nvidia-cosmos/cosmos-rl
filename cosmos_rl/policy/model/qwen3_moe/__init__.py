@@ -36,15 +36,11 @@ from cosmos_rl.policy.model.qwen3_moe.weight_converter import (
     convert_weight_from_hf,
 )
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
-from cosmos_rl.policy.model.qwen3_moe.weight_mapper import Qwen3MoeWeightMapper
 from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
 from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
 from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
+from cosmos_rl.policy.model.base import BaseModel
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property, partial
 from flash_attn import flash_attn_func
@@ -603,7 +599,7 @@ class Qwen3MoEBlock(nn.Module):
         return out
 
 
-@ModelRegistry.register(DecoderOnlyLLMDataPacker, Qwen3MoeWeightMapper)
+@BaseModel.register()
 class Qwen3MoE(BaseModel):
     """
     Qwen3MoE Module

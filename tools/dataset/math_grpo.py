@@ -388,5 +388,6 @@ if __name__ == "__main__":
         # Optional: if not provided, the default data packer of the selected model will be used
         data_packer=MathDataPacker(),
         val_dataset=val_dataset,
+        val_reward_fns=[custom_reward_fn],
         val_data_packer=MathDataPacker(),
     )

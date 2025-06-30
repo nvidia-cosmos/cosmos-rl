@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.policy.model.base import WeightMapper
+from cosmos_rl.rollout.weight_mapper.base import WeightMapper
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
 )
+from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
 import torch
 import copy
 import re
@@ -30,6 +31,7 @@ from cosmos_rl.utils import util
 from transformers import AutoConfig
 
 
+@WeightMapper.register_class(Qwen2_5_VLConditionalModel.supported_model_types())
 class QwenVL25WeightMapper(WeightMapper):
     def __init__(self, hf_config: AutoConfig):
         super().__init__(hf_config)

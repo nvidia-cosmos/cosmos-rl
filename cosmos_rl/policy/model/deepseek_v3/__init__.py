@@ -33,7 +33,7 @@ from cosmos_rl.utils.util import (
     retry,
 )
 from cosmos_rl.utils.logging import logger
-from .weight_converter import (
+from cosmos_rl.policy.model.deepseek_v3.weight_converter import (
     convert_weight_from_hf,
 )
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -41,11 +41,7 @@ from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
 from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
 from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
-from .weight_mapper import DeepseekV3MoEWeightMapper
+from cosmos_rl.policy.model.base import BaseModel
 from transformers.activations import ACT2FN
 from functools import cached_property, partial
 
@@ -806,7 +802,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         return output
 
 
-@ModelRegistry.register(DecoderOnlyLLMDataPacker, DeepseekV3MoEWeightMapper)
+@BaseModel.register()
 class DeepseekV3MoEModel(BaseModel):
     """
     DeepseekV3MoEModel Module
@@ -944,7 +940,7 @@ class DeepseekV3MoEModel(BaseModel):
 
     @property
     def parallelize_fn(self):
-        from .parallelize import parallelize
+        from cosmos_rl.policy.model.deepseek_v3.parallelize import parallelize
 
         return parallelize, self
 
@@ -990,7 +986,7 @@ class DeepseekV3MoEModel(BaseModel):
         Args:
             model_path (str): Path to the HuggingFace model.
             parallel_dims (ParallelDims): Parallel dimensions definition.
-            device (torch.device): Device to load the weights.
+            info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type

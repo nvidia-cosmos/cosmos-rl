@@ -34,28 +34,26 @@ class DataPacker(ABC):
 
     @classmethod
     def register(
-        cls,
-        model_types: Union[str, List[str]],
-        default_data_packer_cls: Type["DataPacker"],
-        *,
-        allow_override: bool = False,
+        cls, model_types: Union[str, List[str]], *, allow_override: bool = False
     ):
         if isinstance(model_types, str):
             model_types = [model_types]
         else:
             model_types = list(model_types)
 
-        for model_type in model_types:
-            if (
-                not allow_override
-                and model_type in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY
-                and DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]
-                != default_data_packer_cls
-            ):
-                raise ValueError(f"DataPacker for {model_type} is already registered")
-            DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type] = (
-                default_data_packer_cls
-            )
+        def decorator(subclass):
+            for model_type in model_types:
+                if (
+                    not allow_override
+                    and model_type in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY
+                ):
+                    raise ValueError(
+                        f"DataPacker for {model_type} is already registered"
+                    )
+                DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type] = subclass
+            return subclass
+
+        return decorator
 
     @classmethod
     def get_default_data_packer(cls, model_type: str) -> Type["DataPacker"]:

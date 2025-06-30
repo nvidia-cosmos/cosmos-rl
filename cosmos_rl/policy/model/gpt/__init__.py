@@ -28,11 +28,7 @@ from cosmos_rl.utils.util import (
     retry,
 )
 from safetensors import safe_open
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
-from cosmos_rl.policy.model.gpt.weight_mapper import GPTWeightMapper
+from cosmos_rl.policy.model.base import BaseModel
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -367,7 +363,7 @@ class GPTBlock(nn.Module):
         return out
 
 
-@ModelRegistry.register(DecoderOnlyLLMDataPacker, GPTWeightMapper)
+@BaseModel.register()
 class GPT(BaseModel):
     """
     GPT Module

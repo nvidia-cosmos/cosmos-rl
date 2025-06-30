@@ -16,7 +16,7 @@
 import torch
 from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
 from typing import Dict, List, Tuple, Callable, Any, Optional
-from cosmos_rl.policy.model.base import WeightMapper
+from cosmos_rl.rollout.weight_mapper.base import WeightMapper
 
 
 class DimRankInfo:

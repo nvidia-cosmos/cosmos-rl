@@ -13,17 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
+from .base import WeightMapper
+from .gpt import GPTWeightMapper
+from .qwen_vl_2_5 import QwenVL25WeightMapper
+from .qwen3_moe import Qwen3MoeWeightMapper
+from .deepseek_v3 import DeepseekV3MoEWeightMapper
 
-module_path = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model", "deepseek_v3"
-)
-
-if __name__ == "__main__":
-    # Ensure
-    # 1. the module path is accessible on all nodes
-    # 2. the model class is exported in `__init__.py`
-    launch_dispatcher(
-        model_module=module_path,
-    )
+__all__ = [
+    "WeightMapper",
+    "GPTWeightMapper",
+    "QwenVL25WeightMapper",
+    "Qwen3MoeWeightMapper",
+    "DeepseekV3MoEWeightMapper",
+]

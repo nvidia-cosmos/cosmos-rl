@@ -3,7 +3,7 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to cosmos-rl’s documentation!
+Welcome to cosmos-rl’s documentation!
 ==============================================
 
 cosmos-rl is fully compatible with PyTorch and is designed for the future of distributed training.
