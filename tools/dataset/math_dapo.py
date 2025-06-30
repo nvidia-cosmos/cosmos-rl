@@ -27,7 +27,7 @@ from torch.utils.data import ConcatDataset
 class MathDapoDataset(Dataset):
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         """
-        This method is optional and get called by launcher after being mounted
+        This method is optional and get called after being mounted
         `config`: config;
         `tokenizer`: tokenizer;
         """
@@ -68,9 +68,7 @@ class MathDapoDataset(Dataset):
         ]
         ```
         """
-        assert hasattr(
-            self, "tokenizer"
-        ), "`self.tokenizer` should be set by the launcher"
+        assert hasattr(self, "tokenizer"), "`self.tokenizer` must be set"
         conversation = self.dataset[idx]["prompt"]
         assert isinstance(
             conversation, list

@@ -35,7 +35,7 @@ class CosmosSFTDataset(Dataset):
 
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         """
-        Called by launcher after being mounted
+        Called after being mounted
         """
         self.config = config
         self.tokenizer = tokenizer
@@ -110,7 +110,7 @@ if __name__ == "__main__":
     with open(args.config, "r") as f:
         config = toml.load(f)
     config = Config.from_dict(config)
-    # Download HF dataset only on launcher worker
+
     dataset = load_dataset(
         config.train.train_policy.dataset.name, config.train.train_policy.dataset.subset
     )

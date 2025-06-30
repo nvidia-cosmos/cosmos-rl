@@ -257,10 +257,10 @@ def parse_args():
     )
 
     parser.add_argument(
-        "launcher",
+        "script",
         nargs="?",  # “?” means 0 or 1 occurrences
         default="cosmos_rl.dispatcher.run_web_panel",
-        help="The launcher to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom launcher can be provided for custom dataset and reward functions injection.",
+        help="The training script to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom training script can be provided for custom dataset and reward functions injection.",
     )
 
     parser.add_argument(
@@ -610,7 +610,7 @@ def main():
 
     # Check if the config file is provided
     cosmos_config = read_config(args.config)
-    launcher = args.launcher
+    script = args.script
 
     # Get the number of GPUs required for policy and rollout
     # and the number of replicas for each
@@ -759,7 +759,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
 
         # Add all non-Lepton arguments to the command
         launch_cmd += " " + " ".join(non_lepton_args)
-        launch_cmd += f" {launcher}"
+        launch_cmd += f" {script}"
 
         # Handle node groups and queue priority
         if args.lepton_node_group or args.lepton_queue_priority:
@@ -1060,7 +1060,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
         logger.info(f"Temporary configuration file created at {tmpfile_toml}")
         controller_cmd = f"{controller_script} --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"
-        controller_cmd += f" {args.launcher}"
+        controller_cmd += f" {args.script}"
         control_url = f"localhost:{port}"
 
     def get_lepton_ip(worker_idx: int) -> str:

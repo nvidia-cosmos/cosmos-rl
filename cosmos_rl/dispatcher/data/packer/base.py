@@ -63,7 +63,7 @@ class DataPacker(ABC):
 
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         """
-        Called by launcher after being mounted
+        Called after being mounted
         """
         assert config is not None, "config should be set"
         assert tokenizer is not None, "tokenizer should be set"

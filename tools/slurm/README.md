@@ -17,7 +17,7 @@ Submitted batch job 2878971
 ```
 Total number of GPU node is computed and dispatched via slurm platform automatically. Number of GPUs each policy or rollout need is automatically computed from the config toml file.
 
-If we need a custom launcher to inject the custom dataset and reward functions, a positional argument can be added to specify the custom launcher file. Some example launcher files can be found in folder `tools/dataset`. As an example, the command to run a slurm grpo job with a custom launcher for handling `gsm8k` dataset is as follows:
+If we need a custom training script to inject the custom dataset and reward functions, a positional argument can be added to specify the custom training script. Some example training script files can be found in folder `tools/dataset`. As an example, the command to run a slurm grpo job with a custom training script for handling `gsm8k` dataset is as follows:
 
 ```bash
 python ./tools/slurm/dispatch_job.py \
@@ -49,4 +49,4 @@ The full arguments for `dispatch_job.py` are as follows:
 | --output-root-path     | str                      | Yes      |   -            | Path to the output root.                                                    |
 | --cosmos-container     | str                      | Yes      |   -            | Path to the cosmos container.                                               |
 | --extra-sbatch-args    | str                      | No       | ["--gres=gpu:8"] | Extra #SBATCH arguments.                                              |
-| launcher               | str (positional)         | No       | cosmos_rl.dispatcher.run_web_panel | Launcher to use for dataset related operations, a custom launcher can be provided for custom dataset and reward functions injection. (Check in tools/dataset)                                              |
+| script                 | str (positional)         | No       | cosmos_rl.dispatcher.run_web_panel | Script to use for dataset related operations, a custom training script can be provided for custom dataset and reward functions injection. (Check in tools/dataset)                                              |

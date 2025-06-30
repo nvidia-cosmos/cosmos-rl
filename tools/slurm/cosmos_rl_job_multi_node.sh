@@ -58,7 +58,7 @@ srun \
     # Start the controller
     export COSMOS_LOG_LEVEL=DEBUG
     cd /opt/cosmos-rl
-    ./cosmos_rl/launcher/launch_controller.sh --port ${CONTROLLER_PORT} --config [[CONFIG_PATH]] [[LAUNCHER]]
+    ./cosmos_rl/launcher/launch_controller.sh --port ${CONTROLLER_PORT} --config [[CONFIG_PATH]] [[SCRIPT]]
     ' \
     &
 pid_controller=$!

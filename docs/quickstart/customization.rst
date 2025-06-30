@@ -41,7 +41,7 @@ Here we attach the `BytedTsinghua-SIA/DAPO-Math-17k <https://huggingface.co/data
     class MathDapoDataset(Dataset):
         def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
             '''
-            This method is optional and get called by launcher after being mounted
+            This method is optional and get called after being mounted
             `config`: config;
             `tokenizer`: tokenizer;
             '''
@@ -70,7 +70,7 @@ Here we attach the `BytedTsinghua-SIA/DAPO-Math-17k <https://huggingface.co/data
             ]
             ```
             '''
-            assert hasattr(self, "tokenizer"), "`self.tokenizer` should be set by the launcher"
+            assert hasattr(self, "tokenizer"), "`self.tokenizer` must be set"
             conversation = self.dataset[idx]["prompt"]
             assert isinstance(
                 conversation, list
@@ -94,12 +94,12 @@ In this example, the dataset fetch each row and return the raw text prompt by ap
 .. note::
     It is assumed here that decoder only LLM data packer is used, so we must either return the raw text prompt or the conversation format.
 
-How to tell the launcher to use your customized dataset?
+How to use your customized dataset?
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
-Since we have already defined our customized dataset in previous step, we need to override the controller launcher to pass the custom dataset.
+Since we have already defined our customized dataset in previous step, we need to pass the custom training script when launching the training job.
 
-Save this file to `./custom_controller_entry.py`
+Save this file to `./training_script.py`
 
 .. code-block:: python
 
@@ -121,7 +121,7 @@ Save this file to `./custom_controller_entry.py`
         )
 
 
-1. Either add `launcher` argument to `cosmos-rl` command if one-click launch is used:
+1. Either add `script` (positional) argument to `cosmos-rl` command if one-click launch is used:
 
 >>> cosmos-rl \
     --config configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml \
@@ -129,7 +129,7 @@ Save this file to `./custom_controller_entry.py`
     --rollout 2 \
     custom_controller_entry.py
 
-2. Or add `launcher` argument to `launch_controller.sh` if manual launch is used:
+2. Or add `script` (positional) argument to `launch_controller.sh` if manual launch is used:
 
 >>> ./tools/launch_controller.sh \
     --port 8000 \
@@ -141,7 +141,7 @@ Check `./tools/dataset/ <#>`_ for more pre-defined customized datasets.
 Customized reward
 -------------------
 
-Similar to customized dataset, override the launcher entry point to pass the custom reward functions:
+Similar to customized dataset, pass a custom training script to use a custom reward functions:
 
 .. code-block:: python
 
@@ -184,7 +184,7 @@ Here we just reuse the pre-deined LLM data packer to demonstrate how to pass you
     class GSM8kDataset(Dataset):
         def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
             '''
-            This method is optional and get called by launcher after being mounted
+            This method is optional and get called after being mounted
             `config`: config;
             `tokenizer`: tokenizer;
             '''
@@ -215,7 +215,7 @@ Here we just reuse the pre-deined LLM data packer to demonstrate how to pass you
             ]
             ```
             '''
-            assert hasattr(self, "tokenizer"), "`self.tokenizer` should be set by the launcher"
+            assert hasattr(self, "tokenizer"), "`self.tokenizer` must be set"
             question = self.dataset[idx]["question"]
             assert isinstance(
                 question, str
@@ -262,7 +262,7 @@ Here we just reuse the pre-deined LLM data packer to demonstrate how to pass you
 
         def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
             '''
-            This method is optional and get called by launcher after being mounted
+            This method is optional and get called after being mounted
             `config`: config;
             `tokenizer`: tokenizer;
             '''

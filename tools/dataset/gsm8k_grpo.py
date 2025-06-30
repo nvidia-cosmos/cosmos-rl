@@ -29,7 +29,7 @@ from cosmos_rl.utils.logging import logger
 class GSM8kDataset(Dataset):
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         """
-        This method is optional and get called by launcher after being mounted
+        This method is optional and get called after being mounted
         `config`: config;
         `tokenizer`: tokenizer;
         """
@@ -60,9 +60,7 @@ class GSM8kDataset(Dataset):
         ]
         ```
         """
-        assert hasattr(
-            self, "tokenizer"
-        ), "`self.tokenizer` should be set by the launcher"
+        assert hasattr(self, "tokenizer"), "`self.tokenizer` must be set"
         question = self.dataset[idx]["question"]
         assert isinstance(
             question, str
@@ -91,7 +89,7 @@ class GSM8kDataset(Dataset):
 class GSM8kValDataset(GSM8kDataset):
     """
     This is a validation dataset for GSM8K, which is used to evaluate the performance of the model.
-    It should be used in the launcher to evaluate the model during training.
+    It should be used to evaluate the model during training.
     """
 
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
@@ -143,7 +141,7 @@ class GSM8kDataPacker(DataPacker):
 
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         """
-        This method is optional and get called by launcher after being mounted
+        This method is optional and get called after being mounted
         `config`: config;
         `tokenizer`: tokenizer;
         """

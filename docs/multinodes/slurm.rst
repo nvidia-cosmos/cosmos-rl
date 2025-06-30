@@ -24,12 +24,12 @@ We provide a script to easily launch training jobs via Slurm on a cluster. For e
 
 The total number of GPU nodes is computed and dispatched automatically by the Slurm platform. The number of GPUs required per policy or rollout replica is determined from the configuration TOML file.
 
-Custom Launcher
+Custom training script
 ---------------
 
-If you need a custom launcher to inject custom datasets and reward functions, you can pass a positional argument specifying the custom launcher file. Example launcher files are located in the ``tools/dataset`` folder.
+If you need a custom training script to inject custom datasets and reward functions, you can pass a positional argument specifying the custom training script file. Example training script files are located in the ``tools/dataset`` folder.
 
-For instance, to run a GRPO job with a custom launcher for the ``gsm8k`` dataset:
+For instance, to run a GRPO job with a custom training script for the ``gsm8k`` dataset:
 
 .. code-block:: bash
 
@@ -114,8 +114,8 @@ The full list of arguments accepted by ``dispatch_job.py`` is shown below:
      - No
      - ``["--gres=gpu:8"]``
      - Extra #SBATCH arguments.
-   * - ``launcher``
+   * - ``script``
      - str (positional)
      - No
      - ``cosmos_rl.dispatcher.run_web_panel``
-     - Launcher to use for dataset-related operations. A custom launcher can be provided for custom dataset and reward function injection. See ``tools/dataset`` for examples.
+     - Script to use for dataset-related operations. A custom training script can be provided for custom dataset and reward function injection. See ``tools/dataset`` for examples.

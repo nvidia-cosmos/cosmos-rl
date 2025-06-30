@@ -143,7 +143,7 @@ class CosmosGRPODataset(Dataset):
 class CosmosGRPOValDataset(CosmosGRPODataset):
     """
     This is a validation dataset for Cosmos GRPO, which is used to evaluate the performance of the model.
-    It should be used in the launcher to evaluate the model during training.
+    It should be used to evaluate the model during training.
     """
 
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
@@ -206,7 +206,7 @@ class DemoDataPacker(DataPacker):
 
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         """
-        This method is optional and get called by launcher after being mounted
+        This method is optional and get called after being mounted
         `config`: config;
         `tokenizer`: tokenizer;
         """

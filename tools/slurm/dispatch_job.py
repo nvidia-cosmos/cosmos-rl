@@ -168,10 +168,10 @@ def main():
         help="Extra #SBATCH arguments",
     )
     parser.add_argument(
-        "launcher",
+        "script",
         nargs="?",  # “?” means 0 or 1 occurrences
         default="cosmos_rl.dispatcher.run_web_panel",
-        help="The launcher to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom launcher can be provided for custom dataset and reward functions injection.",
+        help="The training script to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom script can be provided for custom dataset and reward functions injection.",
     )
 
     args = parser.parse_args()
@@ -212,7 +212,7 @@ def main():
         "SLURM_ACCOUNT": args.slurm_account,
         "SLURM_JOB_NAME": args.job_name,
         "CONFIG_PATH": args.config_path,
-        "LAUNCHER": args.launcher,
+        "SCRIPT": args.script,
         "EXTRA_SBATCH_ARGS": "\n".join(
             f"#SBATCH {arg}" for arg in args.extra_sbatch_args
         ),

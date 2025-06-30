@@ -3,7 +3,7 @@
 PORT=""
 CONFIG_FILE=""
 LOG_FILE=""
-LAUNCHER="cosmos_rl.dispatcher.run_web_panel"
+SCRIPT="cosmos_rl.dispatcher.run_web_panel"
 
 show_help() {
   echo "Usage: $0 [options]"
@@ -13,7 +13,7 @@ show_help() {
   echo "  --config <file>     Specify the configuration file"
   echo "  --log <file>        Specify the redis log file"
   echo "  --help              Show this help message and exit"
-  echo "  <launcher>          Specify the launcher file"
+  echo "  <script>            Specify the training script"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -35,18 +35,18 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      LAUNCHER="$1"
-      echo "Using launcher: $LAUNCHER"
+      SCRIPT="$1"
+      echo "Using training script: $SCRIPT"
       shift
       ;;
   esac
 done
 
   # Check it is ending with .py
-if [[ "$LAUNCHER" == *.py ]]; then
-  CMD="python $LAUNCHER"
+if [[ "${script}" == *.py ]]; then
+  CMD="python ${SCRIPT}"
 else
-  CMD="python -m $LAUNCHER"
+  CMD="python -m ${SCRIPT}"
 fi
 
 if [[ -n "$PORT" ]]; then
