@@ -27,10 +27,13 @@ import struct
 import tarfile
 import ctypes
 import asyncio
+import importlib
+import importlib.util
+import sys
 from functools import wraps
 from msgpack import ExtType
 from tqdm import tqdm
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 import torch
 import pynvml
 from contextlib import contextmanager
@@ -966,3 +969,33 @@ def compute_logprobs(
         effective_logits, effective_input_ids
     )  # [n_logprob_tokens,]
     return logps, cu_seqlens
+
+
+def dynamic_import_module(path: str) -> Dict[str, Any]:
+    """
+    Dynamically import either:
+        - a single .py file
+        - a package directory (must contain __init__.py)
+    and allow it to use relative imports internally.
+    Returns the imported module object.
+    """
+    path = os.path.abspath(path)
+    if os.path.isdir(path):
+        # it's a package dir
+        pkg_dir = path
+        if not os.path.isfile(os.path.join(pkg_dir, "__init__.py")):
+            raise ImportError(f"{pkg_dir!r} is not a package (no __init__.py)")
+        module_name = os.path.basename(pkg_dir)
+        parent_dir = os.path.dirname(pkg_dir)
+    else:
+        # it's a single .py file
+        if not path.lower().endswith(".py"):
+            raise ImportError(f"{path!r} is neither a .py file nor a package directory")
+        parent_dir, filename = os.path.split(path)
+        module_name = os.path.splitext(filename)[0]
+    # Ensure the parent directory is on sys.path
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    # Now import by name – normal import machinery applies
+    module = importlib.import_module(module_name)
+    return module

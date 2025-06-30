@@ -13,15 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.policy.model.gpt import GPT
-from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
-from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
-from cosmos_rl.policy.model.base import BaseModel, WeightMapper
+import os
+from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
 
-__all__ = [
-    "GPT",
-    "Qwen2_5_VLConditionalModel",
-    "Qwen3MoE",
-    "BaseModel",
-    "WeightMapper",
-]
+module_path = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model", "deepseek_v3"
+)
+
+if __name__ == "__main__":
+    # Ensure that the module path is accessible on all nodes
+    launch_dispatcher(model_module=module_path)

@@ -49,6 +49,8 @@ class DataPacker(ABC):
             if (
                 not allow_override
                 and model_type in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY
+                and DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]
+                != default_data_packer_cls
             ):
                 raise ValueError(f"DataPacker for {model_type} is already registered")
             DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type] = (

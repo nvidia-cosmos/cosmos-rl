@@ -97,8 +97,8 @@ class Controller:
         reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[DataPacker] = None,
         val_dataset: Optional[Dataset] = None,
-        val_reward_fns: Optional[List[Callable]] = None,
         val_data_packer: Optional[DataPacker] = None,
+        model_module: Optional[str] = None,
     ):
         if self.config is not None:
             raise Exception(
@@ -123,6 +123,7 @@ class Controller:
         self.sft_user_dataset = dataset if not self.is_rl else None
         self.user_data_packer = data_packer
         self.user_val_data_packer = val_data_packer
+        self.model_module = model_module
         self.dataset = None
         if self.is_rl:
             if dataset is not None:

@@ -80,6 +80,7 @@ class Trainer(CommMixin):
 
         self.train_stream = torch.cuda.current_stream()
         self.train_event_queue = deque()
+        self.init_comm()
         model = BaseModel.build_model(config)
 
         # FP8 settings
@@ -105,7 +106,6 @@ class Trainer(CommMixin):
             torch.cuda.empty_cache()
             self.model_parts = model.separate_model_parts()
             self.model = model
-            self.init_comm()
             # util.add_nan_checks(model)
         except Exception as e:
             import traceback

@@ -22,6 +22,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 import cosmos_rl.utils.util as util
 import torch
 from transformers import AutoConfig
+from cosmos_rl.dispatcher.data.packer import DataPacker
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -160,8 +161,22 @@ class BaseModel(torch.nn.Module, ABC):
     _MODEL_REGISTRY: Dict[str, Type] = {}
 
     @classmethod
+    def _register_model(
+        cls, model_cls: Type, data_packer_cls: Type, weight_mapper_cls: Type
+    ):
+        model_types = model_cls.supported_model_types()
+        if isinstance(model_types, str):
+            model_types = [model_types]
+        for model_type in model_types:
+            BaseModel._MODEL_REGISTRY[model_type] = model_cls
+            WeightMapper.register_class(model_type, weight_mapper_cls)
+            DataPacker.register(model_type, data_packer_cls)
+            setattr(cls, "__cosmos_data_packer_cls", data_packer_cls)
+            setattr(cls, "__cosmos_weight_mapper_cls", weight_mapper_cls)
+
+    @classmethod
     def register(
-        cls,
+        x,
         default_data_packer_cls,
         default_weight_mapper_cls,
         *,
@@ -173,13 +188,15 @@ class BaseModel(torch.nn.Module, ABC):
                 model_types = [model_types]
 
             for model_type in model_types:
-                if not allow_override and model_type in BaseModel._MODEL_REGISTRY:
+                if (
+                    not allow_override
+                    and model_type in BaseModel._MODEL_REGISTRY
+                    and BaseModel._MODEL_REGISTRY[model_type] != cls
+                ):
                     raise ValueError(f"Model {model_type} is already registered.")
-                BaseModel._MODEL_REGISTRY[model_type] = cls
-                WeightMapper.register_class(model_type, default_weight_mapper_cls)
-                from cosmos_rl.dispatcher.data.packer import DataPacker
-
-                DataPacker.register(model_type, default_data_packer_cls)
+                BaseModel._register_model(
+                    cls, default_data_packer_cls, default_weight_mapper_cls
+                )
             return cls
 
         return decorator
@@ -298,6 +315,8 @@ class WeightMapper(ABC):
             if (
                 not allow_override
                 and model_type in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY
+                and WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY[model_type]
+                != default_weight_mapper_cls
             ):
                 raise ValueError(
                     f"WeightMapper for '{model_type}' is already registered."
