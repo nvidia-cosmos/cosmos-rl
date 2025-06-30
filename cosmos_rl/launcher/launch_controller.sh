@@ -43,7 +43,7 @@ while [[ $# -gt 0 ]]; do
 done
 
   # Check it is ending with .py
-if [[ "${script}" == *.py ]]; then
+if [[ "${SCRIPT}" == *.py ]]; then
   CMD="python ${SCRIPT}"
 else
   CMD="python -m ${SCRIPT}"
