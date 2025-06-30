@@ -188,7 +188,9 @@ class BaseModel(torch.nn.Module, ABC):
         model_cls = BaseModel._MODEL_REGISTRY[hf_config.model_type]
 
         with torch.device("meta"):
-            with util.cosmos_default_dtype(config.train.param_torch_dtype):
+            with util.cosmos_default_dtype(
+                util.str2torch_dtype(config.train.param_dtype)
+            ):
                 try:
                     model = model_cls.from_pretrained(
                         hf_config,

@@ -21,7 +21,6 @@ from typing import Any, Union, Optional, List, Literal
 import os
 import json
 import hashlib
-import torch
 from cosmos_rl.utils.modelscope import update_config_if_modelscope
 
 
@@ -488,18 +487,6 @@ class TrainingConfig(BaseModel):
                 "Async tensor parallelism requires torch.compile to be enabled"
             )
         return self
-
-    @property
-    def param_torch_dtype(self):
-        return {
-            "bfloat16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-        }[self.param_dtype]
-
-    @property
-    def fsdp_reduce_torch_dtype(self):
-        return {"float32": torch.float32}[self.fsdp_reduce_dtype]
 
 
 class ParallelismConfig(BaseModel):

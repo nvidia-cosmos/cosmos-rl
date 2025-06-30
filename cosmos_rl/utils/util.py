@@ -238,6 +238,21 @@ def b64_to_list(b64_str) -> List[int]:
     return list(struct.unpack(f"{n}q", byte_data))
 
 
+def str2torch_dtype(dtype_str: str) -> torch.dtype:
+    """
+    Convert a string representation of a dtype to a torch.dtype.
+    """
+    dtype_str = dtype_str.lower()
+    if dtype_str == "bfloat16":
+        return torch.bfloat16
+    elif dtype_str == "float16":
+        return torch.float16
+    elif dtype_str == "float32":
+        return torch.float32
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype_str}")
+
+
 @contextmanager
 def cosmos_default_dtype(dtype: torch.dtype):
     old = torch.get_default_dtype()

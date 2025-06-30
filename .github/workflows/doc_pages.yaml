@@ -1,5 +1,4 @@
-name: Deploy Docs to GitHub Pages
-
+name: build-doc
 on:
   push:
     branches:
@@ -21,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install sphinx-autobuild  sphinx_rtd_theme recommonmark sphinx_markdown_tables sphinx-argparse sphinx-jsonschema
+          pip install pydantic sphinx-autobuild  sphinx_rtd_theme recommonmark sphinx_markdown_tables sphinx-argparse sphinx-jsonschema
 
       - name: Build Sphinx docs
         run: |

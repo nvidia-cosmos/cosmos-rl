@@ -35,6 +35,7 @@ from torch.distributed.tensor.parallel import (
 )
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
 from typing import Callable, Optional
@@ -86,8 +87,8 @@ def parallelize(
         apply_fsdp(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
-            param_dtype=config.train.param_torch_dtype,
-            reduce_dtype=config.train.fsdp_reduce_torch_dtype,
+            param_dtype=str2torch_dtype(config.train.param_dtype),
+            reduce_dtype=str2torch_dtype(config.train.fsdp_reduce_dtype),
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=config.train.fsdp_offload,
             reshard_after_forward_policy=config.train.fsdp_reshard_after_forward,
