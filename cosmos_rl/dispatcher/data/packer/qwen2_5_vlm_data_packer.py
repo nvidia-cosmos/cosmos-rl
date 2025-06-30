@@ -7,10 +7,8 @@ from cosmos_rl.policy.config import Config
 from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info
 import logging
-from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
 
 
-@DataPacker.register(Qwen2_5_VLConditionalModel.supported_model_types())
 class Qwen2_5_VLM_DataPacker(DataPacker):
     """
     Data protocol & processing logic for the Qwen2.5 VLM for SFT and RL training.
