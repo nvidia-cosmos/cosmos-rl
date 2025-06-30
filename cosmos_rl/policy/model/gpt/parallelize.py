@@ -38,9 +38,61 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict
 from cosmos_rl.utils.distributed import ReplicateParallel
 from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
+
+from torch.distributed.tensor.placement_types import Placement
+from torch.distributed.tensor import(
+    distribute_tensor,
+)
+
+
+class UnevenColwiseParallel(ColwiseParallel):
+    def __init__(
+        self,
+        *,
+        input_layouts: Optional[Placement] = None,
+        output_layouts: Optional[Placement] = None,
+        use_local_output: bool = True,
+        per_split_size: Optional[int] = None,
+    ):
+        super().__init__(input_layouts=input_layouts,
+                         output_layouts=output_layouts,
+                         use_local_output=use_local_output)
+        self.per_split_size = per_split_size
+
+
+    def _partition_linear_fn(self, name, module, device_mesh):
+        # colwise shard weight/bias to Shard(0), weight be Shard(0)
+        # means Colwise as Linear is input * weight^T + bias, where
+        # weight would become Shard(1)
+        for name, param in module.named_parameters():
+            # logger.info(f"name {name}, param {param.shape}, device {param.device}")
+
+            if self.per_split_size is not None:
+                if param.shape[0] <= self.per_split_size * device_mesh.size(mesh_dim=0):
+                    param = torch.empty(
+                        (self.per_split_size * device_mesh.size(mesh_dim=0), *param.shape[1:]),
+                        dtype=param.dtype,
+                        device=device_mesh.device_type
+                    )
+            # distribute the parameter to Shard(0) on the device mesh
+            # this is a colwise parallelism, so we shard on dim 0
+            # i.e. the first dimension of the weight matrix
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            # logger.info(
+            #     f"Distributed {name} with shape {dist_param.shape} on device {dist_param.device}"
+            # )
+            module.register_parameter(name, dist_param)
+
+    @staticmethod
+    def _prepare_output_fn(output_layouts, use_local_output, mod, outputs, device_mesh):
+        # outputs is a shard on last dimension DTensor, i.e. Shard(-1)
+        if outputs.placements != output_layouts:
+            outputs = outputs.redistribute(placements=output_layouts, async_op=True)
+        # back to local tensor
+        return outputs.to_local() if use_local_output else outputs
 
 
 def parallelize(
@@ -222,6 +274,7 @@ def apply_tp(
     tp_mesh: DeviceMesh,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
+    min_chunk_sizes: Dict[str, int] = {},
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -307,10 +360,17 @@ def apply_tp(
             "mlp.up_proj": colwise_parallel(),
         }
 
+        updated_layer_plan = {}    
+        for name, plan in layer_plan.items():
+            if isinstance(plan, ColwiseParallel) and name in min_chunk_sizes:
+                updated_layer_plan[name] = UnevenColwiseParallel(min_chunk_sizes[name])
+            else:
+                updated_layer_plan[name] = plan
+
         parallelize_module(
             module=transformer_block,
             device_mesh=tp_mesh,
-            parallelize_plan=layer_plan,
+            parallelize_plan=updated_layer_plan,
         )
 
     if enable_async_tp:

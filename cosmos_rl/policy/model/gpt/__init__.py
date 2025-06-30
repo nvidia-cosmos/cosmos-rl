@@ -557,9 +557,14 @@ class GPT(BaseModel):
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
                 assert (
-                    local_view.shape == shared_weight.shape
+                    shared_weight.numel() == 0 or
+                    local_view.shape == shared_weight.shape                    
                 ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
                 with torch.no_grad():
+                    if shared_weight.numel() == 0:
+                        # If the shared weight is empty, we skip copying it
+                        # This can happen for some weights that are not used in the model such as unevenly sharded weights
+                        continue
                     local_view.data.copy_(shared_weight)
 
         if (
