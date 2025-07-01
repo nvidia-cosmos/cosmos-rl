@@ -112,6 +112,7 @@ class vLLMRollout(RolloutBase):
             enable_chunked_prefill=self.rollout_config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
+            quantization=kwargs.get("quantization", None),
             seed=kwargs.get("seed") or 42,
             # Note: We set load_format="dummy" to avoid loading the HF model weights which could cause too many requests from multiple replicas.
             # This will affect:

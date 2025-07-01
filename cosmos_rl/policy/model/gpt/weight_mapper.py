@@ -58,6 +58,13 @@ class GPTWeightMapper(WeightMapper):
         up_proj_weight = weight[dim_0 // 2 :]
         return gate_proj_weight, up_proj_weight
 
+    def fp8_quantization(self, weight: torch.Tensor):
+        assert (
+            weight.dtype == torch.bfloat16
+        ), f"weight dtype is not bfloat16: {weight.dtype}"
+        # convert to fp8
+        return weight
+
     def rollout_prepare_recv(
         self, vllm_model: Qwen2ForCausalLM
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:

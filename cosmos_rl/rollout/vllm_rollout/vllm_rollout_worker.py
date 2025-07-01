@@ -169,11 +169,17 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             else:
                 os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "1"
 
+        # determine the quantization type
+        self.quantization_type = None
+        if self.config.rollout.quantization == "fp8":
+            self.quantization_type = "fp8"
+
         self.rollout: vLLMRollout = vLLMRollout(
             self.config,
             tokenizer=self.tokenizer,
             seed=self.config.rollout.seed,
             load_format="dummy",
+            quantization=self.quantization_type,
         )
         _patch_vllm_rollout_locked_step(
             self.rollout,
@@ -353,33 +359,38 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self,
         global_rank_of_rollout: int,
         manifest: Tuple[int, int, Dict[int, Any], str, Tuple[int]],
+        target_tensor: torch.Tensor,
         communicator_index: Dict[int, int],
         do_weight_sync_check: bool = False,
     ):
         p_rank, r_rank, tensor_split_strategys, dest_name, _ = manifest
         assert r_rank == global_rank_of_rollout
 
-        target_tensor = self.vllm_weight_inplace_view_map[dest_name]
+        vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
 
-        view = target_tensor.cosmos_slice(tensor_split_strategys)
+        # quantization handling
+        quantization_type = self.config.rollout.quantization
+        if quantization_type == "fp8":
+            # create a new tensor with bf16 to recv the weight from policy
+            vllm_tensor_view = vllm_tensor_view.to(torch.bfloat16)
 
         if do_weight_sync_check:
             cloned_target_tensor = target_tensor.clone()
             # clear the current view
-            view.zero_()
+            vllm_tensor_view.zero_()
 
         recv_tensor = None
-        if view.is_contiguous():
-            recv_tensor = view
+        if vllm_tensor_view.is_contiguous():
+            recv_tensor = vllm_tensor_view
         else:
             # new a temp tensor
-            recv_tensor = torch.empty_like(view)
+            recv_tensor = torch.empty_like(vllm_tensor_view)
 
         nccl_recv(recv_tensor, p_rank, communicator_index[p_rank])
 
         # inplace copy
-        if not view.is_contiguous():
-            view.copy_(recv_tensor)
+        if not vllm_tensor_view.is_contiguous():
+            vllm_tensor_view.copy_(recv_tensor)
 
         if do_weight_sync_check:
             # If the weight sync between Policy and Rollout is correct, the
@@ -472,10 +483,43 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # recv the weight from policy
             # st = time.time()
             total_bytes_received = 0
+            # judge if we have completed one weight tensor's sync.
+            cur_dest_weight_name = insts[0][3]
+            target_tensor = vllm_native_weight = self.vllm_weight_inplace_view_map[
+                cur_dest_weight_name
+            ]
+            if self.quantization_type == "fp8":
+                # if is in fp8, the vllm_native_weight has already been quantized, we need to create a new tensor to recv the weight from policy.
+                target_tensor = torch.empty_like(target_tensor, dtype=torch.bfloat16)
+                # dequantize the vllm fp8 weight back to bf16.
+
             for inst in insts:
+                inst_weight_name = inst[3]
+                if inst_weight_name != cur_dest_weight_name:
+                    # we have completed one weight tensor's sync, handle the quantization if needed.
+                    if self.quantization_type == "fp8":
+                        quantized_weight = self.weight_mapper.fp8_quantization(
+                            target_tensor
+                        )
+                        # copy the quantized weight to the target tensor
+                        vllm_native_weight.copy_(quantized_weight)
+
+                    cur_dest_weight_name = inst_weight_name
+                    # update the target tensor
+                    target_tensor = self.vllm_weight_inplace_view_map[
+                        cur_dest_weight_name
+                    ]
+                    if self.quantization_type == "fp8":
+                        # update the vllm_native_weight to the new target tensor
+                        vllm_native_weight = target_tensor
+                        target_tensor = torch.empty_like(
+                            target_tensor, dtype=torch.bfloat16
+                        )
+
                 total_bytes_received += self.recv_weight_shard(
                     self.global_rank,
                     inst,
+                    target_tensor,
                     communicator_index,
                     command.do_weight_sync_check,
                 )
