@@ -144,7 +144,7 @@ _worker_init_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
-# Background worker implementation 
+# Background worker implementation
 # ---------------------------------------------------------------------------
 
 
@@ -167,7 +167,9 @@ def _worker_loop(device_idx: int):
             while time.monotonic() < deadline:
                 logger.debug(f"[Worker] timing out task {task}")
                 err = _nccl.ncclCommGetAsyncError(comm)
-                logger.debug(f"[Worker] !!!!!!! !!!!! ncclCommGetAsyncError(comm={comm}) = {err}")
+                logger.debug(
+                    f"[Worker] !!!!!!! !!!!! ncclCommGetAsyncError(comm={comm}) = {err}"
+                )
                 if err == 0:  # ncclSuccess
                     logger.debug(f"[Worker] Task {task} async status success")
                     break
@@ -185,9 +187,7 @@ def _worker_loop(device_idx: int):
                 break
             else:
                 # Enqueue timeout hit – abort communicator.
-                logger.error(
-                    f"NCCL: non-blocking enqueue timed out for task {task}"
-                )
+                logger.error(f"NCCL: non-blocking enqueue timed out for task {task}")
                 _nccl.ncclCommAbort(comm)
                 task.timed_out.set()
         except Exception as e:
@@ -364,7 +364,9 @@ def nccl_timeout_watchdog(
 
         # Pop the context and perform a final abort cleanup if required.
         popped = _pop_ctx()
-        logger.debug(f"[Watchdog] Context popped. abort={popped and popped.get('abort')}")
+        logger.debug(
+            f"[Watchdog] Context popped. abort={popped and popped.get('abort')}"
+        )
         if popped and popped.get("abort"):
             for cid in set(popped.get("comm_ids", [])):
                 try:
@@ -414,7 +416,9 @@ def create_nccl_comm(
 
     comm = holder.get("comm")
     if comm is None:
-        raise RuntimeError("Failed to create NCCL communicator (worker did not return comm)")
+        raise RuntimeError(
+            "Failed to create NCCL communicator (worker did not return comm)"
+        )
 
     global _next_comm_idx
     comm_idx = _next_comm_idx
@@ -428,6 +432,7 @@ def create_nccl_comm(
         cur["comm_ids"].append(comm_idx)
 
     return comm_idx
+
 
 # def create_nccl_comm(
 #     uid_chars: List[int], rank: int, world_size: int, timeout_ms: Optional[int] = None

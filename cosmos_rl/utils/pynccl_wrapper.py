@@ -40,13 +40,14 @@ buffer_type = ctypes.c_void_p
 
 ncclDataType_t = ctypes.c_int
 
+
 # --- NCCL config struct (complete v22700) ---
 class ncclConfig_t(ctypes.Structure):
     _fields_ = [
-        ("size", ctypes.c_size_t),            # sizeof(ncclConfig_t)
-        ("magic", ctypes.c_uint),             # constant magic
-        ("version", ctypes.c_uint),           # NCCL version code, e.g. 22703
-        ("blocking", ctypes.c_int),           # whether operations are blocking (0 / 1)
+        ("size", ctypes.c_size_t),  # sizeof(ncclConfig_t)
+        ("magic", ctypes.c_uint),  # constant magic
+        ("version", ctypes.c_uint),  # NCCL version code, e.g. 22703
+        ("blocking", ctypes.c_int),  # whether operations are blocking (0 / 1)
         ("cgaClusterSize", ctypes.c_int),
         ("minCTAs", ctypes.c_int),
         ("maxCTAs", ctypes.c_int),
@@ -306,10 +307,12 @@ class NCCLLibrary:
             _funcs: dict[str, Any] = {}
             for func in NCCLLibrary.exported_functions:
                 try:
-                f = getattr(self.lib, func.name)
+                    f = getattr(self.lib, func.name)
                 except AttributeError:
                     if func.name in NCCLLibrary.optional_functions:
-                        logger.warning(f"Optional NCCL symbol {func.name} not found; falling back to default behavior.")
+                        logger.warning(
+                            f"Optional NCCL symbol {func.name} not found; falling back to default behavior."
+                        )
                         _funcs[func.name] = None
                         continue
                     raise
@@ -401,7 +404,9 @@ class NCCLLibrary:
 
         fn = self._funcs.get("ncclCommInitRankConfig")
         if fn is None:
-            logger.debug("ncclCommInitRankConfig symbol missing – falling back to ncclCommInitRank")
+            logger.debug(
+                "ncclCommInitRankConfig symbol missing – falling back to ncclCommInitRank"
+            )
             return self.ncclCommInitRank(world_size, unique_id, rank)
 
         ret = fn(
