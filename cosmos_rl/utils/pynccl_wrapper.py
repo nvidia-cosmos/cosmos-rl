@@ -326,7 +326,8 @@ class NCCLLibrary:
         return self._funcs["ncclGetErrorString"](result).decode("utf-8")
 
     def NCCL_CHECK(self, result: ncclResult_t) -> None:
-        if result not in (0, 7):
+        """Raise RuntimeError if *result* is an error code."""
+        if not ncclResultEnum.is_ok(int(result)):
             error_str = self.ncclGetErrorString(result)
             raise RuntimeError(f"NCCL error: {error_str}")
 
@@ -416,7 +417,7 @@ class NCCLLibrary:
             rank,
             ctypes.byref(config),
         )
-        if ret not in (0, 7):  # 0 = ncclSuccess, 7 = ncclInProgress
+        if not ncclResultEnum.is_ok(int(ret)):
             self.NCCL_CHECK(ret)
         return comm
 
@@ -538,10 +539,32 @@ class NCCLLibrary:
         self._funcs["ncclCommAbort"](comm)
 
 
+class ncclResultEnum:
+    """Enumeration of NCCL result codes copied from nccl.h."""
+
+    ncclSuccess = 0
+    ncclUnhandledCudaError = 1
+    ncclSystemError = 2
+    ncclInternalError = 3
+    ncclInvalidArgument = 4
+    ncclInvalidUsage = 5
+    ncclRemoteError = 6
+    ncclInProgress = 7
+
+    @staticmethod
+    def is_ok(result: int) -> bool:
+        """Return True if *result* represents a non-error condition."""
+        return result in (
+            ncclResultEnum.ncclSuccess,
+            ncclResultEnum.ncclInProgress,
+        )
+
+
 __all__ = [
     "NCCLLibrary",
     "ncclDataTypeEnum",
     "ncclRedOpTypeEnum",
+    "ncclResultEnum",
     "ncclUniqueId",
     "ncclComm_t",
     "cudaStream_t",

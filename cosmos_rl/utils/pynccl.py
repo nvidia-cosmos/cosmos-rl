@@ -44,6 +44,7 @@ from cosmos_rl.utils.pynccl_wrapper import (
     ncclComm_t,
     ncclDataTypeEnum,
     ncclRedOpTypeEnum,
+    ncclResultEnum,
     ncclUniqueId,
 )
 
@@ -170,10 +171,10 @@ def _worker_loop(device_idx: int):
                 logger.debug(
                     f"[Worker] !!!!!!! !!!!! ncclCommGetAsyncError(comm={comm}) = {err}"
                 )
-                if err == 0:  # ncclSuccess
+                if err == ncclResultEnum.ncclSuccess:
                     logger.debug(f"[Worker] Task {task} async status success")
                     break
-                if err == 7:  # ncclInProgress
+                if err == ncclResultEnum.ncclInProgress:
                     logger.debug(f"[Worker] Task {task} async status in progress")
                     time.sleep(0.001)
                     continue
@@ -242,7 +243,7 @@ def _submit_nccl(functor: Callable[[], ncclComm_t], timeout_ms: Optional[int]):
         cur = _current_ctx()
         if cur is not None:
             cur["abort"] = True
-        raise RuntimeError("NCCL: non-blocking enqueue timed out")
+        raise TimeoutError("NCCL: non-blocking enqueue timed out")
 
 
 # ---------------------------------------------------------------------------
@@ -432,27 +433,6 @@ def create_nccl_comm(
         cur["comm_ids"].append(comm_idx)
 
     return comm_idx
-
-
-# def create_nccl_comm(
-#     uid_chars: List[int], rank: int, world_size: int, timeout_ms: Optional[int] = None
-# ) -> int:
-#     """Create a communicator and return comm_idx handle (int)."""
-#     uid = ncclUniqueId()
-#     for i, byte in enumerate(uid_chars):
-#         uid.internal[i] = byte & 0xFF
-#     comm = _nccl.ncclCommInitRank(world_size, uid, rank)
-#     global _next_comm_idx
-#     comm_idx = _next_comm_idx
-#     _next_comm_idx += 1
-#     # Save communicator handle together with the caller's rank and world size.
-#     _comm_store[comm_idx] = (comm, rank, world_size)
-#     logger.info(f"[NCCL] Created communicator idx={comm_idx} rank={rank}/{world_size}")
-#     # register communicator with current watchdog context (if any)
-#     cur = _current_ctx()
-#     if cur is not None:
-#         cur["comm_ids"].append(comm_idx)
-#     return comm_idx
 
 
 def get_nccl_comm_nranks(comm_idx: int) -> int:
