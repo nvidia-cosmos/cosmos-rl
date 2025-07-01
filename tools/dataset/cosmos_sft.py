@@ -14,16 +14,16 @@
 # limitations under the License.
 
 import os
-import argparse
 import copy
-import toml
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
-from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
+from cosmos_rl.launcher.worker_entry import main as launch_worker
 import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import Config
-from transformers import AutoTokenizer
 from cosmos_rl.utils.util import basename_from_modelpath
+from cosmos_rl.policy.config import Config as CosmosConfig
+from transformers import AutoTokenizer
+
 
 FPS = 1
 MAX_PIXELS = 81920
@@ -104,20 +104,20 @@ class CosmosSFTDataset(Dataset):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
-    args = parser.parse_known_args()[0]
-    with open(args.config, "r") as f:
-        config = toml.load(f)
-    config = Config.from_dict(config)
-    # Download HF dataset only on launcher worker
-    dataset = load_dataset(
-        config.train.train_policy.dataset.name, config.train.train_policy.dataset.subset
-    )
-    # Prepare video files
-    util.prepare_cosmos_data(
-        dataset=config.train.train_policy.dataset, fps=FPS, max_pixels=MAX_PIXELS
-    )
-    launch_dispatcher(
-        dataset=CosmosSFTDataset(dataset=dataset),
+
+    def get_dataset(config: CosmosConfig) -> Dataset:
+        dataset = load_dataset(
+            config.train.train_policy.dataset.name,
+            config.train.train_policy.dataset.subset,
+        )
+        # Prepare video files
+        util.prepare_cosmos_data(
+            dataset=config.train.train_policy.dataset, fps=FPS, max_pixels=MAX_PIXELS
+        )
+        return CosmosSFTDataset(dataset)
+
+    # It is best practice to pass the dataset as a factory function
+    # so that the dataset can be loaded on demand. (Not all workers need it)
+    launch_worker(
+        dataset=get_dataset,
     )

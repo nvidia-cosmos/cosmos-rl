@@ -539,7 +539,7 @@ def run_policy_broadcast_to_policy(shm_names, shm_size, rank, total_rep, self_re
 
 def run_dummy_policy():
     """Run as a dummy policy process for testing"""
-    from cosmos_rl.policy.train import run_train
+    from cosmos_rl.policy.train import main as policy_main
 
     def dummy_train_grpo(
         self, current_step: int, total_steps: int, remain_samples_num: int
@@ -565,7 +565,7 @@ def run_dummy_policy():
 
     GRPOTrainer.get_policy_command_handler = get_policy_command_handler
     SFTTrainer.train = dummy_train_sft
-    run_train()
+    policy_main()
 
 
 def run_dummy_rollout():

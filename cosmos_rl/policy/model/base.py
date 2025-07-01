@@ -163,7 +163,7 @@ class ModelRegistry:
     _MODEL_REGISTRY: Dict[str, Type] = {}
 
     @classmethod
-    def _register_model(
+    def register_model(
         cls, model_cls: Type, data_packer_cls: Type, weight_mapper_cls: Type
     ):
         model_types = model_cls.supported_model_types()
@@ -196,7 +196,7 @@ class ModelRegistry:
                     and ModelRegistry._MODEL_REGISTRY[model_type] != cls
                 ):
                     raise ValueError(f"Model {model_type} is already registered.")
-                ModelRegistry._register_model(
+                ModelRegistry.register_model(
                     cls, default_data_packer_cls, default_weight_mapper_cls
                 )
             return cls

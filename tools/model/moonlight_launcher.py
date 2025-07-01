@@ -13,17 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
-
-module_path = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model", "deepseek_v3"
+from cosmos_rl.launcher.worker_entry import main as launch_worker
+from deepseek_v3 import DeepseekV3MoEModel
+from deepseek_v3.weight_mapper import DeepseekV3MoEWeightMapper
+from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
+    DecoderOnlyLLMDataPacker,
 )
+from cosmos_rl.policy.model.base import ModelRegistry
 
 if __name__ == "__main__":
-    # Ensure
-    # 1. the module path is accessible on all nodes
-    # 2. the model class is exported in `__init__.py`
-    launch_dispatcher(
-        model_module=module_path,
+    # Register the model into the registry
+    ModelRegistry.register_model(
+        # Model class to register
+        DeepseekV3MoEModel,
+        # Data packer for this model
+        DecoderOnlyLLMDataPacker,
+        # Weight mapper for this model
+        DeepseekV3MoEWeightMapper,
     )
+
+    launch_worker()

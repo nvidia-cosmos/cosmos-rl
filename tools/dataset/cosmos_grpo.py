@@ -17,7 +17,7 @@ import os
 from typing import Optional, Any, List, Dict
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
-from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
+from cosmos_rl.launcher.worker_entry import main as launch_worker
 import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.algo.reward import single_choice_reward_fn, format_reward_fn
@@ -25,8 +25,7 @@ from transformers import AutoTokenizer
 from cosmos_rl.utils.util import basename_from_modelpath
 from cosmos_rl.dispatcher.data.packer import DataPacker, Qwen2_5_VLM_DataPacker
 from cosmos_rl.utils.logging import logger
-import toml
-import argparse
+from cosmos_rl.policy.config import Config as CosmosConfig
 
 FPS = 1
 MAX_PIXELS = 81920
@@ -55,7 +54,7 @@ class CosmosGRPODataset(Dataset):
                     mm_files_paths[file] = os.path.join(root, file)
         return mm_files_paths
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
         self.config = config
         self.tokenizer = tokenizer
         self.dataset = load_dataset(
@@ -253,19 +252,18 @@ class DemoDataPacker(DataPacker):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
-    args = parser.parse_known_args()[0]
-    with open(args.config, "r") as f:
-        config = toml.load(f)
-    config = Config.from_dict(config)
+    # It is best practice to pass the dataset and val_dataset as factory functions
+    # so that the dataset and val_dataset can be loaded on demand. (Not all workers need them)
+    def get_dataset(config: CosmosConfig) -> Dataset:
+        return CosmosGRPODataset()
 
-    dataset = CosmosGRPODataset()
-    val_dataset = CosmosGRPOValDataset() if config.train.enable_validation else None
-    launch_dispatcher(
-        dataset=dataset,
+    def get_val_dataset(config: CosmosConfig) -> Dataset:
+        return CosmosGRPOValDataset() if config.train.enable_validation else None
+
+    launch_worker(
+        dataset=get_dataset,
         reward_fns=[custom_reward_fn],
         data_packer=DemoDataPacker(),
-        val_dataset=val_dataset,
+        val_dataset=get_val_dataset,
         val_data_packer=DemoDataPacker(),
     )

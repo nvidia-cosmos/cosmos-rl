@@ -17,8 +17,8 @@
 from typing import Optional, Any, List, Dict
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
-from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
-from cosmos_rl.policy.config import Config
+from cosmos_rl.launcher.worker_entry import main as launch_worker
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.algo.reward import gsm8k_reward_fn
 from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
@@ -27,7 +27,7 @@ from cosmos_rl.utils.logging import logger
 
 
 class GSM8kDataset(Dataset):
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
@@ -94,7 +94,7 @@ class GSM8kValDataset(GSM8kDataset):
     It should be used in the launcher to evaluate the model during training.
     """
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
         if not config.train.enable_validation:
             logger.warning(
                 "Validation is not enabled in the config. Skipping setup for GSM8kValDataset."
@@ -141,7 +141,7 @@ class GSM8kDataPacker(DataPacker):
         # Check source code of DecoderOnlyLLMDataPacker to see how it's implemented
         self.underlying_data_packer = DecoderOnlyLLMDataPacker()
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
@@ -190,14 +190,20 @@ class GSM8kDataPacker(DataPacker):
 
 
 if __name__ == "__main__":
-    dataset = GSM8kDataset()
-    val_dataset = GSM8kValDataset()
-    launch_dispatcher(
-        dataset=dataset,
+
+    def get_dataset(config: CosmosConfig) -> Dataset:
+        return GSM8kDataset()
+
+    def get_val_dataset(config: CosmosConfig) -> Dataset:
+        return GSM8kValDataset()
+
+    # It is best practice to pass the dataset as a factory function
+    launch_worker(
+        dataset=get_dataset,
+        val_dataset=get_val_dataset,
         # Override the reward functions defined in toml
         reward_fns=[custom_reward_fn],
         # Optional: if not provided, the default data packer of the selected model will be used
         data_packer=GSM8kDataPacker(),
-        val_dataset=val_dataset,
         val_data_packer=GSM8kDataPacker(),
     )

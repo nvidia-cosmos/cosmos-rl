@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import argparse
 import uvicorn
-import os
 import toml
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
@@ -25,7 +25,7 @@ import base64
 import cloudpickle
 
 from fastapi.responses import HTMLResponse, JSONResponse
-from typing import Dict, List, Optional, Callable, Tuple
+from typing import Dict, List, Optional, Callable, Tuple, Union
 from cosmos_rl.dispatcher.controller import Controller
 import cosmos_rl.utils.constant as constant
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
@@ -145,8 +145,6 @@ async def meta():
         meta["user_val_data_packer"] = base64.b64encode(
             cloudpickle.dumps(controller.user_val_data_packer)
         ).decode("utf-8")
-    if controller.model_module is not None:
-        meta["model_module"] = controller.model_module
     return meta
 
 
@@ -466,17 +464,38 @@ def _serialize_replicas(replicas: Dict[str, Replica]) -> List[Dict]:
 
 
 def main(
-    dataset: Optional[Dataset] = None,
+    dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     data_packer: Optional[DataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
     val_data_packer: Optional[DataPacker] = None,
-    model_module: Optional[str] = None,
     **kwargs,
 ):
-    logger.warning(
-        f"Params: {list(kwargs.keys())} are not being used in controller initialization."
-    )
+    if kwargs:
+        logger.warning(
+            f"Params: {list(kwargs.keys())} are not being used in controller initialization."
+        )
+
+    # Deprecated: The following code is to ensure backward compatibility:
+    # where `dispatcher` is always launched in custom script
+    role = os.environ.get("COSMOS_ROLE")
+    assert role in ["Policy", "Rollout", "Controller"], f"Invalid role: {role}"
+    if role == "Controller":
+        pass
+    else:
+        logger.warning(
+            "Deprecated: Please update your script to use `cosmos_rl.launcher.launch()` instead of `cosmos_rl.dispatcher.run_web_panel.main`"
+        )
+        if role == "Policy":
+            from cosmos_rl.policy.train import main as policy_main
+
+            policy_main()
+        else:
+            from cosmos_rl.rollout.rollout_entrance import run_rollout
+
+            run_rollout()
+        return
+
     parser = argparse.ArgumentParser(
         description="Run the web panel for the dispatcher."
     )
@@ -541,7 +560,6 @@ def main(
             data_packer=data_packer,
             val_dataset=val_dataset,
             val_data_packer=val_data_packer,
-            model_module=model_module,
         )
         logger.info(f"Successfully loaded configuration from {args.config_file}")
     except FileNotFoundError:

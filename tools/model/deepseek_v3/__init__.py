@@ -41,11 +41,7 @@ from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
 from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
 from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
-from .weight_mapper import DeepseekV3MoEWeightMapper
+from cosmos_rl.policy.model.base import BaseModel
 from transformers.activations import ACT2FN
 from functools import cached_property, partial
 
@@ -806,7 +802,6 @@ class DeepseekV3DecoderLayer(nn.Module):
         return output
 
 
-@ModelRegistry.register(DecoderOnlyLLMDataPacker, DeepseekV3MoEWeightMapper)
 class DeepseekV3MoEModel(BaseModel):
     """
     DeepseekV3MoEModel Module

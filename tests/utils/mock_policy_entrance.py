@@ -91,7 +91,7 @@ class mock_GRPOTrainer(GRPOTrainer):
         return True
 
 
-def run_train():
+def policy_main():
     ctrl_ip, ctrl_port, metadata = get_controller_metadata()
 
     if metadata["config"] is None:
@@ -137,4 +137,4 @@ def run_train():
 
 
 if __name__ == "__main__":
-    run_train()
+    policy_main()

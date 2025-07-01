@@ -16,6 +16,7 @@
 from cosmos_rl.utils.distributed import prevent_vllm_from_setting_nccl_env
 
 prevent_vllm_from_setting_nccl_env()
+import sys
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as RolloutConfig
@@ -24,12 +25,10 @@ from cosmos_rl.utils.distributed import (
     destroy_distributed,
     get_controller_metadata,
 )
-
-import sys
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker import vLLMRolloutWorker
 
 
-def run_rollout():
+def run_rollout(*args, **kwargs):
     ctrl_ip, ctrl_port, metadata = get_controller_metadata()
 
     if metadata["config"] is None:

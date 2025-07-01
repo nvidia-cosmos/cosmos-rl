@@ -13,11 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
-if os.environ.get("TORCH_CPP_LOG_LEVEL") is None:
-    os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
-
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import (
@@ -30,7 +25,7 @@ from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 
 
-def run_train():
+def main(*args, **kwargs):
     ctrl_ip, ctrl_port, metadata = get_controller_metadata()
 
     if metadata["config"] is None:
@@ -71,4 +66,4 @@ def run_train():
 
 
 if __name__ == "__main__":
-    run_train()
+    main()
