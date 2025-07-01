@@ -557,8 +557,8 @@ class GPT(BaseModel):
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
                 assert (
-                    shared_weight.numel() == 0 or
-                    local_view.shape == shared_weight.shape                    
+                    shared_weight.numel() == 0
+                    or local_view.shape == shared_weight.shape
                 ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
                 with torch.no_grad():
                     if shared_weight.numel() == 0:

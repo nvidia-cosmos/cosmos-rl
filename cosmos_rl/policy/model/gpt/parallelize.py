@@ -43,7 +43,7 @@ from cosmos_rl.utils.distributed import ReplicateParallel
 from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
 
 from torch.distributed.tensor.placement_types import Placement
-from torch.distributed.tensor import(
+from torch.distributed.tensor import (
     distribute_tensor,
 )
 
@@ -57,11 +57,12 @@ class UnevenColwiseParallel(ColwiseParallel):
         use_local_output: bool = True,
         per_split_size: Optional[int] = None,
     ):
-        super().__init__(input_layouts=input_layouts,
-                         output_layouts=output_layouts,
-                         use_local_output=use_local_output)
+        super().__init__(
+            input_layouts=input_layouts,
+            output_layouts=output_layouts,
+            use_local_output=use_local_output,
+        )
         self.per_split_size = per_split_size
-
 
     def _partition_linear_fn(self, name, module, device_mesh):
         # colwise shard weight/bias to Shard(0), weight be Shard(0)
@@ -73,9 +74,12 @@ class UnevenColwiseParallel(ColwiseParallel):
             if self.per_split_size is not None:
                 if param.shape[0] <= self.per_split_size * device_mesh.size(mesh_dim=0):
                     param = torch.empty(
-                        (self.per_split_size * device_mesh.size(mesh_dim=0), *param.shape[1:]),
+                        (
+                            self.per_split_size * device_mesh.size(mesh_dim=0),
+                            *param.shape[1:],
+                        ),
                         dtype=param.dtype,
-                        device=device_mesh.device_type
+                        device=device_mesh.device_type,
                     )
             # distribute the parameter to Shard(0) on the device mesh
             # this is a colwise parallelism, so we shard on dim 0
@@ -360,7 +364,7 @@ def apply_tp(
             "mlp.up_proj": colwise_parallel(),
         }
 
-        updated_layer_plan = {}    
+        updated_layer_plan = {}
         for name, plan in layer_plan.items():
             if isinstance(plan, ColwiseParallel) and name in min_chunk_sizes:
                 updated_layer_plan[name] = UnevenColwiseParallel(min_chunk_sizes[name])

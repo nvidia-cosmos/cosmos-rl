@@ -64,6 +64,8 @@ from cosmos_rl.dispatcher.replica import Rollout
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
     COSMOS_API_POLICY_TRAIN_ACK_SUFFIX,
+    COSMOS_API_POLICY_SHARD_INFOS_SUFFIX,
+    COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
 )
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
@@ -71,6 +73,7 @@ from cosmos_rl.utils.pynccl import (
     nccl_send,
 )
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
+from cosmos_rl.utils.parallelism_map import DimRankInfo
 
 
 def compute_loss(
@@ -244,7 +247,6 @@ class GRPOTrainer(Trainer):
         self.mini_batch = self.grpo_config.mini_batch
 
         # For Polocy to Rollout weight mapping
-        self.parallel_mapper = None
         self.policy_to_rollout_insts = None
 
         # For GRPO
@@ -254,13 +256,41 @@ class GRPOTrainer(Trainer):
         self.fetch_command_thread = None
         self.fetch_rollouts_thread = None
         atexit.register(self.handle_shutdown)
-        self.p2r_related_ranks = None
         self.p2r_nccl_uuids = {}
 
         # Flag for determining if the current replica is the master replica,
         # The master replica needs to:
         # - Save the checkpoint/safetensors
         self.is_master_replica = True
+        self.parallel_mapper = ParallelTopoMapperGroup(
+            self.config.policy.parallelism,
+            self.world_size,
+            hf_config=self.hf_config,
+            is_policy=True,
+            weight_mapper=self.model.weight_mapper,
+        )
+        # Ordered list of (hf_key, tensor_dim)
+        hf_key_n_rank: List[Tuple[str, int]] = self.model.sorted_hf_key_n_rank
+        if self.global_rank == 0:
+            self.all_rank_local_shard_infos = [
+                (self.parallel_mapper.prepare_local_shard_infos(hf_key_n_rank, i))
+                for i in range(self.world_size)
+            ]
+            try:
+                make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json={
+                            "shard_infos": self.all_rank_local_shard_infos,
+                        },
+                    ),
+                    self.get_alternative_urls(COSMOS_API_POLICY_SHARD_INFOS_SUFFIX),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Policy] Failed to post policy shard infos to controller after retries {e}."
+                )
 
     def handle_shutdown(self):
         if not hasattr(self, "_handle_shutdown_called"):
@@ -589,96 +619,103 @@ class GRPOTrainer(Trainer):
     @Trainer.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         assert command.src_replica_size == self.world_size
-        if self.parallel_mapper is None:
-            self.parallel_mapper = ParallelTopoMapperGroup(
-                self.config.policy.parallelism,
-                self.config.rollout.parallelism,
-                self.world_size,
-                command.dst_replica_size,
-                hf_config=self.hf_config,
-                weight_mapper=self.model.weight_mapper,
-            )
         if not command.src_replica_name == self.replica_name:
             logger.error(
                 f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
             )
             return False
 
-        if self.policy_to_rollout_insts is None:
-            # Ordered list of (hf_key, tensor_dim)
-            hf_key_n_rank: List[Tuple[str, int]] = self.model.sorted_hf_key_n_rank
-            self.policy_to_rollout_insts = (
-                self.parallel_mapper.prepare_policy_to_rollout_manifest(
-                    hf_key_n_rank, self.global_rank
-                )
-            )
-            self.p2r_related_ranks = [set() for _ in range(command.src_replica_size)]
-            for rank in range(command.src_replica_size):
-                insts_at_rank = self.parallel_mapper.prepare_policy_to_rollout_manifest(
-                    hf_key_n_rank, rank
-                )
-                for i in insts_at_rank:
-                    p_rank, r_rank, _, _, _ = i
-                    self.p2r_related_ranks[rank].add(r_rank)
-
         comm_id = {}
         # Create nccl id for one policy replica to another rollout replica
-        for p_rank in range(command.src_replica_size):
-            for r_rank in sorted(self.p2r_related_ranks[p_rank]):
-                mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        if mesh_key not in self.p2r_nccl_uuids:
+            nccl_uuid = None
+            if self.global_rank == 0:
+                # Only create nccl group id in rank 0.
+                nccl_uuid = create_nccl_uid()
+                base64_nccl_group_id = list_to_b64(nccl_uuid)
+                logger.debug(f"[Policy] mesh_key: {mesh_key}")
+                try:
+                    make_request_with_retry(
+                        partial(
+                            requests.post,
+                            json={
+                                "unique_pair_name": mesh_key,
+                                "handle_base64": base64_nccl_group_id,
+                            },
+                        ),
+                        self.get_alternative_urls(
+                            COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX
+                        ),
+                        max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"[Policy] Failed in post nccl group_id to controller after retries {e}."
+                    )
+            # broadcast the nccl group id to all ranks
+            nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
+            self.p2r_nccl_uuids[mesh_key] = nccl_uuid
 
-                if mesh_key not in self.p2r_nccl_uuids:
-                    nccl_uuid = None
-                    if self.global_rank == 0:
-                        # Only create nccl group id in rank 0.
-                        nccl_uuid = create_nccl_uid()
-                        base64_nccl_group_id = list_to_b64(nccl_uuid)
-                        logger.debug(f"[Policy] mesh_key: {mesh_key}")
-                        try:
-                            make_request_with_retry(
-                                partial(
-                                    requests.post,
-                                    json={
-                                        "unique_pair_name": mesh_key,
-                                        "handle_base64": base64_nccl_group_id,
-                                    },
-                                ),
-                                self.get_alternative_urls(
-                                    COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX
-                                ),
-                                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                            )
-                        except Exception as e:
-                            raise RuntimeError(
-                                f"[Policy] Failed in post nccl group_id to controller after retries {e}."
-                            )
-                    # broadcast the nccl group id to all ranks
-                    nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
-                    self.p2r_nccl_uuids[mesh_key] = nccl_uuid
-
-        for r_rank in sorted(self.p2r_related_ranks[self.global_rank]):
-            mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-            if mesh_key not in self.rollouts_comm:
-                assert mesh_key in self.p2r_nccl_uuids
-                nccl_uuid = self.p2r_nccl_uuids[mesh_key]
-                logger.debug(
-                    f"[Policy] Creating nccl communicator for `P2R` with mesh_key: {mesh_key}"
-                )
-                comm_id[r_rank] = create_nccl_comm(
-                    nccl_uuid,
-                    self.global_rank,
-                    self.world_size + command.dst_replica_size,
-                )
-                logger.debug(
-                    f"[Policy] `P2R` nccl comm: {comm_id[r_rank]} for `P2R` with mesh_key: {mesh_key} is created."
-                )
-                self.rollouts_comm[mesh_key] = comm_id[r_rank]
-            else:
-                comm_id[r_rank] = self.rollouts_comm[mesh_key]
+        if mesh_key not in self.rollouts_comm:
+            assert mesh_key in self.p2r_nccl_uuids
+            nccl_uuid = self.p2r_nccl_uuids[mesh_key]
+            logger.debug(
+                f"[Policy] Creating nccl communicator for `P2R` with mesh_key: {mesh_key}"
+            )
+            comm_id = create_nccl_comm(
+                nccl_uuid,
+                self.global_rank,
+                self.world_size + command.dst_replica_size,
+            )
+            logger.debug(
+                f"[Policy] `P2R` nccl comm: {comm_id} for `P2R` with mesh_key: {mesh_key} is created."
+            )
+            self.rollouts_comm[mesh_key] = comm_id
+        else:
+            comm_id = self.rollouts_comm[mesh_key]
         assert (
             self.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."
         st = time.time()
+
+        if self.policy_to_rollout_insts is None:
+            self.policy_to_rollout_insts = []
+            try:
+                insts_meta = make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json={
+                            "rank": self.global_rank,
+                        },
+                    ),
+                    self.get_alternative_urls(
+                        COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX
+                    ),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+                insts_meta = insts_meta.json()
+                generated_insts = insts_meta["insts"]
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Policy] Failed in fetching policy to rollout insts from controller after retries {e}."
+                )
+            for per_inst in generated_insts:
+                for i in per_inst["insts"]:
+                    p_rank, r_rank, tensor_split_strategys = i
+                    tensor_split_strategys = {
+                        int(k): DimRankInfo.from_dict(v)
+                        for k, v in tensor_split_strategys.items()
+                    }
+                    self.policy_to_rollout_insts.append(
+                        (
+                            p_rank,
+                            r_rank,
+                            tensor_split_strategys,
+                            per_inst["name"],
+                        )
+                    )
+
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
         # There is a local-replica comm in training step
@@ -689,7 +726,7 @@ class GRPOTrainer(Trainer):
                 self.pre_P2R_collect_parameters()
             )
             for inst in self.policy_to_rollout_insts:
-                p_rank, r_rank, tensor_split_strategys, dest_name, _ = inst
+                p_rank, r_rank, tensor_split_strategys, dest_name = inst
                 if dest_name not in self.map_w_from_policy_to_rollout:
                     raise RuntimeError(
                         f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
@@ -709,7 +746,7 @@ class GRPOTrainer(Trainer):
                 nccl_send(
                     view,
                     self.world_size + r_rank,
-                    comm_id[r_rank],
+                    comm_id,
                 )
                 total_bytes_sent += view.numel() * view.element_size()
         # make sure all the send operations of all ranks are finished

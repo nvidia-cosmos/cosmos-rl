@@ -18,7 +18,6 @@ import torch
 import re
 from typing import Tuple, Dict, Any, Optional
 from cosmos_rl.utils.parallelism_registry import register_parallelism_strategy
-from cosmos_rl.utils.logging import logger
 
 
 def map_key_from_hf(name: str, src_model_type: str) -> str:
@@ -82,9 +81,7 @@ def convert_weight_from_hf(
             for i in range(tp_size):
                 cur_chunk_size = max(min(remain_size, head_dim), 0)
                 remain_size -= cur_chunk_size
-                split_chunks.append(
-                    tensor.shape[0] - remain_size
-                )
+                split_chunks.append(tensor.shape[0] - remain_size)
             shards = tensor.tensor_split(split_chunks, dim=0)
             shard = shards[tp_rank]
     elif (

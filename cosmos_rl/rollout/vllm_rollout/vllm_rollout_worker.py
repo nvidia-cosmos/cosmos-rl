@@ -59,8 +59,11 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NEXT_PROMPT_SUFFIX,
     COSMOS_API_ROLLOUT_SUFFIX,
     COSMOS_API_VALIDATION_REPORT_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
 )
 from vllm import SamplingParams
+from cosmos_rl.utils.parallelism_map import DimRankInfo
 
 
 """
@@ -200,7 +203,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.background_thread: threading.Thread | None = None
 
         # For Polocy to Rollout weight mapping
-        self.parallel_mapper = None
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path
         )
@@ -241,6 +243,42 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
         )
+        self.parallel_mapper = ParallelTopoMapperGroup(
+            self.config.rollout.parallelism,
+            self.world_size,
+            self.model_config,
+            is_policy=False,
+        )
+
+        self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
+            self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+        )
+        self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
+        # Ordered list of (hf_key, tensor_dim)
+        if self.global_rank == 0:
+            self.all_rank_local_shard_infos = [
+                (
+                    self.parallel_mapper.prepare_local_shard_infos(
+                        self.recv_param_key_n_rank_list, i
+                    )
+                )
+                for i in range(self.world_size)
+            ]
+            try:
+                make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json={
+                            "shard_infos": self.all_rank_local_shard_infos,
+                        },
+                    ),
+                    self.get_alternative_urls(COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Rollout] Failed in post shard infos to controller after retries {e}."
+                )
 
     def handle_shutdown(self):
         # Only call once
@@ -352,11 +390,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def recv_weight_shard(
         self,
         global_rank_of_rollout: int,
-        manifest: Tuple[int, int, Dict[int, Any], str, Tuple[int]],
-        communicator_index: Dict[int, int],
+        manifest: Tuple[int, int, Dict[int, Any], str],
+        communicator_index: int,
         do_weight_sync_check: bool = False,
     ):
-        p_rank, r_rank, tensor_split_strategys, dest_name, _ = manifest
+        p_rank, r_rank, tensor_split_strategys, dest_name = manifest
         assert r_rank == global_rank_of_rollout
 
         target_tensor = self.vllm_weight_inplace_view_map[dest_name]
@@ -375,7 +413,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # new a temp tensor
             recv_tensor = torch.empty_like(view)
 
-        nccl_recv(recv_tensor, p_rank, communicator_index[p_rank])
+        nccl_recv(recv_tensor, p_rank, communicator_index)
 
         # inplace copy
         if not view.is_contiguous():
@@ -415,64 +453,84 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # get the nccl_unique_id from the controller
         communicator_index = {}
-        if not hasattr(self, "vllm_weight_inplace_view_map"):
-            self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
-                self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+
+        nccl_unique_id_key = command.src_replica_name + "_" + command.dst_replica_name
+        if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
+            logger.debug(
+                f"[Rollout] Reusing cached communicator for {nccl_unique_id_key}"
             )
-            self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
-
-        insts = self.parallel_mapper.prepare_rollout_from_policy_manifest(
-            self.recv_param_key_n_rank_list, self.global_rank
-        )
-
-        related_ranks = [set() for _ in range(command.dst_replica_size)]
-        for i in insts:
-            p_rank, r_rank, _, _, _ = i
-            related_ranks[r_rank].add(p_rank)
-
-        for p_rank in sorted(related_ranks[self.global_rank]):
-            nccl_unique_id_key = (
-                command.src_replica_name + "_" + command.dst_replica_name
+            communicator_index = self.policy_to_rollout_nccl_communicators[
+                nccl_unique_id_key
+            ]
+        else:
+            logger.debug(f"[Rollout] Querying nccl group id for {nccl_unique_id_key}")
+            # query the nccl group id from controller
+            nccl_group_id = self.query_nccl_unique_id_from_controller(
+                nccl_unique_id_key
             )
-            if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
-                logger.debug(
-                    f"[Rollout] Reusing cached communicator for {nccl_unique_id_key}"
+            if nccl_group_id is None:
+                raise RuntimeError(
+                    "[Rollout] Failed to query nccl group_id from controller!"
                 )
-                communicator_index[p_rank] = self.policy_to_rollout_nccl_communicators[
-                    nccl_unique_id_key
-                ]
-            else:
-                logger.debug(
-                    f"[Rollout] Querying nccl group id for {nccl_unique_id_key}"
-                )
-                # query the nccl group id from controller
-                nccl_group_id = self.query_nccl_unique_id_from_controller(
-                    nccl_unique_id_key
-                )
-                if nccl_group_id is None:
-                    raise RuntimeError(
-                        "[Rollout] Failed to query nccl group_id from controller!"
-                    )
-                # create the communicator index
-                # p_rank is the rank in policy, r_rank is the rank in rollout
-                communicator_index[p_rank] = create_nccl_comm(
-                    nccl_group_id,
-                    self.global_rank + command.src_replica_size,
-                    self.world_size + command.src_replica_size,
-                )
-                # cache the communicator index
-                self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (
-                    communicator_index[p_rank]
-                )
+            # create the communicator index
+            # p_rank is the rank in policy, r_rank is the rank in rollout
+            communicator_index = create_nccl_comm(
+                nccl_group_id,
+                self.global_rank + command.src_replica_size,
+                self.world_size + command.src_replica_size,
+            )
+            # cache the communicator index
+            self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (
+                communicator_index
+            )
 
         if command.do_weight_sync_check:
             self.rollout.reload_weight()
+
+        if not hasattr(self, "policy_to_rollout_recv_insts"):
+            self.policy_to_rollout_recv_insts = []
+            try:
+                logger.info("[Rollout] Initializing parallel mapper for rollout.")
+                insts_meta = make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json={
+                            "rank": self.global_rank,
+                        },
+                    ),
+                    self.get_alternative_urls(
+                        COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX
+                    ),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+                insts_meta = insts_meta.json()
+                generated_insts = insts_meta["insts"]
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
+                )
+
+            for per_inst in generated_insts:
+                for i in per_inst["insts"]:
+                    p_rank, r_rank, tensor_split_strategys = i
+                    tensor_split_strategys = {
+                        int(k): DimRankInfo.from_dict(v)
+                        for k, v in tensor_split_strategys.items()
+                    }
+                    self.policy_to_rollout_recv_insts.append(
+                        (
+                            p_rank,
+                            r_rank,
+                            tensor_split_strategys,
+                            per_inst["name"],
+                        )
+                    )
 
         with torch.cuda.stream(self.inference_stream):
             # recv the weight from policy
             # st = time.time()
             total_bytes_received = 0
-            for inst in insts:
+            for inst in self.policy_to_rollout_recv_insts:
                 total_bytes_received += self.recv_weight_shard(
                     self.global_rank,
                     inst,
