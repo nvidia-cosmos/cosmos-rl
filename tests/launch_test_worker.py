@@ -616,10 +616,6 @@ def run_dummy_rollout():
     run_rollout()
 
 
-def dummy_controller():
-    """Run as a dummy controller process for testing purposes"""
-
-
 def main():
     # Get shared memory name and size from command line arguments
     shm_name = sys.argv[1]
@@ -627,10 +623,12 @@ def main():
     mode = sys.argv[3]
 
     if mode == "dummy_policy":
+        os.environ["COSMOS_ROLE"] = "Policy"
         # Dummy policy process for testing
         run_dummy_policy()
         exit(0)
     elif mode == "dummy_rollout":
+        os.environ["COSMOS_ROLE"] = "Rollout"
         # Dummy rollout process for testing
         run_dummy_rollout()
         exit(0)

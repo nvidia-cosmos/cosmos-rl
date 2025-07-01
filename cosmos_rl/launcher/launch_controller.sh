@@ -62,4 +62,5 @@ fi
 
 echo "${CMD}"
 
+export COSMOS_ROLE="Controller"
 $CMD

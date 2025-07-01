@@ -128,7 +128,6 @@ def launch_processes(
     gpu_devices: Optional[List[str]],
     control_urls: Optional[List[str]],
     output_files: Optional[List[str]],
-    roles: Optional[List[str]],
     extra_env: Optional[Dict[str, str]] = None,
 ) -> List[subprocess.Popen]:
     """
@@ -150,20 +149,16 @@ def launch_processes(
     elif len(gpu_devices) != len(commands):
         raise ValueError("Number of GPU devices must match number of commands")
 
-    for cmd, gpu_id, url, ofile, role in zip(
-        commands, gpu_devices, control_urls, output_files, roles
+    for cmd, gpu_id, url, ofile in zip(
+        commands, gpu_devices, control_urls, output_files
     ):
         try:
             # Prepare environment variables
             env = dict(os.environ)
-            if os.environ.get("TORCH_CPP_LOG_LEVEL") is None:
-                env["TORCH_CPP_LOG_LEVEL"] = "ERROR"
             if gpu_id is not None:
                 env["CUDA_VISIBLE_DEVICES"] = gpu_id
             if url is not None:
                 env["COSMOS_CONTROLLER_HOST"] = url
-            if role is not None:
-                env["COSMOS_ROLE"] = role
             if extra_env is not None:
                 env.update(extra_env)
             if ofile is not None:
@@ -431,7 +426,6 @@ def replica_placement(
     gpu_devices = []
     control_urls = []
     output_files = []
-    roles = []
     assert len(available_gpus) in [
         1,
         2,
@@ -463,7 +457,6 @@ def replica_placement(
                 )
                 if script is not None:
                     commands[-1] += f" --script {script}"
-                roles.append("Policy")
                 if node_in_replica == 0:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
@@ -478,13 +471,12 @@ def replica_placement(
                     else None
                 )
                 global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files, roles]
+                    [commands, gpu_devices, control_urls, output_files]
                 )
                 commands = []
                 gpu_devices = []
                 control_urls = []
                 output_files = []
-                roles = []
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus)
         else:
@@ -492,13 +484,12 @@ def replica_placement(
                 global_available_gpus[global_worker_idx]
             ):
                 global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files, roles]
+                    [commands, gpu_devices, control_urls, output_files]
                 )
                 commands = []
                 gpu_devices = []
                 control_urls = []
                 output_files = []
-                roles = []
                 gpu_idx = 0
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus)
@@ -524,20 +515,18 @@ def replica_placement(
                 if output_dir is not None
                 else None
             )
-            roles.append("Policy")
             gpu_idx += min_n_gpus_policy
 
     if min_n_gpus_rollout > len(global_available_gpus[global_worker_idx]):
         # If the number of GPUs needed for rollout is more than available GPUs, we need to allocate a new worker
         if gpu_idx > 0:
             global_launch_settings.append(
-                [commands, gpu_devices, control_urls, output_files, roles]
+                [commands, gpu_devices, control_urls, output_files]
             )
             commands = []
             gpu_devices = []
             control_urls = []
             output_files = []
-            roles = []
             gpu_idx = 0
             global_worker_idx += 1
             global_available_gpus.append(available_gpus)
@@ -560,7 +549,6 @@ def replica_placement(
                 )
                 if script is not None:
                     commands[-1] += f" --script {script}"
-                roles.append("Rollout")
                 if node_in_replica == 0:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
@@ -575,13 +563,12 @@ def replica_placement(
                     else None
                 )
                 global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files, roles]
+                    [commands, gpu_devices, control_urls, output_files]
                 )
                 commands = []
                 gpu_devices = []
                 control_urls = []
                 output_files = []
-                roles = []
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus)
         else:
@@ -589,13 +576,12 @@ def replica_placement(
                 global_available_gpus[global_worker_idx]
             ):
                 global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files, roles]
+                    [commands, gpu_devices, control_urls, output_files]
                 )
                 commands = []
                 gpu_devices = []
                 control_urls = []
                 output_files = []
-                roles = []
                 gpu_idx = 0
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus)
@@ -613,7 +599,6 @@ def replica_placement(
             )
             if script is not None:
                 commands[-1] += f" --script {script}"
-            roles.append("Rollout")
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"rollout_{i}.log")
@@ -624,7 +609,7 @@ def replica_placement(
 
     if len(commands) > 0:
         global_launch_settings.append(
-            [commands, gpu_devices, control_urls, output_files, roles]
+            [commands, gpu_devices, control_urls, output_files]
         )
     return global_launch_settings
 
@@ -1181,7 +1166,6 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
                 if output_dir is not None
                 else None
             ],
-            roles=["Controller"],
         )
         controller_id = len(processes)
         processes.append(controller_process[0])
@@ -1200,7 +1184,6 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
         gpu_devices = global_launch_settings[cur_work_idx][1]
         control_urls = global_launch_settings[cur_work_idx][2]
         output_files = global_launch_settings[cur_work_idx][3]
-        roles = global_launch_settings[cur_work_idx][4]
 
         # Combine all commands
         logger.info(f"Commands to be executed: {commands}")
@@ -1215,7 +1198,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
 
         # Launch all processes
         processes.extend(
-            launch_processes(commands, gpu_devices, control_urls, output_files, roles)
+            launch_processes(commands, gpu_devices, control_urls, output_files)
         )
 
     # Wait for all processes to complete without blocking
