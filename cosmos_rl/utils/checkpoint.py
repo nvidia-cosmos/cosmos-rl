@@ -57,8 +57,10 @@ def upload_file_to_s3(
                 f"Failed to upload {local_file_path} to s3://{bucket_name}/{s3_file_path}. "
                 f"Retry {retry}/{max_retries}. Error: {e}"
             )
-
-
+    raise RuntimeError(
+        f"Failed to upload {local_file_path} to s3://{bucket_name}/{s3_file_path} "
+        f"after {max_retries} retries."
+    )
 def upload_folder_to_s3(
     local_folder: str,
     bucket_name: str,
