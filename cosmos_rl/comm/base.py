@@ -74,7 +74,7 @@ class CommMixin:
     ) -> Optional[Callable]:
         return cls.rollout_command_handler_registry.get_command_handler(command_type)
 
-    def init_comm(self, use_hfllm_type: bool = False):
+    def init_comm(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
         logger.info(
             f"{self.role} Replica started at global rank {self.global_rank}, with replica name: {self.replica_name}"
@@ -100,7 +100,7 @@ class CommMixin:
         )
 
         user_data_packer = metadata.get("user_data_packer", None)
-        model_type = hf_config.model_type if not use_hfllm_type else "hfllm"
+        model_type = hf_config.model_type
         if user_data_packer:
             user_data_packer = base64.b64decode(user_data_packer)
             user_data_packer = cloudpickle.loads(user_data_packer)

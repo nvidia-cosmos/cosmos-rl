@@ -44,17 +44,13 @@ def build_model(config: CosmosConfig):
     with torch.device("meta"):
         with util.cosmos_default_dtype(config.train.param_torch_dtype):
             for model_cls in supported_cls_list:
-                supported_model_types = model_cls.supported_model_types()
-                use_hfllm_type = supported_model_types[0] == "hfllm"
-                if hf_config.model_type in supported_model_types or use_hfllm_type:
+                if hf_config.model_type in model_cls.supported_model_types():
                     try:
                         model = model_cls.from_pretrained(
                             hf_config,
                             model_name_or_path,
                             max_position_embeddings=config.policy.model_max_length,
                         )
-                        model.use_hfllm_type = use_hfllm_type
-
                     except Exception as e:
                         logger.error(
                             f"Failed to load model {model_name_or_path} with error: {e}"

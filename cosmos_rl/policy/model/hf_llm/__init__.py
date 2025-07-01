@@ -382,7 +382,7 @@ class HFLLMModel(BaseModel):
 
     @staticmethod
     def supported_model_types():
-        return ["hfllm"]
+        return ["mistral"]
 
     def __init__(self, model_args: HFLLMArgs):
         super().__init__(model_args.hf_config)
