@@ -1,4 +1,4 @@
-Customized dataset/reward/packer
+Customization
 ================================
 
 Customized dataset
@@ -32,7 +32,6 @@ Here we attach the `BytedTsinghua-SIA/DAPO-Math-17k <https://huggingface.co/data
     from typing import Optional, Any, List, Dict
     from torch.utils.data import Dataset
     from datasets import load_dataset
-    from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
     from cosmos_rl.policy.config import Config
     from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
     from transformers import AutoTokenizer
@@ -97,16 +96,16 @@ In this example, the dataset fetch each row and return the raw text prompt by ap
 How to tell the launcher to use your customized dataset?
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
-Since we have already defined our customized dataset in previous step, we need to override the controller launcher to pass the custom dataset.
+Since we have already defined our customized dataset in previous step, we need to override the launcher entry point to pass the custom dataset.
 
-Save this file to `./custom_controller_entry.py`
+Save this file to `./custom_entry.py`
 
 .. code-block:: python
 
     from typing import Optional, Any, List, Dict
     from torch.utils.data import Dataset
     from datasets import load_dataset
-    from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
+    from cosmos_rl.launcher.worker_entry import main as launch_worker
     from cosmos_rl.policy.config import Config
     from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
     from transformers import AutoTokenizer
@@ -116,25 +115,26 @@ Save this file to `./custom_controller_entry.py`
         ...
 
     if __name__ == "__main__":
-        launch_dispatcher(
-            dataset=MathDapoDataset(),
+        # `dataset` argument can be:
+        #   - a dataset instance
+        #   - a factory function that returns a dataset instance
+        #
+        # It is best practice to pass the dataset as a factory function
+        # so that the dataset can be loaded on demand. (Not all workers need it)
+        def get_dataset_factory(config: Config) -> Dataset:
+            return MathDapoDataset()
+
+        launch_worker(
+            dataset=get_dataset_factory,
         )
 
 
-1. Either add `launcher` argument to `cosmos-rl` command if one-click launch is used:
+ Append your customized launcher entry point to `cosmos-rl` command:
 
->>> cosmos-rl \
-    --config configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml \
+>>> cosmos-rl --config configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml \
     --policy 1 \
     --rollout 2 \
-    custom_controller_entry.py
-
-2. Or add `launcher` argument to `launch_controller.sh` if manual launch is used:
-
->>> ./tools/launch_controller.sh \
-    --port 8000 \
-    --config configs/qwen3/qwen3-8b-p-tp4-r-tp2-pp1-grpo.toml \
-    custom_controller_entry.py
+    custom_entry.py
 
 Check `./tools/dataset/ <#>`_ for more pre-defined customized datasets. 
 
@@ -154,8 +154,10 @@ Similar to customized dataset, override the launcher entry point to pass the cus
         return random.random()
 
     if __name__ == "__main__":
-        launch_dispatcher(
+        launch_worker(
+            #...
             reward_fns=[custom_reward_fn],
+            #...
         )
 
 - ``to_be_evaluated``: rollout generation
@@ -174,7 +176,7 @@ Here we just reuse the pre-deined LLM data packer to demonstrate how to pass you
     from typing import Optional, Any, List, Dict
     from torch.utils.data import Dataset
     from datasets import load_dataset
-    from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
+    from cosmos_rl.launcher.worker_entry import main as launch_worker
     from cosmos_rl.policy.config import Config
     from cosmos_rl.dispatcher.algo.reward import gsm8k_reward_fn
     from transformers import AutoTokenizer
@@ -300,9 +302,58 @@ Here we just reuse the pre-deined LLM data packer to demonstrate how to pass you
             return self.underlying_data_packer.policy_collate_fn(processed_samples, computed_max_len)
 
     if __name__ == "__main__":
-        launch_dispatcher(
-            dataset=GSM8kDataset(),
+        def get_dataset_factory(config: Config) -> Dataset:
+            return GSM8kDataset()
+ 
+        launch_worker(
+            #...
+            dataset=get_dataset_factory,
             data_packer=DemoDataPacker(),
+            #...
         )
+
+
+Customized Model
+-----------------
+
+To customize the model, one needs to implement:
+
+- A new model class that inherits from `cosmos_rl.policy.model.base.BaseModel`
+- A `WeightMapper` class that inherits from `cosmos_rl.policy.model.base.WeightMapper`
+- A `DataPacker` class that inherits from `cosmos_rl.dispatcher.data.packer.DataPacker`
+
+Let's take `deepseek_v3` as an example.
+
+.. code-block:: python
+
+    from cosmos_rl.launcher.worker_entry import main as launch_worker
+    from deepseek_v3 import DeepseekV3MoEModel
+    from deepseek_v3.weight_mapper import DeepseekV3MoEWeightMapper
+    from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
+        DecoderOnlyLLMDataPacker,
+    )
+    from cosmos_rl.policy.model.base import ModelRegistry
+
+    if __name__ == "__main__":
+        # Register the model into the registry
+        ModelRegistry.register_model(
+            # Model class to register
+            DeepseekV3MoEModel,
+            # Data packer for this model
+            DecoderOnlyLLMDataPacker,
+            # Weight mapper for this model
+            DeepseekV3MoEWeightMapper,
+        )
+
+        launch_worker()
+
+First import the model class, weight mapper class, and data packer class from the external source code. 
+
+Then register the model into the registry via `ModelRegistry.register_model`.
+
+User can launch a external model job with: 
+
+>>> cosmos-rl --config ./configs/deepseek-v3/moonlight-moe-13b-tp4-sft.toml 
+    ./tools/model/moonlight_launcher.py
 
 
