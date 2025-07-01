@@ -42,7 +42,7 @@ def upload_file_to_s3(
     try:
         s3_client.head_bucket(Bucket=bucket_name)
     except ClientError:
-        print(f"Bucket {bucket_name} does not exist, creating it now.")
+        logger.info(f"Bucket {bucket_name} does not exist, creating it now.")
         s3_client.create_bucket(Bucket=bucket_name)
     while retry < max_retries:
         try:
@@ -57,10 +57,12 @@ def upload_file_to_s3(
                 f"Failed to upload {local_file_path} to s3://{bucket_name}/{s3_file_path}. "
                 f"Retry {retry}/{max_retries}. Error: {e}"
             )
-    raise RuntimeError(
+    logger.error(
         f"Failed to upload {local_file_path} to s3://{bucket_name}/{s3_file_path} "
         f"after {max_retries} retries."
     )
+
+
 def upload_folder_to_s3(
     local_folder: str,
     bucket_name: str,

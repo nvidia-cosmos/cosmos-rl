@@ -290,6 +290,7 @@ class Trainer(CommMixin):
                 )
                 logger.info(f"Uploading the final model to huggingface: {repo_id}...")
                 retry = 0
+                success = False
                 while retry < max_retries:
                     try:
                         create_repo(repo_id, exist_ok=True)
@@ -309,8 +310,12 @@ class Trainer(CommMixin):
                         logger.error(f"Failed to upload model to huggingface: {e}")
                         retry += 1
                 if not success:
-                    logger.error(f"All retry attempts to upload model to huggingface failed.")
-                    raise RuntimeError(f"Failed to upload model to huggingface after {max_retries} attempts.")
+                    logger.error(
+                        "All retry attempts to upload model to huggingface failed."
+                    )
+                    raise RuntimeError(
+                        f"Failed to upload model to huggingface after {max_retries} attempts."
+                    )
             # upload the model to s3
             if config.train.ckpt.upload_s3:
                 if is_final:
