@@ -20,6 +20,7 @@ import threading
 from queue import Queue
 import atexit
 import types
+from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Tuple, Optional, Callable, Any, Dict
 from functools import partial
 from transformers import AutoConfig
@@ -49,7 +50,6 @@ from cosmos_rl.utils.pynccl import (
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
-from cosmos_rl.rollout.weight_mapper import WeightMapper
 from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -193,6 +193,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path
         )
+
+        if not ModelRegistry.check_model_type_supported(hf_config.model_type):
+            raise ValueError(f"Model {hf_config.model_type} not supported.")
+
         self.weight_mapper = WeightMapper.get_weight_mapper(hf_config.model_type)(
             hf_config
         )

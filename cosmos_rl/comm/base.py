@@ -85,6 +85,15 @@ class CommMixin:
             dist_utils.get_controller_metadata()
         )
 
+        model_module = metadata.get("model_module", None)
+        if model_module:
+            try:
+                util.dynamic_import_module(model_module)
+                logger.info(f"Imported model module: {model_module}")
+            except Exception as e:
+                logger.error(f"Failed to import model module: {e}")
+                raise e
+
         # `sft_user_dataset` is only used in SFT mode when the user provides a dataset
         self.sft_user_dataset = None
         sft_user_dataset = metadata.get("sft_user_dataset", None)

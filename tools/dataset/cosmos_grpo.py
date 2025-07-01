@@ -267,6 +267,5 @@ if __name__ == "__main__":
         reward_fns=[custom_reward_fn],
         data_packer=DemoDataPacker(),
         val_dataset=val_dataset,
-        val_reward_fns=[custom_reward_fn],
         val_data_packer=DemoDataPacker(),
     )

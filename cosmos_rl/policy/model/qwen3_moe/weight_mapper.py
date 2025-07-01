@@ -16,7 +16,7 @@
 import re
 import torch
 from typing import List, Tuple, Dict
-from cosmos_rl.rollout.weight_mapper.base import WeightMapper
+from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
@@ -24,11 +24,9 @@ from cosmos_rl.utils.parallelism_registry import (
 )
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 
 
-@WeightMapper.register_class(Qwen3MoE.supported_model_types())
 class Qwen3MoeWeightMapper(WeightMapper):
     def __init__(self, hf_config: AutoConfig):
         super().__init__(hf_config)

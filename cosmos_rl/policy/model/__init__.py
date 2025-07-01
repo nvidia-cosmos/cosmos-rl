@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .deepseek_v3 import DeepseekV3MoEModel
-from .gpt import GPT
-from .qwen2_5_vl import Qwen2_5_VLConditionalModel
-from .qwen3_moe import Qwen3MoE
-from .base import BaseModel
+from cosmos_rl.policy.model.gpt import GPT
+from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
+from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, WeightMapper
 
 __all__ = [
-    "DeepseekV3MoEModel",
     "GPT",
     "Qwen2_5_VLConditionalModel",
     "Qwen3MoE",
     "BaseModel",
+    "WeightMapper",
+    "ModelRegistry",
 ]

@@ -145,6 +145,8 @@ async def meta():
         meta["user_val_data_packer"] = base64.b64encode(
             cloudpickle.dumps(controller.user_val_data_packer)
         ).decode("utf-8")
+    if controller.model_module is not None:
+        meta["model_module"] = controller.model_module
     return meta
 
 
@@ -469,8 +471,12 @@ def main(
     reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
     val_data_packer: Optional[DataPacker] = None,
-    val_reward_fns: Optional[List[Callable]] = None,
+    model_module: Optional[str] = None,
+    **kwargs,
 ):
+    logger.warning(
+        f"Params: {list(kwargs.keys())} are not being used in controller initialization."
+    )
     parser = argparse.ArgumentParser(
         description="Run the web panel for the dispatcher."
     )
@@ -534,8 +540,8 @@ def main(
             reward_fns=reward_fns,
             data_packer=data_packer,
             val_dataset=val_dataset,
-            val_reward_fns=val_reward_fns,
             val_data_packer=val_data_packer,
+            model_module=model_module,
         )
         logger.info(f"Successfully loaded configuration from {args.config_file}")
     except FileNotFoundError:
