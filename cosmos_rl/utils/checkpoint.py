@@ -34,38 +34,44 @@ def upload_file_to_s3(
     local_file_path: str,
     bucket_name: str,
     s3_file_path: str,
+    max_retries: int = 3,
 ):
     config = BotoConfig(retries={"max_attempts": 10, "mode": "standard"})
     s3_client = boto3.client("s3", config=config)
+    retry = 0
     try:
         s3_client.head_bucket(Bucket=bucket_name)
     except ClientError:
         print(f"Bucket {bucket_name} does not exist, creating it now.")
         s3_client.create_bucket(Bucket=bucket_name)
-    s3_client.upload_file(local_file_path, bucket_name, s3_file_path)
-    logger.info(f"Uploaded {local_file_path} to s3://{bucket_name}/{s3_file_path}")
+    while retry < max_retries:
+        try:
+            s3_client.upload_file(local_file_path, bucket_name, s3_file_path)
+            logger.info(
+                f"Uploaded {local_file_path} to s3://{bucket_name}/{s3_file_path}"
+            )
+            return
+        except ClientError as e:
+            retry += 1
+            logger.error(
+                f"Failed to upload {local_file_path} to s3://{bucket_name}/{s3_file_path}. "
+                f"Retry {retry}/{max_retries}. Error: {e}"
+            )
 
 
 def upload_folder_to_s3(
     local_folder: str,
     bucket_name: str,
     s3_folder: str,
+    max_retries: int = 3,
 ):
-    config = BotoConfig(retries={"max_attempts": 10, "mode": "standard"})
-    s3_client = boto3.client("s3", config=config)
-    try:
-        s3_client.head_bucket(Bucket=bucket_name)
-    except ClientError:
-        print(f"Bucket {bucket_name} does not exist, creating it now.")
-        s3_client.create_bucket(Bucket=bucket_name)
     for root, _, files in os.walk(local_folder):
         for file in files:
             local_file_path = os.path.join(root, file)
             relative_path = os.path.relpath(local_file_path, local_folder)
             s3_file_path = os.path.join(s3_folder, relative_path)
-            s3_client.upload_file(local_file_path, bucket_name, s3_file_path)
-            logger.info(
-                f"Uploaded {local_file_path} to s3://{bucket_name}/{s3_file_path}"
+            upload_file_to_s3(
+                local_file_path, bucket_name, s3_file_path, max_retries=max_retries
             )
 
 
