@@ -40,6 +40,26 @@ buffer_type = ctypes.c_void_p
 
 ncclDataType_t = ctypes.c_int
 
+# --- NCCL config struct (complete v22700) ---
+class ncclConfig_t(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_size_t),            # sizeof(ncclConfig_t)
+        ("magic", ctypes.c_uint),             # constant magic
+        ("version", ctypes.c_uint),           # NCCL version code, e.g. 22703
+        ("blocking", ctypes.c_int),           # whether operations are blocking (0 / 1)
+        ("cgaClusterSize", ctypes.c_int),
+        ("minCTAs", ctypes.c_int),
+        ("maxCTAs", ctypes.c_int),
+        ("netName", ctypes.c_char_p),
+        ("splitShare", ctypes.c_int),
+        ("trafficClass", ctypes.c_int),
+        ("commName", ctypes.c_char_p),
+        ("collnetEnable", ctypes.c_int),
+        ("CTAPolicy", ctypes.c_int),
+        ("shrinkShare", ctypes.c_int),
+        ("nvlsCTAs", ctypes.c_int),
+    ]
+
 
 class ncclDataTypeEnum:
     ncclInt8 = 0
@@ -114,6 +134,8 @@ class Function:
 
 
 class NCCLLibrary:
+    # names of optional functions (absence tolerated)
+    optional_functions = {"ncclCommInitRankConfig"}
     exported_functions = [
         # const char* ncclGetErrorString(ncclResult_t result)
         Function("ncclGetErrorString", ctypes.c_char_p, [ncclResult_t]),
@@ -246,6 +268,20 @@ class NCCLLibrary:
             [ncclComm_t, ctypes.POINTER(ncclResult_t)],
         ),
         Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
+        # ncclResult_t  ncclCommInitRankConfig(
+        #   ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank,
+        #   ncclConfig_t* config);
+        Function(
+            "ncclCommInitRankConfig",
+            ncclResult_t,
+            [
+                ctypes.POINTER(ncclComm_t),
+                ctypes.c_int,
+                ncclUniqueId,
+                ctypes.c_int,
+                ctypes.POINTER(ncclConfig_t),
+            ],
+        ),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -269,7 +305,14 @@ class NCCLLibrary:
         if so_file not in NCCLLibrary.path_to_funcs_mapping:
             _funcs: dict[str, Any] = {}
             for func in NCCLLibrary.exported_functions:
+                try:
                 f = getattr(self.lib, func.name)
+                except AttributeError:
+                    if func.name in NCCLLibrary.optional_functions:
+                        logger.warning(f"Optional NCCL symbol {func.name} not found; falling back to default behavior.")
+                        _funcs[func.name] = None
+                        continue
+                    raise
                 f.restype = func.restype
                 f.argtypes = func.argtypes
                 _funcs[func.name] = f
@@ -280,7 +323,7 @@ class NCCLLibrary:
         return self._funcs["ncclGetErrorString"](result).decode("utf-8")
 
     def NCCL_CHECK(self, result: ncclResult_t) -> None:
-        if result != 0:
+        if result not in (0, 7):
             error_str = self.ncclGetErrorString(result)
             raise RuntimeError(f"NCCL error: {error_str}")
 
@@ -308,6 +351,68 @@ class NCCLLibrary:
                 ctypes.byref(comm), world_size, unique_id, rank
             )
         )
+        return comm
+
+    def ncclCommInitRankConfig(
+        self,
+        world_size: int,
+        unique_id: ncclUniqueId,
+        rank: int,
+        blocking: int = 0,
+    ) -> ncclComm_t:
+        """Python wrapper for ncclCommInitRankConfig with *blocking* flag preset.
+
+        Currently only exposes the *blocking* field (0 = non-blocking NCCL launch).
+        Additional ncclConfig_t fields are kept at their default zeros for
+        simplicity.
+        """
+        comm = ncclComm_t()
+        config = ncclConfig_t()
+        # Fill mandatory header fields according to NCCL_CONFIG_INITIALIZER
+        NCCL_CONFIG_MAGIC = 0xCAFEBEEF
+        # Try to retrieve NCCL version code (e.g., 22703) from library
+        try:
+            ver_str = self.ncclGetVersion()  # e.g. "2.27.3"
+            major, minor, patch = (int(v) for v in ver_str.split("."))
+            version_code = (major * 10000) + (minor * 100) + patch
+        except Exception:
+            # Fallback to hard-coded current header version
+            version_code = 22703
+
+        INT_MIN = -2147483648  # NCCL_CONFIG_UNDEF_INT
+
+        config.size = ctypes.sizeof(ncclConfig_t)
+        config.magic = NCCL_CONFIG_MAGIC
+        config.version = version_code
+
+        # Initialize all integer fields to UNDEF, pointer fields to NULL
+        config.blocking = blocking if blocking in (0, 1) else INT_MIN
+        config.cgaClusterSize = INT_MIN
+        config.minCTAs = INT_MIN
+        config.maxCTAs = INT_MIN
+        config.netName = None
+        config.splitShare = INT_MIN
+        config.trafficClass = INT_MIN
+        config.commName = None
+        config.collnetEnable = INT_MIN
+        config.CTAPolicy = INT_MIN
+        config.shrinkShare = INT_MIN
+        config.nvlsCTAs = INT_MIN
+
+        fn = self._funcs.get("ncclCommInitRankConfig")
+        if fn is None:
+            logger.debug("ncclCommInitRankConfig symbol missing – falling back to ncclCommInitRank")
+            return self.ncclCommInitRank(world_size, unique_id, rank)
+
+        ret = fn(
+            ctypes.byref(comm),
+            world_size,
+            unique_id,
+            rank,
+            ctypes.byref(config),
+        )
+        if ret not in (0, 7):  # 0 = ncclSuccess, 7 = ncclInProgress
+            self.NCCL_CHECK(ret)
         return comm
 
     def ncclAllReduce(
@@ -436,4 +541,5 @@ __all__ = [
     "ncclComm_t",
     "cudaStream_t",
     "buffer_type",
+    "ncclConfig_t",
 ]

@@ -405,8 +405,7 @@ def create_nccl_comm(
     holder: Dict[str, ncclComm_t] = {}
 
     def _init_functor() -> ncclComm_t:
-        # blocking=0 equivalent not available in wrapper; rely on default
-        comm_local = _nccl.ncclCommInitRank(world_size, uid, rank)
+        comm_local = _nccl.ncclCommInitRankConfig(world_size, uid, rank)
         holder["comm"] = comm_local
         return comm_local
 
