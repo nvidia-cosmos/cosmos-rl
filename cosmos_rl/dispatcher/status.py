@@ -88,6 +88,7 @@ class PolicyStatusManager:
         redis_handler: RedisStreamHandler,
         remain_samples_num: int,
         tokenizer: AutoTokenizer,
+        current_step: int = 0,
         val_dataloader: Optional[DataLoader] = None,
     ):
         self.redis_handler = redis_handler
@@ -95,6 +96,7 @@ class PolicyStatusManager:
         self.remain_samples_num = remain_samples_num
         self.tokenizer = tokenizer
         self.val_dataloader = val_dataloader
+        self.current_step = current_step
 
     def __len__(self) -> int:
         """
