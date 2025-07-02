@@ -14,32 +14,19 @@
 # limitations under the License.
 
 from collections import defaultdict
-import os
 import torch
 import torch.nn as nn
 from torch.distributed._composable.replicate import replicate
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Replicate, Shard
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    PrepareModuleInput,
-    PrepareModuleOutput,
-    RowwiseParallel,
-    SequenceParallel,
-)
+
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
 from typing import Callable, Optional
-from cosmos_rl.utils.distributed import ReplicateParallel
-from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
 
 
 def parallelize(
@@ -56,22 +43,18 @@ def parallelize(
     the model must fit on GPU or CPU memory.
     """
     world_mesh = parallel_dims.mesh
-    pipeline_parallelize(model, parallel_dims, config)
-    if parallel_dims.tp_enabled:
-        apply_tp(
-            model,
-            world_mesh["tp"],
-            enable_float8_tensorwise_tp=config.train.fp8.enable_fp8
-            and config.train.fp8.quant_recipe == "tensorwise",
-            enable_async_tp=config.train.async_tp_enabled,
-        )
+    _, pp_size = parallel_dims.pp_coord
+
+    assert (
+        not parallel_dims.tp_enabled
+    ), "Tensor parallelism is not supported for HFLLMModel"
+    assert (
+        not parallel_dims.cp_enabled
+    ), "Context parallelism is not supported for HFLLMModel"
+    assert pp_size == 1, "Pipeline parallelism is not supported for HFLLMModel"
 
     if config.policy.model_gradient_checkpointing:
         apply_ac(model)
-
-    if parallel_dims.cp_enabled:
-        apply_cp(model, parallel_dims)
-        logger.info("Applied Context Parallel to the model")
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if config.train.compile:
@@ -80,10 +63,6 @@ def parallelize(
         # This is caused by the custom SeqAllToAll in ulysses.py
         # Related torch issue: https://github.com/pytorch/pytorch/issues/149586
         # tmp workaround is set fullgraph to False. Figure it out later.
-        if parallel_dims.cp_enabled:
-            logger.warning(
-                "torch.compile and CP will have some issues, temporarily set `fullgraph` to False to bypass the issue. This may cause performance degradation."
-            )
         apply_compile(model, not parallel_dims.cp_enabled)
 
     if (
@@ -121,216 +100,7 @@ def parallelize(
             enable_compiled_autograd=config.train.compile,
         )
 
-    pp_rank, pp_size = parallel_dims.pp_coord
-    if pp_size > 1:
-        proc_group = parallel_dims.mesh["pp"].get_group()
-        # IMPORTANT:
-        # Only CUDA device is acceptable for PP Schedule, `meta` device will cause hanging issue
-        device = torch.device(f"cuda:{os.environ['LOCAL_RANK']}")
-
-        stage = PipelineStage(
-            model,
-            pp_rank,
-            pp_size,
-            device,
-            group=proc_group,
-        )
-
-        assert (
-            config.train.train_batch_per_replica
-            % config.policy.parallelism.pp_micro_batch_size
-            == 0
-        ), "train_batch must be divisible by pp_micro_batch_size"
-        assert (
-            (
-                config.train.train_batch_per_replica
-                // config.policy.parallelism.pp_micro_batch_size
-            )
-            % pp_size
-            == 0
-        ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
-        assert pp_loss_fn is not None, "pp_loss_fn must be provided"
-        n_microbatches = (
-            config.train.train_batch_per_replica
-            // config.policy.parallelism.pp_micro_batch_size
-        )
-        if config.train.enable_validation:
-            assert (
-                config.train.validation_batch_per_replica
-                % config.policy.parallelism.pp_micro_batch_size
-                == 0
-            ), "validation_batch must be divisible by pp_micro_batch_size"
-            assert (
-                (
-                    config.train.validation_batch_per_replica
-                    // config.policy.parallelism.pp_micro_batch_size
-                )
-                % pp_size
-                == 0
-            ), "validation_batch / pp_micro_batch_size must be divisible by pp_size"
-            n_val_microbatches = (
-                config.train.validation_batch_per_replica
-                // config.policy.parallelism.pp_micro_batch_size
-            )
-
-        if config.train.train_policy.type == "grpo":
-            assert (
-                config.train.train_batch_per_replica
-                % (
-                    config.policy.parallelism.dp_shard_size
-                    * config.train.train_policy.mini_batch
-                )
-                == 0
-            ), "train_batch must be divisible by dp_shard_size * mini_batch"
-            assert (
-                config.train.train_policy.mini_batch
-                % config.policy.parallelism.pp_micro_batch_size
-                == 0
-            ), "mini_batch must be divisible by pp_micro_batch_size"
-            n_microbatches = (
-                config.train.train_policy.mini_batch
-                // config.policy.parallelism.pp_micro_batch_size
-            )
-        logger.info(
-            f"Pipeline parallelism is enabled with {pp_size} stages, {n_microbatches} microbatches per stage {stage}"
-        )
-        schedule = Schedule1F1B(
-            stage=stage,
-            n_microbatches=n_microbatches,
-            loss_fn=pp_loss_fn,
-        )
-        if config.train.enable_validation:
-            val_schedule = ScheduleGPipe(
-                stage=stage,
-                n_microbatches=n_val_microbatches,
-            )
-            return schedule, val_schedule
-        else:
-            return schedule, None
-    else:
-        return None, None
-
-
-def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
-    """Apply Context Parallel to the model."""
-    cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
-    model.check_cp_compatible(cp_size, tp_size)
-
-    cp_mesh = parallel_dims.mesh["cp"]
-    for _, transformer_block in model.layers.items():
-        original_attn_func = transformer_block.self_attn.attn_func
-        transformer_block.self_attn.attn_func = ulysses_attn_func(
-            original_attn_func, cp_mesh
-        )
-    swizzle_cp_forward(model, parallel_dims)
-
-
-def apply_tp(
-    model: nn.Module,
-    tp_mesh: DeviceMesh,
-    enable_float8_tensorwise_tp: bool,
-    enable_async_tp: bool,
-):
-    """Apply tensor parallelism."""
-    # 1. Parallelize the embedding and shard its outputs (which are the first
-    # transformer block's inputs)
-    # 2. Parallelize the root norm layer over the sequence dim
-    # 3. Parallelize the final linear output layer
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "embed_tokens": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Replicate(),
-            ),
-            "identity_layer": PrepareModuleOutput(
-                output_layouts=Replicate(),
-                desired_output_layouts=Shard(1),
-                use_local_output=True,
-            ),
-            "norm": SequenceParallel(),
-            "lm_head": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Replicate(),
-                use_local_output=True,
-            ),
-        },
-    )
-
-    # Parallel styles used for transformer block linear weights and their
-    # inputs may be different for float8 linears with tensorwise scaling.
-    if enable_float8_tensorwise_tp:
-        # TODO(vkuzo): add the items below to __init__.py of torchao.float8 and import from there
-        from torchao.float8.float8_tensor_parallel import (
-            Float8ColwiseParallel,
-            Float8RowwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            Float8RowwiseParallel,
-            Float8ColwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-    else:
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            RowwiseParallel,
-            ColwiseParallel,
-            PrepareModuleInput,
-        )
-
-    # Apply tensor + sequence parallelism to every transformer block
-    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
-    #       by folding (and unfolding) the batch dimension and the sequence dimension.
-    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    for layer_id, transformer_block in model.layers.items():
-        layer_plan = {
-            "input_layernorm": SequenceParallel(),
-            "self_attn": prepare_module_input(
-                input_layouts=(
-                    Shard(1),
-                    None,
-                ),  # The input from ``input_layernorm`` is sharded over the sequence dimension, so we set the input layout to Shard(1)
-                desired_input_layouts=(
-                    Replicate(),
-                    None,
-                ),  # Attn OP needs the input to be replicated over the sequence dimension so that all sequence can be attended to
-            ),
-            "self_attn.q_proj": colwise_parallel(),
-            "self_attn.k_proj": colwise_parallel(),
-            "self_attn.q_norm": ReplicateParallel(),
-            "self_attn.k_norm": ReplicateParallel(),
-            "self_attn.v_proj": colwise_parallel(),
-            "self_attn.o_proj": rowwise_parallel(output_layouts=Shard(1)),
-            "post_attention_layernorm": SequenceParallel(),
-            "mlp": prepare_module_input(
-                input_layouts=(Shard(1),),
-                desired_input_layouts=(
-                    Replicate(),
-                ),  # Weight is shared, so no sharding on input
-            ),
-            "mlp.gate_proj": colwise_parallel(),
-            "mlp.down_proj": rowwise_parallel(output_layouts=Shard(1)),
-            "mlp.up_proj": colwise_parallel(),
-        }
-
-        parallelize_module(
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            parallelize_plan=layer_plan,
-        )
-
-    if enable_async_tp:
-        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
-
-        torch._inductor.config._micro_pipeline_tp = True
-        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
-
-    logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
-        "Tensor Parallelism to the model"
-    )
+    return None, None
 
 
 # for selective op activation checkpointing
@@ -433,7 +203,7 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    for layer_id, transformer_block in model.layers.items():
+    for layer_id, transformer_block in enumerate(model.layers):
         if reshard_after_forward_policy == "always":
             reshard_after_forward = True
         elif reshard_after_forward_policy == "never":
@@ -476,15 +246,3 @@ def apply_ddp(
     replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
 
     logger.info("Applied DDP to the model")
-
-
-def pipeline_parallelize(
-    model: nn.Module,
-    parallel_dims: ParallelDims,
-    config: CosmosConfig,
-):
-    if parallel_dims.pp_enabled:
-        pp_rank, pp_size = parallel_dims.pp_coord
-        model.apply_pipeline_split(pp_rank, pp_size)
-    else:
-        logger.info("Pipeline is not enabled, skipping")
