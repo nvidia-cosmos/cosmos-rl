@@ -17,6 +17,7 @@ import torch
 from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
 from typing import Dict, List, Tuple, Callable, Any, Optional
 from cosmos_rl.rollout.weight_mapper.base import WeightMapper
+from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 
 
 class DimRankInfo:
@@ -720,6 +721,11 @@ class ParallelTopoMapperGroup:
         model_type = hf_config.model_type
 
         if weight_mapper is None:
+            if model_type not in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY:
+                print(
+                    f"[ParallelTopoMapperGroup] can not find {model_type} in weight mapper, use {COSMOS_HF_MODEL_TYPES} model type instead."
+                )
+                model_type = COSMOS_HF_MODEL_TYPES
             weight_mapper_fn = WeightMapper.get_weight_mapper(model_type)
             self.weight_mapper = weight_mapper_fn(hf_config)
         else:

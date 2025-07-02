@@ -17,9 +17,10 @@ from cosmos_rl.policy.model.gpt import GPT
 from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
 from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
 from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
-from cosmos_rl.policy.model.hf_llm import HFLLMModel, HF_MODEL_TYPES
+from cosmos_rl.policy.model.hf_llm import HFLLMModel
 from cosmos_rl.policy.config import Config as CosmosConfig
 import cosmos_rl.utils.util as util
+from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 from cosmos_rl.utils.logging import logger
 from transformers import AutoConfig
 import torch
@@ -45,9 +46,11 @@ def build_model(config: CosmosConfig):
         with util.cosmos_default_dtype(config.train.param_torch_dtype):
             for model_cls in supported_cls_list:
                 supported_model_types = model_cls.supported_model_types()
-                use_hfllm_type = supported_model_types[0] == HF_MODEL_TYPES
+                use_hfllm_type = supported_model_types[0] == COSMOS_HF_MODEL_TYPES
                 if use_hfllm_type:
-                    logger.info(f"Using {HF_MODEL_TYPES} for {model_name_or_path}")
+                    logger.info(
+                        f"Using {COSMOS_HF_MODEL_TYPES} for {model_name_or_path}"
+                    )
                 if hf_config.model_type in supported_model_types or use_hfllm_type:
                     try:
                         model = model_cls.from_pretrained(

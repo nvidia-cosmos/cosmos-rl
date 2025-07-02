@@ -19,16 +19,16 @@ from typing import Tuple, List, Optional, Callable, Union
 from transformers import AutoConfig, AutoModelForCausalLM
 from cosmos_rl.utils.util import (
     sync_model_vocab,
+    clear_weight_name,
     retry,
 )
+from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 from cosmos_rl.policy.model.base import BaseModel
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.hf_llm.weight_converter import convert_weight_from_hf
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from functools import cached_property
-
-HF_MODEL_TYPES = "hfllm"
 
 
 class HFLLMModel(BaseModel):
@@ -50,7 +50,7 @@ class HFLLMModel(BaseModel):
 
     @staticmethod
     def supported_model_types():
-        return [HF_MODEL_TYPES]
+        return [COSMOS_HF_MODEL_TYPES]
 
     def __init__(self, hf_config, model):
         super().__init__(hf_config)
@@ -141,6 +141,7 @@ class HFLLMModel(BaseModel):
         ).to(device)
         state_dict = model_with_weights.state_dict()
         self_state_dict = self.model.state_dict()
+        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         all_tensor_names = self_state_dict.keys()
         lm_head_weight_key = "lm_head.weight"
         embed_tokens_weight_key = "model.embed_tokens.weight"
@@ -237,6 +238,8 @@ class HFLLMModel(BaseModel):
         dest_name: str,
         self_state_dict,
     ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
+        if dest_name.startswith("model."):
+            dest_name = dest_name[len("model.") :]
         assert dest_name in self_state_dict, f"Unsupported weight: {dest_name}"
         target_tensor = self_state_dict[dest_name]
         is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
@@ -246,6 +249,7 @@ class HFLLMModel(BaseModel):
     @cached_property
     def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         self_state_dict = self.model.state_dict()
+        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         transforms = []
         for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(

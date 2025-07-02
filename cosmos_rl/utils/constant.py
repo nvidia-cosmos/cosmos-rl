@@ -34,6 +34,9 @@ COSMOS_ROLLOUT_SCAN_INTERVAL = 10  # 10 seconds
 COSMOS_ROLLOUT_STEP_INTERVAL = 100  # 100 steps
 COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY = 10  # 10 seconds
 
+# Internal model type for HFLLMModel
+COSMOS_HF_MODEL_TYPES = "hfllm"
+
 
 class CosmosHttpRetryConfig:
     max_retries: int = 60
