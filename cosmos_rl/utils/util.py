@@ -697,29 +697,48 @@ def sync_model_vocab(
     self_rank = int(os.environ.get("RANK", 0))
     vocab_size = None
     if self_rank == 0:
-        weight_map_path = resolve_model_path(
-            f"{model_name_or_path}:model.safetensors.index.json"
-        )
-        weight_map = read_json_file(weight_map_path)["weight_map"]
-
-        if lm_head_key in weight_map:
-            lm_head = weight_map[lm_head_key]
-            lm_head_path = resolve_model_path(f"{model_name_or_path}:{lm_head}")
-            with safe_open(lm_head_path, framework="pt", device="cpu") as f:
-                tensor_slice = f.get_slice(lm_head_key)
-                vocab_size, _ = tensor_slice.get_shape()
-        elif embed_tokens_key in weight_map:
-            embed_tokens = weight_map[embed_tokens_key]
-            embed_tokens_path = resolve_model_path(
-                f"{model_name_or_path}:{embed_tokens}"
-            )
-            with safe_open(embed_tokens_path, framework="pt", device="cpu") as f:
-                tensor_slice = f.get_slice(embed_tokens_key)
-                vocab_size, _ = tensor_slice.get_shape()
+        model_index_path = f"{model_name_or_path}:model.safetensors.index.json"
+        weight_map_path = resolve_model_path(model_index_path)
+        has_weight_map = os.path.exists(weight_map_path)
+        # Check if the weight map file exists
+        if has_weight_map:
+            weight_map = read_json_file(weight_map_path)["weight_map"]
+            if lm_head_key in weight_map:
+                lm_head = weight_map[lm_head_key]
+                lm_head_path = resolve_model_path(f"{model_name_or_path}:{lm_head}")
+                with safe_open(lm_head_path, framework="pt", device="cpu") as f:
+                    tensor_slice = f.get_slice(lm_head_key)
+                    vocab_size, _ = tensor_slice.get_shape()
+            elif embed_tokens_key in weight_map:
+                embed_tokens = weight_map[embed_tokens_key]
+                embed_tokens_path = resolve_model_path(
+                    f"{model_name_or_path}:{embed_tokens}"
+                )
+                with safe_open(embed_tokens_path, framework="pt", device="cpu") as f:
+                    tensor_slice = f.get_slice(embed_tokens_key)
+                    vocab_size, _ = tensor_slice.get_shape()
+            else:
+                raise ValueError(
+                    "Could not find `lm_head` or `model.embed_tokens.weight` in the model."
+                )
         else:
-            raise ValueError(
-                "Could not find `lm_head` or `model.embed_tokens.weight` in the model."
+            # models like google/gemma-3-1b-pt does not have model.safetensors.index.json
+            model_safetensors_path = resolve_model_path(
+                f"{model_name_or_path}:model.safetensors"
             )
+            with safe_open(model_safetensors_path, framework="pt", device="cpu") as f:
+                tensor_names = f.keys()
+                if lm_head_key in tensor_names:
+                    tensor_slice = f.get_slice(lm_head_key)
+                    vocab_size, _ = tensor_slice.get_shape()
+                elif embed_tokens_key in tensor_names:
+                    tensor_slice = f.get_slice(embed_tokens_key)
+                    vocab_size, _ = tensor_slice.get_shape()
+                else:
+                    raise ValueError(
+                        "Could not find `lm_head` or `model.embed_tokens.weight` in the model."
+                    )
+
     from cosmos_rl.utils.distributed import broadcast_object_cpu
 
     vocab_size = broadcast_object_cpu(vocab_size, src=0, device=torch.device("cpu"))
