@@ -1165,8 +1165,6 @@ class GRPOTrainer(Trainer):
                 ref_per_token_logps,
             )
         ):
-            # user_batch, user_batched_advantages, cp_context = self.wrap_batch_data(batched_data, batched_advantage)
-
             # TODO(jiaxin): support variable length in PP
             computed_max_len = (
                 self.config.policy.model_max_length
@@ -1179,6 +1177,7 @@ class GRPOTrainer(Trainer):
                 // self.seq_len_multiple
                 * self.seq_len_multiple
             )
+            # Convert advantages from [batch_size] -> [batch_size, max_len] via expanding
             user_batched_advantages = (
                 (
                     batched_advantage.unsqueeze(1)
@@ -1195,13 +1194,13 @@ class GRPOTrainer(Trainer):
             )
 
             # Move all tensor to device
-            for k in user_mini_batch.keys():
-                v = user_mini_batch[k]
+            for k in user_batch.keys():
+                v = user_batch[k]
                 if (
                     isinstance(v, torch.Tensor)
                     and v.device != self.device
                 ):
-                    user_mini_batch[k] = v.to(self.device)
+                    user_batch[k] = v.to(self.device)
 
             # input_ids are different across ranks in dp_shard_cp
             position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
@@ -1210,8 +1209,8 @@ class GRPOTrainer(Trainer):
             acc_n_tokens += np.prod(input_ids.shape)
             user_batch["position_ids"] = position_ids
 
-            input_ids_before_cp = user_mini_batch["input_ids"]
-            position_ids_before_cp = user_mini_batch["position_ids"]
+            input_ids_before_cp = user_batch["input_ids"]
+            position_ids_before_cp = user_batch["position_ids"]
 
             if self.parallel_dims.cp_enabled:
                 input_ids, position_ids = slice_input_for_ulysses(
@@ -1219,8 +1218,8 @@ class GRPOTrainer(Trainer):
                     position_ids,
                     self.parallel_dims.mesh["cp"],
                 )
-                user_mini_batch["position_ids"] = position_ids
-                user_mini_batch["input_ids"] = input_ids
+                user_batch["position_ids"] = position_ids
+                user_batch["input_ids"] = input_ids
 
             with (
                 torch.set_grad_enabled(not only_forward),
@@ -1266,6 +1265,15 @@ class GRPOTrainer(Trainer):
 
                     if pp_first_stage or pp_last_stage:
                         # First/Last stage: pass all inputs
+                        if self.parallel_dims.cp_enabled:
+                            # This is for recover these two tensors after ulysses
+                            user_batch["input_ids_before_cp"] = (
+                                input_ids_before_cp
+                            )
+                            user_batch["position_ids_before_cp"] = (
+                                position_ids_before_cp
+                            )
+
                         # TODO(zjx): stage will return a merged stage output, maybe we can use it to get the current_per_token_logprobs
                         self.pp_scheduler.step(
                             **user_batch,
@@ -1294,12 +1302,20 @@ class GRPOTrainer(Trainer):
                 else:
                     # without pp_enabled
                     raw_logits = self.model(**user_batch)
+
+                    if self.parallel_dims.cp_enabled:
+                        # reset the position ids and input ids
+                        user_batch["position_ids"] = (
+                            position_ids_before_cp
+                        )
+                        user_batch["input_ids"] = input_ids_before_cp
+
                     if self.config.train.train_policy.temperature > 1e-6:
                         raw_logits = (
                             raw_logits / self.config.train.train_policy.temperature
                         )
 
-                    current_per_token_logprobs, logprob_masks = self.compute_logprobs(
+                    current_per_token_logprobs, cu_seqlens = self.compute_logprobs(
                         user_batch,
                         full_logits=raw_logits,
                     )
@@ -1313,6 +1329,7 @@ class GRPOTrainer(Trainer):
                         continue
 
                     # Continue compute loss and backward
+                    logprob_masks = batched_data["logprob_masks"]
                     current_advantages = logprob_masks * user_batched_advantages
 
                     loss, kl_loss = compute_loss(
@@ -1729,6 +1746,7 @@ def _swizzle_pp_grpo_forward(
         # will cast and concat this value. if not, it will raise an error
         return torch.tensor([0.0], device=trainer.device)
 
+    logprob_masks = user_input["logprob_masks"]
     current_advantages = logprob_masks * advantages
 
     # check old/ref per_token_logprobs
@@ -1743,11 +1761,11 @@ def _swizzle_pp_grpo_forward(
         # [batch_size, max_len]
         assert isinstance(ref_per_token_logprob, torch.Tensor)
         assert (
-            ref_per_token_logprobs.ndim == 1
-        ), f"ref_per_token_logprobs.ndim: {ref_per_token_logprobs.ndim}, while it should be 1"
+            ref_per_token_logprob.ndim == 2
+        ), f"ref_per_token_logprobs.ndim: {ref_per_token_logprob.ndim}, while it should be 2"
         assert (
-            ref_per_token_logprobs.shape == current_per_token_logprobs.shape
-        ), f"ref_per_token_logprobs.shape: {ref_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
+            ref_per_token_logprob.shape == current_per_token_logprobs.shape
+        ), f"ref_per_token_logprobs.shape: {ref_per_token_logprob.shape}, while it should be {current_per_token_logprobs.shape}"
 
     # TODO(zjx): maybe we can move compute_loss into Trainer.pp_loss_fn ?
     loss, _ = compute_loss(
