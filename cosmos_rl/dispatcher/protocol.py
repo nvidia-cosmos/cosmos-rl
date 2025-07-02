@@ -104,7 +104,7 @@ class SetTracePathRequest(HeartbeatRequest):
 
 
 class SetShardInfosRequest(BaseModel):
-    shard_infos: List[List[Dict[str, Any]]]
+    shard_infos: List[List[List[Dict[str, Any]]]]
 
 
 class GetShardSendRecvInstsRequest(BaseModel):

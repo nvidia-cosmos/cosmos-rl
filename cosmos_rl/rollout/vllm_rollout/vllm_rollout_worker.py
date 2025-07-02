@@ -254,6 +254,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
         )
         self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
+        self.recv_param_key_n_rank_list = [[x] for x in self.recv_param_key_n_rank_list]
         # Ordered list of (hf_key, tensor_dim)
         if self.global_rank == 0:
             self.all_rank_local_shard_infos = [
@@ -509,34 +510,37 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 raise RuntimeError(
                     f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
                 )
-
-            for per_inst in generated_insts:
-                for i in per_inst["insts"]:
-                    p_rank, r_rank, tensor_split_strategys = i
-                    tensor_split_strategys = {
-                        int(k): DimRankInfo.from_dict(v)
-                        for k, v in tensor_split_strategys.items()
-                    }
-                    self.policy_to_rollout_recv_insts.append(
-                        (
-                            p_rank,
-                            r_rank,
-                            tensor_split_strategys,
-                            per_inst["name"],
+            for insts_group in generated_insts:
+                parsed_insts_group = []
+                for per_inst in insts_group:
+                    for i in per_inst["insts"]:
+                        p_rank, r_rank, tensor_split_strategys = i
+                        tensor_split_strategys = {
+                            int(k): DimRankInfo.from_dict(v)
+                            for k, v in tensor_split_strategys.items()
+                        }
+                        parsed_insts_group.append(
+                            (
+                                p_rank,
+                                r_rank,
+                                tensor_split_strategys,
+                                per_inst["name"],
+                            )
                         )
-                    )
+                self.policy_to_rollout_recv_insts.append(parsed_insts_group)
 
         with torch.cuda.stream(self.inference_stream):
             # recv the weight from policy
             # st = time.time()
             total_bytes_received = 0
-            for inst in self.policy_to_rollout_recv_insts:
-                total_bytes_received += self.recv_weight_shard(
-                    self.global_rank,
-                    inst,
-                    communicator_index,
-                    command.do_weight_sync_check,
-                )
+            for insts_group in self.policy_to_rollout_recv_insts:
+                for inst in insts_group:
+                    total_bytes_received += self.recv_weight_shard(
+                        self.global_rank,
+                        inst,
+                        communicator_index,
+                        command.do_weight_sync_check,
+                    )
             self.state.set_weight_synced()
 
     @RolloutWorkerBase.register_rollout_command_handler(

@@ -20,6 +20,11 @@ from cosmos_rl.policy.model.base import WeightMapper
 
 
 class DimRankInfo:
+    """
+    A class to represent the slice information of a tensor along a specific dimension.
+    This class contains the rank, size, dimension name, and length of the tensor slice.
+    """
+
     rank: int
     size: int
     dim: str
@@ -56,6 +61,14 @@ class DimRankInfo:
 def slice_tensor_with_strategy(
     tensor: torch.Tensor, idx: int, tensor_split_strategy: DimRankInfo
 ):
+    """
+    Slices a tensor according to the given strategy at one dimension index.
+    :param tensor: The tensor to be sliced.
+    :param idx: The index of the dimension to slice.
+    :param tensor_split_strategy: The strategy for slicing the tensor.
+    :return: A sliced view of the tensor for the given dimension index.
+    """
+
     view = tensor
     assert view.shape[idx] % tensor_split_strategy.size == 0
     start = view.shape[idx] // tensor_split_strategy.size * tensor_split_strategy.rank
@@ -76,7 +89,7 @@ def slice_tensor_with_strategies(
     self: torch.Tensor, strategys: Dict[int, DimRankInfo]
 ) -> torch.Tensor:
     """
-    Slices the tensor according to the given strategies.
+    Slices the tensor according to the given strategies at all dimension indices.
     :param tensor: The tensor to be sliced.
     :param strategys: A dictionary mapping dimension indices to DimRankInfo objects.
     :return: The sliced tensor.
@@ -92,7 +105,7 @@ torch.Tensor.cosmos_slice = slice_tensor_with_strategies
 
 class ParallelTopoMapper:
     """
-    A class to represent a weight sharing topology map for weight synchronization.
+    A class used for weight sharing topology map for weight synchronization.
     """
 
     ordered_dims: List[str] = ["tp", "dp_shard_cp"]
@@ -118,33 +131,33 @@ class ParallelTopoMapper:
         self.parallelism.build_mesh_info()
         self.parallelism_strategy = parallelism_strategy
         ranks = range(self.parallelism.world_size)
-        full_rank_map = []
+        full_mesh_rank_info_map = []
         for r in ranks:
-            full_rank = self.get_full_rank(r)
-            full_rank_map.append(full_rank)
-        self.full_rank_map = full_rank_map
+            full_rank = self.get_full_mesh_rank_info(r)
+            full_mesh_rank_info_map.append(full_rank)
+        self.full_mesh_rank_info_map = full_mesh_rank_info_map
         self.hf_config = hf_config
 
-    def get_full_rank(self, global_rank: int) -> Dict[str, DimRankInfo]:
+    def get_full_mesh_rank_info(self, global_rank: int) -> Dict[str, DimRankInfo]:
         """
-        Get the full rank of the given rank in the simulation map.
+        Get the full mesh rank info of the given global rank in the simulation map.
 
-        :param rank: The rank to get the full rank for.
-        :return: A dictionary mapping each parallel dimension to its full rank.
+        :param global_rank: The global rank to get the full rank for.
+        :return: A dictionary mapping each parallel mesh dimension to its mesh rank info.
         """
-        full_rank = {}
+        full_mesh_rank_info = {}
         for dim in self.ordered_dims:
-            full_rank[dim] = DimRankInfo(
+            full_mesh_rank_info[dim] = DimRankInfo(
                 self.parallelism.get_rank_in_dim(dim, global_rank),
                 self.parallelism.get_size_in_dim(dim),
                 dim,
             )
-        full_rank["pp"] = DimRankInfo(
+        full_mesh_rank_info["pp"] = DimRankInfo(
             self.parallelism.get_rank_in_dim("pp", global_rank),
             self.parallelism.get_size_in_dim("pp"),
             "pp",
         )
-        return full_rank
+        return full_mesh_rank_info
 
     @classmethod
     def get_unified_rank_info(
@@ -224,17 +237,18 @@ class ParallelTopoMapper:
         return DimRankInfo(rank, size, outter.dim, length)
 
     @classmethod
-    def tensor_sharing_overlap_at_dim(
+    def tensor_overlap_info_at_dim(
         cls,
         policy_rank: Dict[int, DimRankInfo],
         rollout_rank: Dict[int, DimRankInfo],
         dim: int,
     ) -> Tuple[DimRankInfo, DimRankInfo]:
         """
-        Get the tensor sharing information one different dimensions.
-        :param policy_rank: The policy rank information.
-        :param rollout_rank: The rollout rank information.
-        :return: A set of dimensions that are different.
+        Get the tensor overlap information at one dimension index.
+        :param policy_rank: The sharded rank information for the given tensor from policy.
+        :param rollout_rank: The sharded rank information for the given tensor from rollout.
+        :param dim: The dimension index to check for overlap.
+        :return: A tuple containing the overlap information between the given policy and rollout tensors.
         """
         if dim not in policy_rank:
             p = DimRankInfo(0, 1)
@@ -248,22 +262,21 @@ class ParallelTopoMapper:
         p_new, r_new = cls.get_unified_rank_info(p, r)
         overlap = cls.rank_overlap(p_new, r_new)
         if overlap is None:
-            # logger.warning(f"No rank overlap detected in {dim}: {p} and {r}")
             return None, None
         overlap_r = cls.relative_rank(overlap, r_new)
         overlap_p = cls.relative_rank(overlap, p_new)
         return overlap_p, overlap_r
 
-    def shard_dim_info(
+    def shard_info_at_dim(
         self,
         rank_infos: Dict[str, DimRankInfo],
         dim: str,
     ) -> DimRankInfo:
         """
-        Get the tensor sharing information one different dimensions.
-        :param policy_rank: The policy rank information.
-        :param rollout_rank: The rollout rank information.
-        :return: A set of dimensions that are different.
+        Get the sharded rank information at one mesh dimension.
+        :param rank_infos: The rank information for the mesh dimensions.
+        :param dim: The dimension to get the shard information for.
+        :return: A DimRankInfo object representing the sharded rank information for the given dimension.
         """
         if dim not in rank_infos:
             p = DimRankInfo(0, 1, dim)
@@ -272,16 +285,18 @@ class ParallelTopoMapper:
 
         return p
 
-    def shard_merged_dim_info(
+    def merged_shard_info_at_dim(
         self,
         rank_info: Dict[str, DimRankInfo],
     ) -> DimRankInfo:
         """
-        Get the tensor sharing information for the same dimensions.
-        :param rank_info: The rank information.
-        :return: A set of dimensions that are the same.
+        Get the merged sharded rank information for different mesh dimensions.
+        :param rank_info: The rank information for the mesh dimensions.
+        :return: A DimRankInfo object representing the merged sharded rank information for the given dimensions.
         """
-        assert len(self.ordered_dims) == 2, "Only two dimensions are supported"
+        assert (
+            len(self.ordered_dims) == 2
+        ), "Only two dimensions are supported for merging currently."
         if self.ordered_dims[0] not in rank_info:
             rank_info[self.ordered_dims[0]] = DimRankInfo(0, 1, self.ordered_dims[0])
         if self.ordered_dims[1] not in rank_info:
@@ -293,25 +308,25 @@ class ParallelTopoMapper:
         return p
 
     @classmethod
-    def get_global_ranks_for_given_group_rank(
-        cls, parallel_dims: ParallelDims, group_rank: Dict[str, int]
+    def get_global_ranks_for_given_mesh_rank(
+        cls, parallel_dims: ParallelDims, mesh_rank: Dict[str, int]
     ) -> List[int]:
         """
-        Get the global ranks for a given group rank in the parallelism configuration.
-        group_rank is subset of parallel_dims, so there could be multiple devices have
-        the same group_rank.
+        Get the global ranks for a given mesh rank in the parallelism configuration.
+        mesh_rank is subset of parallel_dims, so there could be multiple devices have
+        the same mesh_rank.
         :param parallel_dims: The parallelism configuration.
-        :param group_rank: The group rank to get the global ranks for.
+        :param mesh_rank: The mesh rank to get the global ranks whose mesh rank matches the given mesh_rank.
         :return: A list of global ranks.
         """
-        if len(group_rank) == 0:
+        if len(mesh_rank) == 0:
             return list(range(parallel_dims.world_size))
         global_ranks = []
         for rank in range(parallel_dims.world_size):
             if all(
                 [
                     parallel_dims.get_rank_in_dim(dim, rank) == dimr
-                    for dim, dimr in group_rank.items()
+                    for dim, dimr in mesh_rank.items()
                 ]
             ):
                 global_ranks.append(rank)
@@ -321,16 +336,16 @@ class ParallelTopoMapper:
         self, dims: List[str], global_rank: int
     ) -> List[int]:
         """
-        Get the duplicate ranks at the given dimensions.
-        :param dims: The dimensions to check.
+        Get the duplicate global ranks with same mesh rank info with the given global rank at the specified dimensions.
+        :param dims: The dimensions to check for duplicate ranks.
         :param global_rank: The global rank to check.
-        :return: A list of duplicate ranks.
+        :return: A list of duplicate global ranks.
         """
         dims_map = {}
         for dim in dims:
             dims_map[dim] = self.parallelism.get_rank_in_dim(dim, global_rank)
 
-        return ParallelTopoMapper.get_global_ranks_for_given_group_rank(
+        return ParallelTopoMapper.get_global_ranks_for_given_mesh_rank(
             self.parallelism, dims_map
         )
 
@@ -339,9 +354,9 @@ class ParallelTopoMapper:
         cls, policys: List[int], rollouts: List[int]
     ) -> Tuple[Dict[int, List[int]], Dict[int, List[int]]]:
         """
-        Assign policy ranks to rollout ranks based on the sharing map.
-        :param policys: The list of policy ranks.
-        :param rollouts: The list of rollout ranks.
+        Assign policy ranks to rollout ranks sharing the same sharded part.
+        :param policys: The list of policy ranks sharing the same sharded part.
+        :param rollouts: The list of rollout ranks sharing the same sharded part.
         :return: A tuple containing two dictionaries: policy assignment and rollout assignment.
         """
         p_assignment = {}
@@ -385,59 +400,71 @@ class ParallelTopoMapper:
         shard_dim_info = {}
         for idx, dims in dim_to_parallel.items():
             if len(dims) == 1:
-                shard_dim_info[idx] = self.shard_dim_info(rank_info, dims[0]).__dict__
+                shard_dim_info[idx] = self.shard_info_at_dim(
+                    rank_info, dims[0]
+                ).__dict__
             elif len(dims) == 2:
-                shard_dim_info[idx] = self.shard_merged_dim_info(rank_info).__dict__
+                shard_dim_info[idx] = self.merged_shard_info_at_dim(rank_info).__dict__
             else:
                 raise ValueError(
                     f"Invalid dimension mapping: {dims} in generate_slice_strategies"
                 )
         return shard_dim_info
 
-    def params_local_shard_info(
+    def local_shard_info_for_params(
         self,
-        params: List[Tuple[str, Tuple[int]]],
+        params: List[List[Tuple[str, Tuple[int]]]],
         global_rank: int,
-    ) -> List[Tuple[int, int, Dict[int, Dict], str, Tuple[int]]]:
+    ) -> List[List[Dict[str, Any]]]:
         """
-        Generate loca
+        Generate local shard info for the given parameters.
         :param params: The parameters to generate local shard info for.
         :param global_rank: The global rank to generate local shard info for.
-        :return: A list of tuples containing the generated local shard info.
-        Tuple meaning: [sender rank, receiver rank, tensor split strategies, tensor name, tensor shape]
+        :return: A list containing the generated local shard info.
         """
         local_shard_info_all_params = []
-        for dest_name, shape in params:
-            split_dim_map, dim_to_parallel, pp_rank = self.parallelism_strategy(
-                shape, dest_name, self.parallelism, self.hf_config
-            )
-            dup_ranks = self.duplicate_ranks_at_given_dimensions(
-                list(split_dim_map.keys()) + ["pp"], global_rank
-            )
-            ranks = self.full_rank_map[global_rank]
-            if ranks["pp"].rank != pp_rank:
-                local_shard_info_all_params.append(
+        for param_group in params:
+            group_info = []
+            for dest_name, shape in param_group:
+                """
+                param group may contain multiple parameters with some connections such as from the same original param.
+                """
+                split_dim_map, dim_to_parallel, pp_rank = self.parallelism_strategy(
+                    shape, dest_name, self.parallelism, self.hf_config
+                )
+                dup_ranks = self.duplicate_ranks_at_given_dimensions(
+                    list(split_dim_map.keys()) + ["pp"], global_rank
+                )
+                ranks = self.full_mesh_rank_info_map[global_rank]
+                if ranks["pp"].rank != pp_rank:
+                    group_info.append(
+                        {
+                            "name": dest_name,
+                        }
+                    )
+                    continue
+
+                group_info.append(
                     {
                         "name": dest_name,
+                        "shard_info": self.generate_local_shard_info(
+                            dim_to_parallel, ranks
+                        ),
+                        "dup_ranks": dup_ranks,
                     }
                 )
-                continue
-
-            local_shard_info_all_params.append(
-                {
-                    "name": dest_name,
-                    "shard_info": self.generate_local_shard_info(
-                        dim_to_parallel, ranks
-                    ),
-                    "dup_ranks": dup_ranks,
-                }
-            )
+            local_shard_info_all_params.append(group_info)
+        # Return a list of dictionaries containing the local shard info for each parameter group
         return local_shard_info_all_params
 
 
 class ParallelTopoMapperGroup:
     """
-    A class to represent a group of weight sharing topology maps for weight synchronization.
+    A class to represent a group of weight sharing topology maps used for weight synchronization.
+    This class manages multiple ParallelTopoMapper instances, each corresponding to a different parallelism strategy.
+    Different model parts may have different parallelism strategies in one whole model.
+    It is used to prepare local shard information for parameters based on the parallelism configuration.
+    It clusters parameters by model part and prepares local shard information for each part.
     """
 
     def __init__(
@@ -454,6 +481,8 @@ class ParallelTopoMapperGroup:
         :param global_parallelism: The parallelism configuration for the policy or rollout.
         :param world_size: The world size for the policy or rollout.
         :param hf_config: The huggingface config.
+        :param is_policy: A boolean indicating if this is for policy parallelism.
+        :param weight_mapper: An optional WeightMapper instance. If None, a default mapper is used based on the model type from hf_config.
         """
         self.hf_config = hf_config
         model_type = hf_config.model_type
@@ -494,8 +523,8 @@ class ParallelTopoMapperGroup:
             )
 
     def _cluster_params_by_model_part(
-        self, params: List[Tuple[str, int]]
-    ) -> List[List[Tuple[str, int]]]:
+        self, params: List[List[Tuple[str, int]]]
+    ) -> List[List[List[Tuple[str, int]]]]:
         """
         Resort the parameters based on the name mapper.
         :param params: The parameters to resort.
@@ -504,21 +533,38 @@ class ParallelTopoMapperGroup:
         if len(self.mapper_group) == 1:
             return [params]
         x = [[] for _ in self.mapper_group]
-        for name, rank in params:
-            idx = self.weight_mapper.name_to_model_part_index(name)
-            x[idx].append((name, rank))
+
+        for param_group in params:
+            idx = None
+            for name, _ in param_group:
+                if idx is not None:
+                    assert idx == self.weight_mapper.name_to_model_part_index(name), (
+                        f"Parameter {name} is assigned to different model parts in one same group {param_group}: "
+                        f"{idx} and {self.weight_mapper.name_to_model_part_index(name)}"
+                    )
+                else:
+                    idx = self.weight_mapper.name_to_model_part_index(name)
+            x[idx].append(param_group)
         return x
 
     def prepare_local_shard_infos(
         self,
-        hf_key_n_rank: List[Tuple[str, int]],
+        hf_key_n_rank: List[List[Tuple[str, int]]],
         global_rank: int,
-    ) -> List[Tuple[int, int, Dict[int, DimRankInfo], str, Tuple[int]]]:
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Prepare local shard information for the given parameters based on the parallelism configuration.
+        :param hf_key_n_rank: A list of tuples containing the parameter names and their ranks.
+        :param global_rank: The global rank to prepare local shard information for.
+        :return: A list of dictionaries containing the local shard information for each parameter group.
+        """
         x = self._cluster_params_by_model_part(hf_key_n_rank)
         insts = []
         for model_index, p in enumerate(x):
             insts.extend(
-                self.mapper_group[model_index].params_local_shard_info(p, global_rank)
+                self.mapper_group[model_index].local_shard_info_for_params(
+                    p, global_rank
+                )
             )
         return insts
 
@@ -528,8 +574,12 @@ class ParallelizedShardMapper:
         """
         Initialize the ParallelizedShardMapper with empty shard info lists.
         """
-        self.policy_all_rank_shard_infos: Optional[List[List[Dict[str, Any]]]] = None
-        self.rollout_all_rank_shard_infos: Optional[List[List[Dict[str, Any]]]] = None
+        self.policy_all_rank_shard_infos: Optional[List[List[List[Dict[str, Any]]]]] = (
+            None
+        )
+        self.rollout_all_rank_shard_infos: Optional[
+            List[List[List[Dict[str, Any]]]]
+        ] = None
         self.send_insts_for_policy: List[
             List[Tuple[int, int, Dict[int, DimRankInfo], str]]
         ] = None
@@ -540,6 +590,8 @@ class ParallelizedShardMapper:
     def post_set_shard_infos(self):
         """
         Post-process the shard infos after they are set.
+        This method generates the send and receive instructions for policy and rollout based on the shard infos.
+        It initializes the send and receive instruction lists for policy and rollout, respectively.
         """
         self.send_insts_for_policy = []
         self.recv_insts_for_rollout = []
@@ -558,7 +610,7 @@ class ParallelizedShardMapper:
 
     def set_shard_infos_of_policy(
         self,
-        policy_all_rank_shard_infos: List[List[Dict[str, Any]]],
+        policy_all_rank_shard_infos: List[List[List[Dict[str, Any]]]],
     ):
         """
         Set the shard infos for the policy.
@@ -569,137 +621,147 @@ class ParallelizedShardMapper:
 
     def set_shard_infos_of_rollout(
         self,
-        rollout_all_rank_shard_infos: List[List[Dict[str, Any]]],
+        rollout_all_rank_shard_infos: List[List[List[Dict[str, Any]]]],
     ):
         self.rollout_all_rank_shard_infos = rollout_all_rank_shard_infos
         self.post_set_shard_infos()
 
     def generate_parallelized_shard_send_insts_for_policy(
         self, p_rank: int
-    ) -> List[Dict[str, Any]]:
+    ) -> List[List[Dict[str, Any]]]:
         policy_to_rollout_insts = []
 
         rollout_shard_dicts = [
-            {r["name"]: r for r in r_info}
-            for r_info in self.rollout_all_rank_shard_infos
+            {r["name"]: r for r_info_group in r_infos_per_rank for r in r_info_group}
+            for r_infos_per_rank in self.rollout_all_rank_shard_infos
         ]
 
-        for p_info in self.policy_all_rank_shard_infos[p_rank]:
-            insts_for_param_name = []
-            dest_name = p_info["name"]
-            for r_rank, r_infos in enumerate(rollout_shard_dicts):
-                r_info = r_infos[dest_name]
-                if "shard_info" not in p_info or "shard_info" not in r_info:
-                    continue
+        for p_info_group in self.policy_all_rank_shard_infos[p_rank]:
+            insts_for_group = []
+            for p_info in p_info_group:
+                insts_for_param_name = []
+                dest_name = p_info["name"]
+                for r_rank, r_infos in enumerate(rollout_shard_dicts):
+                    r_info = r_infos[dest_name]
+                    if "shard_info" not in p_info or "shard_info" not in r_info:
+                        continue
 
-                shard_info = {
-                    k: DimRankInfo.from_dict(v) for k, v in p_info["shard_info"].items()
-                }
-                p_dup_ranks = p_info["dup_ranks"]
+                    shard_info = {
+                        k: DimRankInfo.from_dict(v)
+                        for k, v in p_info["shard_info"].items()
+                    }
+                    p_dup_ranks = p_info["dup_ranks"]
 
-                r_shard_info = {
-                    k: DimRankInfo.from_dict(v) for k, v in r_info["shard_info"].items()
-                }
-                r_dup_ranks = r_info["dup_ranks"]
+                    r_shard_info = {
+                        k: DimRankInfo.from_dict(v)
+                        for k, v in r_info["shard_info"].items()
+                    }
+                    r_dup_ranks = r_info["dup_ranks"]
 
-                all_dims = shard_info.keys() | r_shard_info.keys()
+                    all_dims = shard_info.keys() | r_shard_info.keys()
 
-                p_tensor_split_strategys = {}
-                for d in all_dims:
-                    p_tensor_split_strategy, r_tensor_split_strategy = (
-                        ParallelTopoMapper.tensor_sharing_overlap_at_dim(
-                            shard_info, r_shard_info, d
-                        )
-                    )
-                    if p_tensor_split_strategy is None:
-                        assert r_tensor_split_strategy is None
-                        p_tensor_split_strategys = None
-                        break
-                    p_tensor_split_strategys[d] = p_tensor_split_strategy
-                if p_tensor_split_strategys is None:
-                    continue
-                else:
-                    assignments, _ = ParallelTopoMapper.policy_to_rollout_assign(
-                        p_dup_ranks, r_dup_ranks
-                    )
-                    assignment = assignments[p_rank]
-                    for r in assignment:
-                        if r == r_rank:
-                            insts_for_param_name.append(
-                                (p_rank, r, p_tensor_split_strategys)
+                    p_tensor_split_strategys = {}
+                    for d in all_dims:
+                        p_tensor_split_strategy, r_tensor_split_strategy = (
+                            ParallelTopoMapper.tensor_overlap_info_at_dim(
+                                shard_info, r_shard_info, d
                             )
-            policy_to_rollout_insts.append(
-                {"name": dest_name, "insts": insts_for_param_name}
-            )
+                        )
+                        if p_tensor_split_strategy is None:
+                            assert r_tensor_split_strategy is None
+                            p_tensor_split_strategys = None
+                            break
+                        p_tensor_split_strategys[d] = p_tensor_split_strategy
+                    if p_tensor_split_strategys is None:
+                        continue
+                    else:
+                        assignments, _ = ParallelTopoMapper.policy_to_rollout_assign(
+                            p_dup_ranks, r_dup_ranks
+                        )
+                        assignment = assignments[p_rank]
+                        for r in assignment:
+                            if r == r_rank:
+                                insts_for_param_name.append(
+                                    (p_rank, r, p_tensor_split_strategys)
+                                )
+                insts_for_group.append(
+                    {"name": dest_name, "insts": insts_for_param_name}
+                )
+            policy_to_rollout_insts.append(insts_for_group)
         return policy_to_rollout_insts
 
     def generate_parallelized_shard_recv_insts_for_rollout(
         self, r_rank: int
-    ) -> List[Dict[str, Any]]:
+    ) -> List[List[Dict[str, Any]]]:
         rollout_from_policy_insts = []
 
         policy_shard_dicts = [
-            {r["name"]: r for r in r_info}
-            for r_info in self.policy_all_rank_shard_infos
+            {r["name"]: r for r_info_group in r_infos_per_rank for r in r_info_group}
+            for r_infos_per_rank in self.policy_all_rank_shard_infos
         ]
 
-        for r_info in self.rollout_all_rank_shard_infos[r_rank]:
-            insts_for_param_name = []
-            dest_name = r_info["name"]
-            for p_rank, p_infos in enumerate(policy_shard_dicts):
-                p_info = p_infos[dest_name]
-                if "shard_info" not in p_info or "shard_info" not in r_info:
-                    continue
+        for r_info_group in self.rollout_all_rank_shard_infos[r_rank]:
+            insts_for_group = []
+            for r_info in r_info_group:
+                insts_for_param_name = []
+                dest_name = r_info["name"]
+                for p_rank, p_infos in enumerate(policy_shard_dicts):
+                    p_info = p_infos[dest_name]
+                    if "shard_info" not in p_info or "shard_info" not in r_info:
+                        continue
 
-                shard_info = {
-                    k: DimRankInfo.from_dict(v) for k, v in p_info["shard_info"].items()
-                }
-                p_dup_ranks = p_info["dup_ranks"]
+                    shard_info = {
+                        k: DimRankInfo.from_dict(v)
+                        for k, v in p_info["shard_info"].items()
+                    }
+                    p_dup_ranks = p_info["dup_ranks"]
 
-                r_shard_info = {
-                    k: DimRankInfo.from_dict(v) for k, v in r_info["shard_info"].items()
-                }
-                r_dup_ranks = r_info["dup_ranks"]
+                    r_shard_info = {
+                        k: DimRankInfo.from_dict(v)
+                        for k, v in r_info["shard_info"].items()
+                    }
+                    r_dup_ranks = r_info["dup_ranks"]
 
-                all_dims = shard_info.keys() | r_shard_info.keys()
+                    all_dims = shard_info.keys() | r_shard_info.keys()
 
-                r_tensor_split_strategys = {}
-                for d in all_dims:
-                    p_tensor_split_strategy, r_tensor_split_strategy = (
-                        ParallelTopoMapper.tensor_sharing_overlap_at_dim(
-                            shard_info, r_shard_info, d
-                        )
-                    )
-                    if r_tensor_split_strategy is None:
-                        assert p_tensor_split_strategy is None
-                        r_tensor_split_strategys = None
-                        break
-                    r_tensor_split_strategys[d] = r_tensor_split_strategy
-                if r_tensor_split_strategys is None:
-                    continue
-                else:
-                    _, assignments = ParallelTopoMapper.policy_to_rollout_assign(
-                        p_dup_ranks, r_dup_ranks
-                    )
-                    assignment = assignments[r_rank]
-                    for p in assignment:
-                        if p == p_rank:
-                            insts_for_param_name.append(
-                                (p_rank, r_rank, r_tensor_split_strategys)
+                    r_tensor_split_strategys = {}
+                    for d in all_dims:
+                        p_tensor_split_strategy, r_tensor_split_strategy = (
+                            ParallelTopoMapper.tensor_overlap_info_at_dim(
+                                shard_info, r_shard_info, d
                             )
-            rollout_from_policy_insts.append(
-                {"name": dest_name, "insts": insts_for_param_name}
-            )
+                        )
+                        if r_tensor_split_strategy is None:
+                            assert p_tensor_split_strategy is None
+                            r_tensor_split_strategys = None
+                            break
+                        r_tensor_split_strategys[d] = r_tensor_split_strategy
+                    if r_tensor_split_strategys is None:
+                        continue
+                    else:
+                        _, assignments = ParallelTopoMapper.policy_to_rollout_assign(
+                            p_dup_ranks, r_dup_ranks
+                        )
+                        assignment = assignments[r_rank]
+                        for p in assignment:
+                            if p == p_rank:
+                                insts_for_param_name.append(
+                                    (p_rank, r_rank, r_tensor_split_strategys)
+                                )
+                insts_for_group.append(
+                    {"name": dest_name, "insts": insts_for_param_name}
+                )
+            rollout_from_policy_insts.append(insts_for_group)
         return rollout_from_policy_insts
 
-    def get_send_insts_for_policy(self, rank: int) -> List[Dict[str, Any]]:
+    def get_send_insts_for_policy(self, rank: int) -> List[List[Dict[str, Any]]]:
         """
         Get the send instructions for policy.
         :return: A list of send instructions for policy.
         """
         return self.send_insts_for_policy[rank]
 
-    def get_recv_insts_for_rollout(self, rank: int) -> List[Dict[str, Any]]:
+    def get_recv_insts_for_rollout(self, rank: int) -> List[List[Dict[str, Any]]]:
         """
         Get the receive instructions for rollout.
         :return: A list of receive instructions for rollout.
