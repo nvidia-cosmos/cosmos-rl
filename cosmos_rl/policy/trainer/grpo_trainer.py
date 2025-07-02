@@ -1329,7 +1329,7 @@ class GRPOTrainer(Trainer):
                         continue
 
                     # Continue compute loss and backward
-                    logprob_masks = batched_data["logprob_masks"]
+                    logprob_masks = user_batch["logprob_masks"]
                     current_advantages = logprob_masks * user_batched_advantages
 
                     loss, kl_loss = compute_loss(
