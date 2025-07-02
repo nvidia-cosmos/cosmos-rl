@@ -28,6 +28,8 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from functools import cached_property
 
+HF_MODEL_TYPES = "hfllm"
+
 
 class HFLLMModel(BaseModel):
     """
@@ -48,7 +50,7 @@ class HFLLMModel(BaseModel):
 
     @staticmethod
     def supported_model_types():
-        return ["mistral", "gemma3_text"]
+        return [HF_MODEL_TYPES]
 
     def __init__(self, hf_config, model):
         super().__init__(hf_config)
@@ -77,7 +79,8 @@ class HFLLMModel(BaseModel):
         return out.logits
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
-        # reset rotary_emb
+        # reset buffer registered in __init__() function,
+        # e.g. rotary_emb.inv_freq, embed_tokens.embed_scale
         if self.src_model_type in ["mistral", "gemma3_text"]:
             rotary_emb = self.model.model.rotary_emb
             inv_freq = rotary_emb.inv_freq

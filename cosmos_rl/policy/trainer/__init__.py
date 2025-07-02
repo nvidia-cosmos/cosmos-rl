@@ -112,7 +112,7 @@ class Trainer(CommMixin):
             torch.cuda.empty_cache()
             self.model_parts = model.separate_model_parts()
             self.model = model
-            self.init_comm()
+            self.init_comm(model.use_hfllm_type)
             # util.add_nan_checks(model)
         except Exception as e:
             import traceback

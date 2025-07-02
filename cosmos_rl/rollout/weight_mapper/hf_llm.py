@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 import torch
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
 from cosmos_rl.rollout.weight_mapper.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
@@ -61,11 +60,8 @@ class HFLLMWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self, vllm_model: Qwen2ForCausalLM
+        self, vllm_model: Any
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
-        assert (
-            "qwen" in type(vllm_model).__name__.lower()
-        ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
