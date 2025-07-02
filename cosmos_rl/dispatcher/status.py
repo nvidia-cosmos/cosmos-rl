@@ -628,24 +628,15 @@ class PolicyStatusManager:
                         "train/learning_rate"
                     ]
                     train_step = self.report_data_list[0]["train_step"]
-                    if train_step > 1:
-                        total_iter_time_avg = np.mean(
-                            [
-                                data["train/iteration_time"]
-                                for data in self.report_data_list
-                            ]
-                        )
+                    total_iter_time_avg = np.mean(
+                        [data["train/iteration_time"] for data in self.report_data_list]
+                    )
                     self.report_data_list = []
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
-                        if train_step > 1:
-                            log_wandb(
-                                data={"train/pre_iteration_time": total_iter_time_avg},
-                                step=train_step,
-                            )
-
                         log_wandb(
                             data={
+                                "train/iteration_time": total_iter_time_avg,
                                 "train/loss_avg": total_loss_avg,
                                 "train/loss_max": total_loss_max,
                                 "train/learning_rate": total_learning_rate,
@@ -653,12 +644,8 @@ class PolicyStatusManager:
                             step=train_step,
                         )
                     if "console" in self.config.logging.logger:
-                        if train_step > 1:
-                            logger.debug(
-                                f"Step: {train_step-1}/{total_steps}, Iteration time: {total_iter_time_avg:2f} s"
-                            )
                         logger.info(
-                            f"Step: {train_step}/{total_steps}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}."
+                            f"Step: {train_step}/{total_steps}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
                 except Exception as e:
                     logger.warning(
