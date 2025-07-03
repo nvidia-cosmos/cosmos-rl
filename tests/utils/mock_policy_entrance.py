@@ -91,7 +91,7 @@ class mock_GRPOTrainer(GRPOTrainer):
         return True
 
 
-def run_train():
+def policy_main():
     ctrl_ip, ctrl_port, metadata = get_controller_metadata()
 
     if metadata["config"] is None:
@@ -100,7 +100,7 @@ def run_train():
         )
 
     cosmos_config = PolicyConfig.from_dict(metadata["config"])
-    logger.info(f"[Policy] Loaded configuration: {cosmos_config.key_values()}")
+    logger.info(f"[Policy] Loaded configuration: {cosmos_config.model_dump()}")
 
     parallel_dims = ParallelDims.from_config(
         parallesim_config=cosmos_config.policy.parallelism
@@ -137,4 +137,4 @@ def run_train():
 
 
 if __name__ == "__main__":
-    run_train()
+    policy_main()

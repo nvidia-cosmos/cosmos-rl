@@ -6,7 +6,8 @@ NNODES=1
 LOG_RANKS=""
 TYPE=""
 RDZV_ENDPOINT="localhost:0"
-
+SCRIPT=""
+CONFIG=""
 print_help() {
   echo ""
   echo "Usage: ./launch_replica.sh [OPTIONS]"
@@ -17,8 +18,9 @@ print_help() {
   echo "  --ngpus <int>                      Number of GPUs per node. Default: 2"
   echo "  --log-rank <comma-separated ints>  Comma-separated list of ranks to enable logging. Default: Empty for all ranks."
   echo "  --rdzv-endpoint <host:port>        Rendezvous endpoint for distributed training. Default: localhost:0"
+  echo "  --script <script>                  The user script to run before launch."
+  echo "  --config <path>                    The path to the config file."
   echo "  --help                             Show this help message"
-  echo ""
   echo "Examples:"
   echo "  ./launch_replica.sh --type rollout --ngpus 4 --log-rank 0,1"
   echo "  ./launch_replica.sh --type policy --ngpus 8 --log-rank 0"
@@ -47,6 +49,14 @@ while [[ $# -gt 0 ]]; do
     RDZV_ENDPOINT="$2"
     shift 2
     ;;
+  --script)
+    SCRIPT="$2"
+    shift 2
+    ;;
+  --config)
+    CONFIG="$2"
+    shift 2
+    ;;
   --help)
     print_help
     exit 0
@@ -65,10 +75,13 @@ if [ -z "$TYPE" ]; then
   exit 1
 fi
 
+export TORCH_CPP_LOG_LEVEL="ERROR"
 if [ "$TYPE" == "rollout" ]; then
-  MODULE="cosmos_rl.rollout.rollout_entrance"
+  DEFAULT_MODULE="cosmos_rl.rollout.rollout_entrance"
+  export COSMOS_ROLE="Rollout"
 elif [ "$TYPE" == "policy" ]; then
-  MODULE="cosmos_rl.policy.train"
+  DEFAULT_MODULE="cosmos_rl.policy.train"
+  export COSMOS_ROLE="Policy"
 else
   echo "Error: Invalid --type value '$TYPE'. Must be 'rollout' or 'policy'."
   print_help
@@ -95,8 +108,20 @@ if [ -n "$LOG_RANKS" ]; then
   TORCHRUN_CMD+=(--local-ranks-filter "$LOG_RANKS")
 fi
 
-TORCHRUN_CMD+=(
-  -m "$MODULE"
-)
+if [ -n "$SCRIPT" ]; then
+  TORCHRUN_CMD+=(
+    "$SCRIPT"
+  )
+else
+  TORCHRUN_CMD+=(
+    -m "$DEFAULT_MODULE"
+  )
+fi
+
+if [ -n "$CONFIG" ]; then
+  TORCHRUN_CMD+=(
+    --config "$CONFIG"
+  )
+fi
 
 "${TORCHRUN_CMD[@]}"

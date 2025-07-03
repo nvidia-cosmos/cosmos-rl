@@ -23,6 +23,7 @@ import asyncio
 import time
 import itertools
 import os
+import math
 import threading
 import tempfile
 from typing import List, Dict, Tuple, Any, Optional, Callable
@@ -53,6 +54,8 @@ from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
+from cosmos_rl.utils.checkpoint import CheckpointMananger
 
 
 class Controller:
@@ -97,7 +100,6 @@ class Controller:
         reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[DataPacker] = None,
         val_dataset: Optional[Dataset] = None,
-        val_reward_fns: Optional[List[Callable]] = None,
         val_data_packer: Optional[DataPacker] = None,
     ):
         if self.config is not None:
@@ -120,13 +122,18 @@ class Controller:
             )
 
         self.is_rl = task_type != "sft"
+
+        if dataset is not None and isinstance(dataset, Callable):
+            dataset = dataset(config)
+        if val_dataset is not None and isinstance(val_dataset, Callable):
+            val_dataset = val_dataset(config)
+
         self.sft_user_dataset = dataset if not self.is_rl else None
         self.user_data_packer = data_packer
         self.user_val_data_packer = val_data_packer
         self.dataset = None
         if self.is_rl:
             if dataset is not None:
-                # Do simple sanity check
                 assert isinstance(dataset, Dataset)
                 self.dataset = CosmosDataset(
                     config=config, train_set=dataset, tokenizer=self.tokenizer
@@ -157,7 +164,6 @@ class Controller:
 
             if config.train.enable_validation:
                 if val_dataset is not None:
-                    # Do simple sanity check
                     assert isinstance(val_dataset, Dataset)
                     self.val_dataset = CosmosValidationDataset(
                         config=config, val_set=val_dataset, tokenizer=self.tokenizer
@@ -232,12 +238,64 @@ class Controller:
             if self.dataset is not None
             else 0
         )
+        self.ckpt_extra_info = {}
+        self.train_dataloader_bias = 0
+        if self.config.train.resume:
+            try:
+                # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
+                PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
+                self.ckpt_manager = CheckpointMananger(config)
+                self.ckpt_extra_info = (
+                    self.ckpt_manager.load_extra_info_from_checkpoint()
+                )
+                remain_samples_num = self.ckpt_extra_info.get(
+                    "remain_samples_num", remain_samples_num
+                )
+                self.epoch = (
+                    config.train.epoch
+                    - (
+                        math.ceil(
+                            remain_samples_num
+                            / (
+                                len(self.dataset.train_set)
+                                * config.rollout.n_generation
+                            )
+                        )
+                    )
+                    + 1
+                )
+                logger.info(
+                    f"[Controller] Resuming from checkpoint, current epoch: {self.epoch}, remaining samples: {remain_samples_num}"
+                )
+                if config.train.train_policy.dataloader_shuffle:
+                    logger.warning(
+                        "[Controller] Since dataloader_shuffle is True, the dataloader status cannot be resumed identically."
+                    )
+
+                self.train_dataloader_bias = max(
+                    0,
+                    len(self.dataset.train_set)
+                    - (
+                        (math.ceil(remain_samples_num / config.rollout.n_generation))
+                        % len(self.dataset.train_set)
+                    ),
+                )
+
+                logger.info(
+                    f"[Controller] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"[Controller] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
+                )
+
         self.policy_status_manager.setup(
             config,
             self.redis_controller,
             remain_samples_num=remain_samples_num,
             tokenizer=self.tokenizer,
             val_dataloader=val_dataloader,
+            current_step=self.ckpt_extra_info.get("step", 0),
         )
         self.rollout_status_manager.setup(
             config, self.redis_controller, tokenizer=self.tokenizer
@@ -292,6 +350,18 @@ class Controller:
             )
         else:
             iterator = self.train_dataloader_iter
+            for _ in range(self.train_dataloader_bias):
+                try:
+                    next(iterator)
+                except StopIteration:
+                    logger.warning(
+                        "[Controller] Data loader bias adjustment: reached end of dataset."
+                    )
+                    iterator = iter(self.train_dataloader)
+            if self.train_dataloader_bias > 0:
+                logger.info(
+                    f"[Controller] Data loader bias adjustment: skipped {self.train_dataloader_bias} samples due to checkpoint reuse."
+                )
 
         if not is_validation:
             # Throttle the generation speed:

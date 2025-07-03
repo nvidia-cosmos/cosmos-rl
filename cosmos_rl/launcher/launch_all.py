@@ -128,6 +128,7 @@ def launch_processes(
     gpu_devices: Optional[List[str]],
     control_urls: Optional[List[str]],
     output_files: Optional[List[str]],
+    extra_env: Optional[Dict[str, str]] = None,
 ) -> List[subprocess.Popen]:
     """
     Launch multiple subprocesses and return their process objects.
@@ -158,7 +159,8 @@ def launch_processes(
                 env["CUDA_VISIBLE_DEVICES"] = gpu_id
             if url is not None:
                 env["COSMOS_CONTROLLER_HOST"] = url
-
+            if extra_env is not None:
+                env.update(extra_env)
             if ofile is not None:
                 f = open(ofile, "wb")
                 cout = f
@@ -257,10 +259,10 @@ def parse_args():
     )
 
     parser.add_argument(
-        "launcher",
+        "script",
         nargs="?",  # “?” means 0 or 1 occurrences
-        default="cosmos_rl.dispatcher.run_web_panel",
-        help="The launcher to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom launcher can be provided for custom dataset and reward functions injection.",
+        default=None,
+        help="A user script which can be provided for custom dataset, reward functions, and model registration.",
     )
 
     parser.add_argument(
@@ -417,6 +419,8 @@ def replica_placement(
     output_dir: Optional[str],
     get_worker_ip: Optional[Callable] = None,
     rdzv_port: Optional[int] = None,
+    script: Optional[str] = None,
+    config_path: Optional[str] = None,
 ) -> List[List[str]]:
     commands = []
     gpu_devices = []
@@ -434,7 +438,6 @@ def replica_placement(
     gpu_idx = 0
     global_worker_idx = 0
     global_launch_settings = []
-
     # Assign launch settings for each worker
     for i in range(n_policy):
         if min_n_gpus_policy > len(global_available_gpus[global_worker_idx]):
@@ -450,8 +453,10 @@ def replica_placement(
                     ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
                 )
                 commands.append(
-                    f"{replica_script} --type policy --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed}"
+                    f"{replica_script} --type policy --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --config {config_path}"
                 )
+                if script is not None:
+                    commands[-1] += f" --script {script}"
                 if node_in_replica == 0:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
@@ -500,8 +505,10 @@ def replica_placement(
                 )
             )
             commands.append(
-                f"{replica_script} --type policy --ngpus {min_n_gpus_policy}"
+                f"{replica_script} --type policy --ngpus {min_n_gpus_policy} --config {config_path}"
             )
+            if script is not None:
+                commands[-1] += f" --script {script}"
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"policy_{i}.log")
@@ -538,8 +545,10 @@ def replica_placement(
                     ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
                 )
                 commands.append(
-                    f"{replica_script} --type rollout --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed}"
+                    f"{replica_script} --type rollout --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --config {config_path}"
                 )
+                if script is not None:
+                    commands[-1] += f" --script {script}"
                 if node_in_replica == 0:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
@@ -586,8 +595,10 @@ def replica_placement(
                 )
             )
             commands.append(
-                f"{replica_script} --type rollout --ngpus {min_n_gpus_rollout}"
+                f"{replica_script} --type rollout --ngpus {min_n_gpus_rollout} --config {config_path}"
             )
+            if script is not None:
+                commands[-1] += f" --script {script}"
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"rollout_{i}.log")
@@ -610,7 +621,7 @@ def main():
 
     # Check if the config file is provided
     cosmos_config = read_config(args.config)
-    launcher = args.launcher
+    script = os.path.abspath(args.script) if args.script is not None else None
 
     # Get the number of GPUs required for policy and rollout
     # and the number of replicas for each
@@ -759,7 +770,8 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
 
         # Add all non-Lepton arguments to the command
         launch_cmd += " " + " ".join(non_lepton_args)
-        launch_cmd += f" {launcher}"
+        if script is not None:
+            launch_cmd += f" {script}"
 
         # Handle node groups and queue priority
         if args.lepton_node_group or args.lepton_queue_priority:
@@ -821,6 +833,7 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
             "",
             "",
             None,
+            script=script,
         )
         if args.num_workers is not None:
             assert args.num_workers >= len(global_launch_settings)
@@ -1060,7 +1073,8 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
         logger.info(f"Temporary configuration file created at {tmpfile_toml}")
         controller_cmd = f"{controller_script} --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"
-        controller_cmd += f" {args.launcher}"
+        if script:
+            controller_cmd += f" {script}"
         control_url = f"localhost:{port}"
 
     def get_lepton_ip(worker_idx: int) -> str:
@@ -1113,6 +1127,8 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
         output_dir,
         get_worker_ip=get_worker_ip,
         rdzv_port=args.rdzv_port,
+        script=script,
+        config_path=tmpfile_toml,
     )
 
     num_workers = len(global_launch_settings)
@@ -1185,13 +1201,6 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
             launch_processes(commands, gpu_devices, control_urls, output_files)
         )
 
-    if tmpfile_toml is not None and os.path.exists(tmpfile_toml):
-        # Clean up the temporary file
-        try:
-            os.unlink(tmpfile_toml)
-        except Exception as e:
-            logger.error(f"Error deleting temporary file {tmpfile_toml}: {e}")
-
     # Wait for all processes to complete without blocking
     while len(processes) > 0:
         for i, process in enumerate(processes):
@@ -1229,6 +1238,14 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
                     sys.exit(1)
         # Small sleep to prevent busy waiting
         time.sleep(0.1)
+
+    if tmpfile_toml is not None and os.path.exists(tmpfile_toml):
+        # Clean up the temporary file
+        try:
+            os.unlink(tmpfile_toml)
+            tmpfile_toml = None
+        except Exception as e:
+            logger.error(f"Error deleting temporary file {tmpfile_toml}: {e}")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,6 @@ import json
 import os
 import torch
 import threading
-from collections import deque
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.checkpoint import (
     upload_folder_to_s3,
@@ -25,7 +24,7 @@ from cosmos_rl.utils.checkpoint import (
 )
 from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationConfig
 from cosmos_rl.policy.trainer.optm import build_optimizers, build_lr_schedulers
-from cosmos_rl.policy.model import build_model
+from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.wandb_logger import is_wandb_available, init_wandb
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -86,8 +85,8 @@ class Trainer(CommMixin):
             )
 
         self.train_stream = torch.cuda.current_stream()
-        self.train_event_queue = deque()
-        model = build_model(config)
+        self.init_comm()
+        model = ModelRegistry.build_model(config)
 
         # FP8 settings
         with torch.device("meta"):
@@ -112,7 +111,6 @@ class Trainer(CommMixin):
             torch.cuda.empty_cache()
             self.model_parts = model.separate_model_parts()
             self.model = model
-            self.init_comm(model.use_hfllm_type)
             # util.add_nan_checks(model)
         except Exception as e:
             import traceback
@@ -283,6 +281,64 @@ class Trainer(CommMixin):
 
         torch.distributed.barrier()
 
+        def upload_handler(config, is_final, path, rel_path, max_retries=3):
+            """Handle the upload of the model to huggingface and s3."""
+            # upload the final model to huggingface
+            if config.train.ckpt.upload_hf and is_final:
+                username = whoami()["name"]
+                repo_id = (
+                    username
+                    + "/"
+                    + config.train.ckpt.hf_repo_name
+                    + "-"
+                    + config.train.timestamp
+                )
+                logger.info(f"Uploading the final model to huggingface: {repo_id}...")
+                retry = 0
+                success = False
+                while retry < max_retries:
+                    try:
+                        create_repo(repo_id, exist_ok=True)
+                        # hide redundant logs of huggingface
+                        disable_progress_bars()
+                        upload_folder(
+                            folder_path=path,
+                            path_in_repo=".",
+                            repo_id=repo_id,
+                            commit_message="Upload model",
+                        )
+                        enable_progress_bars()
+                        logger.info(f"Model uploaded to huggingface: {repo_id}")
+                        success = True
+                        break
+                    except Exception as e:
+                        logger.error(f"Failed to upload model to huggingface: {e}")
+                        retry += 1
+                if not success:
+                    logger.error(
+                        "All retry attempts to upload model to huggingface failed."
+                    )
+                    raise RuntimeError(
+                        f"Failed to upload model to huggingface after {max_retries} attempts."
+                    )
+            # upload the model to s3
+            if config.train.ckpt.upload_s3:
+                if is_final:
+                    # syncronizely upload the final model to s3
+                    upload_folder_to_s3(
+                        path,
+                        config.train.ckpt.s3_bucket,
+                        os.path.join(config.train.ckpt.s3_prefix, rel_path),
+                    )
+                elif config.train.ckpt.upload_s3 == "all":
+                    # asynchronously upload the model to s3
+                    upload_folder_to_s3(
+                        path,
+                        config.train.ckpt.s3_bucket,
+                        os.path.join(config.train.ckpt.s3_prefix, rel_path),
+                    )
+            logger.info(f"\n\nExported safetensors to {path}\n\n")
+
         if self.global_rank == 0:
             with open(os.path.join(path, "model.safetensors.index.json"), "w") as f:
                 json.dump(
@@ -309,63 +365,17 @@ class Trainer(CommMixin):
             except Exception:
                 logger.warning("[Policy] No generation config found, do not save it.")
 
-        def upload_handler(config, is_final, path, rel_path):
-            """Handle the upload of the model to huggingface and s3."""
-            # upload the final model to huggingface
-            if config.train.ckpt.upload_hf and is_final:
-
-                def upload_hf(folder_path, repo_id):
-                    # hide redundant logs of huggingface
-                    disable_progress_bars()
-                    upload_folder(
-                        folder_path=folder_path,
-                        path_in_repo=".",
-                        repo_id=repo_id,
-                        commit_message="Upload model",
-                    )
-                    enable_progress_bars()
-                    logger.info(f"Model uploaded to huggingface: {repo_id}")
-
-                username = whoami()["name"]
-                repo_id = (
-                    username
-                    + "/"
-                    + config.train.ckpt.hf_repo_name
-                    + "-"
-                    + config.train.timestamp
+            need_upload = (
+                self.config.train.ckpt.upload_hf and is_final
+            ) or self.config.train.ckpt.upload_s3
+            if need_upload:
+                # If the upload thread is already running, wait for it to finish
+                if self.upload_thread is not None:
+                    self.upload_thread.join()
+                self.upload_thread = threading.Thread(
+                    target=upload_handler,
+                    args=(self.config, is_final, path, rel_path),
+                    name="upload_safetensors",
+                    daemon=True,
                 )
-                create_repo(repo_id, exist_ok=True)
-                logger.info(f"Uploading the final model to huggingface: {repo_id}...")
-                upload_hf(path, repo_id)
-            # upload the model to s3
-            if config.train.ckpt.upload_s3:
-                if is_final:
-                    # syncronizely upload the final model to s3
-                    upload_folder_to_s3(
-                        path,
-                        config.train.ckpt.s3_bucket,
-                        os.path.join(config.train.ckpt.s3_prefix, rel_path),
-                    )
-                elif config.train.ckpt.upload_s3 == "all":
-                    # asynchronously upload the model to s3
-                    upload_folder_to_s3(
-                        path,
-                        config.train.ckpt.s3_bucket,
-                        os.path.join(config.train.ckpt.s3_prefix, rel_path),
-                    )
-            logger.info(f"\n\nExported safetensors to {path}\n\n")
-
-        need_upload = (
-            self.config.train.ckpt.upload_hf and is_final
-        ) or self.config.train.ckpt.upload_s3
-        if need_upload:
-            # If the upload thread is already running, wait for it to finish
-            if self.upload_thread is not None:
-                self.upload_thread.join()
-            self.upload_thread = threading.Thread(
-                target=upload_handler,
-                args=(self.config, is_final, path, rel_path),
-                name="upload_safetensors",
-                daemon=True,
-            )
-            self.upload_thread.start()
+                self.upload_thread.start()

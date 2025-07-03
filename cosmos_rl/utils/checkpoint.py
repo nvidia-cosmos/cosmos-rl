@@ -22,7 +22,6 @@ import random
 import shutil
 import numpy as np
 import concurrent.futures as futures
-from dataclasses import asdict
 from botocore.exceptions import ClientError
 from botocore.config import Config as BotoConfig
 from cosmos_rl.utils.util import is_master_rank
@@ -35,38 +34,48 @@ def upload_file_to_s3(
     local_file_path: str,
     bucket_name: str,
     s3_file_path: str,
+    max_retries: int = 3,
 ):
     config = BotoConfig(retries={"max_attempts": 10, "mode": "standard"})
     s3_client = boto3.client("s3", config=config)
+    retry = 0
     try:
         s3_client.head_bucket(Bucket=bucket_name)
     except ClientError:
-        print(f"Bucket {bucket_name} does not exist, creating it now.")
+        logger.info(f"Bucket {bucket_name} does not exist, creating it now.")
         s3_client.create_bucket(Bucket=bucket_name)
-    s3_client.upload_file(local_file_path, bucket_name, s3_file_path)
-    logger.info(f"Uploaded {local_file_path} to s3://{bucket_name}/{s3_file_path}")
+    while retry < max_retries:
+        try:
+            s3_client.upload_file(local_file_path, bucket_name, s3_file_path)
+            logger.info(
+                f"Uploaded {local_file_path} to s3://{bucket_name}/{s3_file_path}"
+            )
+            return
+        except ClientError as e:
+            retry += 1
+            logger.error(
+                f"Failed to upload {local_file_path} to s3://{bucket_name}/{s3_file_path}. "
+                f"Retry {retry}/{max_retries}. Error: {e}"
+            )
+    logger.error(
+        f"Failed to upload {local_file_path} to s3://{bucket_name}/{s3_file_path} "
+        f"after {max_retries} retries."
+    )
 
 
 def upload_folder_to_s3(
     local_folder: str,
     bucket_name: str,
     s3_folder: str,
+    max_retries: int = 3,
 ):
-    config = BotoConfig(retries={"max_attempts": 10, "mode": "standard"})
-    s3_client = boto3.client("s3", config=config)
-    try:
-        s3_client.head_bucket(Bucket=bucket_name)
-    except ClientError:
-        print(f"Bucket {bucket_name} does not exist, creating it now.")
-        s3_client.create_bucket(Bucket=bucket_name)
     for root, _, files in os.walk(local_folder):
         for file in files:
             local_file_path = os.path.join(root, file)
             relative_path = os.path.relpath(local_file_path, local_folder)
             s3_file_path = os.path.join(s3_folder, relative_path)
-            s3_client.upload_file(local_file_path, bucket_name, s3_file_path)
-            logger.info(
-                f"Uploaded {local_file_path} to s3://{bucket_name}/{s3_file_path}"
+            upload_file_to_s3(
+                local_file_path, bucket_name, s3_file_path, max_retries=max_retries
             )
 
 
@@ -105,15 +114,17 @@ class CheckpointMananger:
     def get_ckpt_path(self):
         # find the latest checkpoint under output_dir
         if self.config.train.resume == True:  # noqa: E712
-            root_output_dir = os.path.dirname(self.ckpt_output_dir)
+            root_output_dir = os.path.dirname(os.path.dirname(self.ckpt_output_dir))
+            cur_timestamp = os.path.basename(os.path.dirname(self.ckpt_output_dir))
             timestamps = os.listdir(root_output_dir)
             timestamps.sort()
-            steps = os.listdir(
-                os.path.join(root_output_dir, timestamps[-1], "checkpoints")
-            )
+            for timestamp in reversed(timestamps):
+                if timestamp < cur_timestamp:
+                    break
+            steps = os.listdir(os.path.join(root_output_dir, timestamp, "checkpoints"))
             steps.sort()
             base_path = os.path.join(
-                root_output_dir, timestamps[-1], "checkpoints", steps[-1], "policy"
+                root_output_dir, timestamp, "checkpoints", steps[-1], "policy"
             )
         else:
             base_path = self.config.train.resume
@@ -198,7 +209,7 @@ class CheckpointMananger:
         with open(
             os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir, "cosmos_config"), "w"
         ) as f:
-            f.write(json.dumps(asdict(self.config), indent=4))
+            f.write(json.dumps(self.config.model_dump(), indent=4))
         extra_info = {
             "rng_state": self.get_rng_state(),
             "step": step,
@@ -323,6 +334,31 @@ class CheckpointMananger:
         else:
             raise FileNotFoundError(f"No checkpoint found at {base_path}")
 
+        return extra_vars
+
+    def load_extra_info_from_checkpoint(self):
+        extra_vars = {}
+        base_path = self.get_ckpt_path()
+        # check whether checkpoint existing
+        is_ckpt_path = self.ckpt_path_check(base_path)
+        if is_ckpt_path:
+            logger.info(
+                f"Cosmos checkpoint found at {self.config.train.resume}. Loading extra info..."
+            )
+            extra_info_path = os.path.join(
+                base_path, f"extra_info_rank_{self.global_rank}.pth"
+            )
+            extra_info = self.load_extra_info(extra_info_path)
+            for key in extra_info:
+                if key == "rng_state":
+                    self.set_rng_state(extra_info["rng_state"])
+                else:
+                    extra_vars[key] = extra_info[key]
+            logger.info(
+                f"[Policy] Checkpoint extra info loaded successfully from {base_path}."
+            )
+        else:
+            raise FileNotFoundError(f"No checkpoint found at {base_path}")
         return extra_vars
 
     def save_check(self, step: int, **kwargs):

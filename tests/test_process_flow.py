@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import os
+
+os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
 import unittest
 import subprocess
 import sys
@@ -46,11 +48,14 @@ class TestProcessFlow(unittest.TestCase):
             tmpfile_toml = tmpfile.name
         controller_cmd = f"{sys.executable} -m cosmos_rl.dispatcher.run_web_panel --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"
+        env_dict = os.environ.copy()
+        env_dict["COSMOS_ROLE"] = "Controller"
         controller_process = subprocess.Popen(
             controller_cmd,
             shell=True,
             stdout=sys.stderr,
             stderr=sys.stderr,
+            env=env_dict,
         )
         os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
         # Create the Python command for torchrun
@@ -129,11 +134,14 @@ class TestProcessFlow(unittest.TestCase):
             tmpfile_toml = tmpfile.name
         controller_cmd = f"{sys.executable} -m cosmos_rl.dispatcher.run_web_panel --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"
+        env_dict = os.environ.copy()
+        env_dict["COSMOS_ROLE"] = "Controller"
         controller_process = subprocess.Popen(
             controller_cmd,
             shell=True,
             stdout=sys.stderr,
             stderr=sys.stderr,
+            env=env_dict,
         )
         os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
         # Create the Python command for torchrun

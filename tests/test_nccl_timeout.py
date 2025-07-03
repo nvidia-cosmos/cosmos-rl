@@ -25,6 +25,7 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
     nccl_allreduce,
+    nccl_abort,
 )
 
 
@@ -45,6 +46,8 @@ def routine(N: int, device: torch.device, rank: int, world_size: int):
                         print(f"[RANK {rank}] arrived here")
                     except Exception as e:
                         print(f"[RANK {rank}] error in nccl_allreduce: {e}")
+                else:
+                    nccl_abort(comm)
         except Exception as e:
             print(f"[RANK {rank}] error in nccl_timeout_watchdog: {e}")
 
@@ -93,9 +96,11 @@ def main():
     if nccl_v >= "2.26.2":
         routine(N=512 * 4096 * 512, device=device, rank=rank, world_size=world_size)
 
+    dist.destroy_process_group()
+
 
 if __name__ == "__main__":
-    if os.environ.get("LOCAL_RANK") is None:
+    if os.environ.get("RECURSIVE_ENTRYPOINT") is None:
         n_gpu = torch.cuda.device_count()
         command = [
             "torchrun",
@@ -103,8 +108,14 @@ if __name__ == "__main__":
             "1",
             "--nproc_per_node",
             str(n_gpu),
+            "--rdzv_backend",
+            "c10d",
+            "--rdzv_endpoint",
+            "localhost:12345",
             os.path.abspath(__file__),
         ]
-        subprocess.run(command)
+        env = os.environ.copy()
+        env["RECURSIVE_ENTRYPOINT"] = "1"
+        subprocess.run(command, env=env)
     else:
         main()

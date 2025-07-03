@@ -539,7 +539,7 @@ def run_policy_broadcast_to_policy(shm_names, shm_size, rank, total_rep, self_re
 
 def run_dummy_policy():
     """Run as a dummy policy process for testing"""
-    from cosmos_rl.policy.train import run_train
+    from cosmos_rl.policy.train import main as policy_main
 
     def dummy_train_grpo(
         self, current_step: int, total_steps: int, remain_samples_num: int
@@ -565,7 +565,7 @@ def run_dummy_policy():
 
     GRPOTrainer.get_policy_command_handler = get_policy_command_handler
     SFTTrainer.train = dummy_train_sft
-    run_train()
+    policy_main()
 
 
 def run_dummy_rollout():
@@ -616,10 +616,6 @@ def run_dummy_rollout():
     run_rollout()
 
 
-def dummy_controller():
-    """Run as a dummy controller process for testing purposes"""
-
-
 def main():
     # Get shared memory name and size from command line arguments
     shm_name = sys.argv[1]
@@ -627,10 +623,12 @@ def main():
     mode = sys.argv[3]
 
     if mode == "dummy_policy":
+        os.environ["COSMOS_ROLE"] = "Policy"
         # Dummy policy process for testing
         run_dummy_policy()
         exit(0)
     elif mode == "dummy_rollout":
+        os.environ["COSMOS_ROLE"] = "Rollout"
         # Dummy rollout process for testing
         run_dummy_rollout()
         exit(0)

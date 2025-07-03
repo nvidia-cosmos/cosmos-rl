@@ -13,368 +13,331 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass, field, is_dataclass, asdict, MISSING
+from pydantic import BaseModel, Field, model_validator
+from pydantic.json_schema import GenerateJsonSchema
+from pydantic_core import core_schema
 from datetime import datetime
-from typing import Any, Union, Optional, List
+from typing import Any, Union, Optional, List, Literal
 import os
 import json
 import hashlib
-import torch
-from cosmos_rl.utils.util import update_dataclass_with_dict
 from cosmos_rl.utils.modelscope import update_config_if_modelscope
 
 
-def skip_ui_field(*, default=MISSING, default_factory=MISSING, **kwargs):
-    metadata = kwargs.pop("metadata", {})
-    metadata["skip_ui"] = True
-    if default_factory is not MISSING:
-        return field(default_factory=default_factory, metadata=metadata, **kwargs)
-    elif default is not MISSING:
-        return field(default=default, metadata=metadata, **kwargs)
-    else:
-        raise ValueError("Must provide either default or default_factory.")
-
-
-def config_hash(config) -> str:
+def config_hash(config: BaseModel) -> str:
     """
     Compute the hash of a config object
     """
-    if is_dataclass(config):
-        return hashlib.md5(json.dumps(asdict(config)).encode()).hexdigest()
+    if isinstance(config, BaseModel):
+        return hashlib.md5(json.dumps(config.model_dump()).encode()).hexdigest()
     else:
         return "unhashable"
 
 
-@dataclass
-class DatasetConfig:
-    name: str = field(
+class CustomJsonSchemaGenerator(GenerateJsonSchema):
+    def generate(
+        self, schema: core_schema.CoreSchema, mode="serialization"
+    ) -> dict[str, Any]:
+        json_schema = super().generate(schema, mode)
+
+        if "properties" in json_schema:
+            properties = json_schema["properties"]
+            filtered_properties = {
+                k: v
+                for k, v in properties.items()
+                if not (isinstance(v, dict) and v.get("hide_in_doc") is True)
+            }
+            json_schema["properties"] = filtered_properties
+
+        # Remove 'hide_in_doc' from all the sub-models
+        if "$defs" in json_schema:
+            defs = json_schema["$defs"]
+            for model_def in defs:
+                filtered_sub_properties = {
+                    k: v
+                    for k, v in defs[model_def].get("properties", {}).items()
+                    if not (isinstance(v, dict) and v.get("hide_in_doc") is True)
+                }
+                json_schema["$defs"][model_def]["properties"] = filtered_sub_properties
+
+        return json_schema
+
+
+class DatasetConfig(BaseModel):
+    name: str = Field(
         default="",
-        metadata={"help": "Huggingface dataset name or local path to parquet file"},
+        description="Huggingface dataset name or local path to parquet file",
     )
 
-    subset: Optional[str] = field(
+    subset: Optional[str] = Field(
         default="",
-        metadata={"help": "Dataset subset if exists"},
+        description="Dataset subset if exists",
     )
 
-    revision: Optional[str] = field(
+    revision: Optional[str] = Field(
         default="",
-        metadata={
+        description={
             "help": "Dataset git revision if exist, can be a branch name, a tag, or a commit hash."
         },
     )
 
-    split: Union[str, List[str]] = field(
-        default_factory=list,
-        metadata={"help": "A list of dataset splits to train"},
-    )
-
-    test_size: Optional[Union[float, int]] = field(
-        default=None,
-        metadata={
-            "help": "Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set."
-        },
-    )
-
-
-@dataclass
-class SFTDataConfig:
-    type: str = skip_ui_field(default="sft")
-
-    dataset: DatasetConfig = field(
-        default_factory=DatasetConfig,
-        metadata={
-            "help": "Dataset configuration for SFT training. It includes dataset name, subset, revision, train split, and test split."
-        },
-    )
-
-    dataloader_shuffle: bool = field(
-        default=False,
-        metadata={
-            "help": "Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded."
-        },
-    )
-    enable_dataset_cache: bool = field(
-        default=False,
-        metadata={
-            "help": "Enable dataset cache process results, maybe accelerate the dataset loading",
-        },
-    )
-    dataloader_num_workers: int = field(
-        default=0, metadata={"help": "Number of subprocess to use for data loading"}
-    )
-    dataloader_prefetch_factor: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "Number of batches loaded in advance by each worker.",
-        },
-    )
-    conversation_column_name: str = field(
-        default="conversations",  # "conversation",
-        metadata={"help": "Column name for formated conversation json"},
-    )
-    system_prompt: str = field(
+    split: Union[str, List[str]] = Field(
         default="",
-        metadata={
-            "help": "System prompt for the model, which will be prepended to the prompt",
-        },
+        description="A list of dataset splits to train",
     )
 
-    def __post_init__(self):
+    test_size: Optional[Union[float, int]] = Field(
+        default=None,
+        description="Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set.",
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if isinstance(self.split, str):
+            self.split = [self.split]
+        return self
+
+
+class SFTDataConfig(BaseModel):
+    type: Literal["sft"]
+
+    dataset: DatasetConfig = Field(
+        default_factory=DatasetConfig,
+        description="Dataset configuration for SFT training. It includes dataset name, subset, revision, train split, and test split.",
+    )
+
+    dataloader_shuffle: bool = Field(
+        default=False,
+        description="Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.",
+    )
+    enable_dataset_cache: bool = Field(
+        default=False,
+        description="Enable dataset cache process results, maybe accelerate the dataset loading",
+    )
+    dataloader_num_workers: int = Field(
+        default=0, description="Number of subprocess to use for data loading"
+    )
+    dataloader_prefetch_factor: Optional[int] = Field(
+        default=None,
+        description="Number of batches loaded in advance by each worker.",
+    )
+    conversation_column_name: str = Field(
+        default="conversations",  # "conversation",
+        description="Column name for formated conversation json",
+    )
+    system_prompt: str = Field(
+        default="",
+        description="System prompt for the model, which will be prepended to the prompt",
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
+        return self
 
 
-@dataclass
-class CheckpointConfig:
-    enable_checkpoint: bool = field(
+class CheckpointConfig(BaseModel):
+    enable_checkpoint: bool = Field(
         default=False,
-        metadata={
-            "help": "Enable checkpointing for training. If set to False, no checkpoint will be saved."
-        },
+        description="Enable checkpointing for training. If set to False, no checkpoint will be saved.",
     )
 
-    save_freq: int = field(
-        default=20, metadata={"help": "Checkpoint save frequency for training steps"}
+    save_freq: int = Field(
+        default=20, description="Checkpoint save frequency for training steps"
     )
-    save_mode: str = field(
+    save_mode: str = Field(
         default="async",
-        metadata={
-            "choices": ["async", "sync"],
-            "help": "Checkpoint save mode for training steps",
-        },
+        description="Checkpoint save mode for training steps",
+        choices=["async", "sync"],
     )
-    max_keep: int = field(
+    max_keep: int = Field(
         default=5,
-        metadata={
-            "help": "Maximum number of checkpoints to keep. If set to -1, all checkpoints will be kept."
-        },
+        description="Maximum number of checkpoints to keep. If set to -1, all checkpoints will be kept.",
     )
-    export_safetensors: bool = field(
+    export_safetensors: bool = Field(
         default=True,
-        metadata={
-            "help": "Whether to export a safetensors weight for huggingface usage, include related config files."
-        },
+        description="Whether to export a safetensors weight for huggingface usage, include related config files.",
     )
-    upload_hf: bool = field(
+    upload_hf: bool = Field(
         default=False,
-        metadata={"help": "Whather to upload the safetensors weight to huggingface."},
+        description="Whether to upload the safetensors weight to huggingface.",
     )
-    hf_repo_name: str = field(
+    hf_repo_name: str = Field(
         default="Comos-Reason1",
-        metadata={
-            "help": "The huggingface repo name to upload the safetensors weight."
-        },
+        description="The huggingface repo name to upload the safetensors weight.",
     )
-    upload_s3: Union[bool, str] = field(
+    upload_s3: Union[bool, str] = Field(
         default=False,
-        metadata={
-            "help": "Whether to upload the checkpoint and safetensors to S3. Default to False, set `final` will upload the final checkpoint, `all` will upload all checkpoints."
-        },
+        description="Whether to upload the checkpoint and safetensors to S3. Default to False, set `final` will upload the final checkpoint, `all` will upload all checkpoints.",
     )
-    s3_bucket: Optional[str] = field(
+    s3_bucket: Optional[str] = Field(
         default=None,
-        metadata={
-            "help": "The S3 bucket name to upload the checkpoint and safetensors weight."
-        },
+        description="The S3 bucket name to upload the checkpoint and safetensors weight.",
     )
-    s3_prefix: str = field(
+    s3_prefix: str = Field(
         default="outputs",
-        metadata={
-            "help": "The S3 prefix to upload the checkpoint and safetensors weight."
-        },
+        description="The S3 prefix to upload the checkpoint and safetensors weight.",
     )
 
-    def __post_init__(self):
-        if self.upload_s3 and self.s3_bucket is None:
-            raise ValueError(
-                "s3_bucket must be specified when upload_s3 is True, got None"
-            )
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if self.upload_s3:
+            if self.upload_s3 not in ["final", "all"]:
+                raise ValueError(
+                    "upload_s3 must be one of ['final', 'all'] or False, got {}".format(
+                        self.upload_s3
+                    )
+                )
+            if self.s3_bucket is None:
+                raise ValueError(
+                    "s3_bucket must be specified when upload_s3 is True, got None"
+                )
         if self.save_mode not in ["async", "sync"]:
             raise ValueError(
                 f"Invalid save_mode: {self.save_mode}. Must be one of ['async', 'sync']"
             )
         if self.save_freq <= 0:
             raise ValueError(f"save_freq must be greater than 0, got {self.save_freq}")
+        return self
 
 
-@dataclass
-class OverlongRewardConfig:
-    enable_overlong_penalty: bool = field(
+class OverlongRewardConfig(BaseModel):
+    enable_overlong_penalty: bool = Field(
         default=False,
-        metadata={
-            "help": "Enable overlong penalty for the model. If set to True, the output will be penalized for responses that are too long."
-        },
+        description="Enable overlong penalty for the model. If set to True, the output will be penalized for responses that are too long.",
     )
-    buffer_length: int = field(
+    buffer_length: int = Field(
         default=4096,
-        metadata={
-            "help": "Length of the buffer for overlong penalty. If the response length exceeds this value, the output will be penalized."
-        },
+        description="Length of the buffer for overlong penalty. If the response length exceeds this value, the output will be penalized.",
     )
-    penalty_factor: float = field(
+    penalty_factor: float = Field(
         default=1.0,
-        metadata={
-            "help": "Penalty factor for overlong penalty. The penalry increases linearly with the length of the response exceeding the buffer length from 0 to the penalty_factor."
-        },
+        description="Penalty factor for overlong penalty. The penalty increases linearly with the length of the response exceeding the buffer length from 0 to the penalty_factor.",
     )
 
 
-@dataclass
-class GrpoConfig:
-    type: str = skip_ui_field(default="grpo")
-    variant: str = field(
+class GrpoConfig(BaseModel):
+    type: Literal["grpo"]
+    variant: str = Field(
         default="grpo",
-        metadata={
-            "help": "Variant of the GRPO, currently support `grpo`, and `dapo`",
-            "choices": ["grpo", "dapo"],
-        },
+        description="Variant of the GRPO, currently support `grpo`, and `dapo`",
+        choices=["grpo", "dapo"],
     )
 
-    dataset: DatasetConfig = field(
+    dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
-        metadata={
-            "help": "Dataset configuration for GRPO training. It includes dataset name, subset, revision, train split, test split and test size."
-        },
+        description="Dataset configuration for GRPO training. It includes dataset name, subset, revision, train split, test split and test size.",
     )
 
-    dataloader_shuffle: bool = field(
+    dataloader_shuffle: bool = Field(
         default=True,
-        metadata={
-            "help": "Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded."
-        },
+        description="Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.",
     )
-    enable_dataset_cache: bool = field(
+    enable_dataset_cache: bool = Field(
         default=False,
-        metadata={
-            "help": "Enable dataset cache process results, maybe accelerate the dataset loading",
-        },
+        description="Enable dataset cache process results, maybe accelerate the dataset loading",
     )
-    dataloader_num_workers: int = field(
-        default=0, metadata={"help": "Number of subprocess to use for data loading"}
+    dataloader_num_workers: int = Field(
+        default=0, description="Number of subprocess to use for data loading"
     )
-    dataloader_prefetch_factor: Optional[int] = field(
+    dataloader_prefetch_factor: Optional[int] = Field(
         default=None,
-        metadata={
-            "help": "Number of batches loaded in advance by each worker.",
-        },
+        description="Number of batches loaded in advance by each worker.",
     )
-    prompt_column_name: str = field(
+    prompt_column_name: str = Field(
         default="",
-        metadata={"help": "Column name for prompt"},
+        description="Column name for prompt",
     )
-    response_column_name: str = field(
+    response_column_name: str = Field(
         default="",
-        metadata={"help": "Column name for response/reference answer"},
+        description="Column name for response/reference answer",
     )
-    reward_function: List[str] = field(
+    reward_function: Union[str, List[str]] = Field(
         default_factory=lambda: ["single_choice"],
-        metadata={
-            "help": "A List of reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. ",
-        },
+        description="A List of reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. ",
     )
-    temperature: float = field(
+    temperature: float = Field(
         default=1.0,
-        metadata={
-            "help": "Temperature for sampling. The higher the temperature, the more random the completions."
-        },
+        description="Temperature for sampling. The higher the temperature, the more random the completions.",
     )
 
-    epsilon_low: float = field(
+    epsilon_low: float = Field(
         default=0.2,
-        metadata={"help": "Epsilon value for clipping."},
+        description="Epsilon value for clipping.",
     )
 
-    epsilon_high: float = field(
+    epsilon_high: float = Field(
         default=0.2,
-        metadata={
-            "help": "Upper-bound epsilon value for clipping. If not specified, it defaults to the same value as the "
-            "lower-bound specified in argument `epsilon`. Paper DAPO recommends `0.28`."
-        },
+        description="Upper-bound epsilon value for clipping. If not specified, it defaults to the same value as the "
+        "lower-bound specified in argument `epsilon`. Paper DAPO recommends `0.28`.",
     )
 
-    lower_bound_ratio: float = field(
+    lower_bound_ratio: float = Field(
         default=3.0,
-        metadata={"help": "Lower-bound ratio for dual-clip."},
+        description="Lower-bound ratio for dual-clip.",
     )
 
-    loss_type: str = field(
+    loss_type: str = Field(
         default="token-mean",
-        metadata={
-            "choices": ["token-mean", "seq-mean-token-sum", "seq-mean-token-mean"],
-            "help": "The type of loss to use for GRPO training.",
-        },
+        description="The type of loss to use for GRPO training.",
+        choices=["token-mean", "seq-mean-token-sum", "seq-mean-token-mean"],
     )
 
-    unbiased_loss_max_tokens: Optional[int] = field(
+    unbiased_loss_max_tokens: Optional[int] = Field(
         default=None,
-        metadata={
-            "help": "Maximum number of tokens to use for unbiased loss introduced in Dr.GRPO. If set to None, will not use unbiased loss."
-            "Only available when `loss_type` is `seq-mean-token-mean`"
-        },
+        description="Maximum number of tokens to use for unbiased loss introduced in Dr.GRPO. If set to None, will not use unbiased loss."
+        "Only available when `loss_type` is `seq-mean-token-mean`",
     )
 
-    unbiased_advantage: bool = field(
+    unbiased_advantage: bool = Field(
         default=False,
-        metadata={
-            "help": "Whether to divide the advantage by the standard deviation of rewards."
-        },
+        description="Whether to divide the advantage by the standard deviation of rewards.",
     )
 
-    overlong_reward: OverlongRewardConfig = field(
+    overlong_reward: OverlongRewardConfig = Field(
         default_factory=OverlongRewardConfig,
-        metadata={
-            "help": "Configuration for overlong reward penalty. If enabled, the output will be penalized for responses that are too long."
-        },
+        description="Configuration for overlong reward penalty. If enabled, the output will be penalized for responses that are too long.",
     )
 
-    kl_beta: float = field(
+    kl_beta: float = Field(
         default=0.0,
-        metadata={
-            "help": "KL coefficient. If `0.0`, the reference model is not loaded, reducing memory usage and improving "
-            "training speed, but may be numerically unstable for long training runs."
-        },
+        description="KL coefficient. If `0.0`, the reference model is not loaded, reducing memory usage and improving "
+        "training speed, but may be numerically unstable for long training runs.",
     )
 
-    aipo_rho: Optional[float] = field(
+    aipo_rho: Optional[float] = Field(
         default=None,
-        metadata={
-            "help": "Rho value for AIPO (Asynchronous Importance weighted Policy Optimization). The clipping constant of the importance sampling ratio, suggest [2,10]. "
-            "reference: https://arxiv.org/pdf/2505.24034"
-        },
+        description="Rho value for AIPO (Asynchronous Importance weighted Policy Optimization). The clipping constant of the importance sampling ratio, suggest [2,10]. "
+        "reference: https://arxiv.org/pdf/2505.24034",
     )
 
-    mu_iterations: int = field(
+    mu_iterations: int = Field(
         default=1,
-        metadata={
-            "help": "Number of iterations per batch (denoted as μ in the algorithm)."
-        },
+        description="Number of iterations per batch (denoted as μ in the algorithm).",
     )
 
-    mini_batch: int = field(
+    mini_batch: int = Field(
         default=2,
-        metadata={"help": "mini-batch size for GRPO training."},
+        description="mini-batch size for GRPO training.",
     )
 
-    allowed_outdated_steps: int = field(
+    allowed_outdated_steps: int = Field(
         default=4,
-        metadata={
-            "help": "Allowed outdated-async steps for rollout engine. "
-            "If the number of left pending rollouts is larger than the `allowed_outdated_steps * n_policy_replicas * train_batch_per_replica`, "
-            "then rollout engine traffic will be throttled. "
-        },
+        description="Allowed outdated-async steps for rollout engine. "
+        "If the number of left pending rollouts is larger than the `allowed_outdated_steps * n_policy_replicas * train_batch_per_replica`, "
+        "then rollout engine traffic will be throttled. ",
     )
 
-    min_filter_prefix_tokens: Optional[int] = field(
+    min_filter_prefix_tokens: Optional[int] = Field(
         default=None,
-        metadata={
-            "help": "Minimum number of tokens to filter the prefix tokens for the rollouts inside the same group. "
-            "If the number of tokens is larger than the `min_filter_prefix_tokens`, the rollouts with the same prefix but different rewards will be filtered out in loss calculation. "
-        },
+        description="Minimum number of tokens to filter the prefix tokens for the rollouts inside the same group. "
+        "If the number of tokens is larger than the `min_filter_prefix_tokens`, the rollouts with the same prefix but different rewards will be filtered out in loss calculation.",
     )
 
-    def __post_init__(self):
+    @model_validator(mode="after")
+    def check_params_value(self):
         assert self.variant in [
             "grpo",
             "dapo",
@@ -382,232 +345,174 @@ class GrpoConfig:
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
+        if isinstance(self.reward_function, str):
+            self.reward_function = [self.reward_function]
+        assert (
+            len(self.reward_function) > 0
+        ), "reward_function must be a list of reward functions"
+        return self
 
 
-@dataclass
-class SubProfilerConfig:
-    do_profile: bool = field(
-        default=False, metadata={"help": "Whether to profile, only used in runtime."}
+class SubProfilerConfig(BaseModel):
+    do_profile: bool = Field(
+        default=False, description="Whether to profile, only used in runtime."
     )
-    active_steps: int = field(default=1, metadata={"help": "Number of active steps"})
-    rank_filter: List[int] = field(
-        default_factory=list, metadata={"help": "Rank filter"}
-    )
-    record_shape: bool = field(
-        default=False, metadata={"help": "Whether to record shape"}
-    )
-    profile_memory: bool = field(
-        default=False, metadata={"help": "Whether to profile memory"}
-    )
-    with_stack: bool = field(
-        default=False, metadata={"help": "Whether to profile stack"}
-    )
-    with_modules: bool = field(
-        default=False, metadata={"help": "Whether to profile modules"}
-    )
+    active_steps: int = Field(default=1, description="Number of active steps")
+    rank_filter: List[int] = Field(default_factory=list, description="Rank filter")
+    record_shape: bool = Field(default=False, description="Whether to record shape")
+    profile_memory: bool = Field(default=False, description="Whether to profile memory")
+    with_stack: bool = Field(default=False, description="Whether to profile stack")
+    with_modules: bool = Field(default=False, description="Whether to profile modules")
 
 
-@dataclass
-class ProfilerConfig:
-    enable_profiler: bool = field(
+class ProfilerConfig(BaseModel):
+    enable_profiler: bool = Field(
         default=False,
-        metadata={
-            "help": "Enable profiler for training",
-        },
+        description="Enable profiler for training",
     )
-
-    sub_profiler_config: SubProfilerConfig = field(
-        default_factory=SubProfilerConfig, metadata={"help": "Sub profiler config"}
+    sub_profiler_config: SubProfilerConfig = Field(
+        default_factory=SubProfilerConfig, description="Sub profiler config"
     )
 
 
-@dataclass
-class FP8Config:
-    enable_fp8: bool = field(default=False, metadata={"help": "Whether to enable fp8."})
-    fp8_recipe: str = field(
+class FP8Config(BaseModel):
+    enable_fp8: bool = Field(default=False, description="Whether to enable fp8.")
+    fp8_recipe: str = Field(
         default="dynamic_scaling",
-        metadata={
-            "choices": ["dynamic_scaling", "delayed_scaling"],
-            "help": "Recipe for weight scale calculation.",
-        },
+        description="Recipe for weight scale calculation.",
+        choices=["dynamic_scaling", "delayed_scaling"],
     )
-    quant_recipe: str = field(
+    quant_recipe: str = Field(
         default="rowwise",
-        metadata={
-            "choices": ["rowwise", "tensorwise"],
-            "help": "Quantization strategy for weight.",
-        },
+        description="Quantization strategy for weight.",
+        choices=["rowwise", "tensorwise"],
     )
 
 
-@dataclass
-class TrainingConfig:
-    train_policy: Union[SFTDataConfig, GrpoConfig] = field(
-        default_factory=SFTDataConfig
+class TrainingConfig(BaseModel):
+    train_policy: Union[SFTDataConfig, GrpoConfig] = Field(
+        discriminator="type", default=GrpoConfig(type="grpo")
     )
-    fp8: FP8Config = field(default_factory=FP8Config)
-    ckpt: CheckpointConfig = field(default_factory=CheckpointConfig)
-    resume: Union[bool, str] = field(
+    fp8: FP8Config = Field(default_factory=FP8Config)
+    ckpt: CheckpointConfig = Field(default_factory=CheckpointConfig)
+    resume: Union[bool, str] = Field(
         default=False,
-        metadata={
-            "help": "Resume training from a checkpoint. If True, will resume from the latest checkpoint of the `output_dir`. If a string, will resume from the specified checkpoint path."
-        },
+        description="Resume training from a checkpoint. If True, will resume from the latest checkpoint of the `output_dir`. If a string, will resume from the specified checkpoint path.",
     )
-    epoch: int = field(default=1, metadata={"help": "Number of epochs for training"})
-    output_dir: str = field(default="./outputs", metadata={"help": "Output directory"})
-    timestamp: str = skip_ui_field(
+    epoch: int = Field(default=1, description="Number of epochs for training")
+    output_dir: str = Field(default="./outputs", description="Output directory")
+    timestamp: str = Field(
         default="",
-        metadata={
-            "help": "Timestamp for the output directory and wandb ID, if not set, will be generated automatically"
-        },
+        description="Timestamp for the output directory and wandb ID, if not set, will be generated automatically",
     )
-    epsilon: float = field(default=1e-6, metadata={"help": "Epsilon for optimizer"})
-    optm_name: str = field(
+    epsilon: float = Field(default=1e-6, description="Epsilon for optimizer")
+    optm_name: str = Field(
         default="AdamW",
-        metadata={"choices": ["AdamW", "Adam"], "help": "Optimizer name"},
+        description="Optimizer name",
+        choices=["AdamW", "Adam"],
     )
-    optm_lr: Union[float, List[float]] = field(
+    optm_lr: Union[float, List[float]] = Field(
         default=1e-6,
-        metadata={
-            "help": "Learning rate for optimizer, can be a float or a list of floats for multiple optimizers"
-        },
+        description="Learning rate for optimizer, can be a float or a list of floats for multiple optimizers",
     )
-    optm_impl: Union[str, List[str]] = field(
+    optm_impl: Union[str, List[str]] = Field(
         default="fused",
-        metadata={
-            "choices": ["fused", "foreach", "for-loop"],
-            "help": "More info: https://pytorch.org/docs/stable/optim.html, can be a list of strings for multiple optimizers",
-        },
+        description="Implementation type for optimizer. More info: https://pytorch.org/docs/stable/optim.html, can be a list of strings for multiple optimizers",
+        choices=["fused", "foreach", "for-loop"],
     )
-    optm_weight_decay: float = field(
-        default=0.01, metadata={"help": "Weight decay for optimizer"}
+    optm_weight_decay: float = Field(
+        default=0.01, description="Weight decay for optimizer"
     )
-    optm_betas: tuple[float, float] = field(
-        default=(0.9, 0.999), metadata={"help": "Betas for optimizer"}
+    optm_betas: tuple[float, float] = Field(
+        default=(0.9, 0.999), description="Betas for optimizer"
     )
-    optm_warmup_steps: int = field(
-        default=20, metadata={"help": "Warmup steps for optimizer"}
-    )
-    optm_grad_norm_clip: float = field(
-        default=1.0, metadata={"help": "Gradient norm clip for optimizer"}
+    optm_warmup_steps: int = Field(default=20, description="Warmup steps for optimizer")
+    optm_grad_norm_clip: float = Field(
+        default=1.0, description="Gradient norm clip for optimizer"
     )
 
-    async_tp_enabled: bool = field(
-        default=False, metadata={"help": "Whether to use async tensor parallelism"}
+    async_tp_enabled: bool = Field(
+        default=False, description="Whether to use async tensor parallelism"
     )
 
-    compile: bool = field(
-        default=True, metadata={"help": "Whether to use torch.compile"}
-    )
+    compile: bool = Field(default=True, description="Whether to use torch.compile")
 
-    param_dtype: str = field(
+    param_dtype: str = Field(
         default="bfloat16",
-        metadata={
-            "help": "The data type for parameters and activations",
-            "choices": ["bfloat16", "float16", "float32"],
-        },
+        description="The data type for parameters and activations",
+        choices=["bfloat16", "float16", "float32"],
     )
 
-    fsdp_reduce_dtype: str = field(
+    fsdp_reduce_dtype: str = Field(
         default="float32",
-        metadata={
-            "help": "The data type for reduction in FSDP",
-            "choices": ["float32"],
-        },
+        description="The data type for reduction in FSDP",
+        choices=["float32"],
     )
-    fsdp_offload: bool = field(
+    fsdp_offload: bool = Field(
         default=False,
-        metadata={"help": "Whether to offload the model to CPU if using FSDP"},
+        description="Whether to offload the model to CPU if using FSDP",
     )
 
-    fsdp_reshard_after_forward: str = field(
+    fsdp_reshard_after_forward: str = Field(
         default="default",
-        metadata={
-            "help": "Reshard the param after forward pass in FSDP",
-            "choices": ["always", "never", "default"],
-        },
+        description="Reshard the param after forward pass in FSDP",
+        choices=["always", "never", "default"],
     )
 
-    train_batch_per_replica: int = field(
+    train_batch_per_replica: int = Field(
         default=8,
-        metadata={
-            "help": "The batch size for training per iteration in one replica, this is the local batch size for each gradient accumulation step",
-        },
+        description="The batch size for training per iteration in one replica, this is the local batch size for each gradient accumulation step",
     )
 
-    enable_validation: bool = field(
+    enable_validation: bool = Field(
         default=False,
-        metadata={"help": "Enable validation during training."},
+        description="Enable validation during training.",
     )
-    validation_step: int = field(
+    validation_step: int = Field(
         default=20,
-        metadata={
-            "help": "Validation frequency during training, in terms of training steps",
-        },
+        description="Validation frequency during training, in terms of training steps",
     )
-    validation_batch_per_replica: int = field(
+    validation_batch_per_replica: int = Field(
         default=24,
-        metadata={
-            "help": "The batch size for validation per iteration in one replica.",
-        },
+        description="The batch size for validation per iteration in one replica.",
     )
 
-    sync_weight_interval: int = field(
+    sync_weight_interval: int = Field(
         default=1,
-        metadata={
-            "help": "The interval of train step for synchronizing weights between replicas. "
-        },
+        description="The interval of train step for synchronizing weights between replicas.",
     )
 
-    def __post_init__(self):
-        self.ckpt.__post_init__()
+    @model_validator(mode="after")
+    def check_params_value(self):
         if self.async_tp_enabled and not self.compile:
             raise ValueError(
                 "Async tensor parallelism requires torch.compile to be enabled"
             )
-
-    def key_values(self):
-        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
-
-    @property
-    def param_torch_dtype(self):
-        return {
-            "bfloat16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-        }[self.param_dtype]
-
-    @property
-    def fsdp_reduce_torch_dtype(self):
-        return {"float32": torch.float32}[self.fsdp_reduce_dtype]
+        return self
 
 
-@dataclass
-class ParallelismConfig:
-    n_init_replicas: int = field(
-        default=1, metadata={"help": "Number of initial replicas to be created"}
-    )
-    tp_size: int = field(default=2, metadata={"help": "Tensor parallelism size"})
-    cp_size: int = field(default=1, metadata={"help": "Context parallelism size"})
-    dp_shard_size: int = field(
-        default=-1, metadata={"help": "Data Parallelism size in sharded mode"}
-    )
-    pp_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
-    pp_dynamic_shape: bool = field(
-        default=False, metadata={"help": "Pipeline parallelism dynamic shape"}
-    )
-    pp_micro_batch_size: int = field(
+class ParallelismConfig(BaseModel):
+    n_init_replicas: int = Field(
         default=1,
-        metadata={
-            "help": "Pipeline parallelism micro batch size, `n_micro_batch = batch_size / pp_micro_batch_size`, which must be divisible by `pp` stages"
-        },
+        description="Number of initial replicas to be created",
     )
-    dp_replicate_size: int = skip_ui_field(
+    tp_size: int = Field(default=2, description="Tensor parallelism size")
+    cp_size: int = Field(default=1, description="Context parallelism size")
+    dp_shard_size: int = Field(
+        default=-1, description="Data Parallelism size in sharded mode"
+    )
+    pp_size: int = Field(default=1, description="Pipeline parallelism size")
+    pp_dynamic_shape: bool = Field(
+        default=False, description="Pipeline parallelism dynamic shape"
+    )
+    pp_micro_batch_size: int = Field(
         default=1,
-        metadata={
-            "help": "Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.",
-            "choices": [1],
-        },
+        description="Pipeline parallelism micro batch size, `n_micro_batch = batch_size / pp_micro_batch_size`, which must be divisible by `pp` stages",
+    )
+    dp_replicate_size: int = Field(
+        default=1,
+        description="Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.",
+        choices=[1],
     )
 
     @property
@@ -620,219 +525,191 @@ class ParallelismConfig:
         local_world_size = os.environ.get("LOCAL_WORLD_SIZE", 1)
         return int(local_world_size)
 
-    def key_values(self):
-        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
 
-
-@dataclass
-class PolicyConfig:
-    parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
-    model_name_or_path: str = field(
+class PolicyConfig(BaseModel):
+    parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
+    model_name_or_path: str = Field(
         # default="Qwen/Qwen2.5-3B-Instruct",  #'Qwen/Qwen2.5-VL-7B-Instruct'
         default="Qwen/Qwen2.5-VL-7B-Instruct",
-        metadata={
-            "help": "The model name or path, compatible with huggingface model name or local path"
-        },
+        description="The model name or path, compatible with huggingface model name or local path",
     )
-    model_max_length: int = field(
+    model_max_length: int = Field(
         default=4096,
-        metadata={
-            "help": "The maximum length for training, longer than this will be ignored for training stability"
-        },
+        description="The maximum length for training, longer than this will be ignored for training stability",
     )
-    model_gradient_checkpointing: bool = field(
-        default=True, metadata={"help": "Whether to use gradient checkpointing"}
+    model_gradient_checkpointing: bool = Field(
+        default=True, description="Whether to use gradient checkpointing"
     )
 
-    def key_values(self):
-        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+    @model_validator(mode="after")
+    def check_params_value(self):
+        assert (
+            self.model_name_or_path is not None and self.model_name_or_path != ""
+        ), "model_name_or_path is required"
+        assert self.parallelism.tp_size > 0, "tp_size must be greater than 0"
+        assert self.parallelism.cp_size > 0, "cp_size must be greater than 0"
+        assert self.parallelism.pp_size > 0, "pp_size must be greater than 0"
+        assert (
+            self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
+        ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
+        return self
 
 
-@dataclass
 class RolloutParallelismConfig(ParallelismConfig):
-    n_init_replicas: int = field(
-        default=1, metadata={"help": "Number of initial replicas to be created"}
+    n_init_replicas: int = Field(
+        default=1, description="Number of initial replicas to be created"
     )
-    tp_size: int = field(default=2, metadata={"help": "Tensor parallelism size"})
-    pp_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
+    tp_size: int = Field(default=2, description="Tensor parallelism size")
+    pp_size: int = Field(default=1, description="Pipeline parallelism size")
 
     # Fields below are that we do not want user to config it.
-    dp_replicate_size: int = skip_ui_field(
+    dp_replicate_size: int = Field(
         default=1,
-        metadata={
-            "help": "Data Parallelism size in replica mode, only 1 is supported for dynamic scaling purpose.",
-            "choices": [1],
-        },
+        description="Data Parallelism size in replica mode, only 1 is supported for dynamic scaling purpose.",
+        choices=[1],
     )
-    cp_size: int = skip_ui_field(
-        default=1, metadata={"help": "Context parallelism size"}
-    )
-    dp_shard_size: int = skip_ui_field(
-        default=-1, metadata={"help": "Data Parallelism size in sharded mode"}
+    cp_size: int = Field(default=1, description="Context parallelism size")
+    dp_shard_size: int = Field(
+        default=-1, description="Data Parallelism size in sharded mode"
     )
 
 
-@dataclass
-class SamplingConfig:
-    temperature: float = field(
-        default=1.0, metadata={"help": "Temperature for sampling."}
+class SamplingConfig(BaseModel):
+    temperature: float = Field(default=1.0, description="Temperature for sampling.")
+    top_p: float = Field(default=1.0, description="Top-p for sampling.")
+    top_k: int = Field(default=-1, description="Top-k for sampling.")
+    repetition_penalty: float = Field(
+        default=1.0, description="Repetition penalty for sampling."
     )
-    top_p: float = field(default=1.0, metadata={"help": "Top-p for sampling."})
-    top_k: int = field(default=-1, metadata={"help": "Top-k for sampling."})
-    repetition_penalty: float = field(
-        default=1.0, metadata={"help": "Repetition penalty for sampling."}
-    )
-    use_flashinfer: bool = field(
-        default=False, metadata={"help": "Use flashinfer for sampling."}
+    use_flashinfer: bool = Field(
+        default=False, description="Use flashinfer for sampling."
     )
 
 
-@dataclass
-class ValidationConfig:
-    dataset: DatasetConfig = field(
+class ValidationConfig(BaseModel):
+    dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
-        metadata={
-            "help": "Dataset configuration for validation. It includes dataset name, subset, revision and test split."
-        },
+        description="Dataset configuration for validation. It includes dataset name, subset, revision and test split.",
     )
 
-    temperature: float = field(
-        default=0.9, metadata={"help": "Temperature for sampling during validation."}
+    temperature: float = Field(
+        default=0.9, description="Temperature for sampling during validation."
     )
-    top_p: float = field(
-        default=1.0, metadata={"help": "Top-p for sampling during validation."}
+    top_p: float = Field(
+        default=1.0, description="Top-p for sampling during validation."
     )
-    top_k: int = field(
-        default=10, metadata={"help": "Top-k for sampling during validation."}
+    top_k: int = Field(default=10, description="Top-k for sampling during validation.")
+    repetition_penalty: float = Field(
+        default=1.0, description="Repetition penalty for sampling during validation."
     )
-    repetition_penalty: float = field(
-        default=1.0,
-        metadata={"help": "Repetition penalty for sampling during validation."},
-    )
-    n_generation: int = field(
+    n_generation: int = Field(
         default=1,
-        metadata={
-            "help": "n parameter same like what in OpenAI chat API for validation."
-        },
+        description="n parameter same like what in OpenAI chat API for validation.",
     )
-    max_response_length: int = field(
+    max_response_length: int = Field(
         default=2048,
-        metadata={"help": "Max output length of rollout generation during validation."},
+        description="Max output length of rollout generation during validation.",
     )
 
 
-@dataclass
-class RolloutConfig:
-    parallelism: RolloutParallelismConfig = field(
+class RolloutConfig(BaseModel):
+    parallelism: RolloutParallelismConfig = Field(
         default_factory=RolloutParallelismConfig
     )
-    enforce_eager: bool = field(
-        default=True, metadata={"help": "Whether to enable eager execution for vLLM."}
+    enforce_eager: bool = Field(
+        default=True, description="Whether to enable eager execution for vLLM."
     )
-    include_stop_str_in_output: bool = field(
-        default=False, metadata={"help": "Whether to include stop string in output."}
+    include_stop_str_in_output: bool = Field(
+        default=False, description="Whether to include stop string in output."
     )
-    gpu_memory_utilization: float = field(
+    gpu_memory_utilization: float = Field(
         default=0.8,
-        metadata={"help": "GPU memory utilization factor for rollout backend."},
+        description="GPU memory utilization factor for rollout backend.",
     )
-    enable_chunked_prefill: bool = field(
-        default=False, metadata={"help": "Whether to enable chunked prefill for vLLM."}
+    enable_chunked_prefill: bool = Field(
+        default=False, description="Whether to enable chunked prefill for vLLM."
     )
-    max_response_length: int = field(
-        default=2048, metadata={"help": "Max output length of rollout generation."}
+    max_response_length: int = Field(
+        default=2048, description="Max output length of rollout generation."
     )
-    n_generation: int = field(
-        default=16, metadata={"help": "n parameter same like what in OpenAI chat API."}
+    n_generation: int = Field(
+        default=16, description="n parameter same like what in OpenAI chat API."
     )
 
-    batch_size: int = skip_ui_field(
-        default=1, metadata={"help": "Batch size for rollout."}
-    )
-    val_batch_size: Optional[int] = field(
+    batch_size: int = Field(default=1, description="Batch size for rollout.")
+    val_batch_size: Optional[int] = Field(
         default=None,
-        metadata={"help": "Batch size for rollout generation during validation."},
+        description="Batch size for rollout generation during validation.",
     )
 
     # not used yet.
-    quantization: str = skip_ui_field(
+    quantization: str = Field(
         default="none",
-        metadata={
-            "help": "Quantization in vllm rollout generation.",
-            "choices": ["none"],
-        },
+        description="Quantization in vllm rollout generation.",
+        choices=["none"],
     )
 
-    seed: int = field(default=None, metadata={"help": "random seed for rollout."})
+    seed: Optional[int] = Field(default=None, description="random seed for rollout.")
 
-    sampling_config: SamplingConfig = field(default_factory=SamplingConfig)
+    sampling_config: SamplingConfig = Field(default_factory=SamplingConfig)
 
-    vllm_use_flashinfer: bool = field(
-        default=False, metadata={"help": "Use flashinfer for vllm rollout."}
+    vllm_use_flashinfer: bool = Field(
+        default=False, description="Use flashinfer for vllm rollout."
     )
 
-    def __post_init__(self):
+    @model_validator(mode="after")
+    def check_params_value(self):
         if isinstance(self.parallelism, dict):
             self.parallelism = RolloutParallelismConfig(**self.parallelism)
-
-    def key_values(self):
-        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+        return self
 
 
-@dataclass
-class LoggingConfig:
-    logger: List[str] = field(
+class LoggingConfig(BaseModel):
+    logger: List[str] = Field(
         default_factory=list,
-        metadata={"help": "List of loggers to use, e.g., ['console', 'wandb']"},
+        description="List of loggers to use, e.g., ['console', 'wandb']",
     )
-    project_name: str = field(
+    project_name: str = Field(
         default="cosmos_rl",
-        metadata={
-            "help": "Wandb project name for logging. If set, the training will be logged to this project."
-        },
+        description="Wandb project name for logging. If set, the training will be logged to this project.",
     )
-    experiment_name: str = field(
+    experiment_name: Optional[str] = Field(
         default=None,
-        metadata={
-            "help": "A short display name for this run. If not set, will use the `output_dir` as the experiment name.",
-        },
+        description="A short display name for this run. If not set, will use the `output_dir` as the experiment name.",
     )
-    report_mfu: bool = field(
+    report_mfu: bool = Field(
         default=False,
-        metadata={
-            "help": "Whether to report the MFU (Model FLOPs Utilization) to wandb."
-        },
+        description="Whether to report the MFU (Model FLOPs Utilization) to wandb.",
+        json_schema_extra={"hide_in_doc": True},
     )
 
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if self.logger:
+            self.logger = [logger.lower() for logger in self.logger]
+        return self
 
-@dataclass
-class Config:
-    train: TrainingConfig = field(default_factory=TrainingConfig)
-    rollout: RolloutConfig = field(default_factory=RolloutConfig)
-    policy: PolicyConfig = field(default_factory=PolicyConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
-    profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
-    validation: ValidationConfig = field(default_factory=ValidationConfig)
-    redis: str = skip_ui_field(
+
+class Config(BaseModel):
+    train: TrainingConfig = Field(default_factory=TrainingConfig)
+    rollout: RolloutConfig = Field(default_factory=RolloutConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    profiler: ProfilerConfig = Field(default_factory=ProfilerConfig)
+    validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    redis: str = Field(
         default="",
-        metadata={
-            "help": "Redis server address port, format: port",
-        },
+        description="Redis server address port, format: port",
+        json_schema_extra={"hide_in_doc": True},
     )
-    eth_ips: str = skip_ui_field(
+    eth_ips: str = Field(
         default="",
-        metadata={
-            "help": "List of eth ip addresses, format: ip1;ip2;ip3",
-        },
+        description="List of eth ip addresses, format: ip1;ip2;ip3",
+        json_schema_extra={"hide_in_doc": True},
     )
-
-    def key_values(self):
-        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
 
     @classmethod
     def from_dict(cls, config_data: dict[str, Any]) -> "Config":
-        config = Config()
-
         if "train" in config_data:
             # Set unique timestamp for output directory
             if (
@@ -846,37 +723,32 @@ class Config:
                     config_data["train"]["output_dir"],
                     config_data["train"]["timestamp"],
                 )
-
-            # Handle train_policy type before general update
-            if "train_policy" in config_data["train"]:
-                train_policy_data = config_data["train"]["train_policy"]
-
-                # Determine the type based on characteristic fields
-                if any(
-                    key in train_policy_data
-                    for key in ["temperature", "epsilon_low", "epsilon_high", "kl_beta"]
-                ):
-                    config.train.train_policy = GrpoConfig()
-                else:
-                    config.train.train_policy = SFTDataConfig()
-
-        update_dataclass_with_dict(config, config_data)
-        config.validate()
+        config = cls.model_validate(config_data)
         config = update_config_if_modelscope(config)
         return config
 
-    def validate(self):
-        assert (
-            self.policy.model_name_or_path is not None
-            and self.policy.model_name_or_path != ""
-        ), "model_name_or_path is required"
-        assert self.policy.parallelism.tp_size > 0, "tp_size must be greater than 0"
-        assert self.policy.parallelism.cp_size > 0, "cp_size must be greater than 0"
-        assert self.policy.parallelism.pp_size > 0, "pp_size must be greater than 0"
-        assert (
-            self.policy.parallelism.dp_shard_size >= -1
-            and self.policy.parallelism.dp_shard_size != 0
-        ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
+    @model_validator(mode="before")
+    def preprocess(cls, data: dict) -> dict:
+        # Handle for train_policy type
+        if len(data) == 0:
+            # empty data, all fields set to default values.
+            return data
+
+        if "train_policy" in data["train"]:
+            train_policy_data = data["train"]["train_policy"]
+
+            # Determine the type based on characteristic fields
+            if any(
+                key in train_policy_data
+                for key in ["temperature", "epsilon_low", "epsilon_high", "kl_beta"]
+            ):
+                data["train"]["train_policy"]["type"] = "grpo"
+            else:
+                data["train"]["train_policy"]["type"] = "sft"
+        return data
+
+    @model_validator(mode="after")
+    def check_params_value(self):
         if self.policy.parallelism.pp_size > 1:
             assert (
                 self.policy.parallelism.pp_micro_batch_size > 0
@@ -899,35 +771,14 @@ class Config:
                 % self.policy.parallelism.pp_size
                 == 0
             ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
-        if self.train.train_policy.type == "grpo":
-            if isinstance(self.train.train_policy.reward_function, str):
-                self.train.train_policy.reward_function = [
-                    self.train.train_policy.reward_function
-                ]
-            assert (
-                len(self.train.train_policy.reward_function) > 0
-            ), "reward_function must be a list of reward functions"
-
-        if isinstance(self.train.train_policy.dataset.split, str):
-            self.train.train_policy.dataset.split = [
-                self.train.train_policy.dataset.split
-            ]
-        if isinstance(self.train.train_policy.dataset.split, str):
-            self.train.train_policy.dataset.split = [
-                self.train.train_policy.dataset.split
-            ]
 
         if self.train.train_policy.type == "grpo":
             # Handle for evaludation configuration.
             if isinstance(self.validation.dataset.split, str):
                 self.validation.dataset.split = [self.validation.dataset.split]
+        return self
 
-        if self.train.ckpt.upload_s3:
-            if self.train.ckpt.upload_s3 not in ["final", "all"]:
-                raise ValueError(
-                    "upload_s3 must be one of ['final', 'all'] or False, got {}".format(
-                        self.train.ckpt.upload_s3
-                    )
-                )
-        if self.logging.logger:
-            self.logging.logger = [logger.lower() for logger in self.logging.logger]
+
+COSMOS_CONFIG_SCHEMA = Config.model_json_schema(
+    schema_generator=CustomJsonSchemaGenerator
+)

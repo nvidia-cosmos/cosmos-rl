@@ -17,15 +17,15 @@
 from typing import Optional, Any
 from torch.utils.data import Dataset
 from datasets import load_dataset
-from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
-from cosmos_rl.policy.config import Config
+from cosmos_rl.launcher.worker_entry import main as launch_worker
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
 from transformers import AutoTokenizer
 from torch.utils.data import ConcatDataset
 
 
 class MathDapoDataset(Dataset):
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
@@ -100,8 +100,14 @@ def custom_reward_fn(
 
 
 if __name__ == "__main__":
-    launch_dispatcher(
-        dataset=MathDapoDataset(),
+
+    def get_dataset(config: CosmosConfig) -> Dataset:
+        return MathDapoDataset()
+
+    # It is best practice to pass the dataset as a factory function
+    # so that the dataset can be loaded on demand. (Not all workers need it)
+    launch_worker(
+        dataset=get_dataset,
         # Override the reward functions defined in toml
         reward_fns=[custom_reward_fn],
     )

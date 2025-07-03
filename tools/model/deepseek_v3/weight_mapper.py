@@ -15,14 +15,12 @@
 
 import torch
 from typing import List, Tuple, Dict, Any
-from cosmos_rl.rollout.weight_mapper.base import WeightMapper
+from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
 
 
-@WeightMapper.register_class(DeepseekV3MoEModel.supported_model_types())
 class DeepseekV3MoEWeightMapper(WeightMapper):
     def __init__(self, hf_config: AutoConfig):
         super().__init__(hf_config)

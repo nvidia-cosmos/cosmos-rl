@@ -6,7 +6,7 @@ from cosmos_rl.utils.fp8.fp8_util import (
     IS_TORCH_COMPATIBLE_WITH_FP8,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.config import TrainingConfig, FP8Config
+from cosmos_rl.policy.config import FP8Config
 from cosmos_rl.utils.parallelism import ParallelDims
 
 from torchao.float8.float8_linear import Float8Linear
@@ -32,15 +32,12 @@ class DemoModel(nn.Module):
 class TestFp8(unittest.TestCase):
     def _test_fp8_model_converter_delayed_scaling(self, quant_recipe, dp_shard):
         demo_model = DemoModel(input_dim=1024, output_dim=512, intermediate_dim=1024)
-        config = CosmosConfig(
-            train=TrainingConfig(
-                fp8=FP8Config(
-                    enable_fp8=True,
-                    quant_recipe=quant_recipe,
-                    fp8_recipe="delayed_scaling",
-                )
-            )
+        config = CosmosConfig()
+        fp8_config = FP8Config(
+            enable_fp8=True, quant_recipe=quant_recipe, fp8_recipe="delayed_scaling"
         )
+        config.train.fp8 = fp8_config
+
         # Mock the parallel_dims
         tp_size = 2
         parallel_dims = ParallelDims(
@@ -64,9 +61,11 @@ class TestFp8(unittest.TestCase):
         ]
         for quant_recipe, dp_shard in params:
             with self.subTest(quant_recipe=quant_recipe, dp_shard=dp_shard):
-                self._test_fp8_model_converter_delayed_scaling(
-                    quant_recipe=quant_recipe, dp_shard=dp_shard
-                )
+                # right now expect NotImplementedError for delayed scaling
+                with self.assertRaises(NotImplementedError):
+                    self._test_fp8_model_converter_delayed_scaling(
+                        quant_recipe=quant_recipe, dp_shard=dp_shard
+                    )
 
     def test_fp8_model_converter(self):
         params = [
@@ -87,13 +86,12 @@ class TestFp8(unittest.TestCase):
 
     def _test_fp8_model_converter(self, quant_recipe, fp8_recipe, dp_shard):
         demo_model = DemoModel(input_dim=1024, output_dim=512, intermediate_dim=1024)
-        config = CosmosConfig(
-            train=TrainingConfig(
-                fp8=FP8Config(
-                    enable_fp8=True, quant_recipe=quant_recipe, fp8_recipe=fp8_recipe
-                )
-            )
+        config = CosmosConfig()
+        fp8_config = FP8Config(
+            enable_fp8=True, quant_recipe=quant_recipe, fp8_recipe=fp8_recipe
         )
+        config.train.fp8 = fp8_config
+
         # Mock the parallel_dims
         tp_size = 2
         parallel_dims = ParallelDims(

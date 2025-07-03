@@ -378,6 +378,7 @@ class HighAvailabilitylNccl:
         self.replica_name_to_rank: Dict[str, int] = {}
 
         # For background thread
+        self.build_mesh_lock = threading.Lock()
         self.shutdown_event = threading.Event()
         self.is_single_peer = threading.Event()
         self.is_single_peer.clear()
@@ -431,14 +432,16 @@ class HighAvailabilitylNccl:
             except Empty:
                 continue
 
-            # 1. destory nccl comm immediately when receive any command
-            # need_abort = True if cmd == self.DESTROY_CMD else False
-            self.__execute_destroy_nccl_comm(abort=True)
+            # lock the build_mesh_lock to avoid abort in-flight nccl comm
+            with self.build_mesh_lock:
+                # 1. destory nccl comm immediately when receive any command
+                # need_abort = True if cmd == self.DESTROY_CMD else False
+                self.__execute_destroy_nccl_comm(abort=True)
 
-            # 2. build nccl comm if it is a buildmesh command
-            if isinstance(cmd, BuildMeshCommand):
-                # first, destroy the nccl comm if it exists, then build the new nccl comm
-                self.__execute_build_mesh(cmd)
+                # 2. build nccl comm if it is a buildmesh command
+                if isinstance(cmd, BuildMeshCommand):
+                    # first, destroy the nccl comm if it exists, then build the new nccl comm
+                    self.__execute_build_mesh(cmd)
 
     def __execute_destroy_nccl_comm(self, abort: bool = False):
         self.is_comm_ready.clear()
@@ -564,7 +567,10 @@ class HighAvailabilitylNccl:
                 timeout_ms = (
                     timeout_ms if timeout_ms is not None else self.default_timeout_ms
                 )
-                with nccl_timeout_watchdog(wait_stream=True, timeout_ms=timeout_ms):
+                with (
+                    nccl_timeout_watchdog(wait_stream=True, timeout_ms=timeout_ms),
+                    self.build_mesh_lock,
+                ):
                     func(
                         comm_idx=self.comm_idx,
                         timeout_ms=timeout_ms,

@@ -27,10 +27,13 @@ import struct
 import tarfile
 import ctypes
 import asyncio
+import importlib
+import importlib.util
+import sys
 from functools import wraps
 from msgpack import ExtType
 from tqdm import tqdm
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any, Optional
 import torch
 import pynvml
 from contextlib import contextmanager
@@ -225,65 +228,6 @@ def parse_collection(s):
         return None
 
 
-def update_dataclass(dc_instance, form, prefix=""):
-    """
-    Recursively update the dataclass instance based on form data.
-    The form keys are built as nested keys
-    """
-    for f in dataclasses.fields(dc_instance):
-        if f.metadata.get("skip_ui", False):
-            continue
-
-        field_name = f.name
-        full_key = f"{prefix}.{field_name}" if prefix else field_name
-        value = getattr(dc_instance, field_name)
-
-        # Handle train_policy field specially
-        if field_name == "train_policy" and hasattr(dc_instance, "train_policy"):
-            # The train_policy instance is already set to the correct type (SFT or GRPO)
-            # Just update its fields
-            update_dataclass(value, form, prefix=full_key)
-            continue
-
-        if dataclasses.is_dataclass(value):
-            update_dataclass(value, form, prefix=full_key)
-        else:
-            form_value = form.get(full_key)
-            if form_value is None:
-                if f.type == bool:
-                    new_value = False
-                else:
-                    continue
-            elif f.type == bool:
-                new_value = form_value.lower() == "true"
-            elif f.type == int:
-                new_value = int(form_value)
-            elif f.type == float:
-                new_value = float(form_value)
-            elif f.type == tuple:
-                new_value = tuple(map(float, form_value.split(",")))
-            else:
-                parsed_set = parse_collection(form_value)
-                new_value = parsed_set if parsed_set is not None else form_value
-            setattr(dc_instance, field_name, new_value)
-
-
-def update_dataclass_with_dict(dc_instance, config_data):
-    if config_data is None:
-        raise RuntimeError("Got null config.")
-    for key, value in config_data.items():
-        if hasattr(dc_instance, key):
-            current_value = getattr(dc_instance, key)
-            if dataclasses.is_dataclass(current_value):
-                if value is None:
-                    continue
-                update_dataclass_with_dict(current_value, value)
-            else:
-                setattr(dc_instance, key, value)
-        else:
-            logger.warning(f"Key {key} not found in {dc_instance}")
-
-
 def list_to_b64(lst) -> str:
     # for int64_t listy to base64
     byte_data = struct.pack(f"{len(lst)}q", *lst)
@@ -295,6 +239,21 @@ def b64_to_list(b64_str) -> List[int]:
     byte_data = base64.b64decode(b64_str)
     n = len(byte_data) // 8
     return list(struct.unpack(f"{n}q", byte_data))
+
+
+def str2torch_dtype(dtype_str: str) -> torch.dtype:
+    """
+    Convert a string representation of a dtype to a torch.dtype.
+    """
+    dtype_str = dtype_str.lower()
+    if dtype_str == "bfloat16":
+        return torch.bfloat16
+    elif dtype_str == "float16":
+        return torch.float16
+    elif dtype_str == "float32":
+        return torch.float32
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype_str}")
 
 
 @contextmanager
@@ -1018,9 +977,7 @@ def compute_logprobs(
     ), f"Logits shape {full_logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
     bsz, _, _ = full_logits.shape
     # select the effective logits
-    effective_logits = torch.gather(
-        full_logits,
-    )  # [n_logprob_tokens, vocab_size]
+    effective_logits = full_logits[logprob_masks]  # [n_logprob_tokens, vocab_size]
     effective_input_ids = shifted_input_ids[logprob_masks]  # [n_logprob_tokens,]
     masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
     cu_seqlens = torch.zeros(
@@ -1031,3 +988,46 @@ def compute_logprobs(
         effective_logits, effective_input_ids
     )  # [n_logprob_tokens,]
     return logps, cu_seqlens
+
+
+def dynamic_import_module(path: str, attr: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Dynamically import either:
+        - a single .py file
+        - a package directory (must contain __init__.py)
+    and allow it to use relative imports internally.
+
+    Args:
+        path: the path to the module to import
+        attr: the attribute to import from the module, can be recursive attribute like `model.attr_a.attr_b.attr_c....`
+
+    Returns the imported module object.
+    """
+    path = os.path.abspath(path)
+    if os.path.isdir(path):
+        # it's a package dir
+        pkg_dir = path
+        if not os.path.isfile(os.path.join(pkg_dir, "__init__.py")):
+            raise ImportError(f"{pkg_dir!r} is not a package (no __init__.py)")
+        module_name = os.path.basename(pkg_dir)
+        parent_dir = os.path.dirname(pkg_dir)
+    else:
+        # it's a single .py file
+        if not path.lower().endswith(".py"):
+            raise ImportError(f"{path!r} is neither a .py file nor a package directory")
+        parent_dir, filename = os.path.split(path)
+        module_name = os.path.splitext(filename)[0]
+    # Ensure the parent directory is on sys.path
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    # Now import by name – normal import machinery applies
+    module = importlib.import_module(module_name)
+
+    if attr:
+        obj = module
+        for attr_part in attr.split("."):
+            if not hasattr(obj, attr_part):
+                raise ImportError(f"Attribute {attr} not found in {path}")
+            obj = getattr(obj, attr_part)
+        return obj
+    return module

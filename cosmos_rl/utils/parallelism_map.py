@@ -16,8 +16,8 @@
 import torch
 from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
 from typing import Dict, List, Tuple, Callable, Any, Optional
-from cosmos_rl.rollout.weight_mapper.base import WeightMapper
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
+from cosmos_rl.policy.model.base import WeightMapper
 
 
 class DimRankInfo:
@@ -49,44 +49,14 @@ def slice_tensor_with_strategy(
     length = (
         view.shape[idx] // tensor_split_strategy.size * tensor_split_strategy.length
     )
-    if view.dim() == 1:
-        if idx == 0:
-            view = view[start : start + length]
-        else:
-            raise ValueError(f"Invalid index {idx} for 1D tensor.")
-    elif view.dim() == 2:
-        if idx == 0:
-            view = view[start : start + length, :]
-        elif idx == 1:
-            view = view[:, start : start + length]
-        else:
-            raise ValueError(f"Invalid index {idx} for 2D tensor.")
-    elif view.dim() == 3:
-        if idx == 0:
-            view = view[start : start + length, :, :]
-        elif idx == 1:
-            view = view[:, start : start + length, :]
-        elif idx == 2:
-            view = view[:, :, start : start + length]
-        else:
-            raise ValueError(f"Invalid index {idx} for 3D tensor.")
-    elif view.dim() == 4:
-        if idx == 0:
-            view = view[start : start + length, :, :, :]
-        elif idx == 3:
-            view = view[:, :, :, start : start + length]
-        else:
-            raise ValueError(f"Invalid index {idx} for 4D tensor.")
-    elif view.dim() == 5:
-        if idx == 0:
-            view = view[start : start + length, :, :, :, :]
-        elif idx == 4:
-            view = view[:, :, :, :, start : start + length]
-        else:
-            raise ValueError(f"Invalid index {idx} for 5D tensor.")
-    else:
-        raise ValueError(f"Invalid tensor dimension {view.dim()}.")
-    return view
+    dim = view.dim()
+    assert idx < view.dim(), f"Invalid index {idx} for {dim}D tensor."
+    slices = (
+        [slice(None, None)] * idx
+        + [slice(start, start + length)]
+        + [slice(None, None)] * (dim - idx - 1)
+    )
+    return view[slices]
 
 
 def slice_tensor_with_strategies(

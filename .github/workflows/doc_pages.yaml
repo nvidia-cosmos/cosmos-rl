@@ -1,9 +1,10 @@
-name: Deploy Docs to GitHub Pages
-
+name: build-doc
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches: [ "**" ]
 
 jobs:
   build-deploy:
@@ -19,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install sphinx-autobuild  sphinx_rtd_theme recommonmark sphinx_markdown_tables
+          pip install pydantic sphinx-autobuild  sphinx_rtd_theme recommonmark sphinx_markdown_tables sphinx-argparse sphinx-jsonschema
 
       - name: Build Sphinx docs
         run: |
@@ -27,6 +28,7 @@ jobs:
           make html
 
       - name: Deploy to GitHub Pages
+        if: github.event_name == 'push'
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

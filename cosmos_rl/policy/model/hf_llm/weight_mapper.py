@@ -13,10 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 import torch
-from typing import List, Tuple, Dict
-from cosmos_rl.rollout.weight_mapper.base import WeightMapper
+from typing import List, Tuple, Dict, Any
+from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
@@ -24,11 +23,9 @@ from cosmos_rl.utils.parallelism_registry import (
 )
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from cosmos_rl.policy.model.gpt import GPT
 
 
-@WeightMapper.register_class(GPT.supported_model_types())
-class GPTWeightMapper(WeightMapper):
+class HFLLMWeightMapper(WeightMapper):
     def __init__(self, hf_config: AutoConfig):
         super().__init__(hf_config)
         self.kv_head_ratio = (
@@ -61,11 +58,8 @@ class GPTWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self, vllm_model: Qwen2ForCausalLM
+        self, vllm_model: Any
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
-        assert (
-            "qwen" in type(vllm_model).__name__.lower()
-        ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():

@@ -20,6 +20,7 @@ import threading
 from queue import Queue
 import atexit
 import types
+from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Tuple, Optional, Callable, Any, Dict
 from functools import partial
 from transformers import AutoConfig
@@ -49,7 +50,6 @@ from cosmos_rl.utils.pynccl import (
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
-from cosmos_rl.rollout.weight_mapper import WeightMapper
 from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -148,15 +148,26 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self._command_queue: Queue[Command] = Queue()
         self._prompt_queue: Queue[List[List[int, str]]] = Queue()
 
-        # check for flashinfer
+        # if flashinfer config is not enabled, avoid importing flashinfer
         if self.config.rollout.vllm_use_flashinfer:
-            os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
-            if self.config.rollout.sampling_config.use_flashinfer:
-                os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "1"
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.vllm_use_flashinfer setting."
+                )
             else:
-                os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-        else:
-            os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+                os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
+
+        if self.config.rollout.sampling_config.use_flashinfer:
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.sampling_config.use_flashinfer setting."
+                )
+            else:
+                os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "1"
 
         self.rollout: vLLMRollout = vLLMRollout(
             self.config,
@@ -194,7 +205,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.config.policy.model_name_or_path
         )
         model_type = hf_config.model_type
-        if model_type not in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY:
+        if not ModelRegistry.check_model_type_supported(model_type):
             logger.warning(
                 f"[Rollout] Replica can not find {model_type} in weight mapper, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
             )

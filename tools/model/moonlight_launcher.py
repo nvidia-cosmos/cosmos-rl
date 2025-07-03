@@ -13,18 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import WeightMapper
-from .gpt import GPTWeightMapper
-from .qwen_vl_2_5 import QwenVL25WeightMapper
-from .qwen3_moe import Qwen3MoeWeightMapper
-from .deepseek_v3 import DeepseekV3MoEWeightMapper
-from .hf_llm import HFLLMWeightMapper
+from cosmos_rl.launcher.worker_entry import main as launch_worker
+from deepseek_v3 import DeepseekV3MoEModel
+from deepseek_v3.weight_mapper import DeepseekV3MoEWeightMapper
+from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
+    DecoderOnlyLLMDataPacker,
+)
+from cosmos_rl.policy.model.base import ModelRegistry
 
-__all__ = [
-    "WeightMapper",
-    "GPTWeightMapper",
-    "QwenVL25WeightMapper",
-    "Qwen3MoeWeightMapper",
-    "DeepseekV3MoEWeightMapper",
-    "HFLLMWeightMapper",
-]
+if __name__ == "__main__":
+    # Register the model into the registry
+    ModelRegistry.register_model(
+        # Model class to register
+        DeepseekV3MoEModel,
+        # Data packer for this model
+        DecoderOnlyLLMDataPacker,
+        # Weight mapper for this model
+        DeepseekV3MoEWeightMapper,
+    )
+
+    launch_worker()
