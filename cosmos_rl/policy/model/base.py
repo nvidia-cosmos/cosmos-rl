@@ -27,6 +27,7 @@ class BaseModel(torch.nn.Module, ABC):
         super().__init__()
         from cosmos_rl.rollout.weight_mapper import WeightMapper
 
+        self.tie_word_embeddings = hf_config.get("tie_word_embeddings", False)
         self.weight_mapper = WeightMapper.get_weight_mapper(
             self.supported_model_types()[0]
         )(hf_config)
@@ -44,6 +45,9 @@ class BaseModel(torch.nn.Module, ABC):
         """
         sorted_key_n_rank = []
         for k, v in self.named_parameters():
+            if self.tie_word_embeddings and "lm_head.weight" in k:
+                print(f"Skipping {k} because of tie_word_embeddings")
+                continue
             k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v

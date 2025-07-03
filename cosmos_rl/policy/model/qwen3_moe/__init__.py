@@ -637,15 +637,13 @@ class Qwen3MoE(BaseModel):
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
 
-        if not model_args.hf_config.tie_word_embeddings:
-            self.tie_embed_tokens = False
+        if not self.tie_word_embeddings:
             self.lm_head = nn.Linear(
                 model_args.dim,
                 model_args.vocab_size,
                 bias="lm_head" in model_args.biases,
             )
-        else:
-            self.tie_embed_tokens = True
+
         self.identity_layer = IdentityLayer()
 
     def forward(
@@ -670,7 +668,7 @@ class Qwen3MoE(BaseModel):
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
             h = self.norm(h)
-            if not self.tie_embed_tokens:
+            if not self.tie_word_embeddings:
                 output = self.lm_head(h)
             else:
                 is_w_dist_tensor = isinstance(

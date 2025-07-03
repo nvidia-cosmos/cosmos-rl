@@ -153,9 +153,6 @@ class HFLLMModel(BaseModel):
             dest_name, shared_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims
             )
-            if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                # logger.info(f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism. Skipping this weight checking")
-                continue
 
             target_tensor = self_state_dict[dest_name]
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
