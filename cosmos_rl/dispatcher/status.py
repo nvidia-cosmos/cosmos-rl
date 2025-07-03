@@ -21,6 +21,7 @@ from typing import Dict, List, Iterator, Any, Optional
 from torch.utils.data import DataLoader
 from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.util import RollingDict
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role
@@ -76,7 +77,7 @@ class PolicyStatusManager:
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
         self.status = {}
-        self.train_report_data: Dict[int, Dict[str, Any]] = {}
+        self.train_report_data = RollingDict(maxlen=20)
 
         # Validation
         self.val_iters: Dict[int, Iterator] = {}
