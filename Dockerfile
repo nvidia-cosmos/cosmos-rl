@@ -23,7 +23,7 @@ RUN apt-get install -qq -y redis-server
 
 #################################################
 ## Install EFA installer
-ARG EFA_INSTALLER_VERSION=1.38.1
+ARG EFA_INSTALLER_VERSION=1.42.0
 RUN cd $HOME \
     && curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
     && tar -xf $HOME/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
@@ -33,7 +33,7 @@ RUN cd $HOME \
 
 ###################################################
 ## Install AWS-OFI-NCCL plugin
-ARG AWS_OFI_NCCL_VERSION=v1.14.0
+ARG AWS_OFI_NCCL_VERSION=v1.16.0
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y libhwloc-dev
 #Switch from sh to bash to allow parameter expansion
 SHELL ["/bin/bash", "-c"]
