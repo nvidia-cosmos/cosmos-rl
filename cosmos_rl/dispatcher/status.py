@@ -644,7 +644,7 @@ class PolicyStatusManager:
                         "train/iteration_time": total_iter_time_avg,
                     }
 
-                    self.train_report_data[train_step].update(policy_report_data)
+                    self.train_report_data.setdefault(train_step, {}).update(policy_report_data)
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
