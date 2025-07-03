@@ -1383,7 +1383,6 @@ class GRPOTrainer(Trainer):
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()
-        self.train_event_queue.append((start_event, end_event, current_step))
 
         loss = (loss_sum / loss_count) if loss_count > 0 else loss_sum
         kl_loss = (kl_loss_sum / loss_count) if loss_count > 0 else kl_loss_sum
@@ -1410,17 +1409,10 @@ class GRPOTrainer(Trainer):
         if self.config.logging.logger:
             if is_master_rank(self.parallel_dims, self.global_rank):
                 report_data = {"train_step": current_step}
-                # Calculate the last iteration time
-                if current_step > 1 and len(self.train_event_queue) > 0:
-                    assert self.train_event_queue[0][1].query()
-                    last_iter_start_event, last_iter_end_event, last_iter_step = (
-                        self.train_event_queue.popleft()
-                    )
-                    iter_time = (
-                        last_iter_start_event.elapsed_time(last_iter_end_event) / 1000.0
-                    )  # in seconds
-                    report_data["train/iteration_time"] = iter_time
-
+                # Calculate the iteration time
+                assert end_event.query()
+                iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+                report_data["train/iteration_time"] = iter_time
                 report_data["train/loss_avg"] = global_avg_loss
                 report_data["train/loss_max"] = global_max_loss
                 report_data["train/learning_rate"] = self.lr_schedulers.get_last_lr()[0]

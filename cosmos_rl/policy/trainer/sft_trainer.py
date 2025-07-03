@@ -487,7 +487,6 @@ class SFTTrainer(Trainer):
 
                 self.train_step += 1
                 end_event.record()
-                self.train_event_queue.append((start_event, end_event, self.train_step))
 
                 if (
                     self.parallel_dims.dp_replicate_enabled
@@ -504,29 +503,13 @@ class SFTTrainer(Trainer):
                 if self.config.logging.logger:
                     if util.is_master_rank(self.parallel_dims, self.global_rank):
                         # Calculate last iteration time
-                        if self.train_step > 0 and len(self.train_event_queue) > 0:
-                            assert self.train_event_queue[0][1].query()
-                            (
-                                last_iter_start_event,
-                                last_iter_end_event,
-                                last_iter_step,
-                            ) = self.train_event_queue.popleft()
-                            iter_time = (
-                                last_iter_start_event.elapsed_time(last_iter_end_event)
-                                / 1000.0
-                            )  # in seconds
-                            if (
-                                "wandb" in self.config.logging.logger
-                                and is_wandb_available()
-                            ):
-                                log_wandb(
-                                    data={
-                                        "train/iteration_time": iter_time,
-                                    },
-                                    step=last_iter_step,
-                                )
+                        assert end_event.query()
+                        iter_time = (
+                            start_event.elapsed_time(end_event) / 1000.0
+                        )  # in seconds
 
                         report_data = {
+                            "train/iteration_time": iter_time,
                             "train/loss_avg": global_avg_loss,
                             "train/loss_max": global_max_loss,
                             "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
@@ -554,7 +537,7 @@ class SFTTrainer(Trainer):
                             )
                         if "console" in self.config.logging.logger:
                             logger.info(
-                                f"Step: {self.train_step}/{self.total_steps}, Loss: {global_avg_loss:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}."
+                                f"Step: {self.train_step}/{self.total_steps}, Loss: {global_avg_loss:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}, Iteration time: {iter_time:.2f}s."
                             )
 
                 # For profiling

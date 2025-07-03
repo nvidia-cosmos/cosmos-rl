@@ -390,7 +390,9 @@ class FP8Config(BaseModel):
 
 
 class TrainingConfig(BaseModel):
-    train_policy: Union[SFTDataConfig, GrpoConfig] = Field(discriminator="type")
+    train_policy: Union[SFTDataConfig, GrpoConfig] = Field(
+        discriminator="type", default=GrpoConfig(type="grpo")
+    )
     fp8: FP8Config = Field(default_factory=FP8Config)
     ckpt: CheckpointConfig = Field(default_factory=CheckpointConfig)
     resume: Union[bool, str] = Field(
@@ -728,6 +730,10 @@ class Config(BaseModel):
     @model_validator(mode="before")
     def preprocess(cls, data: dict) -> dict:
         # Handle for train_policy type
+        if len(data) == 0:
+            # empty data, all fields set to default values.
+            return data
+
         if "train_policy" in data["train"]:
             train_policy_data = data["train"]["train_policy"]
 

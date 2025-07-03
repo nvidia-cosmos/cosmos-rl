@@ -114,15 +114,17 @@ class CheckpointMananger:
     def get_ckpt_path(self):
         # find the latest checkpoint under output_dir
         if self.config.train.resume == True:  # noqa: E712
-            root_output_dir = os.path.dirname(self.ckpt_output_dir)
+            root_output_dir = os.path.dirname(os.path.dirname(self.ckpt_output_dir))
+            cur_timestamp = os.path.basename(os.path.dirname(self.ckpt_output_dir))
             timestamps = os.listdir(root_output_dir)
             timestamps.sort()
-            steps = os.listdir(
-                os.path.join(root_output_dir, timestamps[-1], "checkpoints")
-            )
+            for timestamp in reversed(timestamps):
+                if timestamp < cur_timestamp:
+                    break
+            steps = os.listdir(os.path.join(root_output_dir, timestamp, "checkpoints"))
             steps.sort()
             base_path = os.path.join(
-                root_output_dir, timestamps[-1], "checkpoints", steps[-1], "policy"
+                root_output_dir, timestamp, "checkpoints", steps[-1], "policy"
             )
         else:
             base_path = self.config.train.resume
@@ -332,6 +334,31 @@ class CheckpointMananger:
         else:
             raise FileNotFoundError(f"No checkpoint found at {base_path}")
 
+        return extra_vars
+
+    def load_extra_info_from_checkpoint(self):
+        extra_vars = {}
+        base_path = self.get_ckpt_path()
+        # check whether checkpoint existing
+        is_ckpt_path = self.ckpt_path_check(base_path)
+        if is_ckpt_path:
+            logger.info(
+                f"Cosmos checkpoint found at {self.config.train.resume}. Loading extra info..."
+            )
+            extra_info_path = os.path.join(
+                base_path, f"extra_info_rank_{self.global_rank}.pth"
+            )
+            extra_info = self.load_extra_info(extra_info_path)
+            for key in extra_info:
+                if key == "rng_state":
+                    self.set_rng_state(extra_info["rng_state"])
+                else:
+                    extra_vars[key] = extra_info[key]
+            logger.info(
+                f"[Policy] Checkpoint extra info loaded successfully from {base_path}."
+            )
+        else:
+            raise FileNotFoundError(f"No checkpoint found at {base_path}")
         return extra_vars
 
     def save_check(self, step: int, **kwargs):

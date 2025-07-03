@@ -148,15 +148,26 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self._command_queue: Queue[Command] = Queue()
         self._prompt_queue: Queue[List[List[int, str]]] = Queue()
 
-        # check for flashinfer
+        # if flashinfer config is not enabled, avoid importing flashinfer
         if self.config.rollout.vllm_use_flashinfer:
-            os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
-            if self.config.rollout.sampling_config.use_flashinfer:
-                os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "1"
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.vllm_use_flashinfer setting."
+                )
             else:
-                os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-        else:
-            os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+                os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
+
+        if self.config.rollout.sampling_config.use_flashinfer:
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.sampling_config.use_flashinfer setting."
+                )
+            else:
+                os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "1"
 
         self.rollout: vLLMRollout = vLLMRollout(
             self.config,

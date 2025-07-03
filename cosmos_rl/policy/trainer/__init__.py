@@ -17,7 +17,6 @@ import json
 import os
 import torch
 import threading
-from collections import deque
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.checkpoint import (
     upload_folder_to_s3,
@@ -79,7 +78,6 @@ class Trainer(CommMixin):
             )
 
         self.train_stream = torch.cuda.current_stream()
-        self.train_event_queue = deque()
         self.init_comm()
         model = ModelRegistry.build_model(config)
 
