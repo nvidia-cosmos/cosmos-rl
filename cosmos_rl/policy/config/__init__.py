@@ -505,9 +505,11 @@ class ParallelismConfig(BaseModel):
     pp_dynamic_shape: bool = Field(
         default=False, description="Pipeline parallelism dynamic shape"
     )
-    pp_micro_batch_size: int = Field(
+    micro_batch_size: int = Field(
         default=1,
-        description="Pipeline parallelism micro batch size, `n_micro_batch = batch_size / pp_micro_batch_size`, which must be divisible by `pp` stages",
+        metadata={
+            "help": "Minimum batch size to do forward, also the pipeline parallelism micro batch size, `n_micro_batch = batch_size / micro_batch_size`, which must be divisible by `pp` stages"
+        },
     )
     dp_replicate_size: int = Field(
         default=1,
@@ -751,13 +753,13 @@ class Config(BaseModel):
     def check_params_value(self):
         if self.policy.parallelism.pp_size > 1:
             assert (
-                self.policy.parallelism.pp_micro_batch_size > 0
-            ), "pp_micro_batch_size must be greater than 0"
+                self.policy.parallelism.micro_batch_size > 0
+            ), "micro_batch_size must be greater than 0"
             assert (
                 self.train.train_batch_per_replica
-                % self.policy.parallelism.pp_micro_batch_size
+                % self.policy.parallelism.micro_batch_size
                 == 0
-            ), "train_batch must be divisible by pp_micro_batch_size"
+            ), "train_batch must be divisible by micro_batch_size"
 
             # Here we assume that PP uses `Single-stage per rank` which is true for:
             #   - GPipe
@@ -766,11 +768,28 @@ class Config(BaseModel):
             assert (
                 (
                     self.train.train_batch_per_replica
-                    // self.policy.parallelism.pp_micro_batch_size
+                    // self.policy.parallelism.micro_batch_size
                 )
                 % self.policy.parallelism.pp_size
                 == 0
-            ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
+            ), "train_batch / micro_batch_size must be divisible by pp_size"
+        if self.train.train_policy.type == "grpo":
+            if isinstance(self.train.train_policy.reward_function, str):
+                self.train.train_policy.reward_function = [
+                    self.train.train_policy.reward_function
+                ]
+            assert (
+                len(self.train.train_policy.reward_function) > 0
+            ), "reward_function must be a list of reward functions"
+
+        if isinstance(self.train.train_policy.dataset.split, str):
+            self.train.train_policy.dataset.split = [
+                self.train.train_policy.dataset.split
+            ]
+        if isinstance(self.train.train_policy.dataset.split, str):
+            self.train.train_policy.dataset.split = [
+                self.train.train_policy.dataset.split
+            ]
 
         if self.train.train_policy.type == "grpo":
             # Handle for evaludation configuration.
