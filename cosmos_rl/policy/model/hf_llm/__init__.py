@@ -40,15 +40,13 @@ class HFLLMModel(BaseModel):
 
     Args:
         hf_config : Model configuration arguments.
+        model: AutoModelForCausalLM model.
 
     Attributes:
-        model_args (HFLLMArgs): Model configuration arguments.
-        vocab_size (int): Vocabulary size.
-        n_layers (int): Number of layers in the model.
-        embed_tokens (ParallelEmbedding): Token embeddings.
-        layers (torch.nn.ModuleList): List of HFLLM blocks.
-        norm (RMSNorm): Layer normalization for the model output.
-        lm_head (ColumnParallelLinear): Linear layer for final output.
+        hf_config : Model configuration arguments.
+        model: AutoModelForCausalLM model.
+        layers: List of AutoModelForCausalLM blocks.
+        src_model_type: Model type.
     """
 
     @staticmethod
@@ -221,8 +219,8 @@ class HFLLMModel(BaseModel):
         # 4. we follow the convention and do not account for sparsity in causal attention
         layers, heads, head_dim = (
             len(self.layers),
-            self.model_args.n_heads,
-            self.model_args.dim // self.model_args.n_heads,
+            self.hf_config.num_attention_heads,
+            self.hf_config.hidden_size // self.hf_config.num_attention_heads,
         )
         return lambda seq_len: (
             nparams,
@@ -304,7 +302,7 @@ class HFLLMModel(BaseModel):
         return ["lm_head"]
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
-        if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
+        if not (self.hf_config.num_attention_heads % (cp_size * tp_size) == 0):
             raise ValueError(
-                f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+                f"Model is not compatible with cp parallelism, model's head number={self.hf_config.num_attention_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
             )
