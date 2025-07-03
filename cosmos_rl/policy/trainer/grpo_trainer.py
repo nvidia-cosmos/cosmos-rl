@@ -1196,10 +1196,7 @@ class GRPOTrainer(Trainer):
             # Move all tensor to device
             for k in user_batch.keys():
                 v = user_batch[k]
-                if (
-                    isinstance(v, torch.Tensor)
-                    and v.device != self.device
-                ):
+                if isinstance(v, torch.Tensor) and v.device != self.device:
                     user_batch[k] = v.to(self.device)
 
             # input_ids are different across ranks in dp_shard_cp
@@ -1267,9 +1264,7 @@ class GRPOTrainer(Trainer):
                         # First/Last stage: pass all inputs
                         if self.parallel_dims.cp_enabled:
                             # This is for recover these two tensors after ulysses
-                            user_batch["input_ids_before_cp"] = (
-                                input_ids_before_cp
-                            )
+                            user_batch["input_ids_before_cp"] = input_ids_before_cp
                             user_batch["position_ids_before_cp"] = (
                                 position_ids_before_cp
                             )
@@ -1305,9 +1300,7 @@ class GRPOTrainer(Trainer):
 
                     if self.parallel_dims.cp_enabled:
                         # reset the position ids and input ids
-                        user_batch["position_ids"] = (
-                            position_ids_before_cp
-                        )
+                        user_batch["position_ids"] = position_ids_before_cp
                         user_batch["input_ids"] = input_ids_before_cp
 
                     if self.config.train.train_policy.temperature > 1e-6:
