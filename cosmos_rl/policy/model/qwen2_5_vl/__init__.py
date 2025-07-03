@@ -1477,28 +1477,6 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             transforms.append((dest_name, local_view))
         return transforms
 
-    # @cached_property
-    # def sorted_hf_key_n_rank(self) -> List[Tuple[str, int]]:
-    #     sorted_key_n_rank = []
-    #     for k, v in self.named_parameters():
-    #         k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
-    #         is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
-    #         if k.startswith("visual.") and "qkv" in k:
-    #             # For visual model, we need to split qkv weights
-    #             local_view = v.full_tensor() if is_dist_tensor else v
-    #             unit_dim = local_view.shape[0] // 3
-    #             q_view = local_view[:unit_dim]
-    #             k_view = local_view[unit_dim : 2 * unit_dim]
-    #             v_view = local_view[2 * unit_dim :]
-    #             sorted_key_n_rank.append((k.replace("qkv", "q"), q_view.ndim))
-    #             sorted_key_n_rank.append((k.replace("qkv", "k"), k_view.ndim))
-    #             sorted_key_n_rank.append((k.replace("qkv", "v"), v_view.ndim))
-    #         else:
-    #             local_view = v.to_local() if is_dist_tensor else v
-    #             sorted_key_n_rank.append((k, local_view.ndim))
-    #     sorted_key_n_rank.sort(key=lambda x: x[0])
-    #     return sorted_key_n_rank
-
     @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:
         llm = [

@@ -21,6 +21,7 @@ import torch
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from cosmos_rl.utils import util
 from transformers import AutoConfig
+import re
 
 
 class QwenVL25WeightMapper(WeightMapper):
@@ -143,3 +144,20 @@ class QwenVL25WeightMapper(WeightMapper):
             return 0
         else:
             raise ValueError(f"Unsupported weight: {dest_name}")
+
+    @torch.no_grad()
+    def policy_maybe_decompose_weights_to_hf_naming(self, name, weight: torch.Tensor):
+        if match := re.search(  # noqa: F841
+            r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
+            name,
+        ):
+            full_name = re.sub(r"\b(q|k|v)\b", "qkv", name)
+            weights = []
+            for idx in range(3):
+                weights.append(weight)
+                if idx == 2:
+                    yield full_name, torch.stack(weights, dim=0)
+                elif idx < 2:
+                    yield full_name, None
+        else:
+            yield name, weight
