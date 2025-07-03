@@ -24,7 +24,6 @@ import subprocess
 import torch.distributed as dist
 import threading
 from functools import partial
-from typing import override
 import requests
 import atexit
 from queue import Queue, Empty
@@ -163,7 +162,6 @@ class TestHANccl(CommMixin):
             urls.append(f"{remote_host}/{suffix}")
         return urls
 
-    @override
     def register_to_controller(self):
         if self._is_registered:
             return
@@ -192,7 +190,6 @@ class TestHANccl(CommMixin):
         self._is_registered = True
         logger.info(f"register to controller: {self.replica_name}")
 
-    @override
     def unregister_from_controller(self):
         if not self._is_registered:
             return
