@@ -345,7 +345,7 @@ class WeightMapper(ABC):
             return self.parallelism_info_for_params[param_name]
         else:
             logger.error("No parallelism info found for the given parameter name.")
-            return None, None, None
+            return None, None, None, None
 
     def insert_to_parallelism_info(
         self,
@@ -354,6 +354,7 @@ class WeightMapper(ABC):
         parallelism: ParallelDims,
         name_to_hf: Callable,
         packed_modules_mapping: Dict[str, Any] = {},
+        dims_rank_info: Optional[Dict[int, Dict]] = None,
     ):
         """
         Insert the parallelism info for the policy model parameters.
@@ -367,6 +368,9 @@ class WeightMapper(ABC):
             tensor_dim_to_parallel_map[v].append(k)
         p_rank = parallelism.pp_coord[0]
         for k, v in packed_modules_mapping.items():
+            assert (
+                dims_rank_info is None
+            ), f"Packed modules mapping {packed_modules_mapping} should not be used with dims_rank_info {dims_rank_info}."
             if k in param_name:
                 for rename in v:
                     name = name_to_hf(param_name).replace(k, rename)
@@ -374,6 +378,7 @@ class WeightMapper(ABC):
                         dims_map,
                         tensor_dim_to_parallel_map,
                         p_rank,
+                        dims_rank_info,
                     )
                 return
         name = name_to_hf(param_name)
@@ -381,6 +386,7 @@ class WeightMapper(ABC):
             dims_map,
             tensor_dim_to_parallel_map,
             p_rank,
+            dims_rank_info,
         )
 
     def parallelism_info_for_policy_params(
@@ -419,6 +425,9 @@ class WeightMapper(ABC):
                         raise ValueError(f"Unsupported placement type: {placement}")
                 chunk_meta_list = param.__create_chunk_list__()
                 local = param.to_local()
+                assert (
+                    len(chunk_meta_list) == 1
+                ), f"Expected only one chunk meta, but got {len(chunk_meta_list)} for {name}."
                 for meta in chunk_meta_list:
                     assert (
                         len(meta.offsets)
@@ -427,8 +436,28 @@ class WeightMapper(ABC):
                         == len(tuple(local.shape))
                     ), f"Offsets {meta.offsets} and sizes {meta.sizes} must match global shape {global_shape} and local shape {tuple(local.shape)}."
 
+                    dims_rank_info = {}
+                    for idx, g_size in enumerate(global_shape):
+                        rank = int(meta.offsets[idx])
+                        size = int(g_size)
+                        length = int(meta.sizes[idx])
+                        if size == length:
+                            assert (
+                                rank == 0
+                            ), f"Expected rank 0 for full size dimension {idx}, but got {rank}."
+                        else:
+                            dims_rank_info[idx] = {
+                                "rank": rank,
+                                "size": size,
+                                "length": length,
+                                "dim": "",
+                            }
             self.insert_to_parallelism_info(
-                name, dims_map, parallelism, self.policy_map_local_key_to_hf_key
+                name,
+                dims_map,
+                parallelism,
+                self.policy_map_local_key_to_hf_key,
+                dims_rank_info=dims_rank_info,
             )
 
     def parallelism_info_for_rollout_params(

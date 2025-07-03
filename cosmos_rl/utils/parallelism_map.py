@@ -433,7 +433,7 @@ class ParallelTopoMapper:
                 param group may contain multiple parameters with some connections such as from the same original param.
                 """
 
-                split_dim_map, dim_to_parallel, pp_rank = (
+                split_dim_map, dim_to_parallel, pp_rank, dims_rank_info = (
                     self.weight_mapper.parallelism_info_for_param(dest_name)
                 )
 
@@ -470,7 +470,9 @@ class ParallelTopoMapper:
                         "name": dest_name,
                         "shard_info": self.generate_local_shard_info(
                             dim_to_parallel, ranks
-                        ),
+                        )
+                        if dims_rank_info is None
+                        else dims_rank_info,
                         "dup_ranks": dup_ranks,
                     }
                 )
