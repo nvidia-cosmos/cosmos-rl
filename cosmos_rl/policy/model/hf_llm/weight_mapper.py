@@ -116,7 +116,7 @@ class HFLLMWeightMapper(WeightMapper):
         return [replica_parallelism]
 
     def get_policy_parallelism_strategy(self):
-        return [get_policy_parallelism_strategy("gpt")]
+        return [get_policy_parallelism_strategy("hfllm")]
 
     def get_rollout_parallelism_strategy(self):
-        return [get_rollout_parallelism_strategy("gpt")]
+        return [get_rollout_parallelism_strategy("hfllm")]
