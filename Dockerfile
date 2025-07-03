@@ -69,7 +69,7 @@ RUN pip install -r /workspace/cosmos_rl/requirements.txt
 
 FROM base AS package
 
-COPY pyproject.toml /workspace/cosmos_rl/pyproject.toml
+COPY README.md pyproject.toml /workspace/cosmos_rl/
 COPY tools /workspace/cosmos_rl/tools
 COPY configs /workspace/cosmos_rl/configs
 COPY cosmos_rl /workspace/cosmos_rl/cosmos_rl
