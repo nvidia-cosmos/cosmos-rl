@@ -42,6 +42,10 @@ class HandshakeAcceptorRequest(BaseModel):
     unique_pair_name: str
 
 
+class NcclStoreClearRequest(BaseModel):
+    unique_pair_name: str
+
+
 class TrainAckRequest(BaseModel):
     replica_name: str
     weight_step: int
