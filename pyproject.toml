@@ -8,9 +8,6 @@ requires-python = ">=3.9"
 dynamic = ["dependencies"]
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
-constraints = [
-    "nvidia-nccl-cu12>=2.26.2"
-]
 
 [project.urls]
 Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
