@@ -458,7 +458,7 @@ def main():
 
 if __name__ == "__main__":
     # let run this test in distributed mode
-    if os.environ.get("LOCAL_RANK") is None:
+    if os.environ.get("RECURSIVE_ENTRYPOINT") is None:
         # n_gpu = torch.cuda.device_count()
         n_gpu = 4
         command = [
@@ -469,6 +469,8 @@ if __name__ == "__main__":
             str(n_gpu),
             os.path.abspath(__file__),
         ]
-        subprocess.run(command)
+        env = os.environ.copy()
+        env["RECURSIVE_ENTRYPOINT"] = "1"
+        subprocess.run(command, env=env)
     else:
         main()
