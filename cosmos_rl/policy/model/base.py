@@ -23,6 +23,15 @@ import cosmos_rl.utils.util as util
 import torch
 from transformers import AutoConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
+from vllm.model_executor.layers.linear import (
+    RowParallelLinear,
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    MergedColumnParallelLinear,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+
+from torch.nn.parameter import Parameter
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -294,13 +303,11 @@ class WeightMapper(ABC):
     def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
         pass
 
-    @abstractmethod
     def get_policy_parallelism_strategy(self):
-        pass
+        return []
 
-    @abstractmethod
     def get_rollout_parallelism_strategy(self):
-        pass
+        return []
 
     @classmethod
     def register_class(
@@ -333,3 +340,207 @@ class WeightMapper(ABC):
             raise ValueError(f"ModelType '{model_type}' is not supported now.")
 
         return WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY[model_type]
+
+    def parallelism_info_for_param(
+        self,
+        param_name: str,
+    ):
+        """
+        Get the parallelism info for a specific parameter.
+        This method returns a dictionary with parameter names as keys and their parallel dimensions as values.
+        """
+        if hasattr(self, "parallelism_info_for_params"):
+            return self.parallelism_info_for_params[param_name]
+        else:
+            raise ValueError("No parallelism info found for the given parameter name.")
+
+    def insert_to_parallelism_info(
+        self,
+        param_name: str,
+        dims_map: Dict[str, int],
+        parallelism: ParallelDims,
+        name_to_hf: Callable,
+        packed_modules_mapping: Dict[str, Any] = {},
+    ):
+        """
+        Insert the parallelism info for the policy model parameters.
+        This method updates the `policy_parallelism_info_for_params` dictionary with the parameter name,
+        its dimensions map, tensor dimension to parallel map, and the pipeline rank.
+        """
+        tensor_dim_to_parallel_map = {}
+        for k, v in dims_map.items():
+            if v not in tensor_dim_to_parallel_map:
+                tensor_dim_to_parallel_map[v] = []
+            tensor_dim_to_parallel_map[v].append(k)
+        p_rank = parallelism.pp_coord[0]
+        for k, v in packed_modules_mapping.items():
+            if k in param_name:
+                for rename in v:
+                    name = name_to_hf(param_name).replace(k, rename)
+                    self.parallelism_info_for_params[name] = (
+                        dims_map,
+                        tensor_dim_to_parallel_map,
+                        p_rank,
+                    )
+                return
+        name = name_to_hf(param_name)
+        self.parallelism_info_for_params[name] = (
+            dims_map,
+            tensor_dim_to_parallel_map,
+            p_rank,
+        )
+
+    def parallelism_info_for_policy_params(
+        self, model: BaseModel, parallelism: ParallelDims
+    ):
+        """
+        Get the parallelism info for the policy model parameters.
+        This method returns a dictionary with parameter names as keys and their parallel dimensions as values.
+        """
+        if hasattr(self, "parallelism_info_for_params"):
+            assert hasattr(self, "is_policy") and not hasattr(self, "is_rollout"), (
+                "parallelism_info_for_params already exists, "
+                "but is_policy or is_rollout flag is not set correctly."
+            )
+            return self.parallelism_info_for_params
+        self.parallelism_info_for_params = {}
+        self.is_policy = True
+        for name, param in model.named_parameters():
+            is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
+            if not is_dist_tensor:
+                dims_map = {}
+            else:
+                dims_map = {}
+                global_shape = tuple(param.shape)
+                mesh = param.device_mesh
+                placements = param.placements
+                assert (
+                    len(placements) == len(mesh.mesh_dim_names)
+                ), f"Number of placements {placements} does not match number of mesh dimensions {mesh}."
+                for dim, placement in zip(mesh.mesh_dim_names, placements):
+                    if placement.is_shard():
+                        dims_map[dim] = placement.dim
+                    elif placement.is_replicate():
+                        pass
+                    else:
+                        raise ValueError(f"Unsupported placement type: {placement}")
+                chunk_meta_list = param.__create_chunk_list__()
+                local = param.to_local()
+                for meta in chunk_meta_list:
+                    assert (
+                        len(meta.offsets)
+                        == len(meta.sizes)
+                        == len(global_shape)
+                        == len(tuple(local.shape))
+                    ), f"Offsets {meta.offsets} and sizes {meta.sizes} must match global shape {global_shape} and local shape {tuple(local.shape)}."
+
+            self.insert_to_parallelism_info(
+                name, dims_map, parallelism, self.policy_map_local_key_to_hf_key
+            )
+
+    def parallelism_info_for_rollout_params(
+        self, model: Any, parallelism: ParallelDims
+    ):
+        """
+        Get the parallelism info for the rollout model parameters.
+        This method returns a dictionary with parameter names as keys and their parallel dimensions as values.
+        """
+        if hasattr(self, "parallelism_info_for_params"):
+            assert hasattr(self, "is_rollout") and not hasattr(self, "is_policy"), (
+                "parallelism_info_for_params already exists, "
+                "but is_rollout or is_policy flag is not set correctly."
+            )
+            return self.parallelism_info_for_params
+        self.parallelism_info_for_params = {}
+        self.is_rollout = True
+        self.packed_modules_mapping = {}
+        if hasattr(model, "packed_modules_mapping") and model.packed_modules_mapping:
+            for k, v in model.packed_modules_mapping.items():
+                if (
+                    "qkv_proj" in k
+                    and all(["_proj" in x for x in v])
+                    and "qkv" not in model.packed_modules_mapping
+                ):
+                    # If the packed modules mapping does not contain "qkv", but contains "qkv_proj",
+                    # we can assume that it is a QKVParallelLinear module.
+                    self.packed_modules_mapping["qkv"] = [
+                        x.replace("_proj", "") for x in v
+                    ]
+                self.packed_modules_mapping[k] = v
+
+        for param_name, param in model.named_parameters():
+            name_parts = param_name.split(".")
+            part = model
+            is_bias = False
+            for part_name in name_parts:
+                if hasattr(part, part_name):
+                    if isinstance(getattr(part, part_name), Parameter):
+                        if part_name == "bias":
+                            is_bias = True
+                        elif part_name == "weight":
+                            is_bias = False
+                        else:
+                            raise ValueError(
+                                f"Part {part_name} is not a Parameter. Skipping."
+                            )
+                        break
+                    part = getattr(part, part_name)
+                elif str.isdigit(part_name):
+                    part = part[int(part_name)]
+                else:
+                    raise ValueError(f"Part {part_name} not found in {part}. Skipping.")
+            dims_map = {}
+            if isinstance(part, (QKVParallelLinear)):
+                output_dim = getattr(param, "output_dim", None)
+                assert (
+                    output_dim is not None
+                ), f"QKVParallelLinear {param_name} has no output_dim attribute."
+                dims_map["tp"] = output_dim
+                assert any(
+                    [k in param_name for k in self.packed_modules_mapping.keys()]
+                ), f"QKVParallelLinear {param_name} is not in packed_modules_mapping {self.packed_modules_mapping}."
+            elif isinstance(part, (MergedColumnParallelLinear)):
+                output_dim = getattr(param, "output_dim", None)
+                assert (
+                    output_dim is not None
+                ), f"MergedColumnParallelLinear {param_name} has no output_dim attribute."
+                dims_map["tp"] = output_dim
+                assert any(
+                    [k in param_name for k in self.packed_modules_mapping.keys()]
+                ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {self.packed_modules_mapping}."
+            elif isinstance(part, (RowParallelLinear)):
+                input_dim = getattr(param, "input_dim", None)
+                if not is_bias:
+                    assert (
+                        input_dim is not None
+                    ), f"RowParallelLinear {param_name} has no input_dim attribute."
+                    dims_map["tp"] = input_dim
+            elif isinstance(part, (ColumnParallelLinear)):
+                output_dim = getattr(param, "output_dim", None)
+                assert (
+                    output_dim is not None
+                ), f"ColumnParallelLinear {param_name} has no output_dim attribute."
+                dims_map["tp"] = output_dim
+            elif isinstance(part, VocabParallelEmbedding):
+                output_dim = getattr(param, "output_dim", None)
+                assert (
+                    not is_bias
+                ), f"VocabParallelEmbedding {param_name} should not have bias."
+                assert (
+                    output_dim is not None
+                ), f"VocabParallelEmbedding {param_name} has no output_dim attribute."
+                dims_map["tp"] = output_dim
+            else:
+                assert (
+                    "Parallel" not in part.__class__.__name__
+                ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+
+            self.insert_to_parallelism_info(
+                param_name,
+                dims_map,
+                parallelism,
+                self._rollout_vllm_name_to_hf,
+                self.packed_modules_mapping
+                if hasattr(self, "packed_modules_mapping")
+                else {},
+            )

@@ -101,7 +101,7 @@ class TestModel:
         for k, v in self.tensors:
             self.sharded_tensors[k] = convert_weight_from_hf(
                 v, k, self.model_type, self.parallel_dims
-            )[1]
+            )[0][1]
         self.sorted_sharded_params = [
             (k, self.sharded_tensors[k].ndim) for k, _ in self.sorted_hf_key_n_rank
         ]

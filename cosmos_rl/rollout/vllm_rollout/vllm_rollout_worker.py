@@ -243,15 +243,19 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
         )
+
+        self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
+            self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+        )
+        self.weight_mapper.parallelism_info_for_rollout_params(
+            self.get_underlying_model(), parallel_dims
+        )
         self.parallel_mapper = ParallelTopoMapperGroup(
             self.config.rollout.parallelism,
             self.world_size,
             self.model_config,
             is_policy=False,
-        )
-
-        self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
-            self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+            weight_mapper=self.weight_mapper,
         )
         self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
         self.recv_param_key_n_rank_list = [[x] for x in self.recv_param_key_n_rank_list]

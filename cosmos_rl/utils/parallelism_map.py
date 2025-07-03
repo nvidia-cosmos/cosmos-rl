@@ -108,13 +108,14 @@ class ParallelTopoMapper:
     A class used for weight sharing topology map for weight synchronization.
     """
 
-    ordered_dims: List[str] = ["tp", "dp_shard_cp"]
+    ordered_dims: List[str] = ["tp", "dp_shard_cp", "dp_cp_tp"]
 
     def __init__(
         self,
         parallelism: Optional[ParallelismConfig],
         world_size: int,
-        parallelism_strategy: Callable,
+        parallelism_strategy: Optional[Callable],
+        weight_mapper: WeightMapper,
         hf_config: Any,
     ):
         """
@@ -123,6 +124,7 @@ class ParallelTopoMapper:
         :param parallelism: The parallelism configuration for the policy or rollout.
         :param world_size: The world size for the policy or rollout.
         :param parallelism_strategy: The strategy for the policy parallelism or rollout parallelism.
+        :param weight_mapper: The weight mapper to use for mapping weights.
         :param hf_config: The huggingface config.
         """
         self.parallelism = ParallelDims.from_config_for_analysis(
@@ -137,6 +139,7 @@ class ParallelTopoMapper:
             full_mesh_rank_info_map.append(full_rank)
         self.full_mesh_rank_info_map = full_mesh_rank_info_map
         self.hf_config = hf_config
+        self.weight_mapper = weight_mapper
 
     def get_full_mesh_rank_info(self, global_rank: int) -> Dict[str, DimRankInfo]:
         """
@@ -294,9 +297,7 @@ class ParallelTopoMapper:
         :param rank_info: The rank information for the mesh dimensions.
         :return: A DimRankInfo object representing the merged sharded rank information for the given dimensions.
         """
-        assert (
-            len(self.ordered_dims) == 2
-        ), "Only two dimensions are supported for merging currently."
+
         if self.ordered_dims[0] not in rank_info:
             rank_info[self.ordered_dims[0]] = DimRankInfo(0, 1, self.ordered_dims[0])
         if self.ordered_dims[1] not in rank_info:
@@ -404,6 +405,12 @@ class ParallelTopoMapper:
                     rank_info, dims[0]
                 ).__dict__
             elif len(dims) == 2:
+                assert (
+                    self.ordered_dims[2] not in dims
+                ), f"Invalid dimension mapping: {dims} in generate_slice_strategies for merge"
+                assert (
+                    self.ordered_dims[0] in dims and self.ordered_dims[1] in dims
+                ), f"Invalid dimension mapping: {dims} in generate_slice_strategies for merge"
                 shard_dim_info[idx] = self.merged_shard_info_at_dim(rank_info).__dict__
             else:
                 raise ValueError(
@@ -429,9 +436,20 @@ class ParallelTopoMapper:
                 """
                 param group may contain multiple parameters with some connections such as from the same original param.
                 """
-                split_dim_map, dim_to_parallel, pp_rank = self.parallelism_strategy(
+
+                split_dim_map, dim_to_parallel, pp_rank = (
+                    self.weight_mapper.parallelism_info_for_param(dest_name)
+                )
+
+                split_dim_map_, dim_to_parallel_, pp_rank_ = self.parallelism_strategy(
                     shape, dest_name, self.parallelism, self.hf_config
                 )
+
+                assert split_dim_map_ == split_dim_map and pp_rank_ == pp_rank, (
+                    f"Parallelism strategy for {dest_name} does not match: "
+                    f"{split_dim_map_} != {split_dim_map} or {pp_rank_} != {pp_rank}"
+                )
+
                 dup_ranks = self.duplicate_ranks_at_given_dimensions(
                     list(split_dim_map.keys()) + ["pp"], global_rank
                 )
@@ -518,6 +536,7 @@ class ParallelTopoMapperGroup:
                     config,
                     world_size,
                     strategy,
+                    weight_mapper,
                     hf_config,
                 )
             )
@@ -599,6 +618,23 @@ class ParallelizedShardMapper:
             self.policy_all_rank_shard_infos is not None
             and self.rollout_all_rank_shard_infos is not None
         ):
+            self.sort_param_with_groups()
+            self.policy_shard_dicts = [
+                {
+                    r["name"]: r
+                    for r_info_group in r_infos_per_rank
+                    for r in r_info_group
+                }
+                for r_infos_per_rank in self.policy_all_rank_shard_infos
+            ]
+            self.rollout_shard_dicts = [
+                {
+                    r["name"]: r
+                    for r_info_group in r_infos_per_rank
+                    for r in r_info_group
+                }
+                for r_infos_per_rank in self.rollout_all_rank_shard_infos
+            ]
             for p_rank in range(len(self.policy_all_rank_shard_infos)):
                 self.send_insts_for_policy.append(
                     self.generate_parallelized_shard_send_insts_for_policy(p_rank)
@@ -626,22 +662,109 @@ class ParallelizedShardMapper:
         self.rollout_all_rank_shard_infos = rollout_all_rank_shard_infos
         self.post_set_shard_infos()
 
+    def sort_param_with_groups(
+        self,
+    ):
+        """
+        Sort the parameters with groups from policy and rollout shard infos.
+        Merge the parameter groups from policy and rollout shard infos into a single sorted order.
+        Consider the grouping of parameters specified by policy and rollout shard infos.
+        """
+        group_key_map = {}
+        param_group_map = {}
+
+        policy_params = set()
+        rollout_params = set()
+        for p_rank in self.policy_all_rank_shard_infos:
+            for p_group in p_rank:
+                group_key = ";".join(sorted([p["name"] for p in p_group]))
+                if len(p_group) > 1:
+                    for p_info in p_group:
+                        policy_params.add(p_info["name"])
+                        if p_info["name"] not in param_group_map:
+                            assert (
+                                group_key not in group_key_map
+                            ), f"Parameter {p_info['name']} is not in any group, but group {group_key} already exists."
+                            param_group_map[p_info["name"]] = group_key
+                            group_key_map[group_key] = p_group
+                        else:
+                            assert (
+                                param_group_map[p_info["name"]] == group_key
+                            ), f"Parameter {p_info['name']} is in different groups: {param_group_map[p_info['name']]} and {group_key}"
+                else:
+                    policy_params.add(p_group[0]["name"])
+
+        for r_rank in self.rollout_all_rank_shard_infos:
+            for p_group in r_rank:
+                group_key = ";".join(sorted([p["name"] for p in p_group]))
+                if len(p_group) > 1:
+                    for p_info in p_group:
+                        rollout_params.add(p_info["name"])
+                        if p_info["name"] not in param_group_map:
+                            assert (
+                                group_key not in group_key_map
+                            ), f"Parameter {p_info['name']} is not in any group, but group {group_key} already exists."
+                            param_group_map[p_info["name"]] = group_key
+                            group_key_map[group_key] = p_group
+                        else:
+                            assert (
+                                param_group_map[p_info["name"]] == group_key
+                            ), f"Parameter {p_info['name']} is in different groups: {param_group_map[p_info['name']]} and {group_key}"
+                else:
+                    rollout_params.add(p_group[0]["name"])
+
+        groups_map = {}
+
+        for p_rank in self.policy_all_rank_shard_infos:
+            for p_group in p_rank:
+                group_key = ";".join(sorted([p["name"] for p in p_group]))
+                if group_key in group_key_map and group_key not in groups_map:
+                    assert (
+                        len(p_group) > 1
+                    ), f"Parameter group {group_key} should have more than one parameter, but has only {len(p_group)}."
+                    groups_map[group_key] = p_group
+                elif len(p_group) == 1 and p_group[0]["name"] in param_group_map:
+                    pass
+                else:
+                    if group_key not in groups_map:
+                        groups_map[group_key] = p_group
+        for r_rank in self.rollout_all_rank_shard_infos:
+            for p_group in r_rank:
+                group_key = ";".join(sorted([p["name"] for p in p_group]))
+                if group_key in group_key_map and group_key not in groups_map:
+                    assert (
+                        len(p_group) > 1
+                    ), f"Parameter group {group_key} should have more than one parameter, but has only {len(p_group)}."
+                    groups_map[group_key] = p_group
+                elif len(p_group) == 1 and p_group[0]["name"] in param_group_map:
+                    pass
+                else:
+                    if group_key not in groups_map:
+                        groups_map[group_key] = p_group
+
+        self.sorted_param_groups = [groups_map[key] for key in sorted(groups_map)]
+        assert (
+            sum(len(sublist) for sublist in self.sorted_param_groups)
+            == len(policy_params)
+            and sum(len(sublist) for sublist in self.sorted_param_groups)
+            == len(rollout_params)
+        ), "The total number of parameters in sorted_param_groups does not match the number of parameters in policy and rollout shard infos."
+
     def generate_parallelized_shard_send_insts_for_policy(
         self, p_rank: int
     ) -> List[List[Dict[str, Any]]]:
         policy_to_rollout_insts = []
-
-        rollout_shard_dicts = [
-            {r["name"]: r for r_info_group in r_infos_per_rank for r in r_info_group}
-            for r_infos_per_rank in self.rollout_all_rank_shard_infos
-        ]
-
-        for p_info_group in self.policy_all_rank_shard_infos[p_rank]:
+        for info_group in self.sorted_param_groups:
             insts_for_group = []
-            for p_info in p_info_group:
+            for info in info_group:
+                dest_name = info["name"]
+                if dest_name not in self.policy_shard_dicts[p_rank]:
+                    continue
+                p_info = self.policy_shard_dicts[p_rank][dest_name]
                 insts_for_param_name = []
-                dest_name = p_info["name"]
-                for r_rank, r_infos in enumerate(rollout_shard_dicts):
+                for r_rank, r_infos in enumerate(self.rollout_shard_dicts):
+                    if dest_name not in r_infos:
+                        continue
                     r_info = r_infos[dest_name]
                     if "shard_info" not in p_info or "shard_info" not in r_info:
                         continue
@@ -695,17 +818,17 @@ class ParallelizedShardMapper:
     ) -> List[List[Dict[str, Any]]]:
         rollout_from_policy_insts = []
 
-        policy_shard_dicts = [
-            {r["name"]: r for r_info_group in r_infos_per_rank for r in r_info_group}
-            for r_infos_per_rank in self.policy_all_rank_shard_infos
-        ]
-
-        for r_info_group in self.rollout_all_rank_shard_infos[r_rank]:
+        for info_group in self.sorted_param_groups:
             insts_for_group = []
-            for r_info in r_info_group:
+            for info in info_group:
+                dest_name = info["name"]
+                if dest_name not in self.rollout_shard_dicts[r_rank]:
+                    continue
+                r_info = self.rollout_shard_dicts[r_rank][dest_name]
                 insts_for_param_name = []
-                dest_name = r_info["name"]
-                for p_rank, p_infos in enumerate(policy_shard_dicts):
+                for p_rank, p_infos in enumerate(self.policy_shard_dicts):
+                    if dest_name not in p_infos:
+                        continue
                     p_info = p_infos[dest_name]
                     if "shard_info" not in p_info or "shard_info" not in r_info:
                         continue

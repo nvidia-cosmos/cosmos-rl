@@ -272,11 +272,16 @@ class GRPOTrainer(Trainer):
         # Ordered list of (hf_key, tensor_dim)
         hf_key_n_rank: List[Tuple[str, int]] = self.model.sorted_hf_key_n_rank
         hf_key_n_rank = [[x] for x in hf_key_n_rank]
+        self.model.weight_mapper.parallelism_info_for_policy_params(
+            self.model, parallel_dims
+        )
+        local_shard_infos = self.parallel_mapper.prepare_local_shard_infos(
+            hf_key_n_rank, self.global_rank
+        )
+        self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
+            local_shard_infos
+        )
         if self.global_rank == 0:
-            self.all_rank_local_shard_infos = [
-                (self.parallel_mapper.prepare_local_shard_infos(hf_key_n_rank, i))
-                for i in range(self.world_size)
-            ]
             try:
                 make_request_with_retry(
                     partial(

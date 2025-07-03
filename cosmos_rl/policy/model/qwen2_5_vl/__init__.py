@@ -41,8 +41,6 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
-import re
-from functools import partial
 from flash_attn import flash_attn_func
 
 
@@ -252,7 +250,10 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
         self.num_heads = num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=True)
+        self.q = nn.Linear(dim, dim, bias=True)
+        self.k = nn.Linear(dim, dim, bias=True)
+        self.v = nn.Linear(dim, dim, bias=True)
+
         self.proj = nn.Linear(dim, dim)
         self.attn_func = F.scaled_dot_product_attention
 
@@ -264,10 +265,9 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
-            self.qkv(hidden_states)
-            .reshape(seq_length, 3, self.num_heads, -1)
-            .permute(1, 0, 2, 3)
-            .unbind(0)
+            self.q(hidden_states).reshape(seq_length, self.num_heads, -1),
+            self.k(hidden_states).reshape(seq_length, self.num_heads, -1),
+            self.v(hidden_states).reshape(seq_length, self.num_heads, -1),
         )
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
@@ -1308,29 +1308,31 @@ class Qwen2_5_VLConditionalModel(BaseModel):
 
                 for name in weights_of_ckpt.keys():
                     tensor = weights_of_ckpt[name]
-                    dest_name, shared_weight = convert_weight_from_hf(
+                    for dest_name, shared_weight in convert_weight_from_hf(
                         tensor, name, model_type, parallel_dims
-                    )
-                    if dest_name in lm_state_dict:
-                        target_tensor = lm_state_dict[dest_name]
-                    elif dest_name in visual_state_dict:
-                        target_tensor = visual_state_dict[dest_name]
-                    elif parallel_dims.pp_enabled:
-                        # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
-                        continue
-                    else:
-                        raise ValueError(f"Unsupported weight: {dest_name}")
-                    is_dist_tensor = isinstance(
-                        target_tensor, torch.distributed.tensor.DTensor
-                    )
-                    local_view = (
-                        target_tensor.to_local() if is_dist_tensor else target_tensor
-                    )
-                    assert (
-                        local_view.shape == shared_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
-                    with torch.no_grad():
-                        local_view.data.copy_(shared_weight)
+                    ):
+                        if dest_name in lm_state_dict:
+                            target_tensor = lm_state_dict[dest_name]
+                        elif dest_name in visual_state_dict:
+                            target_tensor = visual_state_dict[dest_name]
+                        elif parallel_dims.pp_enabled:
+                            # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
+                            continue
+                        else:
+                            raise ValueError(f"Unsupported weight: {dest_name}")
+                        is_dist_tensor = isinstance(
+                            target_tensor, torch.distributed.tensor.DTensor
+                        )
+                        local_view = (
+                            target_tensor.to_local()
+                            if is_dist_tensor
+                            else target_tensor
+                        )
+                        assert (
+                            local_view.shape == shared_weight.shape
+                        ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                        with torch.no_grad():
+                            local_view.data.copy_(shared_weight)
 
     def separate_model_parts(self) -> List[nn.Module]:
         return [self.model, self.visual]
@@ -1438,44 +1440,6 @@ class Qwen2_5_VLConditionalModel(BaseModel):
     ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
         is_visual = dest_name.startswith("visual.")
         # Handle qkv weights for separate q, k, v tensors
-        if (
-            match := re.search(  # noqa: F841
-                r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
-                dest_name,
-            )
-        ) is not None and is_visual:
-            new_dest_name = re.sub(r"\.(q|k|v)\.", ".qkv.", dest_name)
-            qkv_mode = match.group(2)
-            new_dest_name = new_dest_name.replace("visual.", "")
-            assert (
-                new_dest_name in visual_state_dict
-            ), f"Unsupported weight: {dest_name}"
-            target_tensor = visual_state_dict[new_dest_name]
-
-            def policy_to_rollout_weight_transform(
-                target_tensor: torch.Tensor, qkv_mode: str
-            ) -> torch.Tensor:
-                is_dist_tensor = isinstance(
-                    target_tensor, torch.distributed.tensor.DTensor
-                )
-                full_view = (
-                    target_tensor.full_tensor() if is_dist_tensor else target_tensor
-                )
-                # If the weight is a qkv weight, we need to split it into q, k, v
-                if qkv_mode == "q":
-                    return full_view[: full_view.shape[0] // 3]
-                elif qkv_mode == "k":
-                    return full_view[
-                        full_view.shape[0] // 3 : 2 * full_view.shape[0] // 3
-                    ]
-                elif qkv_mode == "v":
-                    return full_view[2 * full_view.shape[0] // 3 :]
-
-            return partial(
-                policy_to_rollout_weight_transform,
-                target_tensor=target_tensor,
-                qkv_mode=qkv_mode,
-            )
         if is_visual:
             dest_name = dest_name.replace("visual.", "")
             assert dest_name in visual_state_dict, f"Unsupported weight: {dest_name}"

@@ -19,7 +19,6 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 )
 import torch
 import copy
-import re
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
@@ -140,28 +139,6 @@ class QwenVL25WeightMapper(WeightMapper):
         if name == "model.lm_head.weight":
             name = "lm_head.weight"
         return name
-
-    def policy_pre_P2R_gather_required_for_sync(self, name: str) -> bool:
-        """
-        For P->R weight sync, we need to first all-gather vision encoder qkv weights from all ranks.
-        To not be messed up with the following `nccl_send/recv` instructions,
-        pre-collect those weights before first `nccl_send/recv` instruction.
-
-        Args:
-            name (str): The name of the tensor.
-        Returns:
-            bool: True if the tensor sync precollect is required, False otherwise.
-        """
-        is_visual = name.startswith("visual.")
-        # Handle qkv weights for separate q, k, v tensors
-        if (
-            match := re.search(  # noqa: F841
-                r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
-                name,
-            )
-        ) is not None and is_visual:
-            return True
-        return False
 
     def name_to_model_part_index(self, dest_name: str) -> int:
         if dest_name in ["lm_head.weight", "lm_head.bias"]:

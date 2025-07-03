@@ -16,7 +16,7 @@
 from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 import re
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 from cosmos_rl.utils.parallelism_registry import register_parallelism_strategy
 
 
@@ -31,7 +31,7 @@ def convert_weight_from_hf(
     parallel_dims: ParallelDims,
     n_experts: int,
     ignore_unknown_weights: bool = False,
-) -> Tuple[str, torch.Tensor]:
+) -> List[Tuple[str, torch.Tensor]]:
     tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
     assert n_experts % tp_ep_size == 0, "n_experts must be divisible by tp_ep_size"
 
@@ -113,7 +113,7 @@ def convert_weight_from_hf(
             )  # For torch._grouped_mm, the weight should be in (in_features, out_features) shape
         else:
             # If the expert does not belong to the current process, return None to skip this weight
-            return None, None
+            return [(None, None)]
     elif (
         match := re.search(
             r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)", dest_name
@@ -136,7 +136,7 @@ def convert_weight_from_hf(
             )  # For torch._grouped_mm, the weight should be in (in_features, out_features) shape
         else:
             # If the expert does not belong to the current process, return None to skip this weight
-            return None, None
+            return [(None, None)]
     elif (
         match := re.search(  # noqa: F841
             r"layers\.(\d+)\.post_attention_layernorm\.(weight|bias)", dest_name
@@ -153,13 +153,13 @@ def convert_weight_from_hf(
     elif not ignore_unknown_weights:
         raise ValueError(f"Unsupported weight: {dest_name}")
     else:
-        return None, None
+        return [(None, None)]
 
     # Do FSDP sharding
     shard = shard.contiguous()
     if should_do_fsdp_sharding:
         shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
-    return dest_name, shard.contiguous()
+    return [(dest_name, shard.contiguous())]
 
 
 @register_parallelism_strategy("qwen3_moe")

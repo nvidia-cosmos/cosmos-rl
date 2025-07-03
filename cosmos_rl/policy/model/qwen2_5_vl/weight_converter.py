@@ -19,7 +19,7 @@ from cosmos_rl.policy.model.gpt.weight_converter import (
 from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 import re
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 from cosmos_rl.utils.parallelism_registry import (
     register_parallelism_strategy,
     ParallelismStrategyRole,
@@ -39,12 +39,12 @@ def convert_weight_from_hf(
     src_model_type: str,
     parallel_dims: ParallelDims,
     ignore_unknown_weights: bool = False,
-) -> Tuple[str, torch.Tensor]:
-    lm_part_name, lm_part_shard = gpt_weight_from_hf(
+) -> List[Tuple[str, torch.Tensor]]:
+    lm_part = gpt_weight_from_hf(
         tensor, name, src_model_type, parallel_dims, ignore_unknown_weights=True
     )
-    if lm_part_name is not None:
-        return lm_part_name, lm_part_shard
+    if lm_part and lm_part[0][0] is not None:
+        return lm_part
     assert name.startswith("visual."), f"Unsupported weight: {name}"
 
     if (
@@ -62,8 +62,25 @@ def convert_weight_from_hf(
     shard = tensor
     # TODO(cjx): Only FSDP sharding is supported for visual part
     shard = shard.contiguous()
+    if "qkv" in dest_name:
+        # Split qkv weight for visual
+        # weight has shape [3 * head_dim, hidden_dim]
+        # kv head ratio is 1, so we can split it into q, k, v
+        assert shard.shape[0] % 3 == 0, "Weight shape is not compatible for splitting."
+        unit_dim = shard.shape[0] // 3
+        q_weight = shard[:unit_dim].contiguous()
+        q_shard = q_weight.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
+        k_weight = shard[unit_dim : unit_dim * 2].contiguous()
+        k_shard = k_weight.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
+        v_weight = shard[unit_dim * 2 :].contiguous()
+        v_shard = v_weight.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
+        return [
+            (dest_name.replace("qkv", "q"), q_shard.contiguous()),
+            (dest_name.replace("qkv", "k"), k_shard.contiguous()),
+            (dest_name.replace("qkv", "v"), v_shard.contiguous()),
+        ]
     shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
-    return dest_name, shard.contiguous()
+    return [(dest_name, shard.contiguous())]
 
 
 @register_parallelism_strategy("qwen2_5_vl", role=ParallelismStrategyRole.ROLLOUT)
@@ -75,7 +92,6 @@ def map_weight_parallel_dims(
 
     dims_map = {}
     dim = "tp"
-    no_dp = False
     assert dest_name.startswith("visual.")
     if tp_size > 1:
         if (
@@ -101,7 +117,6 @@ def map_weight_parallel_dims(
             )
         ) is not None:
             dims_map[dim] = 0
-            no_dp = True
         elif (
             match := re.search(r"blocks\.(\d+)\.attn\.proj\.weight", dest_name)  # noqa: F841
         ) is not None:
@@ -137,7 +152,7 @@ def map_weight_parallel_dims(
 
     # Do FSDP sharding
     dim = "dp_shard_cp"
-    if dp_shard_size > 1 and not no_dp:
+    if dp_shard_size > 1:
         dims_map[dim] = 0
     else:
         pass
@@ -159,7 +174,6 @@ def map_weight_parallel_dims_no_visual_tp(
     dp_shard_size = parallel_dims.dp_shard * parallel_dims.cp
 
     dims_map = {}
-    no_dp = False
     assert tp_size == 1, f"tp_size should be 1, but got {tp_size}"
     if dest_name.startswith("visual."):
         assert (
@@ -167,16 +181,9 @@ def map_weight_parallel_dims_no_visual_tp(
             or dest_name.startswith("visual.merger.")
             or dest_name.startswith("visual.blocks.")
         )
-        if (
-            match := re.search(  # noqa: F841
-                r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
-                dest_name,
-            )
-        ) is not None:
-            no_dp = True
 
-        dim = "dp_shard_cp"
-        if dp_shard_size > 1 and not no_dp:
+        dim = "dp_cp_tp"
+        if dp_shard_size > 1:
             dims_map[dim] = 0
         else:
             pass
