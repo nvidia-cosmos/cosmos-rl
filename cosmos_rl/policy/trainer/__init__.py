@@ -234,7 +234,7 @@ class Trainer(CommMixin):
                 name, param
             ):
                 if _param is None:
-                    logger.warning(
+                    logger.debug(
                         f"[Policy] Skipping None parameter for {name} in safetensors export."
                     )
                     continue

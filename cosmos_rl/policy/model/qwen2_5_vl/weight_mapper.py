@@ -151,13 +151,23 @@ class QwenVL25WeightMapper(WeightMapper):
             r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
             name,
         ):
+            if not hasattr(self, "qkv_weights"):
+                self.qkv_weights = {}
             full_name = re.sub(r"\b(q|k|v)\b", "qkv", name)
-            weights = []
-            for idx in range(3):
-                weights.append(weight)
-                if idx == 2:
-                    yield full_name, torch.stack(weights, dim=0)
-                elif idx < 2:
-                    yield full_name, None
+            key = match.group(1) + match.group(3)
+            if key not in self.qkv_weights:
+                self.qkv_weights[key] = []
+
+            self.qkv_weights[key].append(weight)
+            if len(self.qkv_weights[key]) == 3:
+                merged = torch.stack(self.qkv_weights[key], dim=0)
+                merged = merged.view(-1, *merged.shape[2:])
+                yield full_name, merged
+            elif len(self.qkv_weights[key]) < 3:
+                yield name, None
+            else:
+                raise ValueError(
+                    f"Unexpected number of qkv weights for {name}: {len(self.qkv_weights[key])}"
+                )
         else:
             yield name, weight
