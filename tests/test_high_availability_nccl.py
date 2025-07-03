@@ -128,7 +128,7 @@ class TestHANccl(CommMixin):
             0  # here we assume every replica only has one gpu, so the global_rank is 0
         )
         self.replica_rank = dist.get_rank()
-        self.remote_hosts = [f"http://{os.environ["COSMOS_CONTROLLER_HOST"]}"]
+        self.remote_hosts = [f"http://{os.environ['COSMOS_CONTROLLER_HOST']}"]
         self.role = "POLICY"
         self._shutdown_event = threading.Event()
         self._is_registered = False
