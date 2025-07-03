@@ -262,6 +262,9 @@ class GRPOTrainer(Trainer):
         # The master replica needs to:
         # - Save the checkpoint/safetensors
         self.is_master_replica = True
+        self.prepare_shard_infos_for_weight_sync_insts()
+
+    def prepare_shard_infos_for_weight_sync_insts(self):
         self.parallel_mapper = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config=self.hf_config,
@@ -273,7 +276,7 @@ class GRPOTrainer(Trainer):
             [x] for x in self.model.sorted_hf_key_n_rank
         ]
         self.model.weight_mapper.parallelism_info_for_policy_params(
-            self.model, parallel_dims
+            self.model, self.parallel_dims
         )
         local_shard_infos = self.parallel_mapper.prepare_local_shard_infos(
             hf_key_n_rank, self.global_rank

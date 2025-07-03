@@ -244,12 +244,14 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
         )
+        self.prepare_shard_infos_for_weight_sync_insts()
 
+    def prepare_shard_infos_for_weight_sync_insts(self):
         self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
             self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
         )
         self.weight_mapper.parallelism_info_for_rollout_params(
-            self.get_underlying_model(), parallel_dims
+            self.get_underlying_model(), self.parallel_dims
         )
         self.parallel_mapper = ParallelTopoMapperGroup(
             self.parallel_dims,
@@ -264,7 +266,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
             local_shard_infos
         )
-
         # Ordered list of (hf_key, tensor_dim)
         if self.global_rank == 0:
             try:

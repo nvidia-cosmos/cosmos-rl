@@ -431,6 +431,7 @@ def policy_to_policy_sync_common(
         CommMixin.replica_name = policy_name
         CommMixin.remote_hosts = ["localhost:0"]
         CommMixin.shutdown_signal = threading.Event()
+        GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = dummy
         policy = GRPOTrainer(cosmos_config, parallel_dims)
         policy.model_load_from_hf()
         policy.replica_name = policy_name
@@ -546,7 +547,7 @@ def run_dummy_policy():
     ):
         return {}
 
-    def dummy_train_sft(self):
+    def dummy(self):
         pass
 
     def dummy_model_load_from_hf(self):
@@ -563,8 +564,9 @@ def run_dummy_policy():
             return dummy_execute_policy_to_rollout_unicast
         return cls.policy_command_handler_registry.get_command_handler(command_type)
 
+    GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = dummy
     GRPOTrainer.get_policy_command_handler = get_policy_command_handler
-    SFTTrainer.train = dummy_train_sft
+    SFTTrainer.train = dummy
     policy_main()
 
 
@@ -579,6 +581,9 @@ def run_dummy_rollout():
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
 
+    def dummy(self):
+        pass
+
     def get_rollout_command_handler(cls, command_type):
         if command_type == PolicyToRolloutUnicastCommand:
             return dummy_sync_weight_from_policy
@@ -587,6 +592,7 @@ def run_dummy_rollout():
         return cls.rollout_command_handler_registry.get_command_handler(command_type)
 
     vLLMRolloutWorker.get_rollout_command_handler = get_rollout_command_handler
+    vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts = dummy
 
     def dummy_init(self, config, tokenizer, **kwargs):
         class Llm_engine:
