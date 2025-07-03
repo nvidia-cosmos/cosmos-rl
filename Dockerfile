@@ -65,12 +65,11 @@ RUN pip install -U pip setuptools wheel packaging
 RUN pip install torch==2.6.0
 
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
-COPY constraints.txt /workspace/cosmos_rl/constraints.txt
 RUN pip install -r /workspace/cosmos_rl/requirements.txt
 
 FROM base AS package
 
-COPY setup.py /workspace/cosmos_rl/setup.py
+COPY pyproject.toml /workspace/cosmos_rl/pyproject.toml
 COPY tools /workspace/cosmos_rl/tools
 COPY configs /workspace/cosmos_rl/configs
 COPY cosmos_rl /workspace/cosmos_rl/cosmos_rl
