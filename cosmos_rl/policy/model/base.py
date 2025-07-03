@@ -48,7 +48,7 @@ class BaseModel(torch.nn.Module, ABC):
         sorted_key_n_rank = []
         for k, v in self.named_parameters():
             if self.tie_word_embeddings and "lm_head.weight" in k:
-                print(f"Sort {k} skipped because of tie_word_embeddings")
+                logger.info(f"Sort {k} skipped because of tie_word_embeddings")
                 continue
             k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
