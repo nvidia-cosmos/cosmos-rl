@@ -74,7 +74,7 @@ class CommMixin:
     ) -> Optional[Callable]:
         return cls.rollout_command_handler_registry.get_command_handler(command_type)
 
-    def init_comm(self, force_hfllm_type: bool = False):
+    def init_comm(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
         logger.info(
             f"{self.role} Replica started at global rank {self.global_rank}, with replica name: {self.replica_name}"
@@ -100,12 +100,7 @@ class CommMixin:
 
         user_data_packer = metadata.get("user_data_packer", None)
         model_type = hf_config.model_type
-        if force_hfllm_type:
-            logger.warning(
-                f"{self.role} Replica force to use {constant.COSMOS_HF_MODEL_TYPES} model type, with replica name: {self.replica_name}"
-            )
-            model_type = constant.COSMOS_HF_MODEL_TYPES
-        elif model_type not in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY:
+        if model_type not in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY:
             logger.warning(
                 f"{self.role} Replica can not find {model_type} in data packer, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
             )
