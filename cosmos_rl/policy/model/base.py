@@ -29,7 +29,7 @@ from cosmos_rl.dispatcher.data.packer import DataPacker
 class BaseModel(torch.nn.Module, ABC):
     def __init__(self, hf_config: AutoConfig):
         super().__init__()
-        self.tie_word_embeddings = hf_config.get("tie_word_embeddings", False)
+        self.tie_word_embeddings = getattr(hf_config, "tie_word_embeddings", False)
         self.weight_mapper = WeightMapper.get_weight_mapper(
             self.supported_model_types()[0]
         )(hf_config)
