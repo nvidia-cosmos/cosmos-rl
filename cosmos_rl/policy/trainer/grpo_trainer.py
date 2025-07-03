@@ -263,15 +263,15 @@ class GRPOTrainer(Trainer):
         # - Save the checkpoint/safetensors
         self.is_master_replica = True
         self.parallel_mapper = ParallelTopoMapperGroup(
-            self.config.policy.parallelism,
-            self.world_size,
+            self.parallel_dims,
             hf_config=self.hf_config,
             is_policy=True,
             weight_mapper=self.model.weight_mapper,
         )
         # Ordered list of (hf_key, tensor_dim)
-        hf_key_n_rank: List[Tuple[str, int]] = self.model.sorted_hf_key_n_rank
-        hf_key_n_rank = [[x] for x in hf_key_n_rank]
+        hf_key_n_rank: List[List[Tuple[str, int]]] = [
+            [x] for x in self.model.sorted_hf_key_n_rank
+        ]
         self.model.weight_mapper.parallelism_info_for_policy_params(
             self.model, parallel_dims
         )

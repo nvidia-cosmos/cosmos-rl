@@ -18,13 +18,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
 )
 import torch
-import copy
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
-from cosmos_rl.utils.parallelism import ParallelismConfig
-from cosmos_rl.utils.parallelism_registry import (
-    get_policy_parallelism_strategy,
-    get_rollout_parallelism_strategy,
-)
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 
@@ -84,6 +78,7 @@ class QwenVL25WeightMapper(WeightMapper):
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
+            group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
             if "qkv_proj" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
@@ -93,11 +88,11 @@ class QwenVL25WeightMapper(WeightMapper):
                 k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
                 v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
                 vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                recv_key_n_rank_list.append((q_proj_weight_key, q_weight.ndim))
+                group_keys.append((q_proj_weight_key, q_weight.ndim))
                 vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                recv_key_n_rank_list.append((k_proj_weight_key, k_weight.ndim))
+                group_keys.append((k_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                recv_key_n_rank_list.append((v_proj_weight_key, v_weight.ndim))
+                group_keys.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in compatible_key:
                 # split gate and up proj
                 gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
@@ -107,13 +102,11 @@ class QwenVL25WeightMapper(WeightMapper):
                     "gate_up_proj", "gate_proj"
                 )
                 vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-                recv_key_n_rank_list.append(
-                    (gate_proj_weight_key, gate_proj_weight.ndim)
-                )
+                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
                 up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
                 vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-                recv_key_n_rank_list.append((up_proj_weight_key, up_proj_weight.ndim))
+                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
             elif "qkv" in compatible_key and "visual" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
                     compatible_key, param
@@ -122,14 +115,15 @@ class QwenVL25WeightMapper(WeightMapper):
                 k_visual_proj_weight_key = compatible_key.replace("qkv", "k")
                 v_visual_proj_weight_key = compatible_key.replace("qkv", "v")
                 vllm_weight_inplace_view_map[q_visual_proj_weight_key] = q_weight
-                recv_key_n_rank_list.append((q_visual_proj_weight_key, q_weight.ndim))
+                group_keys.append((q_visual_proj_weight_key, q_weight.ndim))
                 vllm_weight_inplace_view_map[k_visual_proj_weight_key] = k_weight
-                recv_key_n_rank_list.append((k_visual_proj_weight_key, k_weight.ndim))
+                group_keys.append((k_visual_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_visual_proj_weight_key] = v_weight
-                recv_key_n_rank_list.append((v_visual_proj_weight_key, v_weight.ndim))
+                group_keys.append((v_visual_proj_weight_key, v_weight.ndim))
             else:
                 vllm_weight_inplace_view_map[compatible_key] = param
-                recv_key_n_rank_list.append((compatible_key, param.ndim))
+                group_keys.append((compatible_key, param.ndim))
+            recv_key_n_rank_list.append(group_keys)
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
@@ -149,28 +143,3 @@ class QwenVL25WeightMapper(WeightMapper):
             return 0
         else:
             raise ValueError(f"Unsupported weight: {dest_name}")
-
-    def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
-        return [replica_parallelism, replica_parallelism]
-
-    def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
-        parallelism_config_new = copy.copy(replica_parallelism)
-        assert replica_parallelism.tp_size != -1
-        if parallelism_config_new.dp_shard_size != -1:
-            parallelism_config_new.dp_shard_size = (
-                replica_parallelism.dp_shard_size * replica_parallelism.tp_size
-            )
-        parallelism_config_new.tp_size = 1
-        return [replica_parallelism, parallelism_config_new]
-
-    def get_policy_parallelism_strategy(self):
-        return [
-            get_policy_parallelism_strategy("gpt"),
-            get_policy_parallelism_strategy("qwen2_5_vl"),
-        ]
-
-    def get_rollout_parallelism_strategy(self):
-        return [
-            get_rollout_parallelism_strategy("gpt"),
-            get_rollout_parallelism_strategy("qwen2_5_vl"),
-        ]

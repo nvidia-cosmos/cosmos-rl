@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import torch
-from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
+from cosmos_rl.utils.parallelism import ParallelDims
 from typing import Dict, List, Tuple, Callable, Any, Optional
 from cosmos_rl.policy.model.base import WeightMapper
 
@@ -112,8 +112,7 @@ class ParallelTopoMapper:
 
     def __init__(
         self,
-        parallelism: Optional[ParallelismConfig],
-        world_size: int,
+        parallelism: Optional[ParallelDims],
         parallelism_strategy: Optional[Callable],
         weight_mapper: WeightMapper,
         hf_config: Any,
@@ -121,16 +120,13 @@ class ParallelTopoMapper:
         """
         Initialize the ParallelTopoMap with the given parallelism configurations.
 
-        :param parallelism: The parallelism configuration for the policy or rollout.
+        :param parallelism: The parallelism config for the policy or rollout.
         :param world_size: The world size for the policy or rollout.
         :param parallelism_strategy: The strategy for the policy parallelism or rollout parallelism.
         :param weight_mapper: The weight mapper to use for mapping weights.
         :param hf_config: The huggingface config.
         """
-        self.parallelism = ParallelDims.from_config_for_analysis(
-            parallelism, world_size
-        )
-        self.parallelism.build_mesh_info()
+        self.parallelism = parallelism
         self.parallelism_strategy = parallelism_strategy
         ranks = range(self.parallelism.world_size)
         full_mesh_rank_info_map = []
@@ -441,14 +437,21 @@ class ParallelTopoMapper:
                     self.weight_mapper.parallelism_info_for_param(dest_name)
                 )
 
-                split_dim_map_, dim_to_parallel_, pp_rank_ = self.parallelism_strategy(
-                    shape, dest_name, self.parallelism, self.hf_config
-                )
-
-                assert split_dim_map_ == split_dim_map and pp_rank_ == pp_rank, (
-                    f"Parallelism strategy for {dest_name} does not match: "
-                    f"{split_dim_map_} != {split_dim_map} or {pp_rank_} != {pp_rank}"
-                )
+                if (
+                    split_dim_map is None
+                    and dim_to_parallel is None
+                    and pp_rank is None
+                ):
+                    if self.parallelism_strategy is not None:
+                        split_dim_map, dim_to_parallel, pp_rank = (
+                            self.parallelism_strategy(
+                                shape, dest_name, self.parallelism, self.hf_config
+                            )
+                        )
+                        # assert split_dim_map_ == split_dim_map and pp_rank_ == pp_rank, (
+                        #     f"Parallelism strategy for {dest_name} does not match: "
+                        #     f"{split_dim_map_} != {split_dim_map} or {pp_rank_} != {pp_rank}"
+                        # )
 
                 dup_ranks = self.duplicate_ranks_at_given_dimensions(
                     list(split_dim_map.keys()) + ["pp"], global_rank
@@ -487,8 +490,7 @@ class ParallelTopoMapperGroup:
 
     def __init__(
         self,
-        global_parallelism: ParallelismConfig,
-        world_size: int,
+        global_parallelism: ParallelDims,
         hf_config: Any,
         is_policy: bool,
         weight_mapper: Optional[WeightMapper] = None,
@@ -496,7 +498,7 @@ class ParallelTopoMapperGroup:
         """
         Initialize the ParallelTopoMapperGroup with the given parallelism configurations.
 
-        :param global_parallelism: The parallelism configuration for the policy or rollout.
+        :param global_parallelism: The parallelism config for the policy or rollout.
         :param world_size: The world size for the policy or rollout.
         :param hf_config: The huggingface config.
         :param is_policy: A boolean indicating if this is for policy parallelism.
@@ -519,23 +521,26 @@ class ParallelTopoMapperGroup:
         # Note: policy_strategies and rollout_strategies callable to decide if or how to parallel
         # the param tensor of a give name.
         if is_policy:
-            configs: List[ParallelismConfig] = (
-                self.weight_mapper.get_policy_parallelism(global_parallelism)
-            )
             strategies = self.weight_mapper.get_policy_parallelism_strategy()
         else:
-            configs: List[ParallelismConfig] = (
-                self.weight_mapper.get_rollout_parallelism(global_parallelism)
-            )
             strategies = self.weight_mapper.get_rollout_parallelism_strategy()
 
-        assert len(configs) == len(strategies)
-        for config, strategy in zip(configs, strategies):
+        if strategies:
+            for strategy in strategies:
+                self.mapper_group.append(
+                    ParallelTopoMapper(
+                        global_parallelism,
+                        strategy,
+                        weight_mapper,
+                        hf_config,
+                    )
+                )
+        else:
+            # If no parallelism strategy is provided, use the default parallelism config
             self.mapper_group.append(
                 ParallelTopoMapper(
-                    config,
-                    world_size,
-                    strategy,
+                    global_parallelism,
+                    None,
                     weight_mapper,
                     hf_config,
                 )
@@ -675,72 +680,48 @@ class ParallelizedShardMapper:
 
         policy_params = set()
         rollout_params = set()
-        for p_rank in self.policy_all_rank_shard_infos:
-            for p_group in p_rank:
-                group_key = ";".join(sorted([p["name"] for p in p_group]))
-                if len(p_group) > 1:
-                    for p_info in p_group:
-                        policy_params.add(p_info["name"])
-                        if p_info["name"] not in param_group_map:
+        for all_rank_shard_infos, params_set in zip(
+            [self.policy_all_rank_shard_infos, self.rollout_all_rank_shard_infos],
+            [policy_params, rollout_params],
+        ):
+            for p_rank in all_rank_shard_infos:
+                for p_group in p_rank:
+                    group_key = ";".join(sorted([p["name"] for p in p_group]))
+                    if len(p_group) > 1:
+                        if p_group[0]["name"] not in param_group_map:
                             assert (
                                 group_key not in group_key_map
-                            ), f"Parameter {p_info['name']} is not in any group, but group {group_key} already exists."
-                            param_group_map[p_info["name"]] = group_key
-                            group_key_map[group_key] = p_group
-                        else:
-                            assert (
-                                param_group_map[p_info["name"]] == group_key
-                            ), f"Parameter {p_info['name']} is in different groups: {param_group_map[p_info['name']]} and {group_key}"
-                else:
-                    policy_params.add(p_group[0]["name"])
-
-        for r_rank in self.rollout_all_rank_shard_infos:
-            for p_group in r_rank:
-                group_key = ";".join(sorted([p["name"] for p in p_group]))
-                if len(p_group) > 1:
-                    for p_info in p_group:
-                        rollout_params.add(p_info["name"])
-                        if p_info["name"] not in param_group_map:
-                            assert (
-                                group_key not in group_key_map
-                            ), f"Parameter {p_info['name']} is not in any group, but group {group_key} already exists."
-                            param_group_map[p_info["name"]] = group_key
-                            group_key_map[group_key] = p_group
-                        else:
-                            assert (
-                                param_group_map[p_info["name"]] == group_key
-                            ), f"Parameter {p_info['name']} is in different groups: {param_group_map[p_info['name']]} and {group_key}"
-                else:
-                    rollout_params.add(p_group[0]["name"])
+                            ), f"Parameter {p_group[0]['name']} is not in any group, but group {group_key} already exists."
+                        for p_info in p_group:
+                            params_set.add(p_info["name"])
+                            if p_info["name"] not in param_group_map:
+                                param_group_map[p_info["name"]] = group_key
+                                group_key_map[group_key] = p_group
+                            else:
+                                assert (
+                                    param_group_map[p_info["name"]] == group_key
+                                ), f"Parameter {p_info['name']} is in different groups: {param_group_map[p_info['name']]} and {group_key}"
+                    else:
+                        params_set.add(p_group[0]["name"])
 
         groups_map = {}
-
-        for p_rank in self.policy_all_rank_shard_infos:
-            for p_group in p_rank:
-                group_key = ";".join(sorted([p["name"] for p in p_group]))
-                if group_key in group_key_map and group_key not in groups_map:
-                    assert (
-                        len(p_group) > 1
-                    ), f"Parameter group {group_key} should have more than one parameter, but has only {len(p_group)}."
-                    groups_map[group_key] = p_group
-                elif len(p_group) == 1 and p_group[0]["name"] in param_group_map:
-                    pass
-                else:
-                    if group_key not in groups_map:
+        for all_rank_shard_infos in [
+            self.policy_all_rank_shard_infos,
+            self.rollout_all_rank_shard_infos,
+        ]:
+            for p_rank in all_rank_shard_infos:
+                for p_group in p_rank:
+                    group_key = ";".join(sorted([p["name"] for p in p_group]))
+                    if group_key in group_key_map and group_key not in groups_map:
+                        assert (
+                            len(p_group) > 1
+                        ), f"Parameter group {group_key} should have more than one parameter, but has only {len(p_group)}."
                         groups_map[group_key] = p_group
-        for r_rank in self.rollout_all_rank_shard_infos:
-            for p_group in r_rank:
-                group_key = ";".join(sorted([p["name"] for p in p_group]))
-                if group_key in group_key_map and group_key not in groups_map:
-                    assert (
-                        len(p_group) > 1
-                    ), f"Parameter group {group_key} should have more than one parameter, but has only {len(p_group)}."
-                    groups_map[group_key] = p_group
-                elif len(p_group) == 1 and p_group[0]["name"] in param_group_map:
-                    pass
-                else:
-                    if group_key not in groups_map:
-                        groups_map[group_key] = p_group
+                    elif len(p_group) == 1 and p_group[0]["name"] in param_group_map:
+                        pass
+                    else:
+                        if group_key not in groups_map:
+                            groups_map[group_key] = p_group
 
         self.sorted_param_groups = [groups_map[key] for key in sorted(groups_map)]
         assert (

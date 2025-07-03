@@ -50,6 +50,7 @@ from cosmos_rl.utils.pynccl import (
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
+import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -251,24 +252,21 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.get_underlying_model(), parallel_dims
         )
         self.parallel_mapper = ParallelTopoMapperGroup(
-            self.config.rollout.parallelism,
-            self.world_size,
+            self.parallel_dims,
             self.model_config,
             is_policy=False,
             weight_mapper=self.weight_mapper,
         )
-        self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
-        self.recv_param_key_n_rank_list = [[x] for x in self.recv_param_key_n_rank_list]
+
+        local_shard_infos = self.parallel_mapper.prepare_local_shard_infos(
+            self.recv_param_key_n_rank_list, self.global_rank
+        )
+        self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
+            local_shard_infos
+        )
+
         # Ordered list of (hf_key, tensor_dim)
         if self.global_rank == 0:
-            self.all_rank_local_shard_infos = [
-                (
-                    self.parallel_mapper.prepare_local_shard_infos(
-                        self.recv_param_key_n_rank_list, i
-                    )
-                )
-                for i in range(self.world_size)
-            ]
             try:
                 make_request_with_retry(
                     partial(
@@ -447,15 +445,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         """
         if command.dst_replica_name != self.replica_name:
             return
-        if self.parallel_mapper is None:
-            self.parallel_mapper = ParallelTopoMapperGroup(
-                self.config.policy.parallelism,
-                self.config.rollout.parallelism,
-                command.src_replica_size,
-                self.world_size,
-                self.model_config,
-            )
-
         # get the nccl_unique_id from the controller
         communicator_index = {}
 

@@ -16,7 +16,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional, List, Tuple, Union, Callable, Dict, Type, Any
 from functools import cached_property
-from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
+from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 import cosmos_rl.utils.util as util
@@ -280,11 +280,11 @@ class WeightMapper(ABC):
     @abstractmethod
     def rollout_prepare_recv(
         self, vllm_model: Any
-    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, int]]]:
+    ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
         """
         Rollout prepare recv list for P2R weight sync:
             - vllm_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
-            - recv_key_n_rank_list: List[Tuple[str, int]]: the list of recv key and its tensor rank
+            - recv_key_n_rank_list: List[List[Tuple[str, int]]]: the list of grouped recv key and its tensor rank
         """
         pass
 
@@ -293,14 +293,6 @@ class WeightMapper(ABC):
 
     @abstractmethod
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
-        pass
-
-    @abstractmethod
-    def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
-        pass
-
-    @abstractmethod
-    def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
         pass
 
     def get_policy_parallelism_strategy(self):
@@ -352,7 +344,8 @@ class WeightMapper(ABC):
         if hasattr(self, "parallelism_info_for_params"):
             return self.parallelism_info_for_params[param_name]
         else:
-            raise ValueError("No parallelism info found for the given parameter name.")
+            logger.error("No parallelism info found for the given parameter name.")
+            return None, None, None
 
     def insert_to_parallelism_info(
         self,
