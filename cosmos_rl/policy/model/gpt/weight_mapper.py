@@ -15,7 +15,7 @@
 
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 import torch
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
@@ -59,16 +59,33 @@ class GPTWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self, vllm_model: Qwen2ForCausalLM
-    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
+        self,
+        vllm_model: Qwen2ForCausalLM,
+        quantization: bool = False,
+        promotion_dtype: Optional[torch.dtype] = None,
+    ) -> Tuple[
+        Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
+    ]:
+        if quantization:
+            assert (
+                promotion_dtype is not None
+            ), "promotion_dtype is required when quantization is enabled"
+
         assert (
             "qwen" in type(vllm_model).__name__.lower()
         ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
+        vllm_full_weight_map = {}  # only for weight that need fp8 quantization.
         for param_name, param in vllm_model.named_parameters():
+            if "weight_scale" in param_name:
+                # do not map weight_scale to vllm weight_inplace_view_map
+                continue
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            # logger.info(f"[Rollout] compatible_key: {compatible_key}")
+            if quantization and self.is_fp8_quantized_weight(compatible_key):
+                # logger.info(f"[Rollout] re-materialize weight: {compatible_key} to shape: {param.shape}")
+                param = torch.empty_like(param, dtype=promotion_dtype).t().contiguous()
+                vllm_full_weight_map[compatible_key] = param
             if "qkv_proj" in compatible_key:
                 # must be inplace slicing.
                 # split qkv weight
@@ -104,7 +121,7 @@ class GPTWeightMapper(WeightMapper):
                 vllm_weight_inplace_view_map[compatible_key] = param
                 recv_key_n_shape_list.append((compatible_key, param.ndim))
 
-        return vllm_weight_inplace_view_map, recv_key_n_shape_list
+        return vllm_weight_inplace_view_map, recv_key_n_shape_list, vllm_full_weight_map
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
@@ -124,3 +141,26 @@ class GPTWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("gpt")]
+
+    def quantized_weight_partial_keys(self):
+        return [
+            "qkv_proj",
+            "gate_up_proj",
+            "down_proj",
+            "o_proj",
+        ]  # only layers contain these keywords will be fp8 quantized.
+
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        for key in ["q_proj", "k_proj", "v_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "qkv_proj")
+        for key in ["gate_proj", "up_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "gate_up_proj")
+        return weight_key  # return compatible key
+
+    def is_fp8_quantized_weight(self, weight_key: str) -> bool:
+        for key in self.quantized_weight_partial_keys():
+            if key in weight_key and "bias" not in weight_key:
+                return True
+        return False
