@@ -30,6 +30,8 @@ import asyncio
 import importlib
 import importlib.util
 import sys
+import glob
+from filelock import FileLock, Timeout
 from collections import OrderedDict
 from functools import wraps
 from msgpack import ExtType
@@ -407,130 +409,122 @@ def prepare_cosmos_data(dataset, fps=1, max_pixels=81920):
         dataset.subset,
     )
     video_clips_dir = os.path.join(dataset_dir, "video_clips")
-    video_tensors_dir = os.path.join(
-        dataset_dir,
-        "video_tensors",
-        f"fps-{fps}-pixels-{max_pixels}",
-    )
 
-    if os.path.exists(video_clips_dir) and os.path.exists(video_tensors_dir):
-        clip_files = []
-        for root, dirs, files in os.walk(video_clips_dir):
-            for file in files:
-                if file.endswith((".mp4", ".avi", ".mov")):
-                    clip_files.append(os.path.join(root, file))
-        num_clips = len(clip_files)
-        num_tensors = len(
-            [
-                tensor
-                for tensor in os.listdir(video_tensors_dir)
-                if tensor.endswith(".cosmos")
-            ]
-        )
+    prepared_flag = os.path.join(video_clips_dir, ".prepared")
+    if os.path.exists(prepared_flag):
+        logger.info(f"Dataset {dataset.name} already prepared.")
+        return
 
-        if num_clips == num_tensors:
-            logger.info(f"Dataset {dataset.name} is already prepared.")
-            return
+    # ensure base dirs exist
+    os.makedirs(video_clips_dir, exist_ok=True)
 
-    ## Prepare video clips
-    re_pattern = re.compile(rf"^{re.escape(dataset.subset)}/clips/.*\.tar\.gz$")
-    file_pattern = f"{dataset.subset}/clips/*.tar.gz"
-    if use_modelscope:
-        assert os.path.exists(dataset.name)
-        # list all files in the local directory dataset.name
-        import glob
+    # file-lock to prevent races
+    lock_path = os.path.join(dataset_dir, "prepare.lock")
+    lock = FileLock(lock_path, timeout=1800)  # wait up to 30 minutes
 
-        remote_files = [
-            f.replace(dataset.name + "/", "")
-            for f in glob.glob(
-                f"{dataset.name}/**/*.tar.gz",
-                recursive=True,
-            )
-        ]
-    else:
-        remote_files = list_repo_files(
-            repo_id=dataset_name,
-            repo_type="dataset",
-            revision=dataset.revision or None,
-        )
-
-    tgz_files = [f for f in remote_files if re_pattern.match(f)]
-    if tgz_files:
-        if use_modelscope:
-            downloaded_clips_dir_path = os.path.join(
-                dataset.name,
-                dataset.subset,
-                "clips",
-            )
-        else:
-            downloaded_snapshot_directory_cache = retry(snapshot_download)(
-                dataset_name,
-                allow_patterns=[file_pattern],
-                repo_type="dataset",
-                revision=dataset.revision or None,
-            )
-
-            downloaded_clips_dir_path = os.path.join(
-                downloaded_snapshot_directory_cache,
-                dataset.subset,
-                "clips",
-            )
-        assert os.path.exists(
-            downloaded_clips_dir_path
-        ), f"Can not find clips directory at {downloaded_clips_dir_path}"
-
-        # Avoid redundant extraction
-        if not os.path.exists(video_clips_dir):
-            os.makedirs(video_clips_dir, exist_ok=True)
-            with tqdm(
-                total=len(tgz_files), desc="Extracting clips tar.gz files"
-            ) as pbar:
-                results = {}
-                with multiprocessing.Pool(
-                    processes=min(multiprocessing.cpu_count(), 8)
-                ) as pool:
-                    for tar_file in tgz_files:
-                        full_file_path = os.path.join(
-                            downloaded_clips_dir_path, os.path.basename(tar_file)
-                        )
-                        results[tar_file] = pool.apply_async(
-                            _extract_tgz_file,
-                            (full_file_path, video_clips_dir),
-                            callback=lambda _: pbar.update(1),
-                        )
-                    pool.close()
-                    pool.join()
-
-                for tar_file, result in results.items():
-                    if not result.successful():
-                        raise RuntimeError(
-                            f"Failed to extract {tar_file}: {result.get()}"
-                        )
-
-    else:
-        # legacy dataset format with single tar gz file
-        if not os.path.exists(video_clips_dir):
-            os.makedirs(video_clips_dir, exist_ok=True)
-            clip_filename = os.path.join(dataset.subset, "clips.tar.gz")
-            if use_modelscope:
-                clip_tgz = os.path.join(dataset.name, clip_filename)
-            else:
-                clip_tgz = hf_hub_download(
-                    repo_id=dataset_name,
-                    revision=dataset.revision or None,
-                    repo_type="dataset",
-                    filename=clip_filename,
+    try:
+        with lock:
+            # re-check sentinel inside the lock
+            if os.path.exists(prepared_flag):
+                logger.info(
+                    f"Dataset {dataset.name} already prepared by another worker."
                 )
-            _extract_tgz_file(clip_tgz, video_clips_dir)
+                return
 
-    if dataset.subset == "av":
-        # For AV dataset, we need to rename the files
-        for root, dirs, files in os.walk(video_clips_dir):
-            for file in files:
-                if file.endswith(".mp4"):
-                    new_name = file.split(".")[0] + ".mp4"
-                    os.rename(os.path.join(root, file), os.path.join(root, new_name))
-                    logger.info(f"Renamed {file} to {new_name}")
+            # --- find .tar.gz clips ---
+            re_pattern = re.compile(rf"^{re.escape(dataset.subset)}/clips/.*\.tar\.gz$")
+            file_pattern = f"{dataset.subset}/clips/*.tar.gz"
+            if use_modelscope:
+                assert os.path.exists(dataset.name), f"{dataset.name} not found locally"
+                remote_files = [
+                    f.replace(dataset.name + "/", "")
+                    for f in glob.glob(f"{dataset.name}/**/*.tar.gz", recursive=True)
+                ]
+            else:
+                remote_files = list_repo_files(
+                    repo_id=dataset_name,
+                    repo_type="dataset",
+                    revision=dataset.revision or None,
+                )
+
+            tgz_files = [f for f in remote_files if re_pattern.match(f)]
+
+            # --- extract clips ---
+            if tgz_files:
+                if use_modelscope:
+                    downloaded_clips_dir = os.path.join(
+                        dataset.name, dataset.subset, "clips"
+                    )
+                else:
+                    snapshot_dir = retry(snapshot_download)(
+                        dataset_name,
+                        allow_patterns=[file_pattern],
+                        repo_type="dataset",
+                        revision=dataset.revision or None,
+                    )
+                    downloaded_clips_dir = os.path.join(
+                        snapshot_dir, dataset.subset, "clips"
+                    )
+
+                assert os.path.exists(
+                    downloaded_clips_dir
+                ), f"Cannot find clips at {downloaded_clips_dir}"
+
+                # parallel extract
+                results = {}
+                with tqdm(total=len(tgz_files), desc="Extracting clips") as pbar:
+                    with multiprocessing.Pool(
+                        processes=min(multiprocessing.cpu_count(), 8)
+                    ) as pool:
+                        for tgz in tgz_files:
+                            full_path = os.path.join(
+                                downloaded_clips_dir, os.path.basename(tgz)
+                            )
+                            results[tgz] = pool.apply_async(
+                                _extract_tgz_file,
+                                (full_path, video_clips_dir),
+                                callback=lambda _: pbar.update(1),
+                            )
+                        pool.close()
+                        pool.join()
+
+                # check for extract errors
+                for tgz, res in results.items():
+                    if not res.successful():
+                        raise RuntimeError(f"Failed to extract {tgz}: {res.get()}")
+
+            else:
+                # legacy single-archive format
+                clip_tgz = os.path.join(dataset.subset, "clips.tar.gz")
+                if use_modelscope:
+                    clip_tgz = os.path.join(dataset.name, clip_tgz)
+                else:
+                    clip_tgz = hf_hub_download(
+                        repo_id=dataset_name,
+                        revision=dataset.revision or None,
+                        repo_type="dataset",
+                        filename=clip_tgz,
+                    )
+                _extract_tgz_file(clip_tgz, video_clips_dir)
+
+            # --- special renaming for 'av' subset ---
+            if dataset.subset == "av":
+                for root, _, files in os.walk(video_clips_dir):
+                    for file in files:
+                        if file.endswith(".mp4"):
+                            src = os.path.join(root, file)
+                            dst = os.path.join(root, file.split(".")[0] + ".mp4")
+                            os.rename(src, dst)
+                            logger.info(f"Renamed {file} → {os.path.basename(dst)}")
+
+            # finally, create our sentinel
+            open(prepared_flag, "w").close()
+            logger.info(f"Finished preparing {dataset.name}.")
+
+    except Timeout:
+        raise RuntimeError(
+            f"Timeout acquiring lock for {dataset.name}; another process may be stuck."
+        )
 
 
 GPU_FLOPS_MAPPING = {

@@ -1056,20 +1056,21 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
 
     controller_cmd = None
     tmpfile_toml = None
+    if n_policy > 0 or n_rollouts > 0:
+        # Do not update the config if no replicas are needed which means launch controller only.
+        if "policy" in cosmos_config and "parallelism" in cosmos_config["policy"]:
+            cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
+        if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
+            # Only available for RL.
+            cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
+    # Create a temporary file and write to it
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".toml", delete=False
+    ) as tmpfile:
+        toml.dump(cosmos_config, tmpfile)
+        tmpfile_toml = tmpfile.name
+
     if control_url is None:
-        if n_policy > 0 or n_rollouts > 0:
-            # Do not update the config if no replicas are needed which means launch controller only.
-            if "policy" in cosmos_config and "parallelism" in cosmos_config["policy"]:
-                cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
-            if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
-                # Only available for RL.
-                cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
-        # Create a temporary file and write to it
-        with tempfile.NamedTemporaryFile(
-            mode="w+", suffix=".toml", delete=False
-        ) as tmpfile:
-            toml.dump(cosmos_config, tmpfile)
-            tmpfile_toml = tmpfile.name
         logger.info(f"Temporary configuration file created at {tmpfile_toml}")
         controller_cmd = f"{controller_script} --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"

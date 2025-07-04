@@ -26,6 +26,8 @@ from cosmos_rl.utils.util import basename_from_modelpath
 from cosmos_rl.dispatcher.data.packer import DataPacker, Qwen2_5_VLM_DataPacker
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
+import argparse
+import toml
 
 FPS = 1
 MAX_PIXELS = 81920
@@ -70,9 +72,6 @@ class CosmosGRPODataset(Dataset):
             else:
                 assert isinstance(config.train.train_policy.dataset.split, str)
                 self.dataset = self.dataset[config.train.train_policy.dataset.split]
-        util.prepare_cosmos_data(
-            dataset=config.train.train_policy.dataset, fps=FPS, max_pixels=MAX_PIXELS
-        )
         self.mm_files_paths = self.get_mm_files_paths(
             config.train.train_policy.dataset.name,
             config.train.train_policy.dataset.subset,
@@ -170,9 +169,6 @@ class CosmosGRPOValDataset(CosmosGRPODataset):
         # Prepare the data for Cosmos GRPO
         # This is a hack to make the dataset compatible with the training data
         # Change the training dataset name and subset to utilize the same data preparation logic
-        util.prepare_cosmos_data(
-            dataset=config.validation.dataset, fps=FPS, max_pixels=MAX_PIXELS
-        )
         self.mm_files_paths = self.get_mm_files_paths(
             config.train.train_policy.dataset.name,
             config.train.train_policy.dataset.subset,
@@ -252,6 +248,21 @@ class DemoDataPacker(DataPacker):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    args = parser.parse_known_args()[0]
+    with open(args.config, "r") as f:
+        config = toml.load(f)
+    config = Config.from_dict(config)
+
+    util.prepare_cosmos_data(
+        dataset=config.train.train_policy.dataset, fps=FPS, max_pixels=MAX_PIXELS
+    )
+    if config.train.enable_validation:
+        util.prepare_cosmos_data(
+            dataset=config.validation.dataset, fps=FPS, max_pixels=MAX_PIXELS
+        )
+
     # It is best practice to pass the dataset and val_dataset as factory functions
     # so that the dataset and val_dataset can be loaded on demand. (Not all workers need them)
     def get_dataset(config: CosmosConfig) -> Dataset:

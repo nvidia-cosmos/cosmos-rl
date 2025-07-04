@@ -23,7 +23,8 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.util import basename_from_modelpath
 from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers import AutoTokenizer
-
+import argparse
+import toml
 
 FPS = 1
 MAX_PIXELS = 81920
@@ -104,6 +105,17 @@ class CosmosSFTDataset(Dataset):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    args = parser.parse_known_args()[0]
+    with open(args.config, "r") as f:
+        config = toml.load(f)
+    config = Config.from_dict(config)
+
+    # Each worker needs to prepare the data independently
+    util.prepare_cosmos_data(
+        dataset=config.train.train_policy.dataset, fps=FPS, max_pixels=MAX_PIXELS
+    )
 
     def get_dataset(config: CosmosConfig) -> Dataset:
         dataset = load_dataset(
@@ -111,9 +123,6 @@ if __name__ == "__main__":
             config.train.train_policy.dataset.subset,
         )
         # Prepare video files
-        util.prepare_cosmos_data(
-            dataset=config.train.train_policy.dataset, fps=FPS, max_pixels=MAX_PIXELS
-        )
         return CosmosSFTDataset(dataset)
 
     # It is best practice to pass the dataset as a factory function
