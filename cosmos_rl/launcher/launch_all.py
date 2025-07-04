@@ -15,6 +15,7 @@
 
 #!/usr/bin/env python3
 
+from importlib.metadata import version
 import socket
 import subprocess
 import sys
@@ -188,6 +189,11 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Launch multiple processes with GPU assignments"
     )
+
+    parser.add_argument(
+        "-v", "--version", action="version", version=version("cosmos_rl")
+    )
+
     parser.add_argument(
         "--config",
         type=str,

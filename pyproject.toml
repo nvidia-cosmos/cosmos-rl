@@ -1,10 +1,9 @@
 [project]
 name = "cosmos_rl"
-version="0.1.1"
 description = "Cosmos-RL is a flexible and scalable Reinforcement Learning framework specialized for Physical AI applications."
 readme = "README.md"
 requires-python = ">=3.9"
-dynamic = ["dependencies"]
+dynamic = ["version", "dependencies"]
 
 [project.urls]
 Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
@@ -21,3 +20,16 @@ cosmos_rl = ["launcher/*.sh"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
+
+[build-system]
+requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2,<=7.1.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+write_to = "cosmos_rl/_version.py"
+
+# add .post1.devN to last tagged version (N is the number of commits
+# since the tagged commit)
+version_scheme="no-guess-dev"
+# add git commit (and date if working dir is dirty) to the version tag
+local_scheme="node-and-date"
