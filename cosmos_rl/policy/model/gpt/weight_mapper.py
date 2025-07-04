@@ -60,7 +60,9 @@ class GPTWeightMapper(WeightMapper):
 
     def rollout_prepare_recv(
         self, vllm_model: Qwen2ForCausalLM, quantization=False
-    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
+    ) -> Tuple[
+        Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
+    ]:
         assert (
             "qwen" in type(vllm_model).__name__.lower()
         ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
@@ -113,54 +115,6 @@ class GPTWeightMapper(WeightMapper):
 
         return vllm_weight_inplace_view_map, recv_key_n_shape_list, vllm_full_weight_map
 
-    # def rollout_prepare_recv(
-    #     self, vllm_model: Qwen2ForCausalLM
-    # ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
-    #     assert (
-    #         "qwen" in type(vllm_model).__name__.lower()
-    #     ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
-    #     recv_key_n_shape_list = []
-    #     vllm_weight_inplace_view_map = {}
-    #     for param_name, param in vllm_model.named_parameters():
-    #         compatible_key = self._rollout_vllm_name_to_hf(param_name)
-    #         # logger.info(f"[Rollout] compatible_key: {compatible_key}")
-    #         if "qkv_proj" in compatible_key:
-    #             # must be inplace slicing.
-    #             # split qkv weight
-    #             q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
-    #                 compatible_key, param
-    #             )
-    #             q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
-    #             k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
-    #             v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
-    #             vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-    #             recv_key_n_shape_list.append((q_proj_weight_key, q_weight.ndim))
-    #             vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-    #             recv_key_n_shape_list.append((k_proj_weight_key, k_weight.ndim))
-    #             vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-    #             recv_key_n_shape_list.append((v_proj_weight_key, v_weight.ndim))
-    #         elif "gate_up_proj" in compatible_key:
-    #             # split gate and up proj
-    #             gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
-    #                 compatible_key, param
-    #             )
-    #             gate_proj_weight_key = compatible_key.replace(
-    #                 "gate_up_proj", "gate_proj"
-    #             )
-    #             vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-    #             recv_key_n_shape_list.append(
-    #                 (gate_proj_weight_key, gate_proj_weight.ndim)
-    #             )
-
-    #             up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
-    #             vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-    #             recv_key_n_shape_list.append((up_proj_weight_key, up_proj_weight.ndim))
-    #         else:
-    #             vllm_weight_inplace_view_map[compatible_key] = param
-    #             recv_key_n_shape_list.append((compatible_key, param.ndim))
-
-    #     return vllm_weight_inplace_view_map, recv_key_n_shape_list
-
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
         if not name == "lm_head.weight":
@@ -179,9 +133,6 @@ class GPTWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("gpt")]
-
-    def splited_weight_partial_keys(self):
-        return ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj"]
 
     def quantized_weight_partial_keys(self):
         return [

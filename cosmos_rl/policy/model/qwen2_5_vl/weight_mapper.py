@@ -28,6 +28,7 @@ from cosmos_rl.utils.parallelism_registry import (
 )
 from cosmos_rl.utils import util
 from transformers import AutoConfig
+from typing import Dict, List, Tuple
 
 
 class QwenVL25WeightMapper(WeightMapper):
@@ -80,12 +81,26 @@ class QwenVL25WeightMapper(WeightMapper):
         up_proj_weight = weight[dim_0 // 2 :]
         return gate_proj_weight, up_proj_weight
 
-    def rollout_prepare_recv(self, vllm_model: Qwen2_5_VLForConditionalGeneration):
+    def rollout_prepare_recv(
+        self, vllm_model: Qwen2_5_VLForConditionalGeneration, quantization: bool = False
+    ) -> Tuple[
+        Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
+    ]:
         assert isinstance(vllm_model, Qwen2_5_VLForConditionalGeneration)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
+        vllm_full_weight_map = {}  # rematerialized weights for fp8 quantization.
         for param_name, param in vllm_model.named_parameters():
+            if "weight_scale" in param_name:
+                # do not map weight_scale to vllm weight_inplace_view_map
+                continue
+
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
+            if quantization and self.is_fp8_quantized_weight(compatible_key):
+                # logger.info(f"[Rollout] re-materialize weight: {compatible_key} to shape: {param.shape}")
+                param = torch.empty_like(param, dtype=torch.bfloat16).t().contiguous()
+                vllm_full_weight_map[compatible_key] = param
+
             if "qkv_proj" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
                     compatible_key, param
@@ -197,3 +212,31 @@ class QwenVL25WeightMapper(WeightMapper):
             get_rollout_parallelism_strategy("gpt"),
             get_rollout_parallelism_strategy("qwen2_5_vl"),
         ]
+
+    def quantized_weight_partial_keys(self):
+        return [
+            "qkv_proj",
+            "gate_up_proj",
+            "down_proj",
+            "o_proj",
+            # visual part
+            "qkv",
+        ]  # only layers contain these keywords will be fp8 quantized.
+
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        for key in ["q_proj", "k_proj", "v_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "qkv_proj")
+        for key in ["gate_proj", "up_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "gate_up_proj")
+        for key in ["q", "k", "v"]:
+            if "visual" in weight_key and key in weight_key:
+                return weight_key.replace(key, "qkv")
+        return weight_key  # return compatible key
+
+    def is_fp8_quantized_weight(self, weight_key: str) -> bool:
+        for key in self.quantized_weight_partial_keys():
+            if key in weight_key and "bias" not in weight_key:
+                return True
+        return False

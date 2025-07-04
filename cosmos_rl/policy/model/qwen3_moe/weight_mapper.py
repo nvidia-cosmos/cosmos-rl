@@ -68,13 +68,23 @@ class Qwen3MoeWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self, vllm_model: Qwen3MoeForCausalLM
-    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
+        self, vllm_model: Qwen3MoeForCausalLM, quantization: bool = False
+    ) -> Tuple[
+        Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
+    ]:
         assert isinstance(vllm_model, Qwen3MoeForCausalLM)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
+        vllm_full_weight_map = {}  # only for weight that need fp8 quantization.
         for param_name, param in vllm_model.named_parameters():
+            if "weight_scale" in param_name:
+                # do not map weight_scale to vllm weight_inplace_view_map
+                continue
             param_name_hf = self._rollout_vllm_name_to_hf(param_name)
+            if quantization and self.is_fp8_quantized_weight(param_name_hf):
+                # logger.info(f"[Rollout] re-materialize weight: {compatible_key} to shape: {param.shape}")
+                param = torch.empty_like(param, dtype=torch.bfloat16).t().contiguous()
+                vllm_full_weight_map[param_name_hf] = param
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:
                 # must be inplace slicing.
@@ -152,3 +162,26 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("qwen3_moe")]
+
+    def quantized_weight_partial_keys(self):
+        return [
+            "qkv_proj",
+            "gate_up_proj",
+            "down_proj",
+            "o_proj",
+        ]  # only layers contain these keywords will be fp8 quantized.
+
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        for key in ["q_proj", "k_proj", "v_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "qkv_proj")
+        for key in ["gate_proj", "up_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "gate_up_proj")
+        return weight_key  # return compatible key
+
+    def is_fp8_quantized_weight(self, weight_key: str) -> bool:
+        for key in self.quantized_weight_partial_keys():
+            if key in weight_key and "bias" not in weight_key:
+                return True
+        return False

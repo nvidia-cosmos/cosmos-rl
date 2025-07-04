@@ -270,12 +270,15 @@ class WeightMapper(ABC):
 
     @abstractmethod
     def rollout_prepare_recv(
-        self, vllm_model: Any
-    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, int]]]:
+        self, vllm_model: Any, quantization: bool = False
+    ) -> Tuple[
+        Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
+    ]:
         """
         Rollout prepare recv list for P2R weight sync:
             - vllm_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
             - recv_key_n_rank_list: List[Tuple[str, int]]: the list of recv key and its tensor rank
+            - vllm_full_weight_map: Dict[str, torch.Tensor]: the map of vllm full weight that needed for fp8 quantization, if fp8 available in rollout.
         """
         pass
 
@@ -300,6 +303,18 @@ class WeightMapper(ABC):
 
     @abstractmethod
     def get_rollout_parallelism_strategy(self):
+        pass
+
+    @abstractmethod
+    def quantized_weight_partial_keys(self):
+        pass
+
+    @abstractmethod
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        pass
+
+    @abstractmethod
+    def is_fp8_quantized_weight(self, weight_key: str) -> bool:
         pass
 
     @classmethod
