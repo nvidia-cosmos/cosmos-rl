@@ -16,6 +16,7 @@ import os
 import vllm
 import torch
 from typing import List, Tuple, Any
+from functools import cached_property
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
@@ -90,6 +91,8 @@ class vLLMRollout(RolloutBase):
         # disable VLLM_DISABLE_COMPILE_CACHE
         os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
+        self.quantization = kwargs.get("quantization", None)
+
         self.rollout_engine = LLM(
             model=model_path,
             enable_sleep_mode=False,  # enable sleep could corrupt the cuda allocator.
@@ -148,6 +151,7 @@ class vLLMRollout(RolloutBase):
 
     def reload_weight(self):
         self.rollout_engine.llm_engine.vllm_config.load_config.load_format = "auto"
+        # if fp8 is enabled, reset the quantization to fp8
         self.rollout_engine.collective_rpc("reload_model")
 
     @torch.no_grad()
@@ -205,3 +209,25 @@ class vLLMRollout(RolloutBase):
         Get the underlying parallelized model in vLLM internal.
         """
         return self.rollout_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+
+    def fp8_quantization(self, weight: torch.Tensor):
+        assert (
+            weight.dtype == torch.bfloat16
+        ), f"weight dtype is not bfloat16: {weight.dtype}"
+        # convert to fp8
+        from vllm import _custom_ops as ops
+
+        # quantization of rowwise torch scaled_mm.
+        # weight has shape [out_dim, in_dim]
+        qweight, weight_scale = ops.scaled_fp8_quant(
+            weight, scale=None, use_per_token_if_dynamic=True
+        )
+        return qweight.t(), weight_scale
+
+    @cached_property
+    def model_param_map(self):
+        model = self.get_underlying_model()
+        param_map = {}
+        for name, param in model.named_parameters():
+            param_map[name] = param
+        return param_map

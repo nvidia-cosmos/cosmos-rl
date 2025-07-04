@@ -363,16 +363,17 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         communicator_index: Dict[int, int],
         do_weight_sync_check: bool = False,
     ):
-        p_rank, r_rank, tensor_split_strategys, dest_name, _ = manifest
+        p_rank, r_rank, tensor_split_strategys, dest_name, shape = manifest
+        # logger.info(f"[Rollout] recv_weight_shard: {dest_name}, shape: {shape}")
         assert r_rank == global_rank_of_rollout
 
         vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
 
-        # quantization handling
-        quantization_type = self.config.rollout.quantization
-        if quantization_type == "fp8":
-            # create a new tensor with bf16 to recv the weight from policy
-            vllm_tensor_view = vllm_tensor_view.to(torch.bfloat16)
+        # # quantization handling
+        # quantization_type = self.config.rollout.quantization
+        # if quantization_type == "fp8":
+        #     # create a new tensor with bf16 to recv the weight from policy
+        #     vllm_tensor_view = vllm_tensor_view.to(torch.bfloat16)
 
         if do_weight_sync_check:
             cloned_target_tensor = target_tensor.clone()
@@ -392,7 +393,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         if not vllm_tensor_view.is_contiguous():
             vllm_tensor_view.copy_(recv_tensor)
 
-        if do_weight_sync_check:
+        if (
+            do_weight_sync_check and self.quantization_type is None
+        ):  # disable weight sync check when fp8 is enabled
             # If the weight sync between Policy and Rollout is correct, the
             # `target_tensor` would have no change.
             # TODO: (lms) When we support quantization in rollout side,
@@ -426,9 +429,15 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # get the nccl_unique_id from the controller
         communicator_index = {}
+        # FIXME: (lms) avoid to hold the allocated bf16 tensor in vllm_weight_inplace_view_map when fp8 enabled.
         if not hasattr(self, "vllm_weight_inplace_view_map"):
-            self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
-                self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+            (
+                self.vllm_weight_inplace_view_map,
+                self.recv_param_key_n_rank_list,
+                self.vllm_full_weight_map,  # this is for fp8. It records the real shape of the weight in vllm model in single device.
+            ) = self.weight_mapper.rollout_prepare_recv(
+                self.get_underlying_model(),
+                quantization=self.quantization_type == "fp8",
             )
             self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
 
@@ -476,7 +485,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     communicator_index[p_rank]
                 )
 
-        if command.do_weight_sync_check:
+        if (
+            command.do_weight_sync_check and self.quantization_type is None
+        ):  # disable reload when fp8 is enabled
             self.rollout.reload_weight()
 
         with torch.cuda.stream(self.inference_stream):
@@ -485,36 +496,51 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             total_bytes_received = 0
             # judge if we have completed one weight tensor's sync.
             cur_dest_weight_name = insts[0][3]
-            target_tensor = vllm_native_weight = self.vllm_weight_inplace_view_map[
-                cur_dest_weight_name
-            ]
-            if self.quantization_type == "fp8":
-                # if is in fp8, the vllm_native_weight has already been quantized, we need to create a new tensor to recv the weight from policy.
-                target_tensor = torch.empty_like(target_tensor, dtype=torch.bfloat16)
-                # dequantize the vllm fp8 weight back to bf16.
+            current_dest_full_weight_name = (
+                self.weight_mapper.get_unsplited_weight_name(cur_dest_weight_name)
+            )
 
             for inst in insts:
                 inst_weight_name = inst[3]
-                if inst_weight_name != cur_dest_weight_name:
+                target_tensor = self.vllm_weight_inplace_view_map[inst_weight_name]
+                # logger.info(f"[Rollout] target_tensor: {inst_weight_name}: {target_tensor.shape}, is_contiguous: {target_tensor.is_contiguous()}")
+
+                inst_full_weight_name = self.weight_mapper.get_unsplited_weight_name(
+                    inst_weight_name
+                )
+                if inst_full_weight_name != current_dest_full_weight_name:
                     # we have completed one weight tensor's sync, handle the quantization if needed.
-                    if self.quantization_type == "fp8":
-                        quantized_weight = self.weight_mapper.fp8_quantization(
-                            target_tensor
+                    if (
+                        self.quantization_type == "fp8"
+                        and self.weight_mapper.is_fp8_quantized_weight(
+                            current_dest_full_weight_name
+                        )
+                    ):
+                        weight_to_quantize = self.vllm_full_weight_map[
+                            current_dest_full_weight_name
+                        ]
+                        # logger.info(f"[Rollout] quantize weight: {current_dest_full_weight_name}: {weight_to_quantize.shape}, is_contiguous: {weight_to_quantize.is_contiguous()}")
+                        quantized_weight, weight_scale = self.rollout.fp8_quantization(
+                            weight_to_quantize
                         )
                         # copy the quantized weight to the target tensor
-                        vllm_native_weight.copy_(quantized_weight)
+                        vllm_native_weight = self.rollout.model_param_map[
+                            current_dest_full_weight_name
+                        ]
+                        # logger.info(f"[Rollout] vllm_native_weight: {vllm_native_weight.shape}, is_contiguous: {vllm_native_weight.is_contiguous()}, quantized_weight: {quantized_weight.shape}, is_contiguous: {quantized_weight.is_contiguous()}")
 
-                    cur_dest_weight_name = inst_weight_name
-                    # update the target tensor
-                    target_tensor = self.vllm_weight_inplace_view_map[
-                        cur_dest_weight_name
-                    ]
-                    if self.quantization_type == "fp8":
-                        # update the vllm_native_weight to the new target tensor
-                        vllm_native_weight = target_tensor
-                        target_tensor = torch.empty_like(
-                            target_tensor, dtype=torch.bfloat16
-                        )
+                        vllm_native_weight.copy_(quantized_weight)
+                        # get the scale key.
+                        scale_key = current_dest_full_weight_name.replace(
+                            ".weight", ".weight_scale"
+                        )  # FIXME: (lms) this is only for rowwise quantization.
+                        scale_tensor = self.rollout.model_param_map[scale_key]
+                        # logger.info(f"[Rollout] scale_tensor: {scale_tensor.shape}, is_contiguous: {scale_tensor.is_contiguous()}, weight_scale: {weight_scale.shape}, is_contiguous: {weight_scale.is_contiguous()}")
+                        scale_tensor.copy_(weight_scale)
+                    else:
+                        # For non-fp8 weights and fp8 not enabled, we just do nothing
+                        pass
+                    current_dest_full_weight_name = inst_full_weight_name
 
                 total_bytes_received += self.recv_weight_shard(
                     self.global_rank,

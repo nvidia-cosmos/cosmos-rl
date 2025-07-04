@@ -17,26 +17,7 @@ import torch
 from cosmos_rl.utils.parallelism import ParallelDims, ParallelismConfig
 from typing import Dict, List, Tuple, Callable, Any, Optional
 from cosmos_rl.policy.model.base import WeightMapper
-
-
-class DimRankInfo:
-    rank: int
-    size: int
-    dim: str
-    length: int = 1
-
-    def __init__(self, rank: int, size: int, dim: str, length: int = 1):
-        """
-        Initialize the DimRankInfo with the given rank, size, and dimension.
-        """
-        self.rank = rank
-        self.size = size
-        self.dim = dim
-        self.length = length
-
-    def __repr__(self):
-        # Returning a dictionary representation
-        return f"{self.__dict__}"
+from cosmos_rl.utils.parallelism_struct import DimRankInfo
 
 
 def slice_tensor_with_strategy(

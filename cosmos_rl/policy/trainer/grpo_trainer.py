@@ -690,6 +690,7 @@ class GRPOTrainer(Trainer):
             )
             for inst in self.policy_to_rollout_insts:
                 p_rank, r_rank, tensor_split_strategys, dest_name, _ = inst
+                # logger.info(f"[Policy] p_rank: {p_rank}, r_rank: {r_rank}, dest_name: {dest_name}")
                 if dest_name not in self.map_w_from_policy_to_rollout:
                     raise RuntimeError(
                         f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
