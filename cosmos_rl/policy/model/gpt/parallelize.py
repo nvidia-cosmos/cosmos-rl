@@ -49,6 +49,12 @@ from torch.distributed.tensor import (
 
 
 class UnevenColwiseParallel(ColwiseParallel):
+    """
+    For the case to parallelize q k v gemm whose number of heads is smaller than the number of tp ranks.
+    We should make sure that each split contains at least one complete head and each chunk size is divisible by the head dimension size.
+    This is a special case of ColwiseParallel but cannot be achieved using `ColwiseParallel`, where we can specify the minimum chunk size for each split using `per_split_size`.
+    """
+
     def __init__(
         self,
         *,

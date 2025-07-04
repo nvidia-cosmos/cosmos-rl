@@ -57,22 +57,5 @@ def convert_weight_from_hf(
     shard = tensor
     # TODO(cjx): Only FSDP sharding is supported for visual part
     shard = shard.contiguous()
-    if "qkv" in dest_name:
-        # Split qkv weight for visual
-        # weight has shape [3 * head_dim, hidden_dim]
-        # kv head ratio is 1, so we can split it into q, k, v
-        assert shard.shape[0] % 3 == 0, "Weight shape is not compatible for splitting."
-        unit_dim = shard.shape[0] // 3
-        q_weight = shard[:unit_dim].contiguous()
-        q_shard = q_weight.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
-        k_weight = shard[unit_dim : unit_dim * 2].contiguous()
-        k_shard = k_weight.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
-        v_weight = shard[unit_dim * 2 :].contiguous()
-        v_shard = v_weight.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
-        return [
-            (dest_name.replace("qkv", "q"), q_shard.contiguous()),
-            (dest_name.replace("qkv", "k"), k_shard.contiguous()),
-            (dest_name.replace("qkv", "v"), v_shard.contiguous()),
-        ]
     shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
     return [(dest_name, shard.contiguous())]

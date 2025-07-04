@@ -73,7 +73,6 @@ from cosmos_rl.utils.pynccl import (
     nccl_send,
 )
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
-from cosmos_rl.utils.parallelism_map import DimRankInfo
 
 
 def compute_loss(
@@ -265,22 +264,17 @@ class GRPOTrainer(Trainer):
         self.prepare_shard_infos_for_weight_sync_insts()
 
     def prepare_shard_infos_for_weight_sync_insts(self):
-        self.parallel_mapper = ParallelTopoMapperGroup(
+        # Ordered list of (hf_key, tensor_dim)
+        hf_key_n_rank: List[List[Tuple[str, int]]] = [
+            [x] for x in self.model.sorted_hf_key_n_rank_for_sync
+        ]
+        local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config=self.hf_config,
             is_policy=True,
+            underlying_model=self.model,
             weight_mapper=self.model.weight_mapper,
-        )
-        # Ordered list of (hf_key, tensor_dim)
-        hf_key_n_rank: List[List[Tuple[str, int]]] = [
-            [x] for x in self.model.sorted_hf_key_n_rank
-        ]
-        self.model.weight_mapper.parallelism_info_for_policy_params(
-            self.model, self.parallel_dims
-        )
-        local_shard_infos = self.parallel_mapper.prepare_local_shard_infos(
-            hf_key_n_rank, self.global_rank
-        )
+        ).prepare_local_shard_infos(hf_key_n_rank, self.global_rank)
         self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
             local_shard_infos
         )
@@ -600,31 +594,15 @@ class GRPOTrainer(Trainer):
         and replacing certain substrings in the parameter names.
         """
         name_to_transform = {}
-        assert len(self.model.sorted_hf_key_n_rank) > 0, "No sorted parameters found."
+        assert (
+            len(self.model.sorted_hf_key_n_rank_for_sync) > 0
+        ), "No sorted parameters found."
         for name, transform_block in self.model.weight_sync_transforms:
             assert isinstance(transform_block, Callable) or isinstance(
                 transform_block, torch.Tensor
             )
             name_to_transform[name] = transform_block
         return name_to_transform
-
-    def pre_P2R_collect_parameters(self):
-        needed_tensors = []
-        for insts_group in self.policy_to_rollout_insts:
-            for inst in insts_group:
-                dest_name = inst[3]
-                needed_tensors.append(dest_name)
-        prepared_tensor_to_rollout = {}
-        for dest_name, local_view in self.map_w_from_policy_to_rollout.items():
-            if isinstance(
-                local_view, Callable
-            ) and self.model.weight_mapper.policy_pre_P2R_gather_required_for_sync(
-                dest_name
-            ):
-                view = local_view()
-                if dest_name in needed_tensors:
-                    prepared_tensor_to_rollout[dest_name] = view
-        return prepared_tensor_to_rollout
 
     @Trainer.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
@@ -705,29 +683,11 @@ class GRPOTrainer(Trainer):
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
                 insts_meta = insts_meta.json()
-                generated_insts = insts_meta["insts"]
+                self.policy_to_rollout_insts = insts_meta["insts"]
             except Exception as e:
                 raise RuntimeError(
                     f"[Policy] Failed in fetching policy to rollout insts from controller after retries {e}."
                 )
-            for inst_group in generated_insts:
-                parsed_insts_group = []
-                for per_inst in inst_group:
-                    for i in per_inst["insts"]:
-                        p_rank, r_rank, tensor_split_strategys = i
-                        tensor_split_strategys = {
-                            int(k): DimRankInfo.from_dict(v)
-                            for k, v in tensor_split_strategys.items()
-                        }
-                        parsed_insts_group.append(
-                            (
-                                p_rank,
-                                r_rank,
-                                tensor_split_strategys,
-                                per_inst["name"],
-                            )
-                        )
-                self.policy_to_rollout_insts.append(parsed_insts_group)
 
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
@@ -735,36 +695,33 @@ class GRPOTrainer(Trainer):
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
         with torch.cuda.stream(self.train_stream):
-            pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
-                self.pre_P2R_collect_parameters()
-            )
             for insts_group in self.policy_to_rollout_insts:
-                for inst in insts_group:
-                    p_rank, r_rank, tensor_split_strategys, dest_name = inst
-                    if dest_name not in self.map_w_from_policy_to_rollout:
-                        raise RuntimeError(
-                            f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
-                        )
-                    local_view = self.map_w_from_policy_to_rollout[dest_name]
-                    if dest_name in pre_P2R_collected_tensors:
-                        local_view = pre_P2R_collected_tensors[dest_name]
-                    elif isinstance(local_view, Callable):
-                        local_view = local_view()
-                    else:
-                        pass
+                for insts_for_per_param in insts_group:
+                    dest_name = insts_for_per_param["name"]
+                    for inst in insts_for_per_param["insts"]:
+                        p_rank, r_rank, tensor_split_strategys = inst
+                        if dest_name not in self.map_w_from_policy_to_rollout:
+                            raise RuntimeError(
+                                f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
+                            )
+                        local_view = self.map_w_from_policy_to_rollout[dest_name]
+                        if isinstance(local_view, Callable):
+                            local_view = local_view()
+                        else:
+                            pass
 
-                    view = (
-                        local_view.cosmos_slice(tensor_split_strategys)
-                        .contiguous()
-                        .cuda()
-                    )
-                    assert self.global_rank == p_rank
-                    nccl_send(
-                        view,
-                        self.world_size + r_rank,
-                        comm_id,
-                    )
-                    total_bytes_sent += view.numel() * view.element_size()
+                        view = (
+                            local_view.cosmos_slice(tensor_split_strategys)
+                            .contiguous()
+                            .cuda()
+                        )
+                        assert self.global_rank == p_rank
+                        nccl_send(
+                            view,
+                            self.world_size + r_rank,
+                            comm_id,
+                        )
+                        total_bytes_sent += view.numel() * view.element_size()
         # make sure all the send operations of all ranks are finished
         time_eclapsed = time.time() - st
         logger.debug(

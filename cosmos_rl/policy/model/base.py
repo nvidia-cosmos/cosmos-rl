@@ -23,15 +23,6 @@ import cosmos_rl.utils.util as util
 import torch
 from transformers import AutoConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
-from vllm.model_executor.layers.linear import (
-    RowParallelLinear,
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    MergedColumnParallelLinear,
-)
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-
-from torch.nn.parameter import Parameter
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -58,6 +49,29 @@ class BaseModel(torch.nn.Module, ABC):
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
             sorted_key_n_rank.append((k, local_view.ndim))
+        sorted_key_n_rank.sort(key=lambda x: x[0])
+        return sorted_key_n_rank
+
+    @cached_property
+    def sorted_hf_key_n_rank_for_sync(self) -> List[Tuple[str, int]]:
+        """
+        Return sorted parameter tensor name and their rank of local view after applying the tensor name mapping transform for synchronization.
+        This is used to get the parameters that need to be synchronized.
+        """
+        sorted_key_n_rank = []
+        for k, v in self.sorted_hf_key_n_rank:
+            if self.weight_mapper.policy_map_param_to_transformed_params_for_sync(k):
+                for (
+                    sync_param
+                ) in self.weight_mapper.policy_map_param_to_transformed_params_for_sync(
+                    k
+                ):
+                    # The splitted params from the original param usually have the same rank as the original param.
+                    # So we can use the local view of the original param to get the rank.
+                    sorted_key_n_rank.append((sync_param[0], v))
+            else:
+                # If the parameter is not transformed, we can use the original parameter name and its rank.
+                sorted_key_n_rank.append((k, v))
         sorted_key_n_rank.sort(key=lambda x: x[0])
         return sorted_key_n_rank
 
@@ -139,16 +153,69 @@ class BaseModel(torch.nn.Module, ABC):
         raise NotImplementedError
 
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+    def weight_sync_transforms_per_model(
+        self,
+    ) -> Dict[str, Union[torch.Tensor, Callable]]:
         """
         Get the local view of the tensors from the state dict.
         This method retrieves the state dict of the model, clears the weight names,
+        and returns a dict containing the destination name, and either a tensor or a callable returning a tensor.
+        Returns:
+            Dict[str, Union[torch.Tensor, Callable]]: A dictionary containing the destination name as the key,
+            and either a tensor or a callable returning a tensor as the value.
+        """
+        raise NotImplementedError
+
+    @cached_property
+    def weight_sync_transforms(
+        self,
+    ) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+        """
+        Get the local view of the tensors after remapping and transforms for weight synchronization.
+        Add more specific tensor transforms for weight synchronization in addition to `_weight_sync_transforms_per_model`.
+        Specifically, we apply the transform function set in the weight mapper for each parameter that needs to be transformed before synchronization.
         and returns a list of tuples containing the destination name, and either a tensor or a callable returning a tensor.
         Returns:
             List[Tuple[str, Union[torch.Tensor, Callable]]]: A list of tuples containing the destination name,
             and either a tensor or a callable returning a tensor.
         """
-        raise NotImplementedError
+        weight_sync_transforms = []
+        for name, _ in self.sorted_hf_key_n_rank:
+            if self.weight_mapper.policy_map_param_to_transformed_params_for_sync(name):
+                local_view = self.weight_sync_transforms_per_model[name]
+                for (
+                    sync_param
+                ) in self.weight_mapper.policy_map_param_to_transformed_params_for_sync(
+                    name
+                ):
+                    if sync_param[0] in self.weight_sync_transforms_per_model:
+                        weight_sync_transforms.append(
+                            (
+                                sync_param[0],
+                                self.weight_sync_transforms_per_model[sync_param[0]],
+                            )
+                        )
+                        continue
+                    if (
+                        self.weight_mapper.get_transform_func_from_local_param_for_sync(
+                            sync_param[0]
+                        )
+                        is not None
+                    ):
+                        transform = self.weight_mapper.get_transform_func_from_local_param_for_sync(
+                            sync_param[0]
+                        )
+                        weight_sync_transforms.append(
+                            (sync_param[0], transform(local_view))
+                        )
+                    else:
+                        # If no transform function is set, means the current parameter is not transformed and synchronized at this rank.
+                        pass
+            else:
+                weight_sync_transforms.append(
+                    (name, self.weight_sync_transforms_per_model[name])
+                )
+        return weight_sync_transforms
 
     @classmethod
     @abstractmethod
@@ -264,19 +331,6 @@ class WeightMapper(ABC):
         """
         yield name, param
 
-    def policy_pre_P2R_gather_required_for_sync(self, name: str) -> bool:
-        """
-        For P->R weight sync, some weights need to be pre-collected before first `nccl_send/recv` instruction.
-        To not be messed up with the following `nccl_send/recv` instructions,
-        pre-collect those weights before first `nccl_send/recv` instruction.
-
-        Args:
-            name (str): The name of the tensor.
-        Returns:
-            bool: True if the tensor sync precollect is required, False otherwise.
-        """
-        return False
-
     @abstractmethod
     def rollout_prepare_recv(
         self, vllm_model: Any
@@ -326,6 +380,30 @@ class WeightMapper(ABC):
                 default_weight_mapper_cls
             )
 
+    def set_transform_func_from_local_param_for_sync(
+        self, name: str, transform: Callable
+    ):
+        """
+        Set the mapping of a parameter to be synced to a transform function to get the sent view of the parameter.
+        The function is Callable(local_param: torch.Tensor) -> torch.Tensor
+        """
+        if not hasattr(self, "policy_map_param_to_transform_func_for_sync"):
+            self.policy_map_param_to_transform_func_for_sync = {}
+        self.policy_map_param_to_transform_func_for_sync[name] = transform
+
+    def get_transform_func_from_local_param_for_sync(
+        self, name: str
+    ) -> Optional[Callable]:
+        """
+        Get the transform function for a parameter to be synced.
+        This function returns the transform function that is used to get the sent view of the parameter if specified,
+        The function is Callable(local_param: torch.Tensor) -> torch.Tensor
+        otherwise returns None.
+        """
+        if not hasattr(self, "policy_map_param_to_transform_func_for_sync"):
+            return None
+        return self.policy_map_param_to_transform_func_for_sync.get(name, None)
+
     @classmethod
     def get_weight_mapper(cls, model_type: str) -> Type["WeightMapper"]:
         if model_type not in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY:
@@ -333,236 +411,38 @@ class WeightMapper(ABC):
 
         return WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY[model_type]
 
-    def parallelism_info_for_param(
-        self,
-        param_name: str,
-    ):
+    @cached_property
+    def packed_modules_mapping(self):
         """
-        Get the parallelism info for a specific parameter.
-        This method returns a dictionary with parameter names as keys and their parallel dimensions as values.
+        Return the packed modules mapping for the model.
+        This method defines a mapping of packed modules to their corresponding components.
+        This is used to handle packed modules like QKVParallelLinear and MergedColumnParallelLinear.
         """
-        if hasattr(self, "parallelism_info_for_params"):
-            return self.parallelism_info_for_params[param_name]
-        else:
-            logger.error("No parallelism info found for the given parameter name.")
-            return None, None, None, None
+        # This mapping is used to handle packed modules like QKVParallelLinear and MergedColumnParallelLinear
+        # where multiple components are packed into a single parameter.
+        # The keys are the names of the packed modules, and the values are lists of component
+        # The following mapping is general for most cases.
+        return {
+            "qkv": [
+                "q",
+                "k",
+                "v",
+            ],
+            "gate_up_proj": [
+                "gate_proj",
+                "up_proj",
+            ],
+            "qkv_proj": [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+            ],
+        }
 
-    def insert_to_parallelism_info(
-        self,
-        param_name: str,
-        dims_map: Dict[str, int],
-        parallelism: ParallelDims,
-        name_to_hf: Callable,
-        packed_modules_mapping: Dict[str, Any] = {},
-        dims_rank_info: Optional[Dict[int, Dict]] = None,
-    ):
+    def policy_map_param_to_transformed_params_for_sync(self, name):
         """
-        Insert the parallelism info for the policy model parameters.
-        This method updates the `policy_parallelism_info_for_params` dictionary with the parameter name,
-        its dimensions map, tensor dimension to parallel map, and the pipeline rank.
+        Map a parameter of the policy model to set of transformed parameters that need to be synchronized.
+        This method returns a list containing tuples of the new parameter name and the corresponding new tensor transformed from the original tensor of the given name.
+        Each tuple element includes a transformed tensor and its corresponding slice strategy to derive from the original tensor.
         """
-        tensor_dim_to_parallel_map = {}
-        for k, v in dims_map.items():
-            if v not in tensor_dim_to_parallel_map:
-                tensor_dim_to_parallel_map[v] = []
-            tensor_dim_to_parallel_map[v].append(k)
-        p_rank = parallelism.pp_coord[0]
-        for k, v in packed_modules_mapping.items():
-            assert (
-                dims_rank_info is None
-            ), f"Packed modules mapping {packed_modules_mapping} should not be used with dims_rank_info {dims_rank_info}."
-            if k in param_name:
-                for rename in v:
-                    name = name_to_hf(param_name).replace(k, rename)
-                    self.parallelism_info_for_params[name] = (
-                        dims_map,
-                        tensor_dim_to_parallel_map,
-                        p_rank,
-                        dims_rank_info,
-                    )
-                return
-        name = name_to_hf(param_name)
-        self.parallelism_info_for_params[name] = (
-            dims_map,
-            tensor_dim_to_parallel_map,
-            p_rank,
-            dims_rank_info,
-        )
-
-    def parallelism_info_for_policy_params(
-        self, model: BaseModel, parallelism: ParallelDims
-    ):
-        """
-        Get the parallelism info for the policy model parameters.
-        This method returns a dictionary with parameter names as keys and their parallel dimensions as values.
-        """
-        if hasattr(self, "parallelism_info_for_params"):
-            assert hasattr(self, "is_policy") and not hasattr(self, "is_rollout"), (
-                "parallelism_info_for_params already exists, "
-                "but is_policy or is_rollout flag is not set correctly."
-            )
-            return self.parallelism_info_for_params
-        self.parallelism_info_for_params = {}
-        self.is_policy = True
-        for name, param in model.named_parameters():
-            is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
-            if not is_dist_tensor:
-                dims_map = {}
-            else:
-                dims_map = {}
-                global_shape = tuple(param.shape)
-                mesh = param.device_mesh
-                placements = param.placements
-                assert (
-                    len(placements) == len(mesh.mesh_dim_names)
-                ), f"Number of placements {placements} does not match number of mesh dimensions {mesh}."
-                for dim, placement in zip(mesh.mesh_dim_names, placements):
-                    if placement.is_shard():
-                        dims_map[dim] = placement.dim
-                    elif placement.is_replicate():
-                        pass
-                    else:
-                        raise ValueError(f"Unsupported placement type: {placement}")
-                chunk_meta_list = param.__create_chunk_list__()
-                local = param.to_local()
-                assert (
-                    len(chunk_meta_list) == 1
-                ), f"Expected only one chunk meta, but got {len(chunk_meta_list)} for {name}."
-                for meta in chunk_meta_list:
-                    assert (
-                        len(meta.offsets)
-                        == len(meta.sizes)
-                        == len(global_shape)
-                        == len(tuple(local.shape))
-                    ), f"Offsets {meta.offsets} and sizes {meta.sizes} must match global shape {global_shape} and local shape {tuple(local.shape)}."
-
-                    dims_rank_info = {}
-                    for idx, g_size in enumerate(global_shape):
-                        rank = int(meta.offsets[idx])
-                        size = int(g_size)
-                        length = int(meta.sizes[idx])
-                        if size == length:
-                            assert (
-                                rank == 0
-                            ), f"Expected rank 0 for full size dimension {idx}, but got {rank}."
-                        else:
-                            dims_rank_info[idx] = {
-                                "rank": rank,
-                                "size": size,
-                                "length": length,
-                                "dim": "",
-                            }
-            self.insert_to_parallelism_info(
-                name,
-                dims_map,
-                parallelism,
-                self.policy_map_local_key_to_hf_key,
-                dims_rank_info=dims_rank_info,
-            )
-
-    def parallelism_info_for_rollout_params(
-        self, model: Any, parallelism: ParallelDims
-    ):
-        """
-        Get the parallelism info for the rollout model parameters.
-        This method returns a dictionary with parameter names as keys and their parallel dimensions as values.
-        """
-        if hasattr(self, "parallelism_info_for_params"):
-            assert hasattr(self, "is_rollout") and not hasattr(self, "is_policy"), (
-                "parallelism_info_for_params already exists, "
-                "but is_rollout or is_policy flag is not set correctly."
-            )
-            return self.parallelism_info_for_params
-        self.parallelism_info_for_params = {}
-        self.is_rollout = True
-        self.packed_modules_mapping = {}
-        if hasattr(model, "packed_modules_mapping") and model.packed_modules_mapping:
-            for k, v in model.packed_modules_mapping.items():
-                if (
-                    "qkv_proj" in k
-                    and all(["_proj" in x for x in v])
-                    and "qkv" not in model.packed_modules_mapping
-                ):
-                    # If the packed modules mapping does not contain "qkv", but contains "qkv_proj",
-                    # we can assume that it is a QKVParallelLinear module.
-                    self.packed_modules_mapping["qkv"] = [
-                        x.replace("_proj", "") for x in v
-                    ]
-                self.packed_modules_mapping[k] = v
-
-        for param_name, param in model.named_parameters():
-            name_parts = param_name.split(".")
-            part = model
-            is_bias = False
-            for part_name in name_parts:
-                if hasattr(part, part_name):
-                    if isinstance(getattr(part, part_name), Parameter):
-                        if part_name == "bias":
-                            is_bias = True
-                        elif part_name == "weight":
-                            is_bias = False
-                        else:
-                            raise ValueError(
-                                f"Part {part_name} is not a Parameter. Skipping."
-                            )
-                        break
-                    part = getattr(part, part_name)
-                elif str.isdigit(part_name):
-                    part = part[int(part_name)]
-                else:
-                    raise ValueError(f"Part {part_name} not found in {part}. Skipping.")
-            dims_map = {}
-            if isinstance(part, (QKVParallelLinear)):
-                output_dim = getattr(param, "output_dim", None)
-                assert (
-                    output_dim is not None
-                ), f"QKVParallelLinear {param_name} has no output_dim attribute."
-                dims_map["tp"] = output_dim
-                assert any(
-                    [k in param_name for k in self.packed_modules_mapping.keys()]
-                ), f"QKVParallelLinear {param_name} is not in packed_modules_mapping {self.packed_modules_mapping}."
-            elif isinstance(part, (MergedColumnParallelLinear)):
-                output_dim = getattr(param, "output_dim", None)
-                assert (
-                    output_dim is not None
-                ), f"MergedColumnParallelLinear {param_name} has no output_dim attribute."
-                dims_map["tp"] = output_dim
-                assert any(
-                    [k in param_name for k in self.packed_modules_mapping.keys()]
-                ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {self.packed_modules_mapping}."
-            elif isinstance(part, (RowParallelLinear)):
-                input_dim = getattr(param, "input_dim", None)
-                if not is_bias:
-                    assert (
-                        input_dim is not None
-                    ), f"RowParallelLinear {param_name} has no input_dim attribute."
-                    dims_map["tp"] = input_dim
-            elif isinstance(part, (ColumnParallelLinear)):
-                output_dim = getattr(param, "output_dim", None)
-                assert (
-                    output_dim is not None
-                ), f"ColumnParallelLinear {param_name} has no output_dim attribute."
-                dims_map["tp"] = output_dim
-            elif isinstance(part, VocabParallelEmbedding):
-                output_dim = getattr(param, "output_dim", None)
-                assert (
-                    not is_bias
-                ), f"VocabParallelEmbedding {param_name} should not have bias."
-                assert (
-                    output_dim is not None
-                ), f"VocabParallelEmbedding {param_name} has no output_dim attribute."
-                dims_map["tp"] = output_dim
-            else:
-                assert (
-                    "Parallel" not in part.__class__.__name__
-                ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
-
-            self.insert_to_parallelism_info(
-                param_name,
-                dims_map,
-                parallelism,
-                self._rollout_vllm_name_to_hf,
-                self.packed_modules_mapping
-                if hasattr(self, "packed_modules_mapping")
-                else {},
-            )
+        return []

@@ -145,29 +145,40 @@ class QwenVL25WeightMapper(WeightMapper):
         else:
             raise ValueError(f"Unsupported weight: {dest_name}")
 
-    @torch.no_grad()
-    def policy_maybe_decompose_weights_to_hf_naming(self, name, weight: torch.Tensor):
+    def policy_map_param_to_transformed_params_for_sync(self, name):
+        """
+        Map a parameter of the policy model to set of transformed parameters that need to be synchronized.
+        This method returns a list containing tuples of the new parameter name and the corresponding new tensor transformed from the original tensor of the given name.
+        Each tuple element includes a transformed tensor and its corresponding slice strategy to derive from the original tensor.
+        """
         if match := re.search(  # noqa: F841
-            r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
+            r"blocks\.(\d+)\.attn\.qkv\.(weight|bias)",
             name,
         ):
-            if not hasattr(self, "qkv_weights"):
-                self.qkv_weights = {}
-            full_name = re.sub(r"\b(q|k|v)\b", "qkv", name)
-            key = match.group(1) + match.group(3)
-            if key not in self.qkv_weights:
-                self.qkv_weights[key] = []
-
-            self.qkv_weights[key].append(weight)
-            if len(self.qkv_weights[key]) == 3:
-                merged = torch.stack(self.qkv_weights[key], dim=0)
-                merged = merged.view(-1, *merged.shape[2:])
-                yield full_name, merged
-            elif len(self.qkv_weights[key]) < 3:
-                yield name, None
-            else:
-                raise ValueError(
-                    f"Unexpected number of qkv weights for {name}: {len(self.qkv_weights[key])}"
+            split_strategy = []
+            # The first part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 0 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv", "q"),
+                    {0: {"offset": 0, "total_size": 3, "length": 1}},
                 )
-        else:
-            yield name, weight
+            )
+            # The second part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 1 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv", "k"),
+                    {0: {"offset": 1, "total_size": 3, "length": 1}},
+                )
+            )
+            # The third part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 2 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv", "v"),
+                    {0: {"offset": 2, "total_size": 3, "length": 1}},
+                )
+            )
+            return split_strategy
+        return []

@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from safetensors import safe_open
 from dataclasses import dataclass, field
-from typing import Tuple, List, Optional, Callable, Union
+from typing import Tuple, List, Optional, Callable, Union, Dict
 from transformers import AutoConfig
 import torch.distributed._symmetric_memory as symm_mem
 from cosmos_rl.utils.util import (
@@ -971,15 +971,17 @@ class Qwen3MoE(BaseModel):
         )
 
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+    def weight_sync_transforms_per_model(
+        self,
+    ) -> Dict[str, Union[torch.Tensor, Callable]]:
         self_state_dict = self.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        transforms = []
+        transforms = {}
         for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, self_state_dict
             )
-            transforms.append((dest_name, local_view))
+            transforms[dest_name] = local_view
         return transforms
 
     @classmethod

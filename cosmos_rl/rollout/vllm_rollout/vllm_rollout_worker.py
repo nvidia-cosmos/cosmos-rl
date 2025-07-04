@@ -64,7 +64,6 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
 )
 from vllm import SamplingParams
-from cosmos_rl.utils.parallelism_map import DimRankInfo
 
 
 """
@@ -250,19 +249,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
             self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
         )
-        self.weight_mapper.parallelism_info_for_rollout_params(
-            self.get_underlying_model(), self.parallel_dims
-        )
-        self.parallel_mapper = ParallelTopoMapperGroup(
+        local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             self.model_config,
             is_policy=False,
+            underlying_model=self.get_underlying_model(),
             weight_mapper=self.weight_mapper,
-        )
-
-        local_shard_infos = self.parallel_mapper.prepare_local_shard_infos(
-            self.recv_param_key_n_rank_list, self.global_rank
-        )
+        ).prepare_local_shard_infos(self.recv_param_key_n_rank_list, self.global_rank)
         self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
             local_shard_infos
         )
@@ -394,34 +387,34 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def recv_weight_shard(
         self,
         global_rank_of_rollout: int,
-        manifest: Tuple[int, int, Dict[int, Any], str],
+        dest_name: str,
+        insts: List[Tuple[int, int, Dict[int, Any]]],
         communicator_index: int,
         do_weight_sync_check: bool = False,
     ):
-        p_rank, r_rank, tensor_split_strategys, dest_name = manifest
-        assert r_rank == global_rank_of_rollout
-
+        total_bytes_received = 0
         target_tensor = self.vllm_weight_inplace_view_map[dest_name]
-
-        view = target_tensor.cosmos_slice(tensor_split_strategys)
-
         if do_weight_sync_check:
             cloned_target_tensor = target_tensor.clone()
             # clear the current view
-            view.zero_()
+            target_tensor.zero_()
 
-        recv_tensor = None
-        if view.is_contiguous():
-            recv_tensor = view
-        else:
-            # new a temp tensor
-            recv_tensor = torch.empty_like(view)
+        for inst in insts:
+            p_rank, r_rank, tensor_split_strategys = inst
+            assert r_rank == global_rank_of_rollout
+            view = target_tensor.cosmos_slice(tensor_split_strategys)
+            recv_tensor = None
+            if view.is_contiguous():
+                recv_tensor = view
+            else:
+                # new a temp tensor
+                recv_tensor = torch.empty_like(view)
 
-        nccl_recv(recv_tensor, p_rank, communicator_index)
+            nccl_recv(recv_tensor, p_rank, communicator_index)
 
-        # inplace copy
-        if not view.is_contiguous():
-            view.copy_(recv_tensor)
+            # inplace copy
+            if not view.is_contiguous():
+                view.copy_(recv_tensor)
 
         if do_weight_sync_check:
             # If the weight sync between Policy and Rollout is correct, the
@@ -431,10 +424,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # just apply `torch.allclose` simply.
             if not torch.allclose(cloned_target_tensor, target_tensor):
                 raise ValueError(
-                    f"Weight sync check failed after weight sync instruction: {manifest}"
+                    f"Weight sync check failed after weight sync instruction: {insts} for {dest_name}."
                 )
 
-        return recv_tensor.numel() * recv_tensor.element_size()
+        total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
+        return total_bytes_received
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
@@ -499,39 +493,23 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
                 insts_meta = insts_meta.json()
-                generated_insts = insts_meta["insts"]
+                self.policy_to_rollout_recv_insts = insts_meta["insts"]
             except Exception as e:
                 raise RuntimeError(
                     f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
                 )
-            for insts_group in generated_insts:
-                parsed_insts_group = []
-                for per_inst in insts_group:
-                    for i in per_inst["insts"]:
-                        p_rank, r_rank, tensor_split_strategys = i
-                        tensor_split_strategys = {
-                            int(k): DimRankInfo.from_dict(v)
-                            for k, v in tensor_split_strategys.items()
-                        }
-                        parsed_insts_group.append(
-                            (
-                                p_rank,
-                                r_rank,
-                                tensor_split_strategys,
-                                per_inst["name"],
-                            )
-                        )
-                self.policy_to_rollout_recv_insts.append(parsed_insts_group)
 
         with torch.cuda.stream(self.inference_stream):
             # recv the weight from policy
             # st = time.time()
             total_bytes_received = 0
             for insts_group in self.policy_to_rollout_recv_insts:
-                for inst in insts_group:
+                for insts_for_per_param in insts_group:
+                    dest_name = insts_for_per_param["name"]
                     total_bytes_received += self.recv_weight_shard(
                         self.global_rank,
-                        inst,
+                        dest_name,
+                        insts_for_per_param["insts"],
                         communicator_index,
                         command.do_weight_sync_check,
                     )

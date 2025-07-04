@@ -15,7 +15,7 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Callable, Union
+from typing import List, Optional, Tuple, Callable, Union, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -250,10 +250,7 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
         self.num_heads = num_heads
-        self.q = nn.Linear(dim, dim, bias=True)
-        self.k = nn.Linear(dim, dim, bias=True)
-        self.v = nn.Linear(dim, dim, bias=True)
-
+        self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
         self.attn_func = F.scaled_dot_product_attention
 
@@ -265,9 +262,10 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
-            self.q(hidden_states).reshape(seq_length, self.num_heads, -1),
-            self.k(hidden_states).reshape(seq_length, self.num_heads, -1),
-            self.v(hidden_states).reshape(seq_length, self.num_heads, -1),
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, -1)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
         )
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
@@ -1459,7 +1457,9 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         return local_view
 
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+    def weight_sync_transforms_per_model(
+        self,
+    ) -> Dict[str, Union[torch.Tensor, Callable]]:
         lm_state_dict = self.model.state_dict()
         if self.visual is not None:
             visual_state_dict = self.visual.state_dict()
@@ -1469,12 +1469,12 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         visual_state_dict = {
             clear_weight_name(k): v for k, v in visual_state_dict.items()
         }
-        transforms = []
+        transforms = {}
         for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, lm_state_dict, visual_state_dict
             )
-            transforms.append((dest_name, local_view))
+            transforms[dest_name] = local_view
         return transforms
 
     @classmethod
