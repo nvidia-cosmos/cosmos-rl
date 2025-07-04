@@ -183,13 +183,14 @@ class TestRollout:
         }
         self.ref_compatibale_map = compatibale_map
         self.quantization_type = None
+        self.config = CosmosConfig()
 
         def rollout_prepare_recv(
             self, vllm_model, quantization: bool = False, promotion_dtype=None
         ):
             self.vllm_weight_inplace_view_map = compatibale_map
             self.recv_key_n_rank_list = compatibale_list
-            return operate_compatibale_map, compatibale_list
+            return operate_compatibale_map, compatibale_list, {}
 
         self.operate_compatibale_map = operate_compatibale_map
         self.weight_mapper.rollout_prepare_recv = types.MethodType(
@@ -202,6 +203,7 @@ class TestRollout:
         self,
         global_rank_of_rollout: int,
         manifest: Tuple[int, int, Dict[int, Any], str, Tuple[int]],
+        target_tensor: torch.Tensor,
         communicator_index: Dict[int, int],
         do_weight_sync_check: bool = False,
     ):
