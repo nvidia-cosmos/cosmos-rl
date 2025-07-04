@@ -1018,55 +1018,55 @@ class DeepseekV3MoEModel(BaseModel):
 
             for name in weights_of_ckpt.keys():
                 tensor = weights_of_ckpt[name]
-                for dest_name, shared_weight in convert_weight_from_hf(
+                dest_name, shared_weight = convert_weight_from_hf(
                     tensor,
                     name,
                     model_type,
                     parallel_dims,
                     n_experts=self.model_args.n_routed_experts,
+                )
+                if dest_name is None:
+                    # This is due to the expert parallelism grouping
+                    continue
+
+                expert_id = None
+                if match := re.search(  # noqa: F841
+                    r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
+                    dest_name,
                 ):
-                    if dest_name is None:
-                        # This is due to the expert parallelism grouping
-                        continue
-
-                    expert_id = None
-                    if match := re.search(  # noqa: F841
-                        r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
-                        dest_name,
-                    ):
-                        expert_id = int(match.group(2))
-                        if tp_ep_size > 1:
-                            dest_name = dest_name.replace(
-                                f"experts.{expert_id}.", "experts_ep."
-                            )
-
-                        # Convert expert_id to local_expert_id
-                        n_local_experts = (
-                            self.model_args.n_routed_experts
-                            // parallel_dims.tp
-                            // parallel_dims.dp_shard
+                    expert_id = int(match.group(2))
+                    if tp_ep_size > 1:
+                        dest_name = dest_name.replace(
+                            f"experts.{expert_id}.", "experts_ep."
                         )
 
-                        expert_id = expert_id % n_local_experts
+                    # Convert expert_id to local_expert_id
+                    n_local_experts = (
+                        self.model_args.n_routed_experts
+                        // parallel_dims.tp
+                        // parallel_dims.dp_shard
+                    )
 
-                    if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                        logger.info(
-                            f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
-                        )
-                        continue
+                    expert_id = expert_id % n_local_experts
 
-                    target_tensor = self_state_dict[dest_name]
-                    if isinstance(target_tensor, torch.distributed.tensor.DTensor):
-                        target_tensor = target_tensor.to_local()
-                    # Write to the correct expert of the target tensor
-                    if expert_id is not None and tp_ep_size > 1:
-                        target_tensor = target_tensor[expert_id]
+                if dest_name not in self_state_dict and parallel_dims.pp_enabled:
+                    logger.info(
+                        f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
+                    )
+                    continue
 
-                    assert (
-                        target_tensor.shape == shared_weight.shape
-                    ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
-                    with torch.no_grad():
-                        target_tensor.data.copy_(shared_weight)
+                target_tensor = self_state_dict[dest_name]
+                if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                    target_tensor = target_tensor.to_local()
+                # Write to the correct expert of the target tensor
+                if expert_id is not None and tp_ep_size > 1:
+                    target_tensor = target_tensor[expert_id]
+
+                assert (
+                    target_tensor.shape == shared_weight.shape
+                ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
+                with torch.no_grad():
+                    target_tensor.data.copy_(shared_weight)
 
         if (
             lm_head_weight_key not in weights_of_ckpt_names

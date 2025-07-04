@@ -542,30 +542,30 @@ class GPT(BaseModel):
 
             for name in weights_of_ckpt.keys():
                 tensor = weights_of_ckpt[name]
-                for dest_name, shared_weight in convert_weight_from_hf(
+                dest_name, shared_weight = convert_weight_from_hf(
                     tensor, name, model_type, parallel_dims
-                ):
-                    if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                        # logger.info(f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism. Skipping this weight checking")
-                        continue
+                )
+                if dest_name not in self_state_dict and parallel_dims.pp_enabled:
+                    # logger.info(f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism. Skipping this weight checking")
+                    continue
 
-                    target_tensor = self_state_dict[dest_name]
-                    is_dist_tensor = isinstance(
-                        target_tensor, torch.distributed.tensor.DTensor
-                    )
-                    local_view = (
-                        target_tensor.to_local() if is_dist_tensor else target_tensor
-                    )
-                    assert (
-                        shared_weight.numel() == 0
-                        or local_view.shape == shared_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
-                    with torch.no_grad():
-                        if shared_weight.numel() == 0:
-                            # If the shared weight is empty, we skip copying it
-                            # This can happen for some weights that are not used in the model such as unevenly sharded weights
-                            continue
-                        local_view.data.copy_(shared_weight)
+                target_tensor = self_state_dict[dest_name]
+                is_dist_tensor = isinstance(
+                    target_tensor, torch.distributed.tensor.DTensor
+                )
+                local_view = (
+                    target_tensor.to_local() if is_dist_tensor else target_tensor
+                )
+                assert (
+                    shared_weight.numel() == 0
+                    or local_view.shape == shared_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                with torch.no_grad():
+                    if shared_weight.numel() == 0:
+                        # If the shared weight is empty, we skip copying it
+                        # This can happen for some weights that are not used in the model such as unevenly sharded weights
+                        continue
+                    local_view.data.copy_(shared_weight)
 
         if (
             lm_head_weight_key not in weights_of_ckpt_names
@@ -575,22 +575,22 @@ class GPT(BaseModel):
             name = lm_head_weight_key
             assert embed_tokens_weight_key in reserved
             tensor = reserved[embed_tokens_weight_key]
-            for dest_name, shared_weight in convert_weight_from_hf(
+            dest_name, shared_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims
-            ):
-                if dest_name in self_state_dict:
-                    target_tensor = self_state_dict[dest_name]
-                    is_dist_tensor = isinstance(
-                        target_tensor, torch.distributed.tensor.DTensor
-                    )
-                    local_view = (
-                        target_tensor.to_local() if is_dist_tensor else target_tensor
-                    )
-                    assert (
-                        local_view.shape == shared_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
-                    with torch.no_grad():
-                        local_view.data.copy_(shared_weight)
+            )
+            if dest_name in self_state_dict:
+                target_tensor = self_state_dict[dest_name]
+                is_dist_tensor = isinstance(
+                    target_tensor, torch.distributed.tensor.DTensor
+                )
+                local_view = (
+                    target_tensor.to_local() if is_dist_tensor else target_tensor
+                )
+                assert (
+                    local_view.shape == shared_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                with torch.no_grad():
+                    local_view.data.copy_(shared_weight)
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         seq_dim_idx = 1

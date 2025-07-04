@@ -28,7 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 
 from torch.nn.parameter import Parameter
 from math import gcd
-from functools import reduce
+from functools import reduce, partial
 
 
 class DimSliceInfo:
@@ -505,9 +505,6 @@ class ParallelTopoMapper:
                 ):
                     continue
 
-                dup_ranks = self.duplicate_ranks_at_given_dimensions(
-                    list(split_dim_map.keys()) + ["pp"], global_rank
-                )
                 ranks = self.full_mesh_rank_info_map[global_rank]
                 if ranks["pp"].offset != pp_rank:
                     # group_info.append(
@@ -525,7 +522,6 @@ class ParallelTopoMapper:
                         )
                         if dims_rank_info is None
                         else dims_rank_info,
-                        "dup_ranks": dup_ranks,
                     }
                 )
             if group_info:
@@ -713,12 +709,27 @@ class ParallelTopoMapper:
                                 self.weight_mapper.policy_map_local_key_to_hf_key,
                                 dims_rank_info=splitted_dim_rank_info,
                             )
+
+                            def slice_tensor_with_part(
+                                local: torch.Tensor,
+                                part_in_local: Dict[int, DimSliceInfo],
+                            ) -> torch.Tensor:
+                                """
+                                Slice the local tensor with the part in local information.
+                                :param local: The local tensor to be sliced.
+                                :param part_in_local: The part in local information for slicing.
+                                :return: The sliced tensor.
+                                """
+                                return slice_tensor_with_strategies(
+                                    local, part_in_local
+                                )
+
                             self.weight_mapper.set_transform_func_from_local_param_for_sync(
                                 self.weight_mapper.policy_map_local_key_to_hf_key(
                                     part_name
                                 ),
-                                lambda local: slice_tensor_with_strategies(
-                                    local, part_in_local
+                                partial(
+                                    slice_tensor_with_part, part_in_local=part_in_local
                                 ),
                             )
 
@@ -962,11 +973,11 @@ class ParallelizedShardMapper:
         self.rollout_all_rank_shard_infos: Optional[
             List[List[List[Dict[str, Any]]]]
         ] = None
-        self.send_insts_for_policy: List[
-            List[Tuple[int, int, Dict[int, DimSliceInfo], str]]
-        ] = None
-        self.recv_insts_for_rollout: List[
-            List[Tuple[int, int, Dict[int, DimSliceInfo], str]]
+        self.send_insts_for_policy: Optional[List[List[List[List[Dict[str, Any]]]]]] = (
+            None
+        )
+        self.recv_insts_for_rollout: Optional[
+            List[List[List[List[Dict[str, Any]]]]]
         ] = None
 
     def post_set_shard_infos(self):
@@ -1126,13 +1137,13 @@ class ParallelizedShardMapper:
                         k: DimSliceInfo.from_dict(v)
                         for k, v in p_info["shard_info"].items()
                     }
-                    p_dup_ranks = p_info["dup_ranks"]
 
+                    p_dup_ranks = self.get_dup_ranks_for_policy(p_rank, dest_name)
                     r_shard_info = {
                         k: DimSliceInfo.from_dict(v)
                         for k, v in r_info["shard_info"].items()
                     }
-                    r_dup_ranks = r_info["dup_ranks"]
+                    r_dup_ranks = self.get_dup_ranks_for_rollout(r_rank, dest_name)
 
                     all_dims = shard_info.keys() | r_shard_info.keys()
 
@@ -1165,6 +1176,52 @@ class ParallelizedShardMapper:
                 )
             policy_to_rollout_insts.append(insts_for_group)
         return policy_to_rollout_insts
+
+    def get_dup_ranks_for_policy(
+        self,
+        p_rank: int,
+        name: str,
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Get the duplicate ranks for a param in policy of the given rank.
+        :param p_rank: The rank of the policy to get duplicate ranks for.
+        :param name: The name of the parameter to get duplicate ranks for.
+        :return: A list of duplicate ranks for policy.
+        """
+        if name in self.policy_shard_dicts[p_rank]:
+            p_info = self.policy_shard_dicts[p_rank][name]
+        else:
+            return []
+
+        ranks = []
+        for p_rank, p_infos in enumerate(self.policy_shard_dicts):
+            if name in p_infos:
+                if p_infos[name]["shard_info"] == p_info["shard_info"]:
+                    ranks.append(p_rank)
+        return ranks
+
+    def get_dup_ranks_for_rollout(
+        self,
+        p_rank: int,
+        name: str,
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Get the duplicate ranks for a param in rollout of the given rank.
+        :param p_rank: The rank of the rollout to get duplicate ranks for.
+        :param name: The name of the parameter to get duplicate ranks for.
+        :return: A list of duplicate ranks for rollout.
+        """
+        if name in self.rollout_shard_dicts[p_rank]:
+            p_info = self.rollout_shard_dicts[p_rank][name]
+        else:
+            return []
+
+        ranks = []
+        for p_rank, p_infos in enumerate(self.rollout_shard_dicts):
+            if name in p_infos:
+                if p_infos[name]["shard_info"] == p_info["shard_info"]:
+                    ranks.append(p_rank)
+        return ranks
 
     def generate_parallelized_shard_recv_insts_for_rollout(
         self, r_rank: int
@@ -1201,13 +1258,13 @@ class ParallelizedShardMapper:
                         k: DimSliceInfo.from_dict(v)
                         for k, v in p_info["shard_info"].items()
                     }
-                    p_dup_ranks = p_info["dup_ranks"]
 
+                    p_dup_ranks = self.get_dup_ranks_for_policy(p_rank, dest_name)
                     r_shard_info = {
                         k: DimSliceInfo.from_dict(v)
                         for k, v in r_info["shard_info"].items()
                     }
-                    r_dup_ranks = r_info["dup_ranks"]
+                    r_dup_ranks = self.get_dup_ranks_for_rollout(r_rank, dest_name)
 
                     all_dims = shard_info.keys() | r_shard_info.keys()
 

@@ -479,7 +479,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         if not hasattr(self, "policy_to_rollout_recv_insts"):
             self.policy_to_rollout_recv_insts = []
             try:
-                logger.info("[Rollout] Initializing parallel mapper for rollout.")
                 insts_meta = make_request_with_retry(
                     partial(
                         requests.post,

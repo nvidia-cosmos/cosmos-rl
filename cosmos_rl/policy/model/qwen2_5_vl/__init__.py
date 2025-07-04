@@ -1306,31 +1306,29 @@ class Qwen2_5_VLConditionalModel(BaseModel):
 
                 for name in weights_of_ckpt.keys():
                     tensor = weights_of_ckpt[name]
-                    for dest_name, shared_weight in convert_weight_from_hf(
+                    dest_name, shared_weight = convert_weight_from_hf(
                         tensor, name, model_type, parallel_dims
-                    ):
-                        if dest_name in lm_state_dict:
-                            target_tensor = lm_state_dict[dest_name]
-                        elif dest_name in visual_state_dict:
-                            target_tensor = visual_state_dict[dest_name]
-                        elif parallel_dims.pp_enabled:
-                            # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
-                            continue
-                        else:
-                            raise ValueError(f"Unsupported weight: {dest_name}")
-                        is_dist_tensor = isinstance(
-                            target_tensor, torch.distributed.tensor.DTensor
-                        )
-                        local_view = (
-                            target_tensor.to_local()
-                            if is_dist_tensor
-                            else target_tensor
-                        )
-                        assert (
-                            local_view.shape == shared_weight.shape
-                        ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
-                        with torch.no_grad():
-                            local_view.data.copy_(shared_weight)
+                    )
+                    if dest_name in lm_state_dict:
+                        target_tensor = lm_state_dict[dest_name]
+                    elif dest_name in visual_state_dict:
+                        target_tensor = visual_state_dict[dest_name]
+                    elif parallel_dims.pp_enabled:
+                        # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
+                        continue
+                    else:
+                        raise ValueError(f"Unsupported weight: {dest_name}")
+                    is_dist_tensor = isinstance(
+                        target_tensor, torch.distributed.tensor.DTensor
+                    )
+                    local_view = (
+                        target_tensor.to_local() if is_dist_tensor else target_tensor
+                    )
+                    assert (
+                        local_view.shape == shared_weight.shape
+                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                    with torch.no_grad():
+                        local_view.data.copy_(shared_weight)
 
     def separate_model_parts(self) -> List[nn.Module]:
         return [self.model, self.visual]
