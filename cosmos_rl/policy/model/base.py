@@ -270,7 +270,10 @@ class WeightMapper(ABC):
 
     @abstractmethod
     def rollout_prepare_recv(
-        self, vllm_model: Any, quantization: bool = False
+        self,
+        vllm_model: Any,
+        quantization: bool = False,
+        promotion_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[
         Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
     ]:

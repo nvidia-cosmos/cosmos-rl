@@ -61,8 +61,8 @@ class GPTWeightMapper(WeightMapper):
     def rollout_prepare_recv(
         self,
         vllm_model: Qwen2ForCausalLM,
-        quantization=False,
-        promotion_dtype=Optional[None, torch.dtype],
+        quantization: bool = False,
+        promotion_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[
         Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
     ]:
