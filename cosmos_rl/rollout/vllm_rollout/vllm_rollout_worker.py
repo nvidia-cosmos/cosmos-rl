@@ -432,7 +432,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             ) = self.weight_mapper.rollout_prepare_recv(
                 self.get_underlying_model(),
                 quantization=self.quantization_type == "fp8",
-                promotion_dtype=self.config.train.param_dtype,
+                promotion_dtype=util.str2torch_dtype(self.config.train.param_dtype),
             )
             self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
 
