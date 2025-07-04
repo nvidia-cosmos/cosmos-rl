@@ -369,12 +369,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
 
-        # # quantization handling
-        # quantization_type = self.config.rollout.quantization
-        # if quantization_type == "fp8":
-        #     # create a new tensor with bf16 to recv the weight from policy
-        #     vllm_tensor_view = vllm_tensor_view.to(torch.bfloat16)
-
         if do_weight_sync_check:
             cloned_target_tensor = target_tensor.clone()
             # clear the current view
@@ -438,6 +432,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             ) = self.weight_mapper.rollout_prepare_recv(
                 self.get_underlying_model(),
                 quantization=self.quantization_type == "fp8",
+                promotion_dtype=self.config.train.param_dtype,
             )
             self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
 

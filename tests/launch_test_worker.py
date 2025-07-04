@@ -182,6 +182,7 @@ class TestRollout:
             for k, v in compatibale_map.items()
         }
         self.ref_compatibale_map = compatibale_map
+        self.quantization_type = None
 
         def rollout_prepare_recv(self, vllm_model):
             self.vllm_weight_inplace_view_map = compatibale_map

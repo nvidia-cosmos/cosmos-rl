@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import torch
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils import util
@@ -26,8 +26,13 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         super().__init__(hf_config)
 
     def rollout_prepare_recv(
-        self, vllm_model: Any
-    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
+        self,
+        vllm_model: Any,
+        quantization: bool = False,
+        promotion_dtype: Optional[torch.dtype] = None,
+    ) -> Tuple[
+        Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
+    ]:
         raise NotImplementedError
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:

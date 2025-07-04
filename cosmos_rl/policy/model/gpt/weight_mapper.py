@@ -15,7 +15,7 @@
 
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 import torch
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
@@ -59,10 +59,18 @@ class GPTWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self, vllm_model: Qwen2ForCausalLM, quantization=False
+        self,
+        vllm_model: Qwen2ForCausalLM,
+        quantization=False,
+        promotion_dtype=Optional[None, torch.dtype],
     ) -> Tuple[
         Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
     ]:
+        if quantization:
+            assert (
+                promotion_dtype is not None
+            ), "promotion_dtype is required when quantization is enabled"
+
         assert (
             "qwen" in type(vllm_model).__name__.lower()
         ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
@@ -76,7 +84,7 @@ class GPTWeightMapper(WeightMapper):
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
             if quantization and self.is_fp8_quantized_weight(compatible_key):
                 # logger.info(f"[Rollout] re-materialize weight: {compatible_key} to shape: {param.shape}")
-                param = torch.empty_like(param, dtype=torch.bfloat16).t().contiguous()
+                param = torch.empty_like(param, dtype=promotion_dtype).t().contiguous()
                 vllm_full_weight_map[compatible_key] = param
             if "qkv_proj" in compatible_key:
                 # must be inplace slicing.

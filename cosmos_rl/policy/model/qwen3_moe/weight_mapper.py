@@ -15,7 +15,7 @@
 
 import re
 import torch
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
@@ -68,11 +68,18 @@ class Qwen3MoeWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self, vllm_model: Qwen3MoeForCausalLM, quantization: bool = False
+        self,
+        vllm_model: Qwen3MoeForCausalLM,
+        quantization: bool = False,
+        promotion_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[
         Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
     ]:
         assert isinstance(vllm_model, Qwen3MoeForCausalLM)
+        if quantization:
+            assert (
+                promotion_dtype is not None
+            ), "promotion_dtype is required when quantization is enabled"
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
         vllm_full_weight_map = {}  # only for weight that need fp8 quantization.
@@ -83,7 +90,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
             param_name_hf = self._rollout_vllm_name_to_hf(param_name)
             if quantization and self.is_fp8_quantized_weight(param_name_hf):
                 # logger.info(f"[Rollout] re-materialize weight: {compatible_key} to shape: {param.shape}")
-                param = torch.empty_like(param, dtype=torch.bfloat16).t().contiguous()
+                param = torch.empty_like(param, dtype=promotion_dtype).t().contiguous()
                 vllm_full_weight_map[param_name_hf] = param
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:
