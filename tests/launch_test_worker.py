@@ -22,7 +22,6 @@ import numpy as np
 import torch.distributed as dist
 import toml
 from transformers import AutoConfig
-from typing import Tuple, Dict, Any
 
 import threading
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
@@ -36,7 +35,11 @@ from cosmos_rl.dispatcher.command import (
     PolicyToPolicyUnicastCommand,
     PolicyToPolicyBroadcastCommand,
 )
-from cosmos_rl.utils.parallelism_map import ParallelTopoMapperGroup
+from cosmos_rl.utils.parallelism_map import (
+    ParallelTopoMapperGroup,
+    ParallelTopoMapper,
+    ParallelizedShardMapper,
+)
 from cosmos_rl.utils.parallelism import ParallelismConfig, ParallelDims
 from cosmos_rl.utils.distributed import (
     init_distributed,
@@ -44,6 +47,7 @@ from cosmos_rl.utils.distributed import (
 )
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
+from cosmos_rl.policy.model.gpt.weight_mapper import GPTWeightMapper
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
@@ -82,6 +86,25 @@ class TestModel:
             ("model.norm.weight", torch.Size([1024])),
             ("model.embed_tokens.weight", torch.Size([75968, 2048])),
         ]
+
+        self.parallel_spec = [
+            ("model.layers.9.input_layernorm.weight", {}),
+            ("model.layers.9.mlp.down_proj.weight", {"tp": 1}),
+            ("model.layers.9.mlp.gate_proj.weight", {"tp": 0}),
+            ("model.layers.9.mlp.up_proj.weight", {"tp": 0}),
+            ("model.layers.9.post_attention_layernorm.weight", {}),
+            ("model.layers.9.self_attn.k_proj.bias", {"tp": 0}),
+            ("model.layers.9.self_attn.k_proj.weight", {"tp": 0}),
+            ("model.layers.9.self_attn.o_proj.weight", {"tp": 0}),
+            ("model.layers.9.self_attn.q_proj.bias", {"tp": 0}),
+            ("model.layers.9.self_attn.q_proj.weight", {"tp": 0}),
+            ("model.layers.9.self_attn.v_proj.bias", {"tp": 0}),
+            ("model.layers.9.self_attn.v_proj.weight", {"tp": 0}),
+            ("lm_head.weight", {"tp": 0}),
+            ("model.norm.weight", {}),
+            ("model.embed_tokens.weight", {"tp": 0}),
+        ]
+
         self.sorted_hf_key_n_rank.sort(key=lambda x: x[0])
 
         self.config = AutoConfig.from_pretrained(self.model_path)
@@ -105,32 +128,30 @@ class TestModel:
         self.sorted_sharded_params = [
             (k, self.sharded_tensors[k].ndim) for k, _ in self.sorted_hf_key_n_rank
         ]
+        self.weight_mapper = GPTWeightMapper(self.config)
 
 
 class TestPolicy:
-    def __init__(self, name, policy_world_size, rollout_world_size, rollouts_comm):
+    def __init__(self, name, policy_world_size, rollouts_comm):
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
         self.role = Role.POLICY
         self.world_size = policy_world_size
-        policy_parallelism_config = ParallelismConfig(
+        policy_parallelism_dims = ParallelismConfig(
             dp_shard_size=2, cp_size=1, tp_size=2, pp_size=1
         )
-        rollout_parallelism_config = ParallelismConfig(
-            dp_shard_size=1, cp_size=1, tp_size=4, pp_size=1
-        )
         self.parallel_dims = ParallelDims.from_config(
-            parallesim_config=policy_parallelism_config,
+            policy_parallelism_dims,
         )
         self.parallel_dims.build_mesh(device_type="cuda")
         self.model = TestModel(self.device, self.parallel_dims)
         self.parallel_mapper = ParallelTopoMapperGroup(
-            policy_parallelism_config,
-            rollout_parallelism_config,
-            policy_world_size,
-            rollout_world_size,
+            self.parallel_dims,
             self.model.config,
+            True,
+            self.model,
+            self.model.weight_mapper,
         )
         self.replica_name = name
         self.rollouts_comm = rollouts_comm
@@ -143,21 +164,15 @@ class TestPolicy:
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
 
-    def pre_P2R_collect_parameters(self):
-        return {}
-
 
 class TestRollout:
-    def __init__(self, name, policy_world_size, rollout_world_size, policies_comm):
+    def __init__(self, name, rollout_world_size, policies_comm):
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
         self.role = Role.ROLLOUT
         self.world_size = rollout_world_size
         self.policy_to_rollout_nccl_communicators = policies_comm
-        policy_parallelism_config = ParallelismConfig(
-            dp_shard_size=2, cp_size=1, tp_size=2, pp_size=1
-        )
         rollout_parallelism_config = ParallelismConfig(
             dp_shard_size=1, cp_size=1, tp_size=4, pp_size=1
         )
@@ -168,11 +183,11 @@ class TestRollout:
         self.parallel_dims.build_mesh(device_type="cuda")
         self.model = TestModel(self.device, self.parallel_dims)
         self.parallel_mapper = ParallelTopoMapperGroup(
-            policy_parallelism_config,
-            rollout_parallelism_config,
-            policy_world_size,
-            rollout_world_size,
+            self.parallel_dims,
             self.model.config,
+            False,
+            self.model,
+            self.model.weight_mapper,
         )
         self.weight_mapper = self.parallel_mapper.weight_mapper
         compatibale_map = self.model.sharded_tensors
@@ -183,68 +198,101 @@ class TestRollout:
         }
         self.ref_compatibale_map = compatibale_map
 
-        def rollout_prepare_recv(self, vllm_model):
-            self.vllm_weight_inplace_view_map = compatibale_map
-            self.recv_key_n_rank_list = compatibale_list
-            return operate_compatibale_map, compatibale_list
+        self.vllm_weight_inplace_view_map = compatibale_map
+        self.recv_key_n_rank_list = compatibale_list
 
         self.operate_compatibale_map = operate_compatibale_map
-        self.weight_mapper.rollout_prepare_recv = types.MethodType(
-            rollout_prepare_recv, self.weight_mapper
-        )
         self.inference_stream = torch.cuda.Stream()
         self.state = vLLMRolloutWorker.State()
 
-    def recv_weight_shard(
-        self,
-        global_rank_of_rollout: int,
-        manifest: Tuple[int, int, Dict[int, Any], str, Tuple[int]],
-        communicator_index: Dict[int, int],
-        do_weight_sync_check: bool = False,
-    ):
-        p_rank, r_rank, tensor_split_strategys, dest_name, _ = manifest
-        assert r_rank == global_rank_of_rollout
-
-        target_tensor = self.vllm_weight_inplace_view_map[dest_name]
-
-        view = target_tensor.cosmos_slice(tensor_split_strategys)
-
-        if do_weight_sync_check:
-            cloned_target_tensor = target_tensor.clone()
-            # clear the current view
-            view.zero_()
-
-        recv_tensor = None
-        if view.is_contiguous():
-            recv_tensor = view
-        else:
-            # new a temp tensor
-            recv_tensor = torch.empty_like(view)
-
-        nccl_recv(recv_tensor, p_rank, communicator_index[p_rank])
-
-        # inplace copy
-        if not view.is_contiguous():
-            view.copy_(recv_tensor)
-
-        if do_weight_sync_check:
-            # If the weight sync between Policy and Rollout is correct, the
-            # `target_tensor` would have no change.
-            # TODO: (lms) When we support quantization in rollout side,
-            # we should handle the numerical error of quantized weight, not
-            # just apply `torch.allclose` simply.
-            if not torch.allclose(cloned_target_tensor, target_tensor):
-                raise ValueError(
-                    f"Weight sync check failed after weight sync instruction: {manifest}"
-                )
-
-        return recv_tensor.numel() * recv_tensor.element_size()
+        self.recv_weight_shard = types.MethodType(
+            vLLMRolloutWorker.recv_weight_shard, self
+        )
 
     def get_underlying_model(self):
         return None
 
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
+
+
+def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
+    policy_parallelism_config = ParallelismConfig(
+        dp_shard_size=2, cp_size=1, tp_size=2, pp_size=1
+    )
+    rollout_parallelism_config = ParallelismConfig(
+        dp_shard_size=1, cp_size=1, tp_size=4, pp_size=1
+    )
+    p_world_size = 4
+    r_world_size = 4
+
+    policy_parallel_dims = ParallelDims.from_config_for_analysis(
+        policy_parallelism_config, p_world_size
+    )
+    rollout_parallel_dims = ParallelDims.from_config_for_analysis(
+        rollout_parallelism_config, r_world_size
+    )
+
+    policy_weight_mapper = GPTWeightMapper(hf_config=model.config)
+    rollout_weight_mapper = GPTWeightMapper(hf_config=model.config)
+
+    def dummy(*args, **kwargs):
+        return None
+
+    ParallelTopoMapper.parallelism_info_for_dtensor_params = dummy
+    ParallelTopoMapper.parallelism_info_for_vllm_params = dummy
+
+    policy_mapper = ParallelTopoMapperGroup(
+        global_parallelism=policy_parallel_dims,
+        hf_config=model.config,
+        is_policy=True,
+        underlying_model=None,
+        weight_mapper=policy_weight_mapper,
+    )
+    rollout_mapper = ParallelTopoMapperGroup(
+        global_parallelism=rollout_parallel_dims,
+        hf_config=model.config,
+        is_policy=False,
+        underlying_model=None,
+        weight_mapper=rollout_weight_mapper,
+    )
+
+    def name_to_hf(name: str) -> str:
+        return name
+
+    policy_mapper.mapper_group[0].parallelism_info_for_params = {}
+    for k, v in model.parallel_spec:
+        policy_mapper.mapper_group[0].insert_to_parallelism_info(
+            param_name=k, dims_map=v | {"dp_shard_cp": 0}, name_to_hf=name_to_hf
+        )
+
+    rollout_mapper.mapper_group[0].parallelism_info_for_params = {}
+    for k, v in model.parallel_spec:
+        rollout_mapper.mapper_group[0].insert_to_parallelism_info(
+            param_name=k,
+            dims_map=v | {"dp_shard_cp": 0},
+            name_to_hf=name_to_hf,
+        )
+
+    local_shards_p = [
+        policy_mapper.prepare_local_shard_infos(
+            hf_key_n_rank=[[x] for x in model.parallel_spec], global_rank=p_rank
+        )
+        for p_rank in range(p_world_size)
+    ]
+    local_shards_r = [
+        rollout_mapper.prepare_local_shard_infos(
+            hf_key_n_rank=[[x] for x in model.parallel_spec], global_rank=r_rank
+        )
+        for r_rank in range(r_world_size)
+    ]
+    generator = ParallelizedShardMapper()
+    generator.set_shard_infos_of_policy(local_shards_p)
+    generator.set_shard_infos_of_rollout(local_shards_r)
+    if is_send:
+        return generator.generate_parallelized_shard_send_insts_for_policy(global_rank)
+    else:
+        return generator.generate_parallelized_shard_recv_insts_for_rollout(global_rank)
 
 
 def run_policy_send_to_rollout(shm_name, shm_size, rank):
@@ -282,8 +330,10 @@ def run_policy_send_to_rollout(shm_name, shm_size, rank):
         policy = TestPolicy(
             policy_name,
             POLICY_WORLD_SIZE,
-            ROLLOUT_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
+        )
+        policy.policy_to_rollout_insts = generate_send_recv_insts(
+            policy.model, True, rank
         )
         policy.execute_policy_to_rollout_unicast = types.MethodType(
             GRPOTrainer.execute_policy_to_rollout_unicast, policy
@@ -322,9 +372,11 @@ def run_rollout_recv_from_policy(shm_name, shm_size, rank):
 
         rollout = TestRollout(
             rollout_name,
-            POLICY_WORLD_SIZE,
             ROLLOUT_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
+        )
+        rollout.policy_to_rollout_recv_insts = generate_send_recv_insts(
+            rollout.model, False, rank
         )
         rollout.policy_to_rollout_unicast = types.MethodType(
             vLLMRolloutWorker.policy_to_rollout_unicast, rollout
