@@ -320,7 +320,20 @@ class ParallelDims:
         self.full_world_size_info = dim_paras
         self.full_world_size_info["dp_shard_cp"] = self.dp_shard * self.cp
         self.full_world_size_info["dp"] = self.dp_replicate * self.dp_shard
+        self.full_world_size_info["dp_cp_tp"] = (
+            self.dp_replicate * self.dp_shard * self.cp * self.tp
+        )
+
         for i in range(self.world_size):
+            self.full_rank_info[i]["dp_cp_tp"] = (
+                self.full_rank_info[i]["dp_replicate"]
+                * self.dp_shard
+                * self.cp
+                * self.tp
+                + self.full_rank_info[i]["dp_shard"] * self.cp * self.tp
+                + self.full_rank_info[i]["cp"] * self.tp
+                + self.full_rank_info[i]["tp"]
+            )
             self.full_rank_info[i]["dp_shard_cp"] = (
                 self.full_rank_info[i]["dp_shard"] * self.cp
                 + self.full_rank_info[i]["cp"]

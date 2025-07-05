@@ -16,8 +16,7 @@
 from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 import re
-from typing import Tuple, Dict, Any
-from cosmos_rl.utils.parallelism_registry import register_parallelism_strategy
+from typing import Tuple
 
 
 def map_key_from_hf(name: str, src_model_type: str) -> str:
@@ -108,102 +107,3 @@ def convert_weight_from_hf(
     shard = shard.contiguous()
     shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
     return dest_name, shard.contiguous()
-
-
-@register_parallelism_strategy("gpt")
-def map_weight_parallel_dims(
-    n_dim: int, dest_name: str, parallel_dims: ParallelDims, model_config: Any
-) -> Tuple[Dict[str, int], Dict[int, list], int]:
-    tp_size = parallel_dims.tp
-    dp_shard_size = parallel_dims.dp_shard * parallel_dims.cp
-
-    dims_map = {}
-    dim = "tp"
-    assert dest_name.startswith("model.") or dest_name.startswith("lm_head.")
-    pp_rank = 0
-    pp_size = parallel_dims.pp
-    n_layers = model_config.num_hidden_layers
-
-    if "lm_head.weight" == dest_name:
-        dims_map[dim] = 0
-        pp_rank = pp_size - 1
-    elif "lm_head.bias" == dest_name:
-        pp_rank = pp_size - 1
-        pass
-    elif "model.embed_tokens.weight" == dest_name:
-        dims_map[dim] = 0
-        pp_rank = 0
-    elif dest_name in ["model.norm.weight", "model.norm.bias"]:
-        pp_rank = pp_size - 1
-        pass
-    else:
-        if (
-            match := re.search(  # noqa: F841
-                r"layers\.(\d+)\.input_layernorm\.(weight|bias)", dest_name
-            )
-        ) is not None:
-            pass
-        elif (
-            match := re.search(  # noqa: F841
-                r"layers\.(\d+)\.self_attn\.(q_norm|k_norm|v_norm)\.(weight|bias)",
-                dest_name,
-            )
-        ) is not None:
-            pass
-        elif (
-            match := re.search(  # noqa: F841
-                r"layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj)\.(weight|bias)",
-                dest_name,
-            )
-        ) is not None:
-            dims_map[dim] = 0
-        elif (
-            match := re.search(  # noqa: F841
-                r"layers\.(\d+)\.self_attn\.(o_proj)\.(weight|bias)", dest_name
-            )
-        ) is not None:
-            dims_map[dim] = n_dim - 1
-        elif (
-            match := re.search(  # noqa: F841
-                r"layers\.(\d+)\.mlp\.(up_proj|gate_proj)\.(weight|bias)", dest_name
-            )
-        ) is not None:
-            dims_map[dim] = 0
-        elif (
-            match := re.search(  # noqa: F841
-                r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", dest_name
-            )
-        ) is not None:
-            dims_map[dim] = n_dim - 1
-        elif (
-            match := re.search(  # noqa: F841
-                r"layers\.(\d+)\.post_attention_layernorm\.(weight|bias)", dest_name
-            )
-        ) is not None:
-            pass
-        else:
-            raise ValueError(f"Unsupported weight: {dest_name}")
-        layer_id = int(match.group(1))
-        layers_per_stage = n_layers // pp_size
-        pp_rank = layer_id // layers_per_stage
-        pp_rank = pp_rank if pp_rank < pp_size else pp_size - 1
-
-    if tp_size > 1:
-        pass
-    else:
-        dims_map = {}
-
-    # Do FSDP sharding
-    dim = "dp_shard_cp"
-    if dp_shard_size > 1:
-        dims_map[dim] = 0
-    else:
-        pass
-
-    tensor_dim_to_parallel_map = {}
-    for k, v in dims_map.items():
-        if v not in tensor_dim_to_parallel_map:
-            tensor_dim_to_parallel_map[v] = []
-        tensor_dim_to_parallel_map[v].append(k)
-
-    return dims_map, tensor_dim_to_parallel_map, pp_rank

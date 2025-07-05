@@ -56,6 +56,7 @@ from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
+from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 
 
 class Controller:
@@ -75,6 +76,7 @@ class Controller:
     def _init_status(self):
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
+        self.policy_to_rollout_shard_mapper = ParallelizedShardMapper()
         self.epoch = 1
         self.stat_prompt_tokens_count = 0
         self.stat_completion_tokens_count = 0

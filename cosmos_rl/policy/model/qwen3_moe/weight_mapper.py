@@ -17,7 +17,6 @@ import re
 import torch
 from typing import List, Tuple, Dict
 from cosmos_rl.policy.model.base import WeightMapper
-from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
     get_rollout_parallelism_strategy,
@@ -69,11 +68,12 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def rollout_prepare_recv(
         self, vllm_model: Qwen3MoeForCausalLM
-    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
+    ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, torch.Size]]]]:
         assert isinstance(vllm_model, Qwen3MoeForCausalLM)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
+            group_keys = []
             param_name_hf = self._rollout_vllm_name_to_hf(param_name)
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:
@@ -86,11 +86,11 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 k_proj_weight_key = param_name_hf.replace("qkv_proj", "k_proj")
                 v_proj_weight_key = param_name_hf.replace("qkv_proj", "v_proj")
                 vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                recv_key_n_rank_list.append((q_proj_weight_key, q_weight.ndim))
+                group_keys.append((q_proj_weight_key, q_weight.ndim))
                 vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                recv_key_n_rank_list.append((k_proj_weight_key, k_weight.ndim))
+                group_keys.append((k_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                recv_key_n_rank_list.append((v_proj_weight_key, v_weight.ndim))
+                group_keys.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in param_name_hf:
                 # split gate and up proj
                 gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
@@ -100,17 +100,15 @@ class Qwen3MoeWeightMapper(WeightMapper):
                     "gate_up_proj", "gate_proj"
                 )
                 vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-                recv_key_n_rank_list.append(
-                    (gate_proj_weight_key, gate_proj_weight.ndim)
-                )
+                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
                 up_proj_weight_key = param_name_hf.replace("gate_up_proj", "up_proj")
                 vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-                recv_key_n_rank_list.append((up_proj_weight_key, up_proj_weight.ndim))
+                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
             else:
                 vllm_weight_inplace_view_map[param_name_hf] = param
-                recv_key_n_rank_list.append((param_name_hf, param.ndim))
-
+                group_keys.append((param_name_hf, param.ndim))
+            recv_key_n_rank_list.append(group_keys)
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     @torch.no_grad()
@@ -140,12 +138,6 @@ class Qwen3MoeWeightMapper(WeightMapper):
             if not name.startswith("model."):
                 name = "model." + name
         return name
-
-    def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
-        return [replica_parallelism]
-
-    def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
-        return [replica_parallelism]
 
     def get_policy_parallelism_strategy(self):
         return [get_policy_parallelism_strategy("qwen3_moe")]

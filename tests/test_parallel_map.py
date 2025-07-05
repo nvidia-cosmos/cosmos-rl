@@ -16,19 +16,21 @@
 import unittest
 
 from cosmos_rl.utils.parallelism_map import (
+    ParallelTopoMapperGroup,
     ParallelTopoMapper,
+    ParallelizedShardMapper,
 )
-from cosmos_rl.utils.parallelism import ParallelismConfig
-import torch
-from cosmos_rl.utils.parallelism_registry import (
-    get_policy_parallelism_strategy,
-    get_rollout_parallelism_strategy,
-)
-from cosmos_rl.policy.model.gpt.weight_converter import map_weight_parallel_dims
+from cosmos_rl.policy.model.gpt.weight_mapper import GPTWeightMapper
+from cosmos_rl.utils.parallelism import ParallelismConfig, ParallelDims
 
 
 class TestModelType:
     num_hidden_layers = 12
+    num_attention_heads = 32
+    num_key_value_heads = 32
+    hidden_size = 1024
+    num_attention_heads = 32
+    model_type = "gpt"
 
 
 class TestParallelMap(unittest.TestCase):
@@ -43,67 +45,143 @@ class TestParallelMap(unittest.TestCase):
         p_world_size = 8
         r_world_size = 4
 
-        assert map_weight_parallel_dims is not None
-        model_type = "gpt"
-        mapper = ParallelTopoMapper(
-            policy_parallelism_config,
-            rollout_parallelism_config,
-            poilcy_world_size=p_world_size,
-            rollout_world_size=r_world_size,
-            policy_parallelism_strategy=get_policy_parallelism_strategy(model_type),
-            rollout_parallelism_strategy=get_rollout_parallelism_strategy(model_type),
-            hf_config=TestModelType(),
+        policy_parallel_dims = ParallelDims.from_config_for_analysis(
+            policy_parallelism_config, p_world_size
         )
+        rollout_parallel_dims = ParallelDims.from_config_for_analysis(
+            rollout_parallelism_config, r_world_size
+        )
+
+        policy_weight_mapper = GPTWeightMapper(
+            hf_config=TestModelType  # Assuming a mock config for testing
+        )
+        rollout_weight_mapper = GPTWeightMapper(
+            hf_config=TestModelType  # Assuming a mock config for testing
+        )
+
+        def dummy(*args, **kwargs):
+            return None
+
+        ParallelTopoMapper.parallelism_info_for_dtensor_params = dummy
+        ParallelTopoMapper.parallelism_info_for_vllm_params = dummy
+
+        policy_mapper = ParallelTopoMapperGroup(
+            global_parallelism=policy_parallel_dims,
+            hf_config=TestModelType,
+            is_policy=True,
+            underlying_model=None,
+            weight_mapper=policy_weight_mapper,
+        )
+        rollout_mapper = ParallelTopoMapperGroup(
+            global_parallelism=rollout_parallel_dims,
+            hf_config=TestModelType,
+            is_policy=False,
+            underlying_model=None,
+            weight_mapper=rollout_weight_mapper,
+        )
+
+        assert len(policy_mapper.mapper_group) == 1
+        assert len(rollout_mapper.mapper_group) == 1
+
+        def name_to_hf(name: str) -> str:
+            return name
+
+        #  insert_to_parallelism_info(
+        # self,
+        # param_name: str,
+        # dims_map: Dict[str, int],
+        # name_to_hf: Callable,
+
         layers = [
-            ("model.layers.9.input_layernorm.weight", torch.Size([1024])),
-            ("model.layers.9.mlp.down_proj.weight", torch.Size([1024, 11008])),
-            ("model.layers.9.mlp.gate_proj.weight", torch.Size([5504, 2048])),
-            ("model.layers.9.mlp.up_proj.weight", torch.Size([5504, 2048])),
-            ("model.layers.9.post_attention_layernorm.weight", torch.Size([1024])),
-            ("model.layers.9.self_attn.k_proj.bias", torch.Size([128])),
-            ("model.layers.9.self_attn.k_proj.weight", torch.Size([128, 2048])),
-            ("model.layers.9.self_attn.o_proj.weight", torch.Size([1024, 2048])),
-            ("model.layers.9.self_attn.q_proj.bias", torch.Size([1024])),
-            ("model.layers.9.self_attn.q_proj.weight", torch.Size([1024, 2048])),
-            ("model.layers.9.self_attn.v_proj.bias", torch.Size([128])),
-            ("model.layers.9.self_attn.v_proj.weight", torch.Size([128, 2048])),
-            ("lm_head.weight", torch.Size([75968, 2048])),
-            ("model.norm.weight", torch.Size([1024])),
-            ("model.embed_tokens.weight", torch.Size([75968, 2048])),
+            ("model.layers.9.input_layernorm.weight", {}),
+            ("model.layers.9.mlp.down_proj.weight", {"tp": 1}),
+            ("model.layers.9.mlp.gate_proj.weight", {"tp": 0}),
+            ("model.layers.9.mlp.up_proj.weight", {"tp": 0}),
+            ("model.layers.9.post_attention_layernorm.weight", {}),
+            ("model.layers.9.self_attn.k_proj.bias", {"tp": 0}),
+            ("model.layers.9.self_attn.k_proj.weight", {"tp": 0}),
+            ("model.layers.9.self_attn.o_proj.weight", {"tp": 0}),
+            ("model.layers.9.self_attn.q_proj.bias", {"tp": 0}),
+            ("model.layers.9.self_attn.q_proj.weight", {"tp": 0}),
+            ("model.layers.9.self_attn.v_proj.bias", {"tp": 0}),
+            ("model.layers.9.self_attn.v_proj.weight", {"tp": 0}),
+            ("lm_head.weight", {"tp": 0}),
+            ("model.norm.weight", {}),
+            ("model.embed_tokens.weight", {"tp": 0}),
         ]
+        policy_mapper.mapper_group[0].parallelism_info_for_params = {}
+        for k, v in layers:
+            policy_mapper.mapper_group[0].insert_to_parallelism_info(
+                param_name=k,
+                dims_map=v | {"dp_shard_cp": 0},
+                name_to_hf=name_to_hf,
+            )
+
+        rollout_mapper.mapper_group[0].parallelism_info_for_params = {}
+        for k, v in layers:
+            rollout_mapper.mapper_group[0].insert_to_parallelism_info(
+                param_name=k,
+                dims_map=v | {"dp_shard_cp": 0},
+                name_to_hf=name_to_hf,
+            )
+
+        local_shards_p = [
+            policy_mapper.prepare_local_shard_infos(
+                hf_key_n_rank=[[x] for x in layers], global_rank=p_rank
+            )
+            for p_rank in range(p_world_size)
+        ]
+        local_shards_r = [
+            rollout_mapper.prepare_local_shard_infos(
+                hf_key_n_rank=[[x] for x in layers], global_rank=r_rank
+            )
+            for r_rank in range(r_world_size)
+        ]
+
+        generator = ParallelizedShardMapper()
+        generator.set_shard_infos_of_policy(local_shards_p)
+        generator.set_shard_infos_of_rollout(local_shards_r)
+
         global_rank = 5
-        insts = mapper.policy_to_rollout_manifest(
-            params=[(x[0], len(x[1])) for x in layers], global_rank=int(global_rank)
-        )
+        insts = generator.generate_parallelized_shard_send_insts_for_policy(global_rank)
         r_rank_max = 0
         layer_idx = 0
-        for inst in insts:
-            p_rank, r_rank, tensor_split_strategys, dest_name, _ = inst
-            assert p_rank == global_rank
-            while layers[layer_idx][0] != dest_name:
-                r_rank_max = 0
-                layer_idx += 1
-            assert layers[layer_idx][0] == dest_name
-            assert r_rank >= r_rank_max
-            if r_rank > r_rank_max:
-                r_rank_max = r_rank
+
+        layers.sort(key=lambda x: x[0])
+        for inst_group in insts:
+            for inst in inst_group:
+                dest_name = inst["name"]
+                for i in inst["insts"]:
+                    p_rank, r_rank, tensor_split_strategys = i
+                    assert p_rank == global_rank
+                    while layers[layer_idx][0] != dest_name:
+                        r_rank_max = 0
+                        layer_idx += 1
+                    assert layers[layer_idx][0] == dest_name
+                    assert r_rank >= r_rank_max
+                    if r_rank > r_rank_max:
+                        r_rank_max = r_rank
 
         global_rank = 2
-        insts = mapper.rollout_from_policy_manifest(
-            params=[(x[0], len(x[1])) for x in layers], rollout_rank=int(global_rank)
+        insts = generator.generate_parallelized_shard_recv_insts_for_rollout(
+            global_rank
         )
+
         p_rank_max = 0
         layer_idx = 0
-        for inst in insts:
-            p_rank, r_rank, tensor_split_strategys, dest_name, _ = inst
-            assert r_rank == global_rank
-            while layers[layer_idx][0] != dest_name:
-                p_rank_max = 0
-                layer_idx += 1
-            assert layers[layer_idx][0] == dest_name
-            assert p_rank >= p_rank_max
-            if p_rank > p_rank_max:
-                p_rank_max = p_rank
+        for inst_group in insts:
+            for inst in inst_group:
+                dest_name = inst["name"]
+                for i in inst["insts"]:
+                    p_rank, r_rank, tensor_split_strategys = i
+                    assert r_rank == global_rank
+                    while layers[layer_idx][0] != dest_name:
+                        p_rank_max = 0
+                        layer_idx += 1
+                    assert layers[layer_idx][0] == dest_name
+                    assert p_rank >= p_rank_max
+                    if p_rank > p_rank_max:
+                        p_rank_max = p_rank
 
 
 if __name__ == "__main__":
