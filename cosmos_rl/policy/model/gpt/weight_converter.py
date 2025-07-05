@@ -16,7 +16,7 @@
 from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 import re
-from typing import Tuple, Optional
+from typing import Tuple
 
 
 def map_key_from_hf(name: str, src_model_type: str) -> str:
@@ -32,7 +32,6 @@ def convert_weight_from_hf(
     src_model_type: str,
     parallel_dims: ParallelDims,
     ignore_unknown_weights: bool = False,
-    head_dim: Optional[int] = None,
 ) -> Tuple[str, torch.Tensor]:
     tp_rank, tp_size = parallel_dims.tp_coord
 
@@ -70,19 +69,7 @@ def convert_weight_from_hf(
             dest_name,
         )
     ) is not None:
-        if head_dim is None or tensor.shape[0] >= tp_size * head_dim:
-            # If the tensor is larger than the expected size, we assume it is sharded
-            # across the tp_size dimension.
-            shard = tensor.tensor_split(tp_size, dim=0)[tp_rank]
-        else:
-            split_chunks = []
-            remain_size = tensor.shape[0]
-            for i in range(tp_size):
-                cur_chunk_size = max(min(remain_size, head_dim), 0)
-                remain_size -= cur_chunk_size
-                split_chunks.append(tensor.shape[0] - remain_size)
-            shards = tensor.tensor_split(split_chunks, dim=0)
-            shard = shards[tp_rank]
+        shard = tensor.tensor_split(tp_size, dim=0)[tp_rank]
     elif (
         match := re.search(
             r"layers\.(\d+)\.self_attn\.(o_proj)\.(weight|bias)", dest_name

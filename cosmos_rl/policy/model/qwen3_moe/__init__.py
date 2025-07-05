@@ -818,6 +818,7 @@ class Qwen3MoE(BaseModel):
                     parallel_dims,
                     n_experts=self.model_args.n_experts,
                 )
+
                 if dest_name is None:
                     # This is due to the expert parallelism grouping
                     continue
