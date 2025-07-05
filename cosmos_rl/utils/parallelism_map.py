@@ -461,7 +461,7 @@ class ParallelTopoMapper:
 
     def local_shard_info_for_params(
         self,
-        params: List[List[Tuple[str, Tuple[int]]]],
+        params: List[List[Tuple[str, int]]],
         global_rank: int,
     ) -> List[List[Dict[str, Any]]]:
         """
