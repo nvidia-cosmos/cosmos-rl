@@ -204,13 +204,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path
         )
-
-        if not ModelRegistry.check_model_type_supported(hf_config.model_type):
-            raise ValueError(f"Model {hf_config.model_type} not supported.")
-
-        self.weight_mapper = WeightMapper.get_weight_mapper(hf_config.model_type)(
-            hf_config
-        )
+        model_type = hf_config.model_type
+        if not ModelRegistry.check_model_type_supported(model_type):
+            logger.warning(
+                f"[Rollout] Replica can not find {model_type} in weight mapper, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
+            )
+            model_type = constant.COSMOS_HF_MODEL_TYPES
+        self.weight_mapper = WeightMapper.get_weight_mapper(model_type)(hf_config)
         self.model_config = hf_config
 
         atexit.register(self.handle_shutdown)

@@ -84,7 +84,6 @@ class CommMixin:
         self.remote_ips, self.remote_port, metadata = (
             dist_utils.get_controller_metadata()
         )
-
         # `sft_user_dataset` is only used in SFT mode when the user provides a dataset
         self.sft_user_dataset = None
         sft_user_dataset = metadata.get("sft_user_dataset", None)
@@ -100,13 +99,20 @@ class CommMixin:
         )
 
         user_data_packer = metadata.get("user_data_packer", None)
+        model_type = hf_config.model_type
+        if model_type not in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY:
+            logger.warning(
+                f"{self.role} Replica can not find {model_type} in data packer, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
+            )
+            model_type = constant.COSMOS_HF_MODEL_TYPES
+
         if user_data_packer:
             user_data_packer = base64.b64decode(user_data_packer)
             user_data_packer = cloudpickle.loads(user_data_packer)
             self.data_packer = user_data_packer
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
-            self.data_packer = DataPacker.get_default_data_packer(hf_config.model_type)
+            self.data_packer = DataPacker.get_default_data_packer(model_type)
             logger.info(f"Using default data packer: {self.data_packer}")
         self.data_packer.setup(self.config, self.tokenizer)
 
@@ -119,9 +125,7 @@ class CommMixin:
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )
         else:
-            self.val_data_packer = DataPacker.get_default_data_packer(
-                hf_config.model_type
-            )
+            self.val_data_packer = DataPacker.get_default_data_packer(model_type)
             logger.info(f"Using default validation data packer: {self.val_data_packer}")
         self.val_data_packer.setup(self.config, self.tokenizer)
 
