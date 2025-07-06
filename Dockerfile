@@ -67,7 +67,6 @@ RUN pip install -U pip setuptools wheel packaging
 RUN pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
-COPY constraints.txt /workspace/cosmos_rl/constraints.txt
 RUN pip install \
     torchao==0.11.0 \
     vllm==0.9.1 \
@@ -77,10 +76,9 @@ RUN pip install \
 
 FROM base AS package
 
-COPY setup.py /workspace/cosmos_rl/setup.py
-COPY CMakeLists.txt /workspace/cosmos_rl/CMakeLists.txt
+COPY README.md pyproject.toml /workspace/cosmos_rl/
 COPY tools /workspace/cosmos_rl/tools
 COPY configs /workspace/cosmos_rl/configs
 COPY cosmos_rl /workspace/cosmos_rl/cosmos_rl
 
-RUN cd /workspace/cosmos_rl && pip install -e . && cd -
+RUN pip install -e /workspace/cosmos_rl

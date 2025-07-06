@@ -46,10 +46,10 @@ jobs:
 
           # run tests
           ${DOCKER_RUN} python tests/test_cache.py
-          # ${DOCKER_RUN} torchrun --nproc_per_node=4 tests/test_comm.py
+          ${DOCKER_RUN} python tests/test_comm.py
           ${DOCKER_RUN} python tests/test_fp8.py
           # ${DOCKER_RUN} python tests/test_grad_allreduce.py
-          # ${DOCKER_RUN} python tests/test_high_availability_nccl.py
+          ${DOCKER_RUN} python tests/test_high_availability_nccl.py
           ${DOCKER_RUN} python tests/test_nccl_collectives.py
           ${DOCKER_RUN} python tests/test_nccl_timeout.py
           ${DOCKER_RUN} python tests/test_parallel_map.py

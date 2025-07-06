@@ -30,6 +30,7 @@ import asyncio
 import importlib
 import importlib.util
 import sys
+from collections import OrderedDict
 from functools import wraps
 from msgpack import ExtType
 from tqdm import tqdm
@@ -1031,3 +1032,16 @@ def dynamic_import_module(path: str, attr: Optional[str] = None) -> Dict[str, An
             obj = getattr(obj, attr_part)
         return obj
     return module
+
+
+class RollingDict(OrderedDict):
+    def __init__(self, maxlen=20):
+        super().__init__()
+        self.maxlen = maxlen
+
+    def __setitem__(self, key, value):
+        if key in self:
+            del self[key]
+        super().__setitem__(key, value)
+        if len(self) > self.maxlen:
+            self.popitem(last=False)

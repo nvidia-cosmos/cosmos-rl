@@ -21,6 +21,7 @@ from typing import Dict, List, Iterator, Any, Optional
 from torch.utils.data import DataLoader
 from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.util import RollingDict
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role
@@ -76,6 +77,7 @@ class PolicyStatusManager:
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
         self.status = {}
+        self.train_report_data = RollingDict(maxlen=20)
 
         # Validation
         self.val_iters: Dict[int, Iterator] = {}
@@ -629,25 +631,31 @@ class PolicyStatusManager:
                     total_learning_rate = self.report_data_list[0][
                         "train/learning_rate"
                     ]
-                    train_step = self.report_data_list[0]["train_step"]
                     total_iter_time_avg = np.mean(
                         [data["train/iteration_time"] for data in self.report_data_list]
                     )
+                    train_step = self.report_data_list[0]["train_step"]
                     self.report_data_list = []
+
+                    policy_report_data = {
+                        "train/loss_avg": total_loss_avg,
+                        "train/loss_max": total_loss_max,
+                        "train/learning_rate": total_learning_rate,
+                        "train/iteration_time": total_iter_time_avg,
+                    }
+
+                    self.train_report_data.setdefault(train_step, {}).update(
+                        policy_report_data
+                    )
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
-                            data={
-                                "train/iteration_time": total_iter_time_avg,
-                                "train/loss_avg": total_loss_avg,
-                                "train/loss_max": total_loss_max,
-                                "train/learning_rate": total_learning_rate,
-                            },
+                            data=self.train_report_data[train_step],
                             step=train_step,
                         )
                     if "console" in self.config.logging.logger:
                         logger.info(
-                            f"Step: {train_step}/{total_steps}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
+                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
                 except Exception as e:
                     logger.warning(
@@ -786,14 +794,7 @@ class PolicyStatusManager:
                     "train/completion_length_mean": np.mean(completion_lengths),
                     "train/completion_length_max": np.max(completion_lengths),
                 }
-
-                if "wandb" in self.config.logging.logger and is_wandb_available():
-                    log_wandb(report_data, step=self.current_step)
-
-                if "console" in self.config.logging.logger:
-                    logger.info(
-                        f"Step: {self.current_step}/{self.total_steps}, Reward Mean: {report_data['train/reward_mean']:.4f}, Reward Std: {report_data['train/reward_std']:.4f}, Reward Max: {report_data['train/reward_max']:.4f}, Reward Min: {report_data['train/reward_min']:.4f}, Completion Length Mean: {report_data['train/completion_length_mean']:.2f}, Completion Length Max: {report_data['train/completion_length_max']:.2f}"
-                    )
+                self.train_report_data[self.current_step] = report_data
 
 
 class RolloutStatusManager:

@@ -23,8 +23,11 @@ from cosmos_rl.utils.pynccl import (
     nccl_send,
     nccl_recv,
 )
+import subprocess
 
-os.environ["NCCL_CUMEM_ENABLE"] = "0"
+# This env var may lead to bug in NCCL
+# Check https://github.com/NVIDIA/nccl/issues/1721
+# os.environ["NCCL_CUMEM_ENABLE"] = "0"
 
 
 def main():
@@ -42,19 +45,25 @@ def main():
     print(f"Rank {global_rank} created comm {comm}")
 
     stream = torch.cuda.Stream()
-    # 0 -> 4
-    # 2 -> 4
+
+    # Test interleaved send/recv
     with torch.cuda.stream(stream):
         if global_rank in [0, 2]:
-            send_tensor = torch.randn([16008, 5120], dtype=torch.float16).to(device)
+            send_tensor = (
+                torch.ones([16008, 5120], dtype=torch.float16).to(device) * global_rank
+            )
             nccl_send(send_tensor, 4, comm)
             nccl_send(send_tensor, 4, comm)
         elif global_rank == 4:
             recv_tensor = torch.empty([16008, 5120], dtype=torch.float16, device=device)
             nccl_recv(recv_tensor, 0, comm)
+            assert torch.allclose(recv_tensor, torch.ones_like(recv_tensor) * 0)
             nccl_recv(recv_tensor, 2, comm)
+            assert torch.allclose(recv_tensor, torch.ones_like(recv_tensor) * 2)
             nccl_recv(recv_tensor, 0, comm)
+            assert torch.allclose(recv_tensor, torch.ones_like(recv_tensor) * 0)
             nccl_recv(recv_tensor, 2, comm)
+            assert torch.allclose(recv_tensor, torch.ones_like(recv_tensor) * 2)
     torch.cuda.synchronize()
     dist.barrier()
 
@@ -62,4 +71,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if os.environ.get("RECURSIVE_ENTROPY") is None:
+        n_gpu = torch.cuda.device_count()
+        print(f"Running {n_gpu} processes")
+        command = [
+            "torchrun",
+            "--nnodes",
+            "1",
+            "--nproc_per_node",
+            str(n_gpu),
+            os.path.abspath(__file__),
+        ]
+        env = os.environ.copy()
+        env["RECURSIVE_ENTROPY"] = "1"
+        subprocess.run(command, env=env)
+    else:
+        main()

@@ -46,10 +46,17 @@ def routine(N: int, device: torch.device, rank: int, world_size: int):
                         print(f"[RANK {rank}] arrived here")
                     except Exception as e:
                         print(f"[RANK {rank}] error in nccl_allreduce: {e}")
-                else:
-                    nccl_abort(comm)
         except Exception as e:
             print(f"[RANK {rank}] error in nccl_timeout_watchdog: {e}")
+
+        from cosmos_rl.utils import pynccl as _pynccl
+
+        print("-" * 80)
+        print(
+            f"[rank {rank}] comm_store keys after exit watchdog: {list(_pynccl._COMM_REGISTRY._store.keys())}"
+        )
+        print(f"[rank {rank}] task queue size: {_pynccl._task_q.qsize()}")
+        print("-" * 80)
 
         if rank < 2:
             # Test that the new group still works after the previous nccl failure
@@ -69,6 +76,8 @@ def routine(N: int, device: torch.device, rank: int, world_size: int):
                 recv_tensor,
                 torch.arange(N, dtype=torch.float32, device=device) * world_size,
             )
+            nccl_abort(comm)
+
         print(f"[rank {rank}] finished the test")
 
 
@@ -95,6 +104,45 @@ def main():
     nccl_v = version("nvidia-nccl-cu12")
     if nccl_v >= "2.26.2":
         routine(N=512 * 4096 * 512, device=device, rank=rank, world_size=world_size)
+
+    # Global barrier to ensure all ranks finished routines
+    dist.barrier()
+
+    # Wait background worker to drain queue and communicator store
+    from cosmos_rl.utils import pynccl as _pynccl
+
+    def _wait_for_cleanup(timeout_s: float = 10.0, interval: float = 0.02) -> bool:
+        import time
+
+        start = time.time()
+        while time.time() - start < timeout_s:
+            if _pynccl._task_q.qsize() == 0 and len(_pynccl._COMM_REGISTRY._store) == 0:
+                return True
+            time.sleep(interval)
+        return False
+
+    clean_ok = _wait_for_cleanup()
+    if dist.get_rank() == 0:
+        print("=" * 80)
+        pending_tasks = list(_pynccl._task_q.queue)
+        print(f"[test] remaining task count: {len(pending_tasks)}")
+        if pending_tasks:
+            print("[test] pending tasks:")
+            for t in pending_tasks:
+                print("   ", t)
+
+        print(
+            f"[test] remaining comm_store keys: {list(_pynccl._COMM_REGISTRY._store.keys())}"
+        )
+
+        if clean_ok:
+            print(
+                "[test] cleanup succeeded – task queue and comm store are empty. All tests passed."
+            )
+        else:
+            raise AssertionError(
+                "[test] cleanup timed out – background worker did not drain queues in time."
+            )
 
     dist.destroy_process_group()
 

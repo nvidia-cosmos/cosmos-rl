@@ -327,6 +327,9 @@ class Controller:
     async def update_kv_store(self, key: str, value: str):
         self.temp_kv_store[key] = value
 
+    async def clear_temp_kv_store(self, key: str):
+        self.temp_kv_store.pop(key)
+
     async def get_kv_store(self, key: str) -> str:
         return self.temp_kv_store.get(key)
 

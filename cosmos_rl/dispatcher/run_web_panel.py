@@ -43,6 +43,7 @@ from cosmos_rl.dispatcher.protocol import (
     SetProfileRequest,
     SetTracePathRequest,
     NcclErrRequest,
+    NcclStoreClearRequest,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
 import cosmos_rl.utils.util as util
@@ -61,6 +62,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
     COSMOS_API_NCCL_COMM_GET_ALL_SUFFIX,
     COSMOS_API_NCCL_COMM_ERROR_SUFFIX,
+    COSMOS_API_NCCL_COMM_STORE_CLEAR_SUFFIX,
     COSMOS_API_NEXT_PROMPT_SUFFIX,
     COSMOS_API_ROLLOUT_SUFFIX,
     COSMOS_API_VALIDATION_REPORT_SUFFIX,
@@ -216,11 +218,7 @@ NCCL Handshake API
 
 @app.post(COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX)
 async def comm_initiator(request: HandshakeInitiatorRequest):
-    if request.unique_pair_name in controller.temp_kv_store:
-        return create_error_response(
-            constant.ErrorCode.ALREADY_EXISTS, "Unique pair name already exists"
-        )
-    elif request.handle_base64 is None or request.handle_base64 == "":
+    if request.handle_base64 is None or request.handle_base64 == "":
         return create_error_response(
             constant.ErrorCode.INVALID_REQUEST, "Handle is required"
         )
@@ -242,6 +240,15 @@ async def comm_acceptor(request: HandshakeAcceptorRequest):
 async def comm_error(request: NcclErrRequest):
     await controller.set_replica_ncclerror(request.replica_name, request.error)
     return {"message": "DetectTimeout received"}
+
+
+@app.post(COSMOS_API_NCCL_COMM_STORE_CLEAR_SUFFIX)
+async def comm_store_clear(request: NcclStoreClearRequest):
+    try:
+        await controller.clear_temp_kv_store(request.unique_pair_name)
+    except Exception as e:
+        logger.error(f"[Controller] Error clearing store: {e}")
+    return {"message": "Store cleared"}
 
 
 @app.get(COSMOS_API_NCCL_COMM_GET_ALL_SUFFIX)

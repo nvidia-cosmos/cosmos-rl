@@ -13,205 +13,496 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Pure-Python (ctypes) NCCL backend for ``cosmos_rl``.
+
+A lightweight software watchdog is included.  When the duration of any NCCL
+call exceeds the threshold given by the environment variable
+``COSMOS_NCCL_TIMEOUT_MS`` (default: 600 000 ms) the corresponding
+communicator is aborted via :pyfunc:`nccl_abort` and a ``RuntimeError`` is
+raised.
+
+"""
+
+from __future__ import annotations
+
+import glob
 import os
+import threading
 import time
 from contextlib import contextmanager
-from importlib.metadata import version
-from typing import Optional, List
+from typing import Dict, List, Optional, Callable
+import queue
+from dataclasses import dataclass, field
 
 import torch
-from torch.distributed import ReduceOp
 from torch.cuda import Stream
+from torch.distributed import ReduceOp
 
-import cosmos_rl._cpp as cosmos_c
+from cosmos_rl.utils.pynccl_wrapper import (
+    NCCLLibrary,
+    buffer_type,
+    cudaStream_t,
+    ncclComm_t,
+    ncclDataTypeEnum,
+    ncclRedOpTypeEnum,
+    ncclResultEnum,
+    ncclUniqueId,
+)
+
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import do_once
 
 
-class NcclDataType:
-    # copy from nccl.h
-    ncclInt8 = 0
-    ncclChar = 0
-    ncclUint8 = 1
-    ncclInt32 = 2
-    ncclInt = 2
-    ncclUint32 = 3
-    ncclInt64 = 4
-    ncclUint64 = 5
-    ncclFloat16 = 6
-    ncclHalf = 6
-    ncclFloat32 = 7
-    ncclFloat = 7
-    ncclFloat64 = 8
-    ncclDouble = 8
-    ncclBfloat16 = 9
-    ncclFloat8e4m3 = 10
-    ncclFloat8e5m2 = 11
-    ncclNumTypes = 12
+# ---------------------------------------------------------------------------
+# NCCL ctypes binding instance (shared)
+# ---------------------------------------------------------------------------
+def _find_nccl_so_file() -> str:
+    """Find the libnccl.so* shared object file from the nvidia-nccl-cu* package."""
 
-    map_dtype = {
-        torch.int8: ncclInt8,
-        torch.uint8: ncclUint8,
-        torch.int32: ncclInt32,
-        torch.uint32: ncclUint32,
-        torch.int64: ncclInt64,
-        torch.uint64: ncclUint64,
-        torch.float16: ncclFloat16,
-        torch.float16: ncclHalf,
-        torch.float32: ncclFloat32,
-        torch.float: ncclFloat,
-        torch.float64: ncclFloat64,
-        torch.double: ncclDouble,
-        torch.bfloat16: ncclBfloat16,
-        # torch.float8_e4m3fn: ncclFloat8e4m3, # need check
-        torch.float8_e5m2: ncclFloat8e5m2,
-    }
+    # we assume `nvidia-nccl-cu*` python package is installed next to the torch
+    # package (under site-packages directory)
+    torch_dir = os.path.dirname(torch.__file__)
+    nvidia_nccl_dir = os.path.join(os.path.dirname(torch_dir), "nvidia", "nccl")
+    if not os.path.isdir(nvidia_nccl_dir):
+        raise RuntimeError(
+            f"Could not find `nvidia-nccl-cu*` package directory: {nvidia_nccl_dir}"
+            "Please install the `nvidia-nccl-cu*` package."
+        )
+    # find the so files in nvidia-nccl directory
+    so_files = glob.glob(os.path.join(nvidia_nccl_dir, "lib", "libnccl.so*"))
+    # filter out the symbolic links
+    so_files = [f for f in so_files if not os.path.islink(f)]
+    if len(so_files) != 1:
+        raise RuntimeError(
+            f"Expected exactly one libnccl.so* file in {nvidia_nccl_dir}/lib, "
+            f"but found {len(so_files)}: {so_files}. Please check your installation."
+        )
 
-    @classmethod
-    def from_torch(cls, dtype: torch.dtype) -> int:
-        if dtype not in cls.map_dtype:
-            raise ValueError(f"Unsupported dtype: {dtype}")
-        return int(cls.map_dtype[dtype])
+    so_file = so_files[0]
+    return so_file
 
 
-class NcclRedOp:
-    ncclSum = 0
-    ncclProd = 1
-    ncclMax = 2
-    ncclMin = 3
-    ncclAvg = 4
+_nccl = NCCLLibrary(so_file=_find_nccl_so_file())
 
-    map_redop = {
-        ReduceOp.SUM: ncclSum,
-        ReduceOp.PRODUCT: ncclProd,
-        ReduceOp.MAX: ncclMax,
-        ReduceOp.MIN: ncclMin,
-        ReduceOp.AVG: ncclAvg,
-    }
-
-    @classmethod
-    def to_nccl_reduce_op(cls, opType: ReduceOp.RedOpType) -> int:
-        if opType not in cls.map_redop:
-            raise ValueError(f"Unsupported opType: {opType}")
-        return cls.map_redop[opType]
+# ---------------------------------------------------------------------------
+# Communicator registry (thread-safe singleton)
+# ---------------------------------------------------------------------------
 
 
-def check_tensor(tensor: torch.Tensor):
+@dataclass(slots=True)
+class _CommMeta:
+    """Metadata for a communicator."""
+
+    comm: ncclComm_t
+    rank: int
+    world_size: int
+
+
+class _CommunicatorRegistry:
+    """Thread-safe mapping between integer handles and NCCL communicator metadata."""
+
+    __slots__ = ("_store", "_next_idx", "_lock")
+
+    def __init__(self):
+        self._store: Dict[int, _CommMeta] = {}
+        self._next_idx: int = 0
+        self._lock = threading.Lock()
+
+    def register(self, comm: ncclComm_t, rank: int, world_size: int) -> int:
+        """Insert a new communicator and return its autogenerated handle."""
+        with self._lock:
+            idx = self._next_idx
+            self._next_idx += 1
+            self._store[idx] = _CommMeta(comm, rank, world_size)
+            return idx
+
+    def get(self, idx: int) -> _CommMeta:
+        """Return metadata for *idx*."""
+        with self._lock:
+            return self._store[idx]
+
+    def pop(self, idx: int) -> _CommMeta | None:
+        """Remove and return metadata for *idx* (or sentinel tuple if absent)."""
+        with self._lock:
+            return self._store.pop(idx, None)
+
+
+_COMM_REGISTRY = _CommunicatorRegistry()
+
+# ---------------------------------------------------------------------------
+# Per-thread watchdog context
+# ---------------------------------------------------------------------------
+
+_tls = threading.local()  # thread-local storage for watchdog context stack
+
+
+@dataclass(slots=True)
+class _WatchdogContext:
+    """Lightweight container for per-thread watchdog state."""
+
+    comm_ids: set[int] = field(default_factory=set)
+    abort: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Context stack helpers
+# ---------------------------------------------------------------------------
+
+
+def _push_ctx() -> _WatchdogContext:  # noqa: D401
+    """Create a new watchdog context and push it onto the TLS stack."""
+    ctx = _WatchdogContext()
+    if not hasattr(_tls, "stack"):
+        _tls.stack = []  # type: ignore[attr-defined]
+    _tls.stack.append(ctx)  # type: ignore[attr-defined]
+    return ctx
+
+
+def _pop_ctx() -> _WatchdogContext | None:  # noqa: D401
+    """Pop top watchdog context; return None if the stack is empty."""
+    if not hasattr(_tls, "stack") or not _tls.stack:  # type: ignore[attr-defined]
+        return None
+    return _tls.stack.pop()  # type: ignore[attr-defined]
+
+
+def _current_ctx() -> _WatchdogContext | None:  # noqa: D401
+    """Return current watchdog context or *None* when outside any block."""
+    if hasattr(_tls, "stack") and _tls.stack:  # type: ignore[attr-defined]
+        return _tls.stack[-1]  # type: ignore[attr-defined]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Lightweight async enqueue monitoring (Python worker)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _Task:
+    functor: Callable[[], ncclComm_t]
+    timeout_ms: int
+    comm_idx: Optional[int]
+    done: threading.Event = field(default_factory=threading.Event)
+    timed_out: threading.Event = field(default_factory=threading.Event)
+
+    def __repr__(self):  # pragma: no cover
+        return f"<_Task id={id(self)} timeout_ms={self.timeout_ms}>"
+
+
+_task_q: "queue.Queue[_Task]" = queue.Queue()
+_worker_started = False
+_worker_thread: Optional[threading.Thread] = None
+_worker_device: Optional[int] = None  # GPU index used by worker
+
+# A lock to guarantee that the NCCL background worker is only started once
+_worker_init_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Background worker implementation
+# ---------------------------------------------------------------------------
+
+
+def _worker_loop(device_idx: int):
+    """Background thread that executes queued NCCL host calls on *device_idx*."""
+    torch.cuda.set_device(device_idx)
+
+    while True:
+        task: _Task = _task_q.get()
+        logger.debug(f"[Worker] Got task {task} | queue_size={_task_q.qsize()}")
+
+        comm: ncclComm_t | None = None
+        try:
+            logger.debug(f"[Worker] Executing functor for task {task}")
+            comm = task.functor()
+            logger.debug(f"[Worker] Functor for task {task} returned comm={comm}")
+
+            deadline = time.monotonic() + task.timeout_ms / 1000.0
+            # Poll async error status until success or timeout.
+            while time.monotonic() < deadline:
+                err = _nccl.ncclCommGetAsyncError(comm)
+                logger.debug(f"[Worker] ncclCommGetAsyncError(comm={comm}) = {err}")
+                if err == ncclResultEnum.ncclSuccess:
+                    break
+                if err != ncclResultEnum.ncclInProgress:
+                    # Immediate error – abort communicator and mark task failed.
+                    logger.error(
+                        f"NCCL: async error detected (err={err}), task {task} failed"
+                    )
+                    _safe_abort(task.comm_idx, comm)
+                    task.timed_out.set()
+                    break
+                time.sleep(0.001)
+
+            else:
+                # Enqueue timeout hit – abort communicator.
+                logger.error(f"NCCL: non-blocking enqueue timed out for task {task}")
+                _safe_abort(task.comm_idx, comm)
+                task.timed_out.set()
+        except Exception as e:
+            logger.error(f"[Worker] Exception during task {task}: {e}")
+            task.timed_out.set()
+        finally:
+            task.done.set()
+            logger.debug(
+                f"[Worker] Task {task} done | timed_out={task.timed_out.is_set()}"
+            )
+
+
+def _start_worker(device_idx: int):
+    """Start the NCCL background worker thread exactly once (thread-safe)."""
+    global _worker_started, _worker_thread, _worker_device
+
+    # Double-checked locking pattern to avoid unnecessary acquisition.
+    if _worker_started and _worker_thread is not None and _worker_thread.is_alive():
+        return
+
+    with _worker_init_lock:
+        if _worker_started and _worker_thread is not None and _worker_thread.is_alive():
+            return
+
+        _worker_device = device_idx
+        _worker_thread = threading.Thread(
+            target=_worker_loop,
+            args=(device_idx,),
+            daemon=True,
+            name="pynccl-worker",
+        )
+        _worker_thread.start()
+        _worker_started = True
+
+
+def _submit_nccl(
+    functor: Callable[[], ncclComm_t],
+    timeout_ms: Optional[int],
+    comm_idx: Optional[int] = None,
+):
+    """Execute *functor* in the NCCL worker thread with watchdog integration."""
+    if not _worker_started:
+        raise RuntimeError(
+            "NCCL worker thread not initialized; call create_nccl_comm first."
+        )
+
+    resolved_timeout = _get_timeout_ms(timeout_ms)
+    task = _Task(functor, resolved_timeout, comm_idx)
+    _task_q.put(task)
+    task.done.wait()
+
+    if task.timed_out.is_set():
+        cur = _current_ctx()
+        if cur is not None:
+            cur.abort = True
+        raise TimeoutError("NCCL: non-blocking enqueue timed out")
+
+    # Register communicator with current watchdog context so that any timeout
+    # inside the same `with nccl_timeout_watchdog` block can trigger an abort.
+    cur = _current_ctx()
+    if cur is not None and comm_idx is not None:
+        cur.comm_ids.add(comm_idx)
+
+
+# ---------------------------------------------------------------------------
+# Helper utilities
+# ---------------------------------------------------------------------------
+
+
+def _dtype_enum(dtype: torch.dtype) -> int:
+    """Map torch.dtype to NCCL enum (raises on unsupported)."""
+    return ncclDataTypeEnum.from_torch(dtype)
+
+
+def _redop_enum(op: ReduceOp) -> int:
+    """Map torch.distributed.ReduceOp to NCCL enum."""
+    return ncclRedOpTypeEnum.from_torch(op)
+
+
+def _stream_ptr(stream: Optional[Stream] = None) -> cudaStream_t:
+    """Return cudaStream_t pointer for given stream (defaults to current)."""
+    if stream is None:
+        stream = torch.cuda.current_stream()
+    return cudaStream_t(stream.cuda_stream)
+
+
+def _buf(ptr_tensor: Optional[torch.Tensor]) -> buffer_type:
+    """Return void* pointer for a tensor (or null pointer if None)."""
+    return buffer_type(0) if ptr_tensor is None else buffer_type(ptr_tensor.data_ptr())
+
+
+def _check_tensor(tensor: torch.Tensor):
+    """Validate that tensor is CUDA, contiguous and on current device."""
     if not tensor.is_cuda:
-        raise ValueError("Tensor must be a CUDA tensor")
-    if not tensor.is_contiguous:
+        raise ValueError("Tensor must be CUDA tensor")
+    if not tensor.is_contiguous():
         raise ValueError("Tensor must be contiguous")
     if tensor.numel() == 0:
         raise ValueError("Tensor must have non-zero number of elements")
     if tensor.device.index != torch.cuda.current_device():
-        raise ValueError("Tensor's device does not match the current CUDA device")
-    return True
+        raise ValueError("Tensor device mismatch current CUDA device")
 
 
-def get_cuda_stream(cuda_stream: Optional[Stream] = None) -> int:
-    # Be attention, when cuda not set stream, the current stream is 0 (nullptr),
-    # But don't worry, the nccl api will handle this case.
-    if cuda_stream is None:
-        return torch.cuda.current_stream().cuda_stream
-    return cuda_stream.cuda_stream
+def _get_timeout_ms(user_timeout: Optional[int] = None) -> int:
+    """Resolve timeout value (environment variable overrides default)."""
+    if user_timeout is not None:
+        return user_timeout
+    return int(os.getenv("COSMOS_NCCL_TIMEOUT_MS", "600000"))  # 10 minutes default
 
 
-def get_tensor_ptr(tensor: torch.Tensor) -> int:
-    return int(tensor.data_ptr())
-
-
-def get_nccl_timeout_ms() -> int:
-    timeout_ms = int(
-        os.environ.get("COSMOS_NCCL_TIMEOUT_MS", cosmos_c.get_default_timeout_ms())
-    )
-    if timeout_ms < 0:
-        raise ValueError(
-            f"COSMOS_NCCL_TIMEOUT_MS must be non-negative, but got {timeout_ms}"
-        )
-    return timeout_ms
-
-
-# below wrap torch.Tensor to pure c++ code binding
+# ---------------------------------------------------------------------------
+# Context-manager
+# ---------------------------------------------------------------------------
 
 
 @contextmanager
-def nccl_timeout_watchdog(wait_stream=False, timeout_ms: int = None):
-    """
-    Context manager to monitor NCCL operations and raise an error if they take longer than a specified timeout.
-    Important: do not call any synchronous API:
-    - torch.cuda.synchronize()
-    - torch.cuda.stream.synchronize()
-    - torch.cuda.stream.wait_stream()
-    - torch.cuda.event.wait()
-    - ...
+def nccl_timeout_watchdog(
+    *, wait_stream: bool = False, timeout_ms: Optional[int] = None
+):
+    """Light-weight watchdog around a block of NCCL calls."""
 
-    Args:
-        wait_stream (bool): If True, wait for the NCCL operation to complete before raising an error.
-        If False, just wait until all NCCL operations are enqueued to the stream.
-    """
-    nccl_v = version("nvidia-nccl-cu12")
-    if nccl_v < "2.26.2":
+    timeout_ms = _get_timeout_ms(timeout_ms)
+    logger.debug("[Watchdog] Entered watchdog context")
 
-        @do_once
-        def warn_nccl_version():
-            logger.warning(
-                "NCCL version is less than 2.26.2, which is known to hang in some cases, please upgrade to a newer version"
-            )
+    ctx = _push_ctx()
 
-        warn_nccl_version()
+    start_ts = time.monotonic()
+    cur_stream = torch.cuda.current_stream()
 
-    start_time = time.time()
-    threshold_ms = timeout_ms if timeout_ms is not None else get_nccl_timeout_ms()
-    # Enter the watchdog context
-    cosmos_c.watchdog_enter()
-    error_raised = False
+    def _do_abort():
+        ctx.abort = True
+        logger.error(
+            f"[Watchdog] NCCL block exceeded {timeout_ms} ms. Aborting its communicators."
+        )
+        logger.debug(f"[Watchdog] Context comm_ids to abort: {ctx.comm_ids}")
+        for cid in ctx.comm_ids:
+            try:
+                nccl_abort(cid)
+            except Exception:
+                pass
+
+    timer: Optional[threading.Timer] = None
+
+    if not wait_stream:
+        timer = threading.Timer(timeout_ms / 1000.0, _do_abort)
+        timer.daemon = True
+        timer.start()
+
+    exc: BaseException | None = None
     try:
         yield
-    except Exception as e:
-        error_raised = True
-        raise e
+    except BaseException as e:
+        exc = e
+        ctx.abort = True
+        raise
     finally:
-        if wait_stream and not error_raised:
-            event = torch.cuda.Event()
-            event.record()
-            while not event.query():
-                if time.time() - start_time > threshold_ms / 1000:
-                    cosmos_c.watchdog_exit(abort=True)
-                    raise RuntimeError(
-                        f"NCCL operation took {time.time() - start_time} seconds, which is longer than the threshold {threshold_ms} ms"
-                    )
-        cosmos_c.watchdog_exit(abort=error_raised)
+        if timer is not None:
+            timer.cancel()
+            logger.debug("[Watchdog] Timer canceled")
+
+        timeout_hit = False
+
+        if wait_stream and exc is None:
+            logger.debug("[Watchdog] wait_stream=True: flushing current stream")
+            evt = torch.cuda.Event()
+            evt.record(cur_stream)
+
+            while True:
+                if evt.query():
+                    logger.debug("[Watchdog] CUDA stream flushed; exiting wait loop")
+                    # Stream completely flushed.
+                    break
+
+                elapsed_ms = (time.monotonic() - start_ts) * 1000.0
+                if not timeout_hit and elapsed_ms >= timeout_ms:
+                    timeout_hit = True
+                    _do_abort()
+                    break
+
+                time.sleep(0.001)  # cooperative yield
+
+        # Pop the context and perform a final abort cleanup if required.
+        popped = _pop_ctx()
+        logger.debug(f"[Watchdog] Context popped. abort={popped and popped.abort}")
+        if popped and popped.abort:
+            for cid in popped.comm_ids:
+                try:
+                    logger.debug(f"[Watchdog] Aborting communicator {cid}")
+                    nccl_abort(cid)
+                except Exception:
+                    pass
+        if timeout_hit and exc is None:
+            raise TimeoutError(
+                "NCCL operation exceeded watchdog timeout and was aborted"
+            )
+        logger.debug("[Watchdog] Exiting watchdog context")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def create_nccl_uid() -> List[int]:
+    """Generate a NCCL unique ID and return it as a list of 128 bytes."""
+    uid = _nccl.ncclGetUniqueId()
+    return list(uid.internal)
 
 
 def create_nccl_comm(
     uid_chars: List[int], rank: int, world_size: int, timeout_ms: Optional[int] = None
 ) -> int:
-    """
-    Create a NCCL communication group. Return the comm_idx.
-    """
-    timeout_ms = get_nccl_timeout_ms() if timeout_ms is None else timeout_ms
-    return cosmos_c.create_nccl_comm(uid_chars, rank, world_size, timeout_ms)
+    """Create a communicator and return comm_idx handle (int)."""
+    # Start the NCCL background worker exactly once using the caller's CUDA device.
+    _start_worker(torch.cuda.current_device())
 
+    uid = ncclUniqueId()
+    for i, byte in enumerate(uid_chars):
+        uid.internal[i] = byte & 0xFF
 
-def create_nccl_uid() -> List[int]:
-    """
-    Create a NCCL unique identifier.
-    """
-    return cosmos_c.create_nccl_uid()
+    # Holder to fetch communicator created in worker thread
+    holder: Dict[str, ncclComm_t] = {}
 
+    def _init_functor() -> ncclComm_t:
+        comm_local = _nccl.ncclCommInitRankConfig(world_size, uid, rank)
+        holder["comm"] = comm_local
+        return comm_local
 
-def nccl_abort(comm_idx: int):
-    """
-    Abort the NCCL communication group.
-    """
-    cosmos_c.nccl_abort(comm_idx)
+    # Run init on worker thread with timeout protection
+    _submit_nccl(_init_functor, timeout_ms)
+
+    comm = holder.get("comm")
+    if comm is None:
+        raise RuntimeError(
+            "Failed to create NCCL communicator (worker did not return comm)"
+        )
+
+    # Register communicator
+    comm_idx = _COMM_REGISTRY.register(comm, rank, world_size)
+    logger.info(f"[NCCL] Created communicator idx={comm_idx} rank={rank}/{world_size}")
+
+    # Register communicator with current watchdog context (if any)
+    cur = _current_ctx()
+    if cur is not None:
+        cur.comm_ids.add(comm_idx)
+
+    return comm_idx
 
 
 def get_nccl_comm_nranks(comm_idx: int) -> int:
-    """
-    Get the number of ranks in the NCCL communication group.
-    """
-    return cosmos_c.get_nccl_comm_count(comm_idx)
+    """Return world_size of communicator comm_idx."""
+    meta = _COMM_REGISTRY.get(comm_idx)
+    return meta.world_size
+
+
+def nccl_abort(comm_idx: int):
+    """Abort (destroy) communicator comm_idx."""
+    meta = _COMM_REGISTRY.pop(comm_idx)
+    if meta is not None and meta.comm is not None:
+        try:
+            _nccl.ncclCommAbort(meta.comm)
+        except Exception:
+            _nccl.ncclCommDestroy(meta.comm)
+        logger.warning(f"[NCCL] Aborted communicator idx={comm_idx}")
+
+
+# Collective wrapper functions
 
 
 def nccl_broadcast(
@@ -221,19 +512,45 @@ def nccl_broadcast(
     stream: Optional[Stream] = None,
     timeout_ms: Optional[int] = None,
 ):
+    """Broadcast tensor from rank (root) to all peers in communicator.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Buffer to send/receive. It must reside on the current CUDA device.
+    rank : int
+        Rank that owns the valid send buffer within the communicator.
+    comm_idx : int
+        Handle returned by :func:`create_nccl_comm`.
+    stream : torch.cuda.Stream | None
+        CUDA stream where the collective is launched (defaults to current).
+    timeout_ms : int | None
+        Reserved for future watchdog-based timeout handling.
     """
-    Broadcast a tensor from the source rank to all other ranks in the communication group.
-    """
-    check_tensor(tensor)
-    cosmos_c.nccl_broadcast(
-        tensor=get_tensor_ptr(tensor),
-        count=tensor.numel(),
-        dtype=NcclDataType.from_torch(tensor.dtype),
-        rank=rank,
-        comm_idx=comm_idx,
-        stream=get_cuda_stream(stream),
-        timeout_ms=get_nccl_timeout_ms() if timeout_ms is None else timeout_ms,
-    )
+    _check_tensor(tensor)
+    meta = _COMM_REGISTRY.get(comm_idx)
+
+    # Only the root rank provides a valid send buffer. All ranks – including the
+    # root – must supply a valid receive buffer so that they all obtain the
+    # broadcasted data.
+    sendbuf = _buf(tensor) if meta.rank == rank else buffer_type()
+    recvbuf = _buf(tensor)
+
+    stream_ptr = _stream_ptr(stream)
+
+    def _broadcast_call():
+        _nccl.ncclBroadcast(
+            sendbuf,
+            recvbuf,
+            tensor.numel(),
+            _dtype_enum(tensor.dtype),
+            rank,
+            meta.comm,
+            stream_ptr,
+        )
+        return meta.comm
+
+    _submit_nccl(_broadcast_call, timeout_ms, comm_idx)
 
 
 def nccl_send(
@@ -243,19 +560,24 @@ def nccl_send(
     stream: Optional[Stream] = None,
     timeout_ms: Optional[int] = None,
 ):
-    """
-    Send a tensor to a peer in the communication group.
-    """
-    check_tensor(tensor)
-    cosmos_c.nccl_send(
-        tensor=get_tensor_ptr(tensor),
-        count=tensor.numel(),
-        dtype=NcclDataType.from_torch(tensor.dtype),
-        peer=peer,
-        comm_idx=comm_idx,
-        stream=get_cuda_stream(stream),
-        timeout_ms=get_nccl_timeout_ms() if timeout_ms is None else timeout_ms,
-    )
+    """Point-to-point send."""
+    _check_tensor(tensor)
+    meta = _COMM_REGISTRY.get(comm_idx)
+
+    stream_ptr = _stream_ptr(stream)
+
+    def _send_call():
+        _nccl.ncclSend(
+            _buf(tensor),
+            tensor.numel(),
+            _dtype_enum(tensor.dtype),
+            peer,
+            meta.comm,
+            stream_ptr,
+        )
+        return meta.comm
+
+    _submit_nccl(_send_call, timeout_ms, comm_idx)
 
 
 def nccl_recv(
@@ -265,19 +587,24 @@ def nccl_recv(
     stream: Optional[Stream] = None,
     timeout_ms: Optional[int] = None,
 ):
-    """
-    Receive a tensor from a peer in the communication group.
-    """
-    check_tensor(tensor)
-    cosmos_c.nccl_recv(
-        tensor=get_tensor_ptr(tensor),
-        count=tensor.numel(),
-        dtype=NcclDataType.from_torch(tensor.dtype),
-        peer=peer,
-        comm_idx=comm_idx,
-        stream=get_cuda_stream(stream),
-        timeout_ms=get_nccl_timeout_ms() if timeout_ms is None else timeout_ms,
-    )
+    """Point-to-point receive."""
+    _check_tensor(tensor)
+    meta = _COMM_REGISTRY.get(comm_idx)
+
+    stream_ptr = _stream_ptr(stream)
+
+    def _recv_call():
+        _nccl.ncclRecv(
+            _buf(tensor),
+            tensor.numel(),
+            _dtype_enum(tensor.dtype),
+            peer,
+            meta.comm,
+            stream_ptr,
+        )
+        return meta.comm
+
+    _submit_nccl(_recv_call, timeout_ms, comm_idx)
 
 
 def nccl_allreduce(
@@ -288,21 +615,25 @@ def nccl_allreduce(
     stream: Optional[Stream] = None,
     timeout_ms: Optional[int] = None,
 ):
-    """
-    Allreduce a tensor in the communication group.
-    """
-    check_tensor(sendbuff)
-    check_tensor(recvbuff)
-    cosmos_c.nccl_allreduce(
-        sendbuff=get_tensor_ptr(sendbuff),
-        recvbuff=get_tensor_ptr(recvbuff),
-        count=sendbuff.numel(),
-        dtype=NcclDataType.from_torch(sendbuff.dtype),
-        op=NcclRedOp.to_nccl_reduce_op(op),
-        comm_idx=comm_idx,
-        stream=get_cuda_stream(stream),
-        timeout_ms=get_nccl_timeout_ms() if timeout_ms is None else timeout_ms,
-    )
+    """All-reduce collective."""
+    _check_tensor(sendbuff)
+    _check_tensor(recvbuff)
+    meta = _COMM_REGISTRY.get(comm_idx)
+    stream_ptr = _stream_ptr(stream)
+
+    def _allreduce_call():
+        _nccl.ncclAllReduce(
+            _buf(sendbuff),
+            _buf(recvbuff),
+            sendbuff.numel(),
+            _dtype_enum(sendbuff.dtype),
+            _redop_enum(op),
+            meta.comm,
+            stream_ptr,
+        )
+        return meta.comm
+
+    _submit_nccl(_allreduce_call, timeout_ms, comm_idx)
 
 
 def nccl_alltoall(
@@ -312,17 +643,68 @@ def nccl_alltoall(
     stream: Optional[Stream] = None,
     timeout_ms: Optional[int] = None,
 ):
+    """All-to-all emulation via AllGather (NCCL native AllToAll not exposed)."""
+    _check_tensor(sendbuff)
+    _check_tensor(recvbuff)
+    meta = _COMM_REGISTRY.get(comm_idx)
+
+    stream_ptr = _stream_ptr(stream)
+
+    def _alltoall_call():
+        _nccl.ncclAllGather(
+            _buf(sendbuff),
+            _buf(recvbuff),
+            sendbuff.numel(),
+            _dtype_enum(sendbuff.dtype),
+            meta.comm,
+            stream_ptr,
+        )
+        return meta.comm
+
+    _submit_nccl(_alltoall_call, timeout_ms, comm_idx)
+
+
+# Compatibility helper (legacy API surface)
+
+
+def get_nccl_timeout_ms() -> int:
+    """Public helper that mirrors the old pynccl.get_nccl_timeout_ms API."""
+    return _get_timeout_ms()
+
+
+def _safe_abort(comm_idx: Optional[int], comm: ncclComm_t):
+    """Abort NCCL communicator gracefully, regardless of its registry state.
+
+    If *comm_idx* is given, we first try to abort via :func:`nccl_abort` so the
+    communicator is removed from the registry. When *comm_idx* is *None* (e.g.
+    during communicator creation), we fall back to aborting the raw
+    ``ncclComm_t``.  Any error during the abort is intentionally suppressed
+    because we are already in an error-handling path.
     """
-    Alltoall a tensor in the communication group.
-    """
-    check_tensor(sendbuff)
-    check_tensor(recvbuff)
-    cosmos_c.nccl_alltoall(
-        sendbuff=get_tensor_ptr(sendbuff),
-        recvbuff=get_tensor_ptr(recvbuff),
-        total_size=sendbuff.numel(),
-        dtype=NcclDataType.from_torch(sendbuff.dtype),
-        comm_idx=comm_idx,
-        stream=get_cuda_stream(stream),
-        timeout_ms=get_nccl_timeout_ms() if timeout_ms is None else timeout_ms,
-    )
+    try:
+        if comm_idx is not None:
+            nccl_abort(comm_idx)
+        else:
+            _nccl.ncclCommAbort(comm)
+    except Exception:
+        # Best-effort abort; ignore secondary failures
+        pass
+
+
+__all__ = [
+    # management
+    "create_nccl_uid",
+    "create_nccl_comm",
+    "nccl_abort",
+    "get_nccl_comm_nranks",
+    # collectives
+    "nccl_broadcast",
+    "nccl_send",
+    "nccl_recv",
+    "nccl_allreduce",
+    "nccl_alltoall",
+    # watchdog
+    "nccl_timeout_watchdog",
+    # compatibility helper
+    "get_nccl_timeout_ms",
+]

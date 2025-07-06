@@ -27,12 +27,18 @@ COSMOS_ROLLOUT_TRAJECTORY_SIZE = 30
 # Heartbeat used to make sure the main thread is alive.
 # Mostly, Heartbeat report is non-blocking in a separate thread,
 # so we can use a shorter timeout threshold.
-COSMOS_HEARTBEAT_TIMEOUT = 200  # 200 seconds
-COSMOS_HEARTBEAT_SEND_INTERVAL = 60  # 60 seconds
+COSMOS_HEARTBEAT_TIMEOUT = int(os.environ.get("COSMOS_HEARTBEAT_TIMEOUT", "200"))
+COSMOS_HEARTBEAT_SEND_INTERVAL = int(
+    os.environ.get("COSMOS_HEARTBEAT_SEND_INTERVAL", "60")
+)
 
-COSMOS_ROLLOUT_SCAN_INTERVAL = 10  # 10 seconds
-COSMOS_ROLLOUT_STEP_INTERVAL = 100  # 100 steps
-COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY = 10  # 10 seconds
+COSMOS_ROLLOUT_SCAN_INTERVAL = int(os.environ.get("COSMOS_ROLLOUT_SCAN_INTERVAL", "10"))
+COSMOS_ROLLOUT_STEP_INTERVAL = int(
+    os.environ.get("COSMOS_ROLLOUT_STEP_INTERVAL", "100")
+)
+COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY = int(
+    os.environ.get("COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY", "10")
+)
 
 # Internal model type for HFLLMModel
 COSMOS_HF_MODEL_TYPES = "hfllm"

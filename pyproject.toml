@@ -1,0 +1,23 @@
+[project]
+name = "cosmos_rl"
+version="0.1.1"
+description = "Cosmos-RL is a flexible and scalable Reinforcement Learning framework specialized for Physical AI applications."
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
+
+[project.scripts]
+cosmos-rl = "cosmos_rl.launcher.launch_all:main"
+
+[tool.setuptools]
+packages = ["cosmos_rl"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+cosmos_rl = ["launcher/*.sh"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

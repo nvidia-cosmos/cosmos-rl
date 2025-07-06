@@ -46,6 +46,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NCCL_COMM_ERROR_SUFFIX,
     COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
     COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
+    COSMOS_API_NCCL_COMM_STORE_CLEAR_SUFFIX,
 )
 from cosmos_rl.utils.pynccl import (
     get_nccl_timeout_ms,
@@ -555,6 +556,22 @@ class HighAvailabilitylNccl:
         logger.debug(
             f"{self.__log_prefix()} created nccl_comm for replica_rank {rank} with total {len(cmd.replica_name_to_rank)} ranks."
         )
+
+        # To prevent following rebuild mesh with same unique_pair_name,
+        # we need to clear the kv store of the old mesh.
+        if self.replica_name_to_rank.get(self.replica_name) == 0:
+            make_request_with_retry(
+                partial(
+                    requests.post,
+                    json={
+                        "unique_pair_name": self.__get_mesh_unique_key(
+                            cmd.replica_name_to_rank
+                        )
+                    },
+                ),
+                self.__get_alternative_urls(COSMOS_API_NCCL_COMM_STORE_CLEAR_SUFFIX),
+                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+            )
 
     def __do_nccl_op_with_retry(self, func: Callable, timeout_ms: int, **kwargs):
         if self.is_single_peer.is_set():

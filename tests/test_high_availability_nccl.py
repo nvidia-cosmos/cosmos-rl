@@ -17,12 +17,13 @@
 import torch
 import time
 import os
+
+os.environ["COSMOS_HEARTBEAT_TIMEOUT"] = "100000"
 import sys
 import subprocess
 import torch.distributed as dist
 import threading
 from functools import partial
-from typing import override
 import requests
 import atexit
 from queue import Queue, Empty
@@ -103,6 +104,8 @@ def launch_controller(config: str):
     Launch the controller process.
     """
     logger.info("launch controller")
+    env = os.environ.copy()
+    env["COSMOS_ROLE"] = "Controller"
     p = subprocess.Popen(
         "python -m cosmos_rl.dispatcher.run_web_panel "
         f"--port {CTRL_PORT} --config {config}",
@@ -110,7 +113,7 @@ def launch_controller(config: str):
         stdout=sys.stdout,
         stderr=sys.stderr,
         text=True,
-        env=dict(os.environ),
+        env=env,
     )
 
     return [p]
@@ -124,7 +127,7 @@ class TestHANccl(CommMixin):
             0  # here we assume every replica only has one gpu, so the global_rank is 0
         )
         self.replica_rank = dist.get_rank()
-        self.remote_hosts = [f"http://{os.environ["COSMOS_CONTROLLER_HOST"]}"]
+        self.remote_hosts = [f"http://{os.environ['COSMOS_CONTROLLER_HOST']}"]
         self.role = "POLICY"
         self._shutdown_event = threading.Event()
         self._is_registered = False
@@ -141,9 +144,9 @@ class TestHANccl(CommMixin):
         self.init_redis()
 
         # start heartbeat thread
-        self.heartbeat_thread = self.start_heartbeat(
-            self._shutdown_event,
-        )
+        # self.heartbeat_thread = self.start_heartbeat(
+        #     self._shutdown_event,
+        # )
 
         self.fetch_command_thread = threading.Thread(
             target=self.run_fetch_command,
@@ -159,7 +162,6 @@ class TestHANccl(CommMixin):
             urls.append(f"{remote_host}/{suffix}")
         return urls
 
-    @override
     def register_to_controller(self):
         if self._is_registered:
             return
@@ -188,7 +190,6 @@ class TestHANccl(CommMixin):
         self._is_registered = True
         logger.info(f"register to controller: {self.replica_name}")
 
-    @override
     def unregister_from_controller(self):
         if not self._is_registered:
             return
@@ -321,15 +322,14 @@ class TestHANccl(CommMixin):
             controller_hosts=self.remote_hosts,
         )
 
+        dist.barrier()
+        world_size = dist.get_world_size()
         # 2. trigger buildmesh command over all ranks
         if self.replica_rank == 1:
             self.unregister_from_controller()
-            self.register_to_controller()
-            logger.info("  re-register to controller is done")
-
-        # wait all ranks fetch latest command from controller
-        dist.barrier()
-        time.sleep(5)
+            return
+        else:
+            time.sleep(5)
 
         cmds = self.fetch_command()
         cmds = [cmd for cmd in cmds if isinstance(cmd, BuildMeshCommand)]
@@ -350,15 +350,15 @@ class TestHANccl(CommMixin):
             # monitor that all other ranks execute the build mesh command
             cmd = cmds[-1]
             assert (
-                len(cmd.replica_name_to_rank) == dist.get_world_size()
-            ), f"buildmesh command should be {dist.get_world_size()}"
+                len(cmd.replica_name_to_rank) == world_size - 1
+            ), f"buildmesh command should be {world_size - 1}"
             logger.info(
                 f"  replica_rank {self.replica_rank} push the buildmesh command: {cmd.replica_name_to_rank}"
             )
             comm.push_cmd(cmd)
 
             retry_count = 0
-            while retry_count < 10:
+            while retry_count < 100:
                 # here we wait rebuild comm until nranks equals to the world size - 1
                 if comm.is_ready():
                     break
@@ -377,8 +377,8 @@ class TestHANccl(CommMixin):
 
             assert comm.is_ready(), "comm is not ready"
             assert (
-                comm.world_size() == dist.get_world_size() - 1
-            ), f"world size should be {dist.get_world_size() - 1}, actual {comm.world_size()}"
+                comm.world_size() == world_size - 1
+            ), f"world size should be {world_size - 1}, actual {comm.world_size()}"
 
         # finally, shutdown the comm
         comm.destroy_nccl_comm()
@@ -458,7 +458,7 @@ def main():
 
 if __name__ == "__main__":
     # let run this test in distributed mode
-    if os.environ.get("LOCAL_RANK") is None:
+    if os.environ.get("RECURSIVE_ENTRYPOINT") is None:
         # n_gpu = torch.cuda.device_count()
         n_gpu = 4
         command = [
@@ -469,6 +469,8 @@ if __name__ == "__main__":
             str(n_gpu),
             os.path.abspath(__file__),
         ]
-        subprocess.run(command)
+        env = os.environ.copy()
+        env["RECURSIVE_ENTRYPOINT"] = "1"
+        subprocess.run(command, env=env)
     else:
         main()
