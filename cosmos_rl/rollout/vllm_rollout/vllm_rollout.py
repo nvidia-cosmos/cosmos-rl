@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+
+from cosmos_rl.rollout.vllm_rollout.mokey_patch_fo_fp8 import apply_fp8_linear_patch
+
 import vllm
 import torch
 from typing import List, Tuple, Any
@@ -115,7 +118,7 @@ class vLLMRollout(RolloutBase):
             enable_chunked_prefill=self.rollout_config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
-            quantization=kwargs.get("quantization", None),
+            quantization=self.quantization,
             seed=kwargs.get("seed") or 42,
             # Note: We set load_format="dummy" to avoid loading the HF model weights which could cause too many requests from multiple replicas.
             # This will affect:
@@ -128,6 +131,10 @@ class vLLMRollout(RolloutBase):
 
         # patch the vllm model to reload weight
         patch_vllm_model_to_reload_weight(self.rollout_engine)
+
+        # patch the vllm model to use rowwise fp8
+        if self.quantization == "fp8":
+            apply_fp8_linear_patch(self.get_underlying_model())
 
         self.pad_token_id = tokenizer.pad_token_id
 
@@ -211,9 +218,6 @@ class vLLMRollout(RolloutBase):
         return self.rollout_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
 
     def fp8_quantization(self, weight: torch.Tensor):
-        assert (
-            weight.dtype == torch.bfloat16
-        ), f"weight dtype is not bfloat16: {weight.dtype}"
         # convert to fp8
         from vllm import _custom_ops as ops
 
@@ -222,6 +226,7 @@ class vLLMRollout(RolloutBase):
         qweight, weight_scale = ops.scaled_fp8_quant(
             weight, scale=None, use_per_token_if_dynamic=True
         )
+
         return qweight.t(), weight_scale
 
     @cached_property

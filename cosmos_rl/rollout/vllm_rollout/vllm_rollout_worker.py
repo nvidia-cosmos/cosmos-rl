@@ -60,6 +60,11 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SUFFIX,
     COSMOS_API_VALIDATION_REPORT_SUFFIX,
 )
+from cosmos_rl.utils.fp8.fp8_util import (
+    IS_TORCH_COMPATIBLE_WITH_FP8,
+    MIN_TORCH_VERSION_FOR_FP8,
+)
+
 from vllm import SamplingParams
 
 
@@ -173,6 +178,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.quantization_type = None
         if self.config.rollout.quantization == "fp8":
             self.quantization_type = "fp8"
+            assert (
+                IS_TORCH_COMPATIBLE_WITH_FP8
+            ), f"[Rollout] FP8 needs PyTorch >= {MIN_TORCH_VERSION_FOR_FP8}"
 
         self.rollout: vLLMRollout = vLLMRollout(
             self.config,
@@ -387,14 +395,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         if not vllm_tensor_view.is_contiguous():
             vllm_tensor_view.copy_(recv_tensor)
 
-        if (
-            do_weight_sync_check and self.quantization_type is None
-        ):  # disable weight sync check when fp8 is enabled
-            # If the weight sync between Policy and Rollout is correct, the
-            # `target_tensor` would have no change.
+        if do_weight_sync_check:
             # TODO: (lms) When we support quantization in rollout side,
             # we should handle the numerical error of quantized weight, not
             # just apply `torch.allclose` simply.
+            # If the weight sync between Policy and Rollout is correct, the
+            # `target_tensor` would have no change.
             if not torch.allclose(cloned_target_tensor, target_tensor):
                 raise ValueError(
                     f"Weight sync check failed after weight sync instruction: {manifest}"
@@ -528,9 +534,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         # get the scale key.
                         scale_key = current_dest_full_weight_name.replace(
                             ".weight", ".weight_scale"
-                        )  # FIXME: (lms) this is only for rowwise quantization.
+                        )
                         scale_tensor = self.rollout.model_param_map[scale_key]
-                        # logger.info(f"[Rollout] scale_tensor: {scale_tensor.shape}, is_contiguous: {scale_tensor.is_contiguous()}, weight_scale: {weight_scale.shape}, is_contiguous: {weight_scale.is_contiguous()}")
+                        assert (
+                            scale_tensor.shape == weight_scale.shape
+                        ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
                         scale_tensor.copy_(weight_scale)
                     else:
                         # For non-fp8 weights and fp8 not enabled, we just do nothing
@@ -542,7 +550,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     inst,
                     target_tensor,
                     communicator_index,
-                    command.do_weight_sync_check,
+                    command.do_weight_sync_check
+                    and self.quantization_type
+                    is None,  # temporarily disable weight sync check when fp8 is enabled
                 )
             self.state.set_weight_synced()
 
