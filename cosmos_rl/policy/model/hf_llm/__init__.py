@@ -292,7 +292,9 @@ class HFLLMModel(BaseModel):
         Initialize a HFLLM model from a pretrained model.
 
         Args:
+            hf_config (AutoConfig): HuggingFace config.
             model_name_or_path (str): Model name or path to the pretrained model.
+            max_position_embeddings (int): Maximum position embeddings.
 
         Returns:
             HFLLMModel: HFLLM model.
