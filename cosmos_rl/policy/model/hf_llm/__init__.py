@@ -82,30 +82,40 @@ class HFLLMModel(BaseModel):
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         # reset buffer registered in __init__() function,
         # e.g. rotary_emb.inv_freq, embed_tokens.embed_scale
-        if self.src_model_type in ["mistral", "gemma3_text"]:
-            rotary_emb = self.model.model.rotary_emb
-            inv_freq = rotary_emb.inv_freq
-            rope_init_fn = rotary_emb.rope_init_fn
-            inv_freq, rotary_emb.attention_scaling = rope_init_fn(self.hf_config, None)
-            rotary_emb.register_buffer("inv_freq", inv_freq, persistent=False)
-            if self.src_model_type == "gemma3_text":
-                rotary_emb_local = self.model.model.rotary_emb_local
-                local_inv_freq = rotary_emb_local.inv_freq
-                rope_init_fn = rotary_emb_local.rope_init_fn
+        model = self.model.model
+        rotary_emb = getattr(model, "rotary_emb", None)
+        if rotary_emb is not None:
+            rope_init_fn = getattr(rotary_emb, "rope_init_fn", None)
+            if rope_init_fn is not None:
+                inv_freq, rotary_emb.attention_scaling = rope_init_fn(
+                    self.hf_config, None
+                )
+                rotary_emb.register_buffer("inv_freq", inv_freq, persistent=False)
+            else:
+                logger.warning(
+                    "rotary_emb does not have rope_init_fn, cannot reset inv_freq."
+                )
+        # Models like Gemma have rotary_emb_local
+        rotary_emb_local = getattr(model, "rotary_emb_local", None)
+        if rotary_emb_local is not None:
+            rope_init_fn = getattr(rotary_emb_local, "rope_init_fn", None)
+            if rope_init_fn is not None:
                 local_inv_freq, rotary_emb_local.attention_scaling = rope_init_fn(
                     self.hf_config, None
                 )
                 rotary_emb_local.register_buffer(
                     "inv_freq", local_inv_freq, persistent=False
                 )
-                embed_tokens = self.model.model.embed_tokens
-                embed_scale = self.hf_config.hidden_size**0.5
-                embed_tokens.register_buffer(
-                    "embed_scale", torch.tensor(embed_scale), persistent=False
+            else:
+                logger.warning(
+                    "rotary_emb_local does not have rope_init_fn, cannot reset inv_freq."
                 )
-        else:
-            logger.warning(
-                f"Model type {self.src_model_type} does not reset rotary_emb which may cause accuracy issue"
+
+        if self.src_model_type in ["gemma3_text"]:
+            embed_tokens = model.embed_tokens
+            embed_scale = self.hf_config.hidden_size**0.5
+            embed_tokens.register_buffer(
+                "embed_scale", torch.tensor(embed_scale), persistent=False
             )
 
     @property

@@ -67,9 +67,11 @@ class vLLMRollout(RolloutBase):
 
         enable_ep_parallelism = False
         disable_mm_preprocessor_cache = False
+        force_auto_load_format = False
 
         moe_model_type = {"qwen3_moe"}
         multimodal_type = {"qwen2_5_vl"}
+        force_auto_load_model_type = {"gemma", "gemma2", "gemma3_text"}
 
         model_type = model_config.model_type
         if model_type in moe_model_type:
@@ -77,6 +79,14 @@ class vLLMRollout(RolloutBase):
         if model_type in multimodal_type:
             # for vllm nightly, this is only True for multimodal models, check here
             disable_mm_preprocessor_cache = True
+        # Enable force_auto_load_format for gemma, gemma2, and gemma3_text models.
+        # These models do not set the normalizer as non-persistent, causing it to be randomly rewritten in dummy load mode.
+        # This issue is resolved in vllm version >= 0.9.2rc1 as per PR: https://github.com/vllm-project/vllm/pull/19788.
+        # TODO(huik): Remove this workaround after upgrading to vllm version 0.9.2 or newer.
+        if vllm.__version__ <= "0.9.1" and model_type in force_auto_load_model_type:
+            force_auto_load_format = True
+            logger.info(f"force auto load format for {model_type}")
+        self.force_auto_load_format = force_auto_load_format
 
         rollout_parallelism = self.rollout_config.parallelism
 
@@ -119,11 +129,14 @@ class vLLMRollout(RolloutBase):
             #      2. TODO:(lms) this may have conflict with quantization. Check it when supporting quantization
             # This won't affect:
             #      1. The GRPO procedure won't be affected because we will first have a P2R before rollout generation. So it is safe.
-            load_format=kwargs.get("load_format", "dummy"),
+            load_format="auto"
+            if force_auto_load_format
+            else kwargs.get("load_format", "dummy"),
         )
 
         # patch the vllm model to reload weight
-        patch_vllm_model_to_reload_weight(self.rollout_engine)
+        if not self.force_auto_load_format:
+            patch_vllm_model_to_reload_weight(self.rollout_engine)
 
         self.pad_token_id = tokenizer.pad_token_id
 
@@ -146,8 +159,9 @@ class vLLMRollout(RolloutBase):
         self.tokenizer = tokenizer
 
     def reload_weight(self):
-        self.rollout_engine.llm_engine.vllm_config.load_config.load_format = "auto"
-        self.rollout_engine.collective_rpc("reload_model")
+        if not self.force_auto_load_format:
+            self.rollout_engine.llm_engine.vllm_config.load_config.load_format = "auto"
+            self.rollout_engine.collective_rpc("reload_model")
 
     @torch.no_grad()
     def rollout_generation(
