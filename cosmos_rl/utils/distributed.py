@@ -414,13 +414,17 @@ class HighAvailabilitylNccl:
     DESTROY_CMD = "destroy"
 
     def __init__(
-        self, replica_name: str, global_rank: int, controller_hosts: list[str]
+        self,
+        replica_name: str,
+        global_rank: int,
+        controller_hosts: list[str],
+        max_retry: int = 100,
     ):
         self.replica_name = replica_name
         self.global_rank = global_rank
         self.remote_hosts = controller_hosts
         # max retry times for nccl op after nccl comm is rebuilt
-        self.max_retry = 3
+        self.max_retry = max_retry
         self.default_timeout_ms = get_nccl_timeout_ms()
 
         # The nccl group info
@@ -428,21 +432,12 @@ class HighAvailabilitylNccl:
         self.nccl_comm_count_map = {}
         self.replica_name_to_rank: Dict[str, int] = {}
 
-        # For background thread
-        self.build_mesh_lock = threading.Lock()
-        self.shutdown_event = threading.Event()
-        self.is_single_peer = threading.Event()
-        self.is_single_peer.clear()
         self.is_comm_ready = threading.Event()
         self.is_comm_ready.clear()
+        self.is_single_peer = threading.Event()
+        self.is_single_peer.clear()
         self.is_first_time_build_mesh = True
         self.cmd_queue = Queue()
-        self.build_mesh_thread = threading.Thread(
-            target=self.__run_background_thread,
-            daemon=True,
-            name=f"HA_NCCL-{self.replica_name}-#{self.global_rank}",
-        )
-        self.build_mesh_thread.start()
 
     def __get_alternative_urls(self, suffix: str):
         # Get the alternative URLs for the given suffix
@@ -470,6 +465,13 @@ class HighAvailabilitylNccl:
             return f"[HA_NCCL][global_rank {self.global_rank}, replica_rank {self.replica_name_to_rank[self.replica_name]}] {self.replica_name}"
         else:
             return f"[HA_NCCL][global_rank {self.global_rank}] {self.replica_name}"
+
+    def __check_if_run_in_main_thread(self):
+        if threading.current_thread() != threading.main_thread():
+            # To avoid nccl/gloo hanging, we only allow nccl op to be run in main thread
+            raise RuntimeError(
+                f"{self.__log_prefix()} nccl op should be run only in main thread"
+            )
 
     def __run_background_thread(self):
         # new thread will reset current device to 0, we fix it here.
@@ -623,14 +625,40 @@ class HighAvailabilitylNccl:
                 max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
 
+    def __broadcast_cmd(self, force_wait_cmd: bool = False) -> BuildMeshCommand | None:
+        """Let all ranks in this replica have the same cmd"""
+        if not force_wait_cmd:
+            if self.is_comm_ready.is_set() and self.cmd_queue.empty():
+                return None
+
+        # wait cmd to buildmesh
+        cmd = None
+        if self.global_rank == 0:
+            cmd = self.cmd_queue.get()
+
+        # broadcast cmd to all ranks in this replica
+        # here we assume that rank 0 always have the cmd
+        cmd = broadcast_object_cpu(cmd, src=0, device=torch.device("cpu"), group=None)
+        return cmd
+
     def __do_nccl_op_with_retry(self, func: Callable, timeout_ms: int, **kwargs):
-        if self.is_single_peer.is_set():
-            # single peer, no need to do nccl op
-            return
+        self.__check_if_run_in_main_thread()
 
         for i in range(self.max_retry):
+            # TODO(zjx): question needs answer:
+            # 1. how to detect the buildmesh cmd need to be executed?
+            # 2. how to make sure all local_ranks run same cmd? (when multi buildmesh cmd are sent to the queue)
+            # 3. broadcast cmd in HANccl or outside?
+
+            cmd = self.__broadcast_cmd()
+            if cmd is not None:
+                self.__execute_build_mesh(cmd)
+
+            if self.is_single_peer.is_set():
+                # Nothing to do for single peer
+                return
+
             try:
-                self.wait_comm_ready()
                 timeout_ms = (
                     timeout_ms if timeout_ms is not None else self.default_timeout_ms
                 )
@@ -665,14 +693,10 @@ class HighAvailabilitylNccl:
                 )
 
     def destroy_nccl_comm(self):
-        self.cmd_queue.put(self.DESTROY_CMD)
+        self.__execute_destroy_nccl_comm(abort=True)
 
     def push_cmd(self, cmd: BuildMeshCommand):
         self.cmd_queue.put(cmd)
-
-    def shutdown(self):
-        self.shutdown_event.set()
-        self.build_mesh_thread.join()
 
     def is_ready(self):
         """
@@ -681,39 +705,16 @@ class HighAvailabilitylNccl:
         """
         return self.is_comm_ready.is_set()
 
-    def wait_comm_ready(self, timeout: float = 0):
-        """
-        Wait for the nccl comm to be ready.
-
-        Args:
-            timeout (float): The timeout in seconds.
-        """
-        start_time = time.time()
-
-        if timeout == 0:
-            while not self.is_comm_ready.is_set():
-                time.sleep(0.1)
-        else:
-            done = self.is_comm_ready.wait(timeout=timeout)
-            if not done:
-                raise TimeoutError(
-                    f"{self.__log_prefix()} wait for nccl comm ready timeout, current time: {time.time()}, start time: {start_time}, timeout: {timeout}"
-                )
-
     def world_size(self):
         """
         Get the world size of the nccl comm.
         """
-        if self.is_single_peer.is_set():
-            return 1
-
         if not self.is_ready():
             raise RuntimeError(
                 f"{self.__log_prefix()} nccl comm is not ready, please wait for the nccl comm to be ready"
             )
 
         try:
-            # TODO(zjx): there will be a risk, if the nccl comm destroyed while get_nccl_comm_count,
             ws = get_nccl_comm_nranks(self.comm_idx)
         except Exception as e:
             ws = -1
@@ -724,7 +725,6 @@ class HighAvailabilitylNccl:
         return ws
 
     def get_replica_rank(self, replica_name: str):
-        self.wait_comm_ready()
         return self.replica_name_to_rank[replica_name]
 
     def broadcast(self, tensor: torch.Tensor, src_replica: str, timeout_ms: int = None):
