@@ -1,7 +1,7 @@
 Hugging Face Model Type Support
 ===============================
 
-Design of HF Model Type in cosmos-rl
+Design of HF Model Type
 ------------------------------------
 
 The HF Model Type (``HFLLMModel``) in cosmos-rl is designed to provide a generic and flexible interface for integrating HF models into the training and inference pipeline. The core implementation is located in ``cosmos_rl/policy/model/hf_llm/__init__.py``, where the ``HFLLMModel`` class acts as a universal wrapper for any model supported by Hugging Face's ``AutoModelForCausalLM``.
@@ -15,12 +15,6 @@ Key design points:
 
 This design ensures that cosmos-rl remains extensible and up-to-date with the rapidly evolving Hugging Face ecosystem, while still allowing for custom optimizations and model-specific logic when needed.
 
-Benefits of HF Model Type Support
-----------------------------------
-
-- **Interoperability:** Seamless integration with the Hugging Face Hub and community resources.
-- **Flexibility:** Quick adaptation to new models and architectures as they become available.
-- **Scalability:** Efficient distributed training and inference using modern frameworks.
 
 Policy Parallelism Support
 --------------------------
