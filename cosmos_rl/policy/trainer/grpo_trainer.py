@@ -432,6 +432,8 @@ class GRPOTrainer(Trainer):
                         for idx, x in enumerate(obj)
                     ]
                 )
+            else:
+                obj = obj_new
         return obj
 
     def sync_all_states(self, is_send: bool, send_hook: callable, recv_hook: callable):
