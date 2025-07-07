@@ -63,7 +63,7 @@ class vLLMRollout(RolloutBase):
         model_path = policy_config.model_name_or_path
 
         # Check if the model has MoE
-        model_config = util.retry(AutoConfig.from_pretrained)(model_path)
+        model_config = util.retry(AutoConfig.from_pretrained)(model_path, trust_remote_code=trust_remote_code)
 
         enable_ep_parallelism = False
         disable_mm_preprocessor_cache = False
