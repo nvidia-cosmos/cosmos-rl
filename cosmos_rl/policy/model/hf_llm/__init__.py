@@ -27,13 +27,12 @@ from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.hf_llm.weight_converter import convert_weight_from_hf
 from cosmos_rl.policy.model.hf_llm.weight_mapper import HFLLMWeightMapper
-from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from functools import cached_property
 
 
-@ModelRegistry.register(DecoderOnlyLLMDataPacker, HFLLMWeightMapper)
+@ModelRegistry.register(HFLLMWeightMapper)
 class HFLLMModel(BaseModel):
     """
     HFLLM Module
