@@ -28,24 +28,32 @@ def apply_patch_to_dispatch():
 apply_patch_to_dispatch()
 
 
-def simplified_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-    # Warning: this is only for rowwise fp8 linear.
-    qweight, weight_scale = ops.scaled_fp8_quant(
-        layer.weight, scale=None, use_per_token_if_dynamic=True
+def set_process_weights_after_loading_empty():
+    def empty_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
+    Fp8LinearMethod.process_weights_after_loading = empty_process_weights_after_loading
+
+
+def simplify_process_weights_after_loading():
+    def simplified_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Warning: this is only for rowwise fp8 linear.
+        qweight, weight_scale = ops.scaled_fp8_quant(
+            layer.weight, scale=None, use_per_token_if_dynamic=True
+        )
+
+        # Update the layer with the new values
+        layer.weight = Parameter(qweight.t(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        layer.input_scale = None
+
+    # modify the process_weights_after_loading method for rowwise fp8 linear.
+    Fp8LinearMethod.process_weights_after_loading = (
+        simplified_process_weights_after_loading
     )
 
-    # Update the layer with the new values
-    layer.weight = Parameter(qweight.t(), requires_grad=False)
-    layer.weight_scale = Parameter(weight_scale, requires_grad=False)
-    layer.input_scale = None
 
-
-# WARNING: in `Fp8LinearMethod` `__init__`, vllm will read the `vllm_config`
-# But at this time, `vllm_config` is empty. So there will have a warning that complains
-# it is not set. This only affects the padding, seems no big problem.
-
-# modify the process_weights_after_loading method for rowwise fp8 linear.
-Fp8LinearMethod.process_weights_after_loading = simplified_process_weights_after_loading
+simplify_process_weights_after_loading()
 
 
 # patch the Linear layer.
@@ -57,6 +65,9 @@ def apply_fp8_linear_patch(model: torch.nn.Module):
         elif isinstance(quant_method, Fp8LinearMethod):
             # replace the fp8_linear op with our own config
             # that use rowwise fp8
+            # WARNING: in `Fp8LinearOp` `__init__`, vllm will read the `vllm_config`
+            # But at this time, `vllm_config` is empty. So there will have a warning that complains
+            # it is not set. This only affects the padding, seems no big problem.
             quant_method.fp8_linear = Fp8LinearOp(
                 # disable cutlass fp8
                 cutlass_fp8_supported=False,

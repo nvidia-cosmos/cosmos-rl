@@ -582,7 +582,14 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 src_rank = self.replica_name_to_rank[src_replica_name]
 
                 for parameter in self.get_underlying_model().parameters():
-                    nccl_broadcast(parameter, src_rank, self.global_commnicator_idex)
+                    recv_tensor = parameter
+                    if not parameter.is_contiguous():
+                        recv_tensor = parameter.contiguous()
+
+                    nccl_broadcast(recv_tensor, src_rank, self.global_commnicator_idex)
+
+                    if not parameter.is_contiguous():
+                        parameter.copy_(recv_tensor)
 
                 if not self.state.weight_synced():
                     self.state.set_weight_synced()

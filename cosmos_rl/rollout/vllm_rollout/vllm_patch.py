@@ -36,23 +36,6 @@ It can only be used for V1 vLLM backend.
 
 
 class CustomModelLoader(DefaultModelLoader):
-    def reload_weights_with_quantization(
-        self, vllm_config: VllmConfig, model: nn.Module
-    ) -> None:
-        pass
-        # device_config = vllm_config.device_config
-        # model_config = vllm_config.model_config
-        # quant_config = vllm_config.quant_config
-        # target_device = torch.device(device_config.device)
-        # with set_default_torch_dtype(model_config.dtype):
-        #     weights_to_load = {
-        #         name for name, _ in model.named_parameters()
-        #     }  # these parameters has already been quantized with dummy weights.
-        #     hf_weight_iterator = self.get_all_weights(model_config, model)
-        #     # Only handle linear layers now.
-        #     for name, param in hf_weight_iterator:
-        #         logger.info(f"Reloading weight: {name}")
-
     def reload_weights(self, vllm_config: VllmConfig, model: nn.Module) -> None:
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
@@ -99,30 +82,10 @@ def patch_vllm_model_to_reload_weight(llm: LLM):
         with context:
             self.model_runner.reload_model()
 
-    def reload_model_worker_with_quant(self) -> None:
-        if self.vllm_config.model_config.enable_sleep_mode:
-            allocator = CuMemAllocator.get_instance()
-            assert allocator.get_current_usage() == 0, (
-                "Sleep mode can only be " "used for one instance per process."
-            )
-            context = allocator.use_memory_pool(tag="weights")
-        else:
-            from contextlib import nullcontext
-
-            context = nullcontext()
-        with context:
-            self.model_runner.reload_model_runner_with_quant()
-
     add_method(
         llm.llm_engine.engine_core.engine_core.model_executor.driver_worker,
         reload_model_worker,
         "reload_model",
-    )
-
-    add_method(
-        llm.llm_engine.engine_core.engine_core.model_executor.driver_worker,
-        reload_model_worker_with_quant,
-        "reload_model_with_quant",
     )
 
     def reload_model_runner(self) -> None:
@@ -142,31 +105,8 @@ def patch_vllm_model_to_reload_weight(llm: LLM):
             time_after_load - time_before_load,
         )
 
-    def reload_model_runner_with_quant(self) -> None:
-        logger.info("Starting to realod weight for current vllm model")
-        with DeviceMemoryProfiler(self.device) as m:
-            time_before_load = time.perf_counter()
-            loader = CustomModelLoader(self.vllm_config.load_config)
-            if not hasattr(loader, "reload_weights"):
-                raise ValueError("Model loader does not support reloading weights")
-            loader.reload_weights_with_quantization(self.vllm_config, self.model)
-            time_after_load = time.perf_counter()
-
-        self.model_memory_usage = m.consumed_memory
-        logger.info(
-            "Model weight reloading took %.4f GiB and %.6f seconds",
-            self.model_memory_usage / GiB_bytes,
-            time_after_load - time_before_load,
-        )
-
     add_method(
         llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.model_runner,
         reload_model_runner,
         "reload_model",
-    )
-
-    add_method(
-        llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.model_runner,
-        reload_model_runner_with_quant,
-        "reload_model_with_quant",
     )

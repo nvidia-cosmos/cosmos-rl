@@ -14,7 +14,7 @@
 # limitations under the License.
 import os
 
-from cosmos_rl.rollout.vllm_rollout.mokey_patch_fo_fp8 import apply_fp8_linear_patch
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_fo_fp8 import apply_fp8_linear_patch
 
 import vllm
 import torch
@@ -134,7 +134,11 @@ class vLLMRollout(RolloutBase):
 
         # patch the vllm model to use rowwise fp8
         if self.quantization == "fp8":
-            apply_fp8_linear_patch(self.get_underlying_model())
+            from vllm.config import set_current_vllm_config
+
+            vllm_config = self.rollout_engine.llm_engine.vllm_config
+            with set_current_vllm_config(vllm_config):
+                apply_fp8_linear_patch(self.get_underlying_model())
 
         self.pad_token_id = tokenizer.pad_token_id
 
