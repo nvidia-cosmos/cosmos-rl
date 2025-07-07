@@ -2,13 +2,13 @@ redis = "12800"
 
 [train]
 resume = false
-epoch = 15
-output_dir = "./outputs/qwen2-5-32b-p-fsdp2-tp4-r-tp4-pp1-grpo-fp8"
+epoch = 10
+output_dir = "./outputs/qwen2-5-32b-gsm8k-grpo-p-fp8-r-fp8"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 2e-6
 optm_impl = "fused"
-optm_weight_decay = 0.0
+optm_weight_decay = 0.01
 optm_betas = [ 0.9, 0.999,]
 optm_warmup_steps = 10
 optm_grad_norm_clip = 1.0
@@ -33,6 +33,8 @@ n_generation = 16
 batch_size = 24
 quantization = "fp8"
 max_response_length = 1024
+seed = 3407
+enforce_eager = false
 
 [policy]
 model_name_or_path = "Qwen/Qwen2.5-32B-Instruct"
@@ -42,7 +44,7 @@ model_gradient_checkpointing = true
 [logging]
 logger = ['console', 'wandb']
 project_name = "cosmos_rl"
-experiment_name = "qwen-32b-gsm8k-grpo"
+experiment_name = "fp8_rollout"
 
 [train.train_policy]
 type = "grpo"
@@ -58,7 +60,9 @@ epsilon_high = 0.28
 kl_beta = 0.0
 mu_iterations = 1
 min_filter_prefix_tokens = 1
-mini_batch = 8
+mini_batch = 6
+unbiased_loss_max_tokens = 200 
+loss_type = "seq-mean-token-mean"
 
 [train.ckpt]
 enable_checkpoint = true
