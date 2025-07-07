@@ -352,6 +352,21 @@ def broadcast_object_cpu(obj, src=0, device=torch.device("cpu"), group=None):
     return obj_lst[0]
 
 
+def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
+    """
+    Gather an object from all processes.
+    The object is first converted to a list and then gathered.
+    """
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    if world_size == 1:
+        return [obj]
+
+    obj_lst = [None for i in range(world_size)]
+    dist.all_gather_object(obj_lst, obj, group=group)
+    return obj_lst
+
+
 class HighAvailabilitylNccl:
     NCCL_REDUCE_OPS = {
         "sum": 0,

@@ -240,6 +240,11 @@ class Trainer(CommMixin):
             ) in self.model.weight_mapper.policy_maybe_decompose_weights_to_hf_naming(
                 name, param
             ):
+                if _param is None:
+                    logger.debug(
+                        f"[Policy] Skipping None parameter for {name} in safetensors export."
+                    )
+                    continue
                 tensor_size = get_tensor_size(_param)
                 # If adding the current tensor exceeds the size limit, save the current chunk
                 if current_chunk_size + tensor_size > max_size_bytes:

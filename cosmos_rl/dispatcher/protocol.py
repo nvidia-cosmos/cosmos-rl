@@ -103,6 +103,14 @@ class SetTracePathRequest(HeartbeatRequest):
     global_rank: int
 
 
+class SetShardInfosRequest(BaseModel):
+    shard_infos: List[List[List[Dict[str, Any]]]]
+
+
+class GetShardSendRecvInstsRequest(BaseModel):
+    rank: int
+
+
 class RegisterRequest(BaseModel):
     replica_name: str
     role: str
