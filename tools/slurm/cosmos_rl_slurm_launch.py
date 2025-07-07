@@ -34,8 +34,12 @@ logging.basicConfig(level=logging.INFO)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--type", type=str, required=True, choices=["policy", "rollout"]
+        "--type",
+        type=str,
+        required=True,
+        choices=["policy", "rollout"],
     )
+    parser.add_argument("--script", type=str)
     args = parser.parse_args()
 
     node_list = os.environ["LOCAL_NODE_LIST"].split(" ")
@@ -74,19 +78,20 @@ if __name__ == "__main__":
             "launcher",
             "launch_replica.sh",
         )
-        cmds.append(
-            [
-                replica_launch_script,
-                "--type",
-                args.type,
-                "--rdzv-endpoint",
-                f"{rendezvous_node}:{rendezvous_port}",
-                "--ngpus",
-                str(len(visible_gpus)),
-                "--nnodes",
-                str(nnode),
-            ]
-        )
+        cmd = [
+            replica_launch_script,
+            "--type",
+            args.type,
+            "--rdzv-endpoint",
+            f"{rendezvous_node}:{rendezvous_port}",
+            "--ngpus",
+            str(len(visible_gpus)),
+            "--nnodes",
+            str(nnode),
+        ]
+        if args.script:
+            cmd += ["--script", args.script]
+        cmds.append(cmd)
         envs.append(env)
 
     procs = [subprocess.Popen(cmd, env=env) for cmd, env in zip(cmds, envs)]
