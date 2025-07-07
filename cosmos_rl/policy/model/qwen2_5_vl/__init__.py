@@ -846,7 +846,9 @@ class Qwen2_5_VLModel(nn.Module):
         )
 
 
-@ModelRegistry.register(Qwen2_5_VLM_DataPacker, QwenVL25WeightMapper)
+@ModelRegistry.register(
+    QwenVL25WeightMapper, default_data_packer_cls=Qwen2_5_VLM_DataPacker
+)
 class Qwen2_5_VLConditionalModel(BaseModel):
     def __init__(self, config: Qwen2_5_VL_LM_Args):
         super().__init__(config.hf_config)

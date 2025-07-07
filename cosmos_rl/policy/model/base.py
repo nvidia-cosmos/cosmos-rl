@@ -240,7 +240,7 @@ class ModelRegistry:
 
     @classmethod
     def register_model(
-        cls, model_cls: Type, data_packer_cls: Type, weight_mapper_cls: Type
+        cls, model_cls: Type, weight_mapper_cls: Type, data_packer_cls: Type = None
     ):
         model_types = model_cls.supported_model_types()
         if isinstance(model_types, str):
@@ -248,17 +248,16 @@ class ModelRegistry:
         for model_type in model_types:
             ModelRegistry._MODEL_REGISTRY[model_type] = model_cls
             WeightMapper.register_class(model_type, weight_mapper_cls)
-            DataPacker.register(model_type, data_packer_cls)
-            setattr(cls, "__cosmos_data_packer_cls", data_packer_cls)
-            setattr(cls, "__cosmos_weight_mapper_cls", weight_mapper_cls)
+            if data_packer_cls is not None:
+                DataPacker.register(model_type, data_packer_cls)
 
     @classmethod
     def register(
         x,
-        default_data_packer_cls,
         default_weight_mapper_cls,
         *,
         allow_override: bool = False,
+        default_data_packer_cls=None,
     ):
         def decorator(cls: Type) -> Type:
             model_types = cls.supported_model_types()
@@ -273,7 +272,9 @@ class ModelRegistry:
                 ):
                     raise ValueError(f"Model {model_type} is already registered.")
                 ModelRegistry.register_model(
-                    cls, default_data_packer_cls, default_weight_mapper_cls
+                    cls,
+                    default_weight_mapper_cls,
+                    data_packer_cls=default_data_packer_cls,
                 )
             return cls
 
