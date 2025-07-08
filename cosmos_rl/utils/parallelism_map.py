@@ -790,10 +790,6 @@ class ParallelTopoMapper:
             dims_map = {}
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
-                assert (
-                    output_dim is not None
-                ), f"QKVParallelLinear {param_name} has no output_dim attribute."
-
                 dims_map["tp"] = output_dim
                 assert any(
                     [
@@ -803,9 +799,6 @@ class ParallelTopoMapper:
                 ), f"QKVParallelLinear {param_name} is not in packed_modules_mapping {self.weight_mapper.packed_modules_mapping}."
             elif isinstance(part, (MergedColumnParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
-                assert (
-                    output_dim is not None
-                ), f"MergedColumnParallelLinear {param_name} has no output_dim attribute."
                 dims_map["tp"] = output_dim
                 assert any(
                     [
@@ -822,18 +815,12 @@ class ParallelTopoMapper:
                     dims_map["tp"] = input_dim
             elif isinstance(part, (ColumnParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
-                assert (
-                    output_dim is not None
-                ), f"ColumnParallelLinear {param_name} has no output_dim attribute."
                 dims_map["tp"] = output_dim
             elif isinstance(part, VocabParallelEmbedding):
                 output_dim = getattr(param, "output_dim", 0)
                 assert (
                     not is_bias
                 ), f"VocabParallelEmbedding {param_name} should not have bias."
-                assert (
-                    output_dim is not None
-                ), f"VocabParallelEmbedding {param_name} has no output_dim attribute."
                 dims_map["tp"] = output_dim
             else:
                 assert (

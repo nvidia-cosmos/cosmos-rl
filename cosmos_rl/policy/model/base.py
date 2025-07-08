@@ -363,10 +363,6 @@ class WeightMapper(ABC):
         return []
 
     @abstractmethod
-    def quantized_weight_partial_keys(self):
-        pass
-
-    @abstractmethod
     def get_unsplited_weight_name(self, weight_key: str) -> str:
         pass
 

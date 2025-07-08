@@ -215,6 +215,10 @@ class TestRollout:
         self.recv_weight_shard = types.MethodType(
             vLLMRolloutWorker.recv_weight_shard, self
         )
+        # just for testing
+        tokenizer = AutoTokenizer.from_pretrained(self.config.policy.model_name_or_path)
+        self.rollout = vLLMRollout(self.config, tokenizer)
+        self.rollout._engine_initialized = True
 
     def get_underlying_model(self):
         return None

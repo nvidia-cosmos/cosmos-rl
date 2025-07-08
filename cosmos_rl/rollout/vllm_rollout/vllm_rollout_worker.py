@@ -478,7 +478,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             # check weight sync
             if do_weight_sync_check:
-                # allclose doen't support fp8, promote it.
+                # allclose doesn't support fp8, promote it.
                 bf16_vllm_native_weight = vllm_native_weight.to(torch.bfloat16)
                 bf16_quantized_weight = quantized_weight.to(torch.bfloat16)
                 if not torch.allclose(bf16_vllm_native_weight, bf16_quantized_weight):

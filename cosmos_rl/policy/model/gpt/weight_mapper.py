@@ -128,14 +128,6 @@ class GPTWeightMapper(WeightMapper):
                 name = "model." + name
         return name
 
-    def quantized_weight_partial_keys(self):
-        return [
-            "qkv_proj",
-            "gate_up_proj",
-            "down_proj",
-            "o_proj",
-        ]  # only layers contain these keywords will be fp8 quantized.
-
     def get_unsplited_weight_name(self, weight_key: str) -> str:
         for key in ["q_proj", "k_proj", "v_proj"]:
             if key in weight_key:
@@ -146,7 +138,19 @@ class GPTWeightMapper(WeightMapper):
         return weight_key  # return compatible key
 
     def is_fp8_quantized_weight(self, weight_key: str) -> bool:
-        for key in self.quantized_weight_partial_keys():
+        quantized_weight_partial_keys = [
+            "qkv_proj",
+            "gate_up_proj",
+            "down_proj",
+            "o_proj",
+        ]
+        for key in quantized_weight_partial_keys:
             if key in weight_key and "bias" not in weight_key:
                 return True
         return False
+
+    def get_policy_parallelism_strategy(self):
+        return []
+
+    def get_rollout_parallelism_strategy(self):
+        return []
