@@ -308,10 +308,8 @@ class HFLLMModel(BaseModel):
 
         return cls.from_model_args(hf_config)
 
-    def named_parameters(self, prefix="", recurse=True, remove_duplicate=True):
-        return self.model.named_parameters(
-            prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate
-        )
+    def named_parameters(self, *args, **kwargs):
+        return self.model.named_parameters(*args, **kwargs)
 
     @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:
