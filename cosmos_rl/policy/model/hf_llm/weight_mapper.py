@@ -63,6 +63,7 @@ class HFLLMWeightMapper(WeightMapper):
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
+            group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
             # logger.info(f"[Rollout] compatible_key: {compatible_key}")
             if "qkv_proj" in compatible_key:
@@ -75,11 +76,11 @@ class HFLLMWeightMapper(WeightMapper):
                 k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
                 v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
                 vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                recv_key_n_shape_list.append((q_proj_weight_key, q_weight.ndim))
+                group_keys.append((q_proj_weight_key, q_weight.ndim))
                 vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                recv_key_n_shape_list.append((k_proj_weight_key, k_weight.ndim))
+                group_keys.append((k_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                recv_key_n_shape_list.append((v_proj_weight_key, v_weight.ndim))
+                group_keys.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in compatible_key:
                 # split gate and up proj
                 gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
@@ -89,17 +90,16 @@ class HFLLMWeightMapper(WeightMapper):
                     "gate_up_proj", "gate_proj"
                 )
                 vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-                recv_key_n_shape_list.append(
-                    (gate_proj_weight_key, gate_proj_weight.ndim)
-                )
+                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
                 up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
                 vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-                recv_key_n_shape_list.append((up_proj_weight_key, up_proj_weight.ndim))
+                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
             else:
                 vllm_weight_inplace_view_map[compatible_key] = param
-                recv_key_n_shape_list.append((compatible_key, param.ndim))
+                group_keys.append((compatible_key, param.ndim))
 
+            recv_key_n_shape_list.append(group_keys)
         return vllm_weight_inplace_view_map, recv_key_n_shape_list
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
