@@ -473,29 +473,6 @@ class HighAvailabilitylNccl:
                 f"{self.__log_prefix()} nccl op should be run only in main thread"
             )
 
-    def __run_background_thread(self):
-        # new thread will reset current device to 0, we fix it here.
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
-
-        while not self.shutdown_event.is_set():
-            try:
-                # non-blocking get the command from the queue
-                cmd = self.cmd_queue.get(timeout=1)
-            except Empty:
-                continue
-
-            # lock the build_mesh_lock to avoid abort in-flight nccl comm
-            with self.build_mesh_lock:
-                # 1. destory nccl comm immediately when receive any command
-                # need_abort = True if cmd == self.DESTROY_CMD else False
-                self.__execute_destroy_nccl_comm(abort=True)
-
-                # 2. build nccl comm if it is a buildmesh command
-                if isinstance(cmd, BuildMeshCommand):
-                    # first, destroy the nccl comm if it exists, then build the new nccl comm
-                    self.__execute_build_mesh(cmd)
-
     def __execute_destroy_nccl_comm(self, abort: bool = False):
         self.is_comm_ready.clear()
         if self.comm_idx != -1:
@@ -510,7 +487,7 @@ class HighAvailabilitylNccl:
             finally:
                 self.comm_idx = -1
 
-    def __execute_build_mesh(self, cmd: BuildMeshCommand) -> bool:
+    def __execute_build_mesh(self, cmd: BuildMeshCommand):
         logger.debug(
             f"{self.__log_prefix()} build mesh with {cmd.replica_name_to_rank}"
         )
@@ -641,7 +618,7 @@ class HighAvailabilitylNccl:
         cmd = broadcast_object_cpu(cmd, src=0, device=torch.device("cpu"), group=None)
         return cmd
 
-    def __do_nccl_op_with_retry(self, func: Callable, timeout_ms: int, **kwargs):
+    def __do_nccl_op_with_retry(self, func: Callable, timeout_ms: Optional[int], **kwargs):
         self.__check_if_run_in_main_thread()
 
         for i in range(self.max_retry):
@@ -662,10 +639,7 @@ class HighAvailabilitylNccl:
                 timeout_ms = (
                     timeout_ms if timeout_ms is not None else self.default_timeout_ms
                 )
-                with (
-                    nccl_timeout_watchdog(wait_stream=True, timeout_ms=timeout_ms),
-                    self.build_mesh_lock,
-                ):
+                with nccl_timeout_watchdog(wait_stream=True, timeout_ms=timeout_ms):
                     func(
                         comm_idx=self.comm_idx,
                         timeout_ms=timeout_ms,
@@ -727,7 +701,7 @@ class HighAvailabilitylNccl:
     def get_replica_rank(self, replica_name: str):
         return self.replica_name_to_rank[replica_name]
 
-    def broadcast(self, tensor: torch.Tensor, src_replica: str, timeout_ms: int = None):
+    def broadcast(self, tensor: torch.Tensor, src_replica: str, timeout_ms: Optional[int] = None):
         src_rank = self.get_replica_rank(src_replica)
         self.__do_nccl_op_with_retry(
             func=nccl_broadcast,
@@ -741,7 +715,7 @@ class HighAvailabilitylNccl:
         sendbuff: torch.Tensor,
         recvbuff: torch.Tensor,
         op: str,
-        timeout_ms: int = None,
+        timeout_ms: Optional[int] = None,
     ):
         op = self.NCCL_REDUCE_OPS[op]
         self.__do_nccl_op_with_retry(
@@ -752,7 +726,7 @@ class HighAvailabilitylNccl:
             timeout_ms=timeout_ms,
         )
 
-    def send(self, tensor: torch.Tensor, dst_replica: str, timeout_ms: int = None):
+    def send(self, tensor: torch.Tensor, dst_replica: str, timeout_ms: Optional[int] = None):
         dst_rank = self.get_replica_rank(dst_replica)
         self.__do_nccl_op_with_retry(
             func=nccl_send,
@@ -761,7 +735,7 @@ class HighAvailabilitylNccl:
             timeout_ms=timeout_ms,
         )
 
-    def recv(self, tensor: torch.Tensor, src_replica: str, timeout_ms: int = None):
+    def recv(self, tensor: torch.Tensor, src_replica: str, timeout_ms: Optional[int] = None):
         src_rank = self.get_replica_rank(src_replica)
         self.__do_nccl_op_with_retry(
             func=nccl_recv,
