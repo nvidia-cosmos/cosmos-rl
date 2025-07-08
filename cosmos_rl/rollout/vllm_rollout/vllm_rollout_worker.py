@@ -465,11 +465,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
 
             if check_inside_group:
-                # TODO: (lms) When we support quantization in rollout side,
-                # we should handle the numerical error of quantized weight, not
-                # just apply `torch.allclose` simply.
-                # If the weight sync between Policy and Rollout is correct, the
-                # `target_tensor` would have no change.
                 if not torch.allclose(cloned_target_tensor, target_tensor):
                     raise ValueError(
                         f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
@@ -491,11 +486,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             # check weight sync
             if do_weight_sync_check:
-                if not torch.allclose(vllm_native_weight, quantized_weight):
+                # allclose doen't support fp8, promote it.
+                bf16_vllm_native_weight = vllm_native_weight.to(torch.bfloat16)
+                bf16_quantized_weight = quantized_weight.to(torch.bfloat16)
+                if not torch.allclose(bf16_vllm_native_weight, bf16_quantized_weight):
                     raise ValueError(
                         f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
                     )
-
             vllm_native_weight.copy_(quantized_weight)
             # get the scale key.
             scale_key = inst_group_full_weight_name.replace(".weight", ".weight_scale")
