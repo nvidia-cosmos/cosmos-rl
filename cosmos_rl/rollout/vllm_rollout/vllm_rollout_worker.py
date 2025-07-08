@@ -405,55 +405,108 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def recv_weight_shard(
         self,
         global_rank_of_rollout: int,
-        dest_name: str,
-        insts: List[Tuple[int, int, Dict[int, Any]]],
-        target_tensor: torch.Tensor,
+        insts_group: List[Dict[str, Any]],
         communicator_index: Dict[int, int],
         do_weight_sync_check: bool = False,
     ):
-        if do_weight_sync_check:
-            cloned_target_tensor = target_tensor.clone()
-            # clear the current view
-            target_tensor.zero_()
+        inst_group_weight_name = insts_group[0][
+            "name"
+        ]  # take a name from the inst group to determine the full weight name
+        # the full weight name that this inst group handles.
+        inst_group_full_weight_name = self.weight_mapper.get_unsplited_weight_name(
+            inst_group_weight_name
+        )
+
+        check_inside_group = do_weight_sync_check and (
+            self.quantization_type != "fp8"
+            or not self.weight_mapper.is_fp8_quantized_weight(
+                inst_group_full_weight_name
+            )
+        )
 
         total_bytes_received = 0
 
-        for inst in insts:
-            p_rank, r_rank, tensor_split_strategys = inst
-            assert r_rank == global_rank_of_rollout
-            vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
-            recv_tensor = None
-            if vllm_tensor_view.is_contiguous():
-                recv_tensor = vllm_tensor_view
-            else:
-                # new a temp tensor
-                recv_tensor = torch.empty_like(vllm_tensor_view)
+        for insts_for_per_param in insts_group:
+            # insts_for_per_param: Dict[str, Any] -> inst list for a single tensor
+            insts = insts_for_per_param["insts"]
+            # insts: List[Tuple[int, int, Dict[int, Any]]]
+            inst_dest_name = insts_for_per_param["name"]
+            target_tensor = self.vllm_weight_inplace_view_map[inst_dest_name]
 
-            nccl_recv(recv_tensor, p_rank, communicator_index)
+            if check_inside_group:
+                cloned_target_tensor = target_tensor.clone()
+                # clear the current view
+                target_tensor.zero_()
 
-            # inplace copy
-            if not vllm_tensor_view.is_contiguous():
-                vllm_tensor_view.copy_(recv_tensor)
+            for inst in insts:
+                p_rank, r_rank, tensor_split_strategys = inst
+                assert r_rank == global_rank_of_rollout
+                vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
+                recv_tensor = None
+                if vllm_tensor_view.is_contiguous():
+                    recv_tensor = vllm_tensor_view
+                else:
+                    # new a temp tensor
+                    recv_tensor = torch.empty_like(vllm_tensor_view)
 
-            total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
+                nccl_recv(recv_tensor, p_rank, communicator_index)
 
-            logger.info(
-                f"[Rollout] recv_tensor: {recv_tensor.shape}, vllm_tensor_view: {vllm_tensor_view.shape}"
+                # logger.info(
+                #     f"[Rollout] recv_tensor: {recv_tensor.shape}, vllm_tensor_view: {vllm_tensor_view.shape}"
+                # )
+                # logger.info(
+                #     f"[Rollout] recv_tensor: {recv_tensor.flatten()[-10:]}, vllm_tensor_view: {vllm_tensor_view.flatten()[-10:]}"
+                # )
+
+                # inplace copy
+                if not vllm_tensor_view.is_contiguous():
+                    vllm_tensor_view.copy_(recv_tensor)
+
+                total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
+
+            if check_inside_group:
+                # TODO: (lms) When we support quantization in rollout side,
+                # we should handle the numerical error of quantized weight, not
+                # just apply `torch.allclose` simply.
+                # If the weight sync between Policy and Rollout is correct, the
+                # `target_tensor` would have no change.
+                if not torch.allclose(cloned_target_tensor, target_tensor):
+                    raise ValueError(
+                        f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
+                    )
+
+        # here we got one full weight tensor sync done, if it is fp8 weight, we should do the quantization and check the numerical error.
+        if (
+            self.quantization_type == "fp8"
+            and self.weight_mapper.is_fp8_quantized_weight(inst_group_full_weight_name)
+        ):
+            weight_to_quantize = self.vllm_full_weight_map[inst_group_full_weight_name]
+            quantized_weight, weight_scale = self.rollout.fp8_quantization(
+                weight_to_quantize
             )
-            logger.info(
-                f"[Rollout] recv_tensor: {recv_tensor.flatten()[0:10]}, vllm_tensor_view: {vllm_tensor_view.flatten()[0:10]}"
-            )
 
-        if do_weight_sync_check:
-            # TODO: (lms) When we support quantization in rollout side,
-            # we should handle the numerical error of quantized weight, not
-            # just apply `torch.allclose` simply.
-            # If the weight sync between Policy and Rollout is correct, the
-            # `target_tensor` would have no change.
-            if not torch.allclose(cloned_target_tensor, target_tensor):
-                raise ValueError(
-                    f"Weight sync check failed after weight sync instruction: {insts} for {dest_name}."
-                )
+            vllm_native_weight = self.rollout.model_param_map[
+                inst_group_full_weight_name
+            ]
+
+            # check weight sync
+            if do_weight_sync_check:
+                if not torch.allclose(vllm_native_weight, quantized_weight):
+                    raise ValueError(
+                        f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
+                    )
+
+            vllm_native_weight.copy_(quantized_weight)
+            # get the scale key.
+            scale_key = inst_group_full_weight_name.replace(".weight", ".weight_scale")
+            scale_tensor = self.rollout.model_param_map[scale_key]
+            assert (
+                scale_tensor.shape == weight_scale.shape
+            ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
+            scale_tensor.copy_(weight_scale)
+        else:
+            # For non-fp8 weights and fp8 not enabled cases, we just do nothing
+            pass
 
         return total_bytes_received
 
@@ -541,85 +594,15 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # recv the weight from policy
             # st = time.time()
             total_bytes_received = 0
-            # judge if we have completed one weight tensor's sync.
-
-            logger.info(
-                f"LMS: self.policy_to_rollout_recv_insts[0]: {self.policy_to_rollout_recv_insts[0]}"
-            )
-            cur_dest_weight_name = self.policy_to_rollout_recv_insts[0][0]["name"]
-            current_dest_full_weight_name = (
-                self.weight_mapper.get_unsplited_weight_name(cur_dest_weight_name)
-            )
             for insts_group in self.policy_to_rollout_recv_insts:
-                inst_group_weight_name = insts_group[0]["name"]
-
-                inst_group_full_weight_name = (
-                    self.weight_mapper.get_unsplited_weight_name(inst_group_weight_name)
+                # insts_group: List[Dict[str, Any]] -> inst list for a full weight tensor
+                # handle inst group
+                total_bytes_received += self.recv_weight_shard(
+                    self.global_rank,
+                    insts_group,
+                    communicator_index,
+                    command.do_weight_sync_check,
                 )
-                if inst_group_full_weight_name != current_dest_full_weight_name:
-                    # we have completed one full weight tensor's sync, handle the quantization if needed.
-                    if (
-                        self.quantization_type == "fp8"
-                        and self.weight_mapper.is_fp8_quantized_weight(
-                            current_dest_full_weight_name
-                        )
-                    ):
-                        weight_to_quantize = self.vllm_full_weight_map[
-                            current_dest_full_weight_name
-                        ]
-                        # logger.info(f"[Rollout] quantize weight: {current_dest_full_weight_name}: {weight_to_quantize.shape}, is_contiguous: {weight_to_quantize.is_contiguous()}")
-                        quantized_weight, weight_scale = self.rollout.fp8_quantization(
-                            weight_to_quantize
-                        )
-
-                        # copy the quantized weight to the target tensor
-                        vllm_native_weight = self.rollout.model_param_map[
-                            current_dest_full_weight_name
-                        ]
-                        # logger.info(f"[Rollout] vllm_native_weight: {vllm_native_weight.shape}, is_contiguous: {vllm_native_weight.is_contiguous()}, quantized_weight: {quantized_weight.shape}, is_contiguous: {quantized_weight.is_contiguous()}")
-
-                        vllm_native_weight.copy_(quantized_weight)
-
-                        # get the scale key.
-                        scale_key = current_dest_full_weight_name.replace(
-                            ".weight", ".weight_scale"
-                        )
-                        scale_tensor = self.rollout.model_param_map[scale_key]
-                        assert (
-                            scale_tensor.shape == weight_scale.shape
-                        ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
-                        scale_tensor.copy_(weight_scale)
-                    else:
-                        # For non-fp8 weights and fp8 not enabled, we just do nothing
-                        pass
-                    current_dest_full_weight_name = inst_group_full_weight_name
-
-                    # handle inst group
-                    # insts_group: List[Dict[str, Any]] -> inst list for a full weight tensor
-                    for insts_for_per_param in insts_group:
-                        # insts_for_per_param: Dict[str, Any] -> inst list for a sinle tensor
-                        inst_dest_name = insts_for_per_param["name"]
-                        target_tensor = self.vllm_weight_inplace_view_map[
-                            inst_dest_name
-                        ]
-                        total_bytes_received += self.recv_weight_shard(
-                            self.global_rank,
-                            inst_dest_name,
-                            insts_for_per_param["insts"],
-                            target_tensor,
-                            communicator_index,
-                            command.do_weight_sync_check,
-                        )
-            # for insts_group in self.policy_to_rollout_recv_insts:
-            #     for insts_for_per_param in insts_group:
-            #         dest_name = insts_for_per_param["name"]
-            #         total_bytes_received += self.recv_weight_shard(
-            #             self.global_rank,
-            #             dest_name,
-            #             insts_for_per_param["insts"],
-            #             communicator_index,
-            #             command.do_weight_sync_check,
-            #         )
             self.state.set_weight_synced()
 
     @RolloutWorkerBase.register_rollout_command_handler(
