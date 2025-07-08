@@ -73,8 +73,10 @@ Keep in mind that torch distributed is not thread safe. So try to keep the usage
 """
 
 
-def _patch_vllm_rollout_locked_step(rollout, consume_command, enable_validation):
-    llm_engine = rollout.rollout_engine.llm_engine
+def _patch_vllm_rollout_locked_step(
+    rollout: vLLMRollout, consume_command, enable_validation
+):
+    llm_engine = rollout.get_engine().llm_engine
     orig_step = llm_engine.step
 
     def cmd_pred(cmd: Command, enable_validation: bool):
@@ -188,11 +190,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             seed=self.config.rollout.seed,
             load_format="dummy",
             quantization=self.quantization_type,
-        )
-        _patch_vllm_rollout_locked_step(
-            self.rollout,
-            self.consume_command,
-            self.config.train.enable_validation,
         )
 
         # communicator index for the cached communicators in C++ binding.
@@ -401,6 +398,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # just apply `torch.allclose` simply.
             # If the weight sync between Policy and Rollout is correct, the
             # `target_tensor` would have no change.
+            logger.info(
+                f"[Rollout] recv_tensor: {recv_tensor.shape}, vllm_tensor_view: {vllm_tensor_view.shape}"
+            )
+            logger.info(
+                f"[Rollout] recv_tensor: {recv_tensor.flatten()[0:10]}, vllm_tensor_view: {vllm_tensor_view.flatten()[0:10]}"
+            )
             if not torch.allclose(cloned_target_tensor, target_tensor):
                 raise ValueError(
                     f"Weight sync check failed after weight sync instruction: {manifest}"
@@ -416,6 +419,21 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         This is Policy -> Rollout replica. Will only happen between
         a pair of policy and rollout replica.
         """
+        # First we do lazy initialization of the vllm engine.
+        if not self.rollout.is_engine_initialized():
+            is_for_weight_resume = command.dst_replica_name == self.replica_name
+            load_format = "auto" if is_for_weight_resume else "dummy"
+            self.rollout.init_engine(
+                quantization=self.quantization_type,
+                seed=self.config.rollout.seed,
+                load_format=load_format,
+            )
+            _patch_vllm_rollout_locked_step(
+                self.rollout,
+                self.consume_command,
+                self.config.train.enable_validation,
+            )
+
         if command.dst_replica_name != self.replica_name:
             return
         if self.parallel_mapper is None:
@@ -486,11 +504,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     communicator_index[p_rank]
                 )
 
-        if (
-            command.do_weight_sync_check and self.quantization_type is None
-        ):  # disable reload when fp8 is enabled
-            self.rollout.reload_weight()
-
         with torch.cuda.stream(self.inference_stream):
             # recv the weight from policy
             # st = time.time()
@@ -550,9 +563,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     inst,
                     target_tensor,
                     communicator_index,
-                    command.do_weight_sync_check
-                    and self.quantization_type
-                    is None,  # temporarily disable weight sync check when fp8 is enabled
+                    command.do_weight_sync_check,
                 )
             self.state.set_weight_synced()
 

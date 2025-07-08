@@ -21,11 +21,9 @@ else:
 
 from vllm.utils import GiB_bytes
 from vllm.utils import DeviceMemoryProfiler
-from vllm.logger import init_logger
 from vllm import LLM
 
-
-logger = init_logger(__name__)
+from cosmos_rl.utils.logging import logger
 
 
 """
@@ -35,36 +33,47 @@ It can only be used for V1 vLLM backend.
 """
 
 
-class CustomModelLoader(DefaultModelLoader):
-    def reload_weights(self, vllm_config: VllmConfig, model: nn.Module) -> None:
-        device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
-        target_device = torch.device(device_config.device)
-        with set_default_torch_dtype(model_config.dtype):
-            weights_to_load = {name for name, _ in model.named_parameters()}
-            loaded_weights = model.load_weights(
-                self.get_all_weights(model_config, model)
-            )
-            self.counter_after_loading_weights = time.perf_counter()
-            logger.info(
-                "Loading weights took %.2f seconds",
-                self.counter_after_loading_weights
-                - self.counter_before_loading_weights,
-            )
-            # We only enable strict check for non-quantized models
-            # that have loaded weights tracking currently.
-            if model_config.quantization is None and loaded_weights is not None:
-                weights_not_loaded = weights_to_load - loaded_weights
-                if weights_not_loaded:
-                    raise ValueError(
-                        "Following weights were not initialized from "
-                        f"checkpoint: {weights_not_loaded}"
-                    )
+def patch_vllm_model_to_reload_weight(llm: LLM, is_fp8: bool = False):
+    class CustomModelLoader(DefaultModelLoader):
+        def reload_weights(self, vllm_config: VllmConfig, model: nn.Module) -> None:
+            device_config = vllm_config.device_config
+            model_config = vllm_config.model_config
+            target_device = torch.device(device_config.device)
+            with set_default_torch_dtype(model_config.dtype):
+                weights_to_load = {name for name, _ in model.named_parameters()}
+                loaded_weights = model.load_weights(
+                    self.get_all_weights(model_config, model)
+                )
+                self.counter_after_loading_weights = time.perf_counter()
+                logger.info(
+                    "Loading weights took %.2f seconds",
+                    self.counter_after_loading_weights
+                    - self.counter_before_loading_weights,
+                )
+                # We only enable strict check for non-quantized models
+                # that have loaded weights tracking currently.
+                if model_config.quantization is None and loaded_weights is not None:
+                    weights_not_loaded = weights_to_load - loaded_weights
+                    if weights_not_loaded:
+                        raise ValueError(
+                            "Following weights were not initialized from "
+                            f"checkpoint: {weights_not_loaded}"
+                        )
+                if is_fp8:
+                    # iterate the model and copy weight scale
+                    param_map = dict(model.named_parameters())
+                    for name, param in param_map.items():
+                        if hasattr(param, "tmp_weight_scale"):
+                            # this is a qweight and has kept the tmp_weight_scale
+                            weihght_scale = param_map[
+                                name.replace("weight", "weight_scale")
+                            ]
+                            assert weihght_scale.shape == param.tmp_weight_scale.shape
+                            weihght_scale.copy_(param.tmp_weight_scale)
+                            del param.tmp_weight_scale
+                else:
+                    process_weights_after_loading(model, model_config, target_device)
 
-            process_weights_after_loading(model, model_config, target_device)
-
-
-def patch_vllm_model_to_reload_weight(llm: LLM):
     def add_method(obj, method, method_name):
         setattr(obj, method_name, types.MethodType(method, obj))
 

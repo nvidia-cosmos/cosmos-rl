@@ -105,8 +105,7 @@ class QwenVL25WeightMapper(WeightMapper):
 
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
             if quantization and self.is_fp8_quantized_weight(compatible_key):
-                # logger.info(f"[Rollout] re-materialize weight: {compatible_key} to shape: {param.shape}")
-                param = torch.empty_like(param, dtype=promotion_dtype).t().contiguous()
+                param = param.t().to(promotion_dtype).contiguous()
                 vllm_full_weight_map[compatible_key] = param
 
             if "qkv_proj" in compatible_key:

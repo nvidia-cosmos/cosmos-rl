@@ -24,3 +24,8 @@ class RolloutBase(ABC):
     def rollout_generation(self, prompts, *args, **kwargs):
         """Generate sequences"""
         pass
+
+    @abstractmethod
+    def init_engine(self, quantization: str, seed: int, load_format: str):
+        """Initialize the engine"""
+        pass

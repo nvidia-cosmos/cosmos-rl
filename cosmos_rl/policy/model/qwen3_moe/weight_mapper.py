@@ -90,7 +90,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
             param_name_hf = self._rollout_vllm_name_to_hf(param_name)
             if quantization and self.is_fp8_quantized_weight(param_name_hf):
                 # logger.info(f"[Rollout] re-materialize weight: {compatible_key} to shape: {param.shape}")
-                param = torch.empty_like(param, dtype=promotion_dtype).t().contiguous()
+                param = param = param.t().to(promotion_dtype).contiguous()
                 vllm_full_weight_map[param_name_hf] = param
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:
