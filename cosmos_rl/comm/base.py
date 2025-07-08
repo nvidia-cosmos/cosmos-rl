@@ -26,7 +26,7 @@ from urllib.parse import urljoin
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 from cosmos_rl.utils.network_util import make_request_with_retry, get_local_ip
 from cosmos_rl.dispatcher.command import CommandRegistry, Command
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import DataPacker, DecoderOnlyLLMDataPacker
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
@@ -106,8 +106,16 @@ class CommMixin:
             self.data_packer = user_data_packer
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
-            self.data_packer = DataPacker.get_default_data_packer(hf_config.model_type)
-            logger.info(f"Using default data packer: {self.data_packer}")
+            try:
+                self.data_packer = DataPacker.get_default_data_packer(
+                    hf_config.model_type
+                )
+                logger.info(f"Using default data packer: {self.data_packer}")
+            except ValueError:
+                logger.warning(
+                    f"No default data packer found for {hf_config.model_type}, using DecoderOnlyLLMDataPacker as default"
+                )
+                self.data_packer = DecoderOnlyLLMDataPacker()
         self.data_packer.setup(self.config, self.tokenizer)
 
         user_val_data_packer = metadata.get("user_val_data_packer", None)
@@ -119,10 +127,18 @@ class CommMixin:
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )
         else:
-            self.val_data_packer = DataPacker.get_default_data_packer(
-                hf_config.model_type
-            )
-            logger.info(f"Using default validation data packer: {self.val_data_packer}")
+            try:
+                self.val_data_packer = DataPacker.get_default_data_packer(
+                    hf_config.model_type
+                )
+                logger.info(
+                    f"Using default validation data packer: {self.val_data_packer}"
+                )
+            except ValueError:
+                logger.warning(
+                    f"No default validation data packer found for {hf_config.model_type}, using DecoderOnlyLLMDataPacker as default"
+                )
+                self.val_data_packer = DecoderOnlyLLMDataPacker()
         self.val_data_packer.setup(self.config, self.tokenizer)
 
         self.remote_hosts = [

@@ -17,11 +17,6 @@ from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 import torch
 from typing import List, Tuple, Dict, Optional
 from cosmos_rl.policy.model.base import WeightMapper
-from cosmos_rl.utils.parallelism import ParallelismConfig
-from cosmos_rl.utils.parallelism_registry import (
-    get_policy_parallelism_strategy,
-    get_rollout_parallelism_strategy,
-)
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 
@@ -64,7 +59,9 @@ class GPTWeightMapper(WeightMapper):
         quantization: bool = False,
         promotion_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[
-        Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
+        Dict[str, torch.Tensor],
+        List[List[Tuple[str, torch.Size]]],
+        Dict[str, torch.Tensor],
     ]:
         if quantization:
             assert (
@@ -81,6 +78,7 @@ class GPTWeightMapper(WeightMapper):
             if "weight_scale" in param_name:
                 # do not map weight_scale to vllm weight_inplace_view_map
                 continue
+            group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
             if quantization and self.is_fp8_quantized_weight(compatible_key):
                 # logger.info(f"[Rollout] re-materialize weight: {compatible_key} to shape: {param.shape}")
@@ -96,11 +94,11 @@ class GPTWeightMapper(WeightMapper):
                 k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
                 v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
                 vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                recv_key_n_shape_list.append((q_proj_weight_key, q_weight.ndim))
+                group_keys.append((q_proj_weight_key, q_weight.ndim))
                 vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                recv_key_n_shape_list.append((k_proj_weight_key, k_weight.ndim))
+                group_keys.append((k_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                recv_key_n_shape_list.append((v_proj_weight_key, v_weight.ndim))
+                group_keys.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in compatible_key:
                 # split gate and up proj
                 gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
@@ -110,16 +108,16 @@ class GPTWeightMapper(WeightMapper):
                     "gate_up_proj", "gate_proj"
                 )
                 vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-                recv_key_n_shape_list.append(
-                    (gate_proj_weight_key, gate_proj_weight.ndim)
-                )
+                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
                 up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
                 vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-                recv_key_n_shape_list.append((up_proj_weight_key, up_proj_weight.ndim))
+                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
             else:
                 vllm_weight_inplace_view_map[compatible_key] = param
-                recv_key_n_shape_list.append((compatible_key, param.ndim))
+                group_keys.append((compatible_key, param.ndim))
+
+            recv_key_n_shape_list.append(group_keys)
 
         return vllm_weight_inplace_view_map, recv_key_n_shape_list, vllm_full_weight_map
 
@@ -129,18 +127,6 @@ class GPTWeightMapper(WeightMapper):
             if not name.startswith("model."):
                 name = "model." + name
         return name
-
-    def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
-        return [replica_parallelism]
-
-    def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
-        return [replica_parallelism]
-
-    def get_policy_parallelism_strategy(self):
-        return [get_policy_parallelism_strategy("gpt")]
-
-    def get_rollout_parallelism_strategy(self):
-        return [get_rollout_parallelism_strategy("gpt")]
 
     def quantized_weight_partial_keys(self):
         return [

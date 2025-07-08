@@ -62,7 +62,6 @@ class vLLMRollout(RolloutBase):
 
         model_path = policy_config.model_name_or_path
 
-        # Check if the model has MoE
         self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
 
         self.pad_token_id = tokenizer.pad_token_id
@@ -109,6 +108,7 @@ class vLLMRollout(RolloutBase):
             enable_ep_parallelism = False
             disable_mm_preprocessor_cache = False
 
+            # Check if the model has MoE
             moe_model_type = {"qwen3_moe"}
             multimodal_type = {"qwen2_5_vl"}
 

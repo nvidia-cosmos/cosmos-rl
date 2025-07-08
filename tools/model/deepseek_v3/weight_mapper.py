@@ -16,7 +16,6 @@
 import torch
 from typing import List, Tuple, Dict, Any, Optional
 from cosmos_rl.policy.model.base import WeightMapper
-from cosmos_rl.utils.parallelism import ParallelismConfig
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 
@@ -41,12 +40,6 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
             if not name.startswith("model."):
                 name = "model." + name
         return name
-
-    def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
-        raise NotImplementedError
-
-    def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
-        raise NotImplementedError
 
     def get_policy_parallelism_strategy(self):
         raise NotImplementedError

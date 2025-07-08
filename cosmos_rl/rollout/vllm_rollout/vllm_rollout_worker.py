@@ -50,6 +50,7 @@ from cosmos_rl.utils.pynccl import (
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
+import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -59,6 +60,8 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NEXT_PROMPT_SUFFIX,
     COSMOS_API_ROLLOUT_SUFFIX,
     COSMOS_API_VALIDATION_REPORT_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
 )
 from cosmos_rl.utils.fp8.fp8_util import (
     IS_TORCH_COMPATIBLE_WITH_FP8,
@@ -211,9 +214,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.background_thread: threading.Thread | None = None
 
         # For Polocy to Rollout weight mapping
-        self.parallel_mapper = None
         hf_config = util.retry(AutoConfig.from_pretrained)(
-            self.config.policy.model_name_or_path
+            self.config.policy.model_name_or_path,
+            trust_remote_code=True,
         )
 
         if not ModelRegistry.check_model_type_supported(hf_config.model_type):
@@ -252,6 +255,45 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
         )
+
+    def prepare_shard_infos_for_weight_sync_insts(self):
+        (
+            self.vllm_weight_inplace_view_map,
+            self.recv_param_key_n_rank_list,
+            self.vllm_full_weight_map,
+        ) = self.weight_mapper.rollout_prepare_recv(
+            self.get_underlying_model(),
+            quantization=self.quantization_type == "fp8",
+            promotion_dtype=util.str2torch_dtype(self.config.train.param_dtype),
+        )
+        local_shard_infos = ParallelTopoMapperGroup(
+            self.parallel_dims,
+            self.model_config,
+            is_policy=False,
+            underlying_model=self.get_underlying_model(),
+            weight_mapper=self.weight_mapper,
+        ).prepare_local_shard_infos(self.recv_param_key_n_rank_list, self.global_rank)
+
+        self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
+            local_shard_infos
+        )
+        # Ordered list of (hf_key, tensor_dim)
+        if self.global_rank == 0:
+            try:
+                make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json={
+                            "shard_infos": self.all_rank_local_shard_infos,
+                        },
+                    ),
+                    self.get_alternative_urls(COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Rollout] Failed in post shard infos to controller after retries {e}."
+                )
 
     def handle_shutdown(self):
         # Only call once
@@ -363,34 +405,44 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def recv_weight_shard(
         self,
         global_rank_of_rollout: int,
-        manifest: Tuple[int, int, Dict[int, Any], str, Tuple[int]],
+        dest_name: str,
+        insts: List[Tuple[int, int, Dict[int, Any]]],
         target_tensor: torch.Tensor,
         communicator_index: Dict[int, int],
         do_weight_sync_check: bool = False,
     ):
-        p_rank, r_rank, tensor_split_strategys, dest_name, shape = manifest
-        # logger.info(f"[Rollout] recv_weight_shard: {dest_name}, shape: {shape}")
-        assert r_rank == global_rank_of_rollout
-
-        vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
-
         if do_weight_sync_check:
             cloned_target_tensor = target_tensor.clone()
             # clear the current view
-            vllm_tensor_view.zero_()
+            target_tensor.zero_()
 
-        recv_tensor = None
-        if vllm_tensor_view.is_contiguous():
-            recv_tensor = vllm_tensor_view
-        else:
-            # new a temp tensor
-            recv_tensor = torch.empty_like(vllm_tensor_view)
+        total_bytes_received = 0
 
-        nccl_recv(recv_tensor, p_rank, communicator_index[p_rank])
+        for inst in insts:
+            p_rank, r_rank, tensor_split_strategys = inst
+            assert r_rank == global_rank_of_rollout
+            vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
+            recv_tensor = None
+            if vllm_tensor_view.is_contiguous():
+                recv_tensor = vllm_tensor_view
+            else:
+                # new a temp tensor
+                recv_tensor = torch.empty_like(vllm_tensor_view)
 
-        # inplace copy
-        if not vllm_tensor_view.is_contiguous():
-            vllm_tensor_view.copy_(recv_tensor)
+            nccl_recv(recv_tensor, p_rank, communicator_index)
+
+            # inplace copy
+            if not vllm_tensor_view.is_contiguous():
+                vllm_tensor_view.copy_(recv_tensor)
+
+            total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
+
+            logger.info(
+                f"[Rollout] recv_tensor: {recv_tensor.shape}, vllm_tensor_view: {vllm_tensor_view.shape}"
+            )
+            logger.info(
+                f"[Rollout] recv_tensor: {recv_tensor.flatten()[0:10]}, vllm_tensor_view: {vllm_tensor_view.flatten()[0:10]}"
+            )
 
         if do_weight_sync_check:
             # TODO: (lms) When we support quantization in rollout side,
@@ -398,18 +450,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # just apply `torch.allclose` simply.
             # If the weight sync between Policy and Rollout is correct, the
             # `target_tensor` would have no change.
-            logger.info(
-                f"[Rollout] recv_tensor: {recv_tensor.shape}, vllm_tensor_view: {vllm_tensor_view.shape}"
-            )
-            logger.info(
-                f"[Rollout] recv_tensor: {recv_tensor.flatten()[0:10]}, vllm_tensor_view: {vllm_tensor_view.flatten()[0:10]}"
-            )
             if not torch.allclose(cloned_target_tensor, target_tensor):
                 raise ValueError(
-                    f"Weight sync check failed after weight sync instruction: {manifest}"
+                    f"Weight sync check failed after weight sync instruction: {insts} for {dest_name}."
                 )
 
-        return recv_tensor.numel() * recv_tensor.element_size()
+        return total_bytes_received
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
@@ -419,7 +465,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         This is Policy -> Rollout replica. Will only happen between
         a pair of policy and rollout replica.
         """
-        # First we do lazy initialization of the vllm engine.
+        # lazy initialization of the vllm engine.
         if not self.rollout.is_engine_initialized():
             is_for_weight_resume = command.dst_replica_name == self.replica_name
             load_format = "auto" if is_for_weight_resume else "dummy"
@@ -433,75 +479,62 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.consume_command,
                 self.config.train.enable_validation,
             )
+            self.prepare_shard_infos_for_weight_sync_insts()
 
         if command.dst_replica_name != self.replica_name:
             return
-        if self.parallel_mapper is None:
-            self.parallel_mapper = ParallelTopoMapperGroup(
-                self.config.policy.parallelism,
-                self.config.rollout.parallelism,
-                command.src_replica_size,
-                self.world_size,
-                self.model_config,
-            )
-
         # get the nccl_unique_id from the controller
         communicator_index = {}
-        # FIXME: (lms) avoid to hold the allocated bf16 tensor in vllm_weight_inplace_view_map when fp8 enabled.
-        if not hasattr(self, "vllm_weight_inplace_view_map"):
-            (
-                self.vllm_weight_inplace_view_map,
-                self.recv_param_key_n_rank_list,
-                self.vllm_full_weight_map,  # this is for fp8. It records the real shape of the weight in vllm model in single device.
-            ) = self.weight_mapper.rollout_prepare_recv(
-                self.get_underlying_model(),
-                quantization=self.quantization_type == "fp8",
-                promotion_dtype=util.str2torch_dtype(self.config.train.param_dtype),
+        nccl_unique_id_key = command.src_replica_name + "_" + command.dst_replica_name
+        if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
+            logger.debug(
+                f"[Rollout] Reusing cached communicator for {nccl_unique_id_key}"
             )
-            self.recv_param_key_n_rank_list.sort(key=lambda x: x[0])
-
-        insts = self.parallel_mapper.prepare_rollout_from_policy_manifest(
-            self.recv_param_key_n_rank_list, self.global_rank
-        )
-
-        related_ranks = [set() for _ in range(command.dst_replica_size)]
-        for i in insts:
-            p_rank, r_rank, _, _, _ = i
-            related_ranks[r_rank].add(p_rank)
-
-        for p_rank in sorted(related_ranks[self.global_rank]):
-            nccl_unique_id_key = (
-                command.src_replica_name + "_" + command.dst_replica_name
+            communicator_index = self.policy_to_rollout_nccl_communicators[
+                nccl_unique_id_key
+            ]
+        else:
+            logger.debug(f"[Rollout] Querying nccl group id for {nccl_unique_id_key}")
+            # query the nccl group id from controller
+            nccl_group_id = self.query_nccl_unique_id_from_controller(
+                nccl_unique_id_key
             )
-            if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
-                logger.debug(
-                    f"[Rollout] Reusing cached communicator for {nccl_unique_id_key}"
+            if nccl_group_id is None:
+                raise RuntimeError(
+                    "[Rollout] Failed to query nccl group_id from controller!"
                 )
-                communicator_index[p_rank] = self.policy_to_rollout_nccl_communicators[
-                    nccl_unique_id_key
-                ]
-            else:
-                logger.debug(
-                    f"[Rollout] Querying nccl group id for {nccl_unique_id_key}"
+            # create the communicator index
+            # p_rank is the rank in policy, r_rank is the rank in rollout
+            communicator_index = create_nccl_comm(
+                nccl_group_id,
+                self.global_rank + command.src_replica_size,
+                self.world_size + command.src_replica_size,
+            )
+            # cache the communicator index
+            self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (
+                communicator_index
+            )
+
+        if not hasattr(self, "policy_to_rollout_recv_insts"):
+            self.policy_to_rollout_recv_insts = []
+            try:
+                insts_meta = make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json={
+                            "rank": self.global_rank,
+                        },
+                    ),
+                    self.get_alternative_urls(
+                        COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX
+                    ),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
-                # query the nccl group id from controller
-                nccl_group_id = self.query_nccl_unique_id_from_controller(
-                    nccl_unique_id_key
-                )
-                if nccl_group_id is None:
-                    raise RuntimeError(
-                        "[Rollout] Failed to query nccl group_id from controller!"
-                    )
-                # create the communicator index
-                # p_rank is the rank in policy, r_rank is the rank in rollout
-                communicator_index[p_rank] = create_nccl_comm(
-                    nccl_group_id,
-                    self.global_rank + command.src_replica_size,
-                    self.world_size + command.src_replica_size,
-                )
-                # cache the communicator index
-                self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (
-                    communicator_index[p_rank]
+                insts_meta = insts_meta.json()
+                self.policy_to_rollout_recv_insts = insts_meta["insts"]
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
                 )
 
         with torch.cuda.stream(self.inference_stream):
@@ -509,21 +542,22 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # st = time.time()
             total_bytes_received = 0
             # judge if we have completed one weight tensor's sync.
-            cur_dest_weight_name = insts[0][3]
+
+            logger.info(
+                f"LMS: self.policy_to_rollout_recv_insts[0]: {self.policy_to_rollout_recv_insts[0]}"
+            )
+            cur_dest_weight_name = self.policy_to_rollout_recv_insts[0][0]["name"]
             current_dest_full_weight_name = (
                 self.weight_mapper.get_unsplited_weight_name(cur_dest_weight_name)
             )
+            for insts_group in self.policy_to_rollout_recv_insts:
+                inst_group_weight_name = insts_group[0]["name"]
 
-            for inst in insts:
-                inst_weight_name = inst[3]
-                target_tensor = self.vllm_weight_inplace_view_map[inst_weight_name]
-                # logger.info(f"[Rollout] target_tensor: {inst_weight_name}: {target_tensor.shape}, is_contiguous: {target_tensor.is_contiguous()}")
-
-                inst_full_weight_name = self.weight_mapper.get_unsplited_weight_name(
-                    inst_weight_name
+                inst_group_full_weight_name = (
+                    self.weight_mapper.get_unsplited_weight_name(inst_group_weight_name)
                 )
-                if inst_full_weight_name != current_dest_full_weight_name:
-                    # we have completed one weight tensor's sync, handle the quantization if needed.
+                if inst_group_full_weight_name != current_dest_full_weight_name:
+                    # we have completed one full weight tensor's sync, handle the quantization if needed.
                     if (
                         self.quantization_type == "fp8"
                         and self.weight_mapper.is_fp8_quantized_weight(
@@ -537,6 +571,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         quantized_weight, weight_scale = self.rollout.fp8_quantization(
                             weight_to_quantize
                         )
+
                         # copy the quantized weight to the target tensor
                         vllm_native_weight = self.rollout.model_param_map[
                             current_dest_full_weight_name
@@ -544,6 +579,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         # logger.info(f"[Rollout] vllm_native_weight: {vllm_native_weight.shape}, is_contiguous: {vllm_native_weight.is_contiguous()}, quantized_weight: {quantized_weight.shape}, is_contiguous: {quantized_weight.is_contiguous()}")
 
                         vllm_native_weight.copy_(quantized_weight)
+
                         # get the scale key.
                         scale_key = current_dest_full_weight_name.replace(
                             ".weight", ".weight_scale"
@@ -556,15 +592,34 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     else:
                         # For non-fp8 weights and fp8 not enabled, we just do nothing
                         pass
-                    current_dest_full_weight_name = inst_full_weight_name
+                    current_dest_full_weight_name = inst_group_full_weight_name
 
-                total_bytes_received += self.recv_weight_shard(
-                    self.global_rank,
-                    inst,
-                    target_tensor,
-                    communicator_index,
-                    command.do_weight_sync_check,
-                )
+                    # handle inst group
+                    # insts_group: List[Dict[str, Any]] -> inst list for a full weight tensor
+                    for insts_for_per_param in insts_group:
+                        # insts_for_per_param: Dict[str, Any] -> inst list for a sinle tensor
+                        inst_dest_name = insts_for_per_param["name"]
+                        target_tensor = self.vllm_weight_inplace_view_map[
+                            inst_dest_name
+                        ]
+                        total_bytes_received += self.recv_weight_shard(
+                            self.global_rank,
+                            inst_dest_name,
+                            insts_for_per_param["insts"],
+                            target_tensor,
+                            communicator_index,
+                            command.do_weight_sync_check,
+                        )
+            # for insts_group in self.policy_to_rollout_recv_insts:
+            #     for insts_for_per_param in insts_group:
+            #         dest_name = insts_for_per_param["name"]
+            #         total_bytes_received += self.recv_weight_shard(
+            #             self.global_rank,
+            #             dest_name,
+            #             insts_for_per_param["insts"],
+            #             communicator_index,
+            #             command.do_weight_sync_check,
+            #         )
             self.state.set_weight_synced()
 
     @RolloutWorkerBase.register_rollout_command_handler(

@@ -15,7 +15,7 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Callable, Union
+from typing import List, Optional, Tuple, Callable, Union, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,8 +41,6 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
-import re
-from functools import partial
 from flash_attn import flash_attn_func
 
 
@@ -848,7 +846,9 @@ class Qwen2_5_VLModel(nn.Module):
         )
 
 
-@ModelRegistry.register(Qwen2_5_VLM_DataPacker, QwenVL25WeightMapper)
+@ModelRegistry.register(
+    QwenVL25WeightMapper, default_data_packer_cls=Qwen2_5_VLM_DataPacker
+)
 class Qwen2_5_VLConditionalModel(BaseModel):
     def __init__(self, config: Qwen2_5_VL_LM_Args):
         super().__init__(config.hf_config)
@@ -1438,44 +1438,6 @@ class Qwen2_5_VLConditionalModel(BaseModel):
     ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
         is_visual = dest_name.startswith("visual.")
         # Handle qkv weights for separate q, k, v tensors
-        if (
-            match := re.search(  # noqa: F841
-                r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
-                dest_name,
-            )
-        ) is not None and is_visual:
-            new_dest_name = re.sub(r"\.(q|k|v)\.", ".qkv.", dest_name)
-            qkv_mode = match.group(2)
-            new_dest_name = new_dest_name.replace("visual.", "")
-            assert (
-                new_dest_name in visual_state_dict
-            ), f"Unsupported weight: {dest_name}"
-            target_tensor = visual_state_dict[new_dest_name]
-
-            def policy_to_rollout_weight_transform(
-                target_tensor: torch.Tensor, qkv_mode: str
-            ) -> torch.Tensor:
-                is_dist_tensor = isinstance(
-                    target_tensor, torch.distributed.tensor.DTensor
-                )
-                full_view = (
-                    target_tensor.full_tensor() if is_dist_tensor else target_tensor
-                )
-                # If the weight is a qkv weight, we need to split it into q, k, v
-                if qkv_mode == "q":
-                    return full_view[: full_view.shape[0] // 3]
-                elif qkv_mode == "k":
-                    return full_view[
-                        full_view.shape[0] // 3 : 2 * full_view.shape[0] // 3
-                    ]
-                elif qkv_mode == "v":
-                    return full_view[2 * full_view.shape[0] // 3 :]
-
-            return partial(
-                policy_to_rollout_weight_transform,
-                target_tensor=target_tensor,
-                qkv_mode=qkv_mode,
-            )
         if is_visual:
             dest_name = dest_name.replace("visual.", "")
             assert dest_name in visual_state_dict, f"Unsupported weight: {dest_name}"
@@ -1495,7 +1457,9 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         return local_view
 
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+    def weight_sync_transforms_per_model(
+        self,
+    ) -> Dict[str, Union[torch.Tensor, Callable]]:
         lm_state_dict = self.model.state_dict()
         if self.visual is not None:
             visual_state_dict = self.visual.state_dict()
@@ -1505,35 +1469,13 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         visual_state_dict = {
             clear_weight_name(k): v for k, v in visual_state_dict.items()
         }
-        transforms = []
+        transforms = {}
         for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, lm_state_dict, visual_state_dict
             )
-            transforms.append((dest_name, local_view))
+            transforms[dest_name] = local_view
         return transforms
-
-    @cached_property
-    def sorted_hf_key_n_rank(self) -> List[Tuple[str, int]]:
-        sorted_key_n_rank = []
-        for k, v in self.named_parameters():
-            k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
-            is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
-            if k.startswith("visual.") and "qkv" in k:
-                # For visual model, we need to split qkv weights
-                local_view = v.full_tensor() if is_dist_tensor else v
-                unit_dim = local_view.shape[0] // 3
-                q_view = local_view[:unit_dim]
-                k_view = local_view[unit_dim : 2 * unit_dim]
-                v_view = local_view[2 * unit_dim :]
-                sorted_key_n_rank.append((k.replace("qkv", "q"), q_view.ndim))
-                sorted_key_n_rank.append((k.replace("qkv", "k"), k_view.ndim))
-                sorted_key_n_rank.append((k.replace("qkv", "v"), v_view.ndim))
-            else:
-                local_view = v.to_local() if is_dist_tensor else v
-                sorted_key_n_rank.append((k, local_view.ndim))
-        sorted_key_n_rank.sort(key=lambda x: x[0])
-        return sorted_key_n_rank
 
     @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:

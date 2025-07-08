@@ -18,7 +18,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from dataclasses import dataclass, field
-from typing import Tuple, List, Optional, Callable, Union
+from typing import Tuple, List, Optional, Callable, Union, Dict
 from transformers import AutoConfig
 from cosmos_rl.utils.util import (
     resolve_model_path,
@@ -29,9 +29,6 @@ from cosmos_rl.utils.util import (
 )
 from safetensors import safe_open
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
 from cosmos_rl.policy.model.gpt.weight_mapper import GPTWeightMapper
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
@@ -367,7 +364,7 @@ class GPTBlock(nn.Module):
         return out
 
 
-@ModelRegistry.register(DecoderOnlyLLMDataPacker, GPTWeightMapper)
+@ModelRegistry.register(GPTWeightMapper)
 class GPT(BaseModel):
     """
     GPT Module
@@ -643,15 +640,17 @@ class GPT(BaseModel):
         return local_view
 
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+    def weight_sync_transforms_per_model(
+        self,
+    ) -> Dict[str, Union[torch.Tensor, Callable]]:
         self_state_dict = self.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        transforms = []
+        transforms = {}
         for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, self_state_dict
             )
-            transforms.append((dest_name, local_view))
+            transforms[dest_name] = local_view
         return transforms
 
     @classmethod

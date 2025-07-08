@@ -44,6 +44,8 @@ from cosmos_rl.dispatcher.protocol import (
     SetTracePathRequest,
     NcclErrRequest,
     NcclStoreClearRequest,
+    SetShardInfosRequest,
+    GetShardSendRecvInstsRequest,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
 import cosmos_rl.utils.util as util
@@ -67,6 +69,10 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SUFFIX,
     COSMOS_API_VALIDATION_REPORT_SUFFIX,
     COSMOS_API_POLICY_TRAIN_ACK_SUFFIX,
+    COSMOS_API_POLICY_SHARD_INFOS_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
+    COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
 )
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
@@ -209,6 +215,56 @@ async def heartbeat(request: HeartbeatRequest):
     # Set the replica timestamp to the current time for heartbeat
     controller.replica_heartbeat(request.replica_name)
     return {"message": "Heartbeat received"}
+
+
+@app.post(COSMOS_API_POLICY_SHARD_INFOS_SUFFIX)
+async def policy_shard_infos(request: SetShardInfosRequest):
+    controller.policy_to_rollout_shard_mapper.set_shard_infos_of_policy(
+        request.shard_infos
+    )
+    return {"message": "Policy shard infos set"}
+
+
+@app.post(COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX)
+async def rollout_shard_infos(request: SetShardInfosRequest):
+    controller.policy_to_rollout_shard_mapper.set_shard_infos_of_rollout(
+        request.shard_infos
+    )
+    return {"message": "Rollout shard infos set"}
+
+
+@app.post(COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX)
+async def policy_shard_send_insts(request: GetShardSendRecvInstsRequest):
+    """
+    Get the send instructions for policy.
+    :return: A list of send instructions for policy.
+    """
+    send_insts = controller.policy_to_rollout_shard_mapper.get_send_insts_for_policy(
+        request.rank
+    )
+    if send_insts is None:
+        return create_error_response(
+            constant.ErrorCode.INTERNAL_ERROR,
+            "Policy shard send instructions not found",
+        )
+    return {"insts": send_insts}
+
+
+@app.post(COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX)
+async def rollout_shard_recv_insts(request: GetShardSendRecvInstsRequest):
+    """
+    Get the receive instructions for rollout.
+    :return: A list of receive instructions for rollout.
+    """
+    recv_insts = controller.policy_to_rollout_shard_mapper.get_recv_insts_for_rollout(
+        request.rank
+    )
+    if recv_insts is None:
+        return create_error_response(
+            constant.ErrorCode.INTERNAL_ERROR,
+            "Rollout shard receive instructions not found",
+        )
+    return {"insts": recv_insts}
 
 
 """

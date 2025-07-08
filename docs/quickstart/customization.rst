@@ -339,8 +339,6 @@ Let's take `deepseek_v3` as an example.
         ModelRegistry.register_model(
             # Model class to register
             DeepseekV3MoEModel,
-            # Data packer for this model
-            DecoderOnlyLLMDataPacker,
             # Weight mapper for this model
             DeepseekV3MoEWeightMapper,
         )

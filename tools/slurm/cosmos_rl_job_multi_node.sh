@@ -78,7 +78,7 @@ srun \
     bash -c \
     '
     cd /opt/cosmos-rl
-    python ./tools/slurm/cosmos_rl_slurm_launch.py --type policy
+    python ./tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]]
     ' \
     &
 pid_policy=$!
@@ -97,7 +97,7 @@ srun \
     bash -c \
     '
     cd /opt/cosmos-rl
-    python ./tools/slurm/cosmos_rl_slurm_launch.py --type rollout
+    python ./tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]]
     ' \
     &
 pid_rollout=$!

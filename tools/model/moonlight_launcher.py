@@ -16,9 +16,6 @@
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from deepseek_v3 import DeepseekV3MoEModel
 from deepseek_v3.weight_mapper import DeepseekV3MoEWeightMapper
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-    DecoderOnlyLLMDataPacker,
-)
 from cosmos_rl.policy.model.base import ModelRegistry
 
 if __name__ == "__main__":
@@ -26,8 +23,6 @@ if __name__ == "__main__":
     ModelRegistry.register_model(
         # Model class to register
         DeepseekV3MoEModel,
-        # Data packer for this model
-        DecoderOnlyLLMDataPacker,
         # Weight mapper for this model
         DeepseekV3MoEWeightMapper,
     )

@@ -18,17 +18,11 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
 )
 import torch
-import copy
-import re
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
-from cosmos_rl.utils.parallelism import ParallelismConfig
-from cosmos_rl.utils.parallelism_registry import (
-    get_policy_parallelism_strategy,
-    get_rollout_parallelism_strategy,
-)
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 from typing import Dict, List, Tuple, Optional
+import re
 
 
 class QwenVL25WeightMapper(WeightMapper):
@@ -103,6 +97,7 @@ class QwenVL25WeightMapper(WeightMapper):
                 # do not map weight_scale to vllm weight_inplace_view_map
                 continue
 
+            group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
             if quantization and self.is_fp8_quantized_weight(compatible_key):
                 param = param.t().to(promotion_dtype).contiguous()
@@ -116,11 +111,11 @@ class QwenVL25WeightMapper(WeightMapper):
                 k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
                 v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
                 vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                recv_key_n_rank_list.append((q_proj_weight_key, q_weight.ndim))
+                group_keys.append((q_proj_weight_key, q_weight.ndim))
                 vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                recv_key_n_rank_list.append((k_proj_weight_key, k_weight.ndim))
+                group_keys.append((k_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                recv_key_n_rank_list.append((v_proj_weight_key, v_weight.ndim))
+                group_keys.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in compatible_key:
                 # split gate and up proj
                 gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
@@ -130,13 +125,11 @@ class QwenVL25WeightMapper(WeightMapper):
                     "gate_up_proj", "gate_proj"
                 )
                 vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-                recv_key_n_rank_list.append(
-                    (gate_proj_weight_key, gate_proj_weight.ndim)
-                )
+                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
                 up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
                 vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-                recv_key_n_rank_list.append((up_proj_weight_key, up_proj_weight.ndim))
+                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
             elif "qkv" in compatible_key and "visual" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
                     compatible_key, param
@@ -145,14 +138,15 @@ class QwenVL25WeightMapper(WeightMapper):
                 k_visual_proj_weight_key = compatible_key.replace("qkv", "k")
                 v_visual_proj_weight_key = compatible_key.replace("qkv", "v")
                 vllm_weight_inplace_view_map[q_visual_proj_weight_key] = q_weight
-                recv_key_n_rank_list.append((q_visual_proj_weight_key, q_weight.ndim))
+                group_keys.append((q_visual_proj_weight_key, q_weight.ndim))
                 vllm_weight_inplace_view_map[k_visual_proj_weight_key] = k_weight
-                recv_key_n_rank_list.append((k_visual_proj_weight_key, k_weight.ndim))
+                group_keys.append((k_visual_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_visual_proj_weight_key] = v_weight
-                recv_key_n_rank_list.append((v_visual_proj_weight_key, v_weight.ndim))
+                group_keys.append((v_visual_proj_weight_key, v_weight.ndim))
             else:
                 vllm_weight_inplace_view_map[compatible_key] = param
-                recv_key_n_rank_list.append((compatible_key, param.ndim))
+                group_keys.append((compatible_key, param.ndim))
+            recv_key_n_rank_list.append(group_keys)
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
@@ -162,28 +156,6 @@ class QwenVL25WeightMapper(WeightMapper):
         if name == "model.lm_head.weight":
             name = "lm_head.weight"
         return name
-
-    def policy_pre_P2R_gather_required_for_sync(self, name: str) -> bool:
-        """
-        For P->R weight sync, we need to first all-gather vision encoder qkv weights from all ranks.
-        To not be messed up with the following `nccl_send/recv` instructions,
-        pre-collect those weights before first `nccl_send/recv` instruction.
-
-        Args:
-            name (str): The name of the tensor.
-        Returns:
-            bool: True if the tensor sync precollect is required, False otherwise.
-        """
-        is_visual = name.startswith("visual.")
-        # Handle qkv weights for separate q, k, v tensors
-        if (
-            match := re.search(  # noqa: F841
-                r"blocks\.(\d+)\.attn\.(q|k|v)\.(weight|bias)",
-                name,
-            )
-        ) is not None and is_visual:
-            return True
-        return False
 
     def name_to_model_part_index(self, dest_name: str) -> int:
         if dest_name in ["lm_head.weight", "lm_head.bias"]:
@@ -195,30 +167,43 @@ class QwenVL25WeightMapper(WeightMapper):
         else:
             raise ValueError(f"Unsupported weight: {dest_name}")
 
-    def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
-        return [replica_parallelism, replica_parallelism]
-
-    def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
-        parallelism_config_new = copy.copy(replica_parallelism)
-        assert replica_parallelism.tp_size != -1
-        if parallelism_config_new.dp_shard_size != -1:
-            parallelism_config_new.dp_shard_size = (
-                replica_parallelism.dp_shard_size * replica_parallelism.tp_size
+    def policy_map_param_to_transformed_params_for_sync(self, name):
+        """
+        Map a parameter of the policy model to set of transformed parameters that need to be synchronized.
+        This method returns a list containing tuples of the new parameter name and the corresponding new tensor transformed from the original tensor of the given name.
+        Each tuple element includes a transformed tensor and its corresponding slice strategy to derive from the original tensor.
+        """
+        if match := re.search(  # noqa: F841
+            r"blocks\.(\d+)\.attn\.qkv\.(weight|bias)",
+            name,
+        ):
+            split_strategy = []
+            # The first part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 0 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv", "q"),
+                    {0: {"offset": 0, "total_size": 3, "length": 1}},
+                )
             )
-        parallelism_config_new.tp_size = 1
-        return [replica_parallelism, parallelism_config_new]
-
-    def get_policy_parallelism_strategy(self):
-        return [
-            get_policy_parallelism_strategy("gpt"),
-            get_policy_parallelism_strategy("qwen2_5_vl"),
-        ]
-
-    def get_rollout_parallelism_strategy(self):
-        return [
-            get_rollout_parallelism_strategy("gpt"),
-            get_rollout_parallelism_strategy("qwen2_5_vl"),
-        ]
+            # The second part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 1 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv", "k"),
+                    {0: {"offset": 1, "total_size": 3, "length": 1}},
+                )
+            )
+            # The third part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 2 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv", "v"),
+                    {0: {"offset": 2, "total_size": 3, "length": 1}},
+                )
+            )
+            return split_strategy
+        return []
 
     def quantized_weight_partial_keys(self):
         return [
