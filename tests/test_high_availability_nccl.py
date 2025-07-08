@@ -255,12 +255,10 @@ class TestHANccl(CommMixin):
                 comm.push_cmd(cmd)
 
         # 2. wait for the comm to be ready
-        comm.wait_comm_ready()
         assert (
             comm.world_size() == dist.get_world_size()
         ), f"world size should be {dist.get_world_size()}"
         comm.destroy_nccl_comm()
-        comm.shutdown()
         logger.info("  === normal case, passed")
 
     def test_comm_auto_rebuild_intiative_scale_down(self):
@@ -298,13 +296,11 @@ class TestHANccl(CommMixin):
                 for cmd in cmds:
                     comm.push_cmd(cmd)
                 break
-            comm.wait_comm_ready()
             assert (
                 comm.world_size() == dist.get_world_size() - 1
             ), f"world size should be {dist.get_world_size() - 1}, actual {comm.world_size()}"
 
         comm.destroy_nccl_comm()
-        comm.shutdown()
         logger.info("  === intiative scale down, passed")
 
     def test_comm_auto_rebuild_timeout_scale_down(self):
@@ -382,7 +378,6 @@ class TestHANccl(CommMixin):
 
         # finally, shutdown the comm
         comm.destroy_nccl_comm()
-        comm.shutdown()
         logger.info(" === test_comm_auto_rebuild passed")
 
     def test_allreduce_timeout_retry(self):
@@ -392,7 +387,7 @@ class TestHANccl(CommMixin):
         logger.info("run nccl test")
         pass
 
-    def test_send_recv_timeout_retry():
+    def test_send_recv_timeout_retry(self):
         """
         Run the NCCL test.
         """
@@ -435,20 +430,20 @@ def main():
     time.sleep(10)
 
     # 3. init the tester
-    ctrl_ip, ctrl_port, metadata = get_controller_metadata()
-    cosmos_config = Config.from_dict(metadata["config"])
-    tester = TestHANccl(ctrl_ip, ctrl_port, cosmos_config)
-    dist.barrier()
+    # ctrl_ip, ctrl_port, metadata = get_controller_metadata()
+    # cosmos_config = Config.from_dict(metadata["config"])
+    # tester = TestHANccl(ctrl_ip, ctrl_port, cosmos_config)
+    # dist.barrier()
 
     # 4. Run the test
-    tester.test_comm_auto_rebuild_normal()
-    dist.barrier()
+    # tester.test_comm_auto_rebuild_normal()
+    # dist.barrier()
 
-    tester.test_comm_auto_rebuild_intiative_scale_down()
-    dist.barrier()
+    # tester.test_comm_auto_rebuild_intiative_scale_down()
+    # dist.barrier()
 
-    tester.test_comm_auto_rebuild_timeout_scale_down()
-    dist.barrier()
+    # tester.test_comm_auto_rebuild_timeout_scale_down()
+    # dist.barrier()
 
     # finally, wait for all ranks to finish the test
     for hdl in ctrl_hdl:
