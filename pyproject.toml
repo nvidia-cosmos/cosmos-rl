@@ -13,11 +13,13 @@ Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
 cosmos-rl = "cosmos_rl.launcher.launch_all:main"
 
 [tool.setuptools]
-packages = ["cosmos_rl"]
 include-package-data = true
 
 [tool.setuptools.package-data]
 cosmos_rl = ["launcher/*.sh"]
+
+[tool.setuptools.packages.find]
+include = ["cosmos_rl*"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
