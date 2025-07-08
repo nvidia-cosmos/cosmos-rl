@@ -486,20 +486,29 @@ class ParallelTopoMapper:
                 """
 
                 split_dim_map, dim_to_parallel, pp_rank, dims_rank_info = (
-                    self.parallelism_info_for_param(dest_name)
+                    None,
+                    None,
+                    None,
+                    None,
                 )
+                if self.parallelism_strategy is not None:
+                    # If custom parallelism strategy is provided, use it to get the split dimensions and parallel mapping.
+                    # The custom parallelism strategy has high priority.
+                    # The custom parallelism strategy is specified from `get_policy_parallelism_strategy` and `get_rollout_parallelism_strategy` in weight mapper.
+                    split_dim_map, dim_to_parallel, pp_rank = self.parallelism_strategy(
+                        shape, dest_name, self.parallelism, self.hf_config
+                    )
 
                 if (
                     split_dim_map is None
                     and dim_to_parallel is None
                     and pp_rank is None
                 ):
-                    if self.parallelism_strategy is not None:
-                        split_dim_map, dim_to_parallel, pp_rank = (
-                            self.parallelism_strategy(
-                                shape, dest_name, self.parallelism, self.hf_config
-                            )
-                        )
+                    # If no custom parallelism strategy is provided, use the default automatically inferred parallelism info for the parameter.
+                    split_dim_map, dim_to_parallel, pp_rank, dims_rank_info = (
+                        self.parallelism_info_for_param(dest_name)
+                    )
+
                 if (
                     split_dim_map is None
                     and dim_to_parallel is None
@@ -509,11 +518,6 @@ class ParallelTopoMapper:
 
                 ranks = self.full_mesh_rank_info_map[global_rank]
                 if ranks["pp"].offset != pp_rank:
-                    # group_info.append(
-                    #     {
-                    #         "name": dest_name,
-                    #     }
-                    # )
                     continue
 
                 group_info.append(
@@ -731,7 +735,8 @@ class ParallelTopoMapper:
                                     part_name
                                 ),
                                 partial(
-                                    slice_tensor_with_part, part_in_local=part_in_local
+                                    slice_tensor_with_part,
+                                    part_in_local=part_in_local,
                                 ),
                             )
 
@@ -763,6 +768,7 @@ class ParallelTopoMapper:
             name_parts = param_name.split(".")
             part = self.underlying_model
             is_bias = False
+            should_skip = False
             for part_name in name_parts:
                 if hasattr(part, part_name):
                     if isinstance(getattr(part, part_name), Parameter):
@@ -771,15 +777,18 @@ class ParallelTopoMapper:
                         elif part_name == "weight":
                             is_bias = False
                         else:
-                            raise ValueError(
+                            logger.warning(
                                 f"Part {part_name} is not a Parameter. Skipping."
                             )
+                            should_skip = True
                         break
                     part = getattr(part, part_name)
                 elif str.isdigit(part_name):
                     part = part[int(part_name)]
                 else:
                     raise ValueError(f"Part {part_name} not found in {part}. Skipping.")
+            if should_skip:
+                continue
             dims_map = {}
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", None)

@@ -535,6 +535,24 @@ class GRPOTrainer(Trainer):
             self.ckpt_manager.set_rng_state(rng_state)
         return len_params
 
+    def pre_P2R_collect_parameters(self):
+        needed_tensors = []
+        for insts_group in self.policy_to_rollout_insts:
+            for insts_for_per_param in insts_group:
+                dest_name = insts_for_per_param["name"]
+                needed_tensors.append(dest_name)
+        prepared_tensor_to_rollout = {}
+        for dest_name, local_view in self.map_w_from_policy_to_rollout.items():
+            if isinstance(
+                local_view, Callable
+            ) and self.model.weight_mapper.policy_pre_P2R_gather_required_for_sync(
+                dest_name
+            ):
+                view = local_view()
+                if dest_name in needed_tensors:
+                    prepared_tensor_to_rollout[dest_name] = view
+        return prepared_tensor_to_rollout
+
     @Trainer.register_policy_command_handler(PolicyToPolicyBroadcastCommand)
     def execute_policy_to_policy_broadcast(
         self, command: PolicyToPolicyBroadcastCommand
@@ -697,6 +715,9 @@ class GRPOTrainer(Trainer):
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
         with torch.cuda.stream(self.train_stream):
+            pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
+                self.pre_P2R_collect_parameters()
+            )
             for insts_group in self.policy_to_rollout_insts:
                 for insts_for_per_param in insts_group:
                     dest_name = insts_for_per_param["name"]
@@ -707,7 +728,9 @@ class GRPOTrainer(Trainer):
                                 f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
                             )
                         local_view = self.map_w_from_policy_to_rollout[dest_name]
-                        if isinstance(local_view, Callable):
+                        if dest_name in pre_P2R_collected_tensors:
+                            local_view = pre_P2R_collected_tensors[dest_name]
+                        elif isinstance(local_view, Callable):
                             local_view = local_view()
                         else:
                             pass

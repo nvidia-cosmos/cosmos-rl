@@ -169,6 +169,9 @@ class TestPolicy:
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
 
+    def pre_P2R_collect_parameters(self):
+        return {}
+
 
 class TestRollout:
     def __init__(self, name, rollout_world_size, policies_comm):
