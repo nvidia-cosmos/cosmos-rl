@@ -607,6 +607,22 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         src_replica_name: str = broadcast_command.src_replica_name
         dst_replica_names: List[str] = broadcast_command.dst_replica_names
 
+        # lazy initialization of the vllm engine.
+        if not self.rollout.is_engine_initialized():
+            if self.replica_name != src_replica_name:
+                # for replicas that needs to be broadcasted, use dummy format.
+                self.rollout.init_engine(
+                    quantization=self.quantization_type,
+                    seed=self.config.rollout.seed,
+                    load_format="dummy",
+                )
+                _patch_vllm_rollout_locked_step(
+                    self.rollout,
+                    self.consume_command,
+                    self.config.train.enable_validation,
+                )
+                self.prepare_shard_infos_for_weight_sync_insts()
+
         if len(dst_replica_names) > 1:
             # Only do broadcast if there are more than one rollout replicas.
             with torch.cuda.stream(self.inference_stream):
