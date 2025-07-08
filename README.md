@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="assets/nvidia-cosmos-header.png" alt="NVIDIA Cosmos Header">
+    <img src="https://raw.githubusercontent.com/nvidia-cosmos/cosmos-rl/main/assets/nvidia-cosmos-header.png" alt="NVIDIA Cosmos Header">
 </p>
 
 
@@ -33,7 +33,7 @@ Cosmos-RL provides toolchain to enable large scale RL training workload with fol
     - Efficient messaging system (e.g., `weight-sync`, `rollout`, `evaluate`) to coordinate policy and rollout replicas
     - Dynamic NCCL Process Groups for on-the-fly GPU [un]registration to enable fault-tolerant and elastic large-scale RL training
 
-![Policy-Rollout-Controller Decoupled Architecture](./assets/rl_infra.svg)
+![Policy-Rollout-Controller Decoupled Architecture](https://raw.githubusercontent.com/nvidia-cosmos/cosmos-rl/main/assets/rl_infra.svg)
 
 ## License and Contact
 
