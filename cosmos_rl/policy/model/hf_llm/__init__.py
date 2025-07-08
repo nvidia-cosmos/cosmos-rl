@@ -15,7 +15,7 @@
 
 import torch
 from torch import nn
-from typing import Tuple, List, Optional, Callable, Union
+from typing import Tuple, List, Optional, Callable, Union, Dict
 from transformers import AutoConfig, AutoModelForCausalLM
 from cosmos_rl.utils.util import (
     sync_model_vocab,
@@ -245,8 +245,6 @@ class HFLLMModel(BaseModel):
         dest_name: str,
         self_state_dict,
     ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        if dest_name.startswith("model."):
-            dest_name = dest_name[len("model.") :]
         assert dest_name in self_state_dict, f"Unsupported weight: {dest_name}"
         target_tensor = self_state_dict[dest_name]
         is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
@@ -254,15 +252,17 @@ class HFLLMModel(BaseModel):
         return local_view
 
     @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+    def weight_sync_transforms_per_model(
+        self,
+    ) -> Dict[str, Union[torch.Tensor, Callable]]:
         self_state_dict = self.model.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        transforms = []
+        transforms = {}
         for dest_name, _ in self.sorted_hf_key_n_rank:
             local_view = self.weight_sync_transform_by_key_internal(
                 dest_name, self_state_dict
             )
-            transforms.append((dest_name, local_view))
+            transforms[dest_name] = local_view
         return transforms
 
     @classmethod
@@ -307,6 +307,11 @@ class HFLLMModel(BaseModel):
         _ = sync_model_vocab(model_name_or_path)
 
         return cls.from_model_args(hf_config)
+
+    def named_parameters(self, prefix="", recurse=True, remove_duplicate=True):
+        return self.model.named_parameters(
+            prefix=prefix, recurse=recurse, remove_duplicate=remove_duplicate
+        )
 
     @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:
