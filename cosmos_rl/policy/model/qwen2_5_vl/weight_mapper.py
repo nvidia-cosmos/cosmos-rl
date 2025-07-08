@@ -81,7 +81,9 @@ class QwenVL25WeightMapper(WeightMapper):
         quantization: bool = False,
         promotion_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[
-        Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
+        Dict[str, torch.Tensor],
+        List[List[Tuple[str, torch.Size]]],
+        Dict[str, torch.Tensor],
     ]:
         assert isinstance(vllm_model, Qwen2_5_VLForConditionalGeneration)
         if quantization:
@@ -147,7 +149,7 @@ class QwenVL25WeightMapper(WeightMapper):
                 vllm_weight_inplace_view_map[compatible_key] = param
                 group_keys.append((compatible_key, param.ndim))
             recv_key_n_rank_list.append(group_keys)
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list
+        return vllm_weight_inplace_view_map, recv_key_n_rank_list, vllm_full_weight_map
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)

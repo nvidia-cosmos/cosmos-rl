@@ -450,14 +450,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     recv_tensor = torch.empty_like(vllm_tensor_view)
 
                 nccl_recv(recv_tensor, p_rank, communicator_index)
-
-                # logger.info(
-                #     f"[Rollout] recv_tensor: {recv_tensor.shape}, vllm_tensor_view: {vllm_tensor_view.shape}"
-                # )
-                # logger.info(
-                #     f"[Rollout] recv_tensor: {recv_tensor.flatten()[-10:]}, vllm_tensor_view: {vllm_tensor_view.flatten()[-10:]}"
-                # )
-
                 # inplace copy
                 if not vllm_tensor_view.is_contiguous():
                     vllm_tensor_view.copy_(recv_tensor)

@@ -751,10 +751,9 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
     rollout = vLLMRollout(
         config,
         tokenizer=tokenizer,
-        seed=config.rollout.seed,
-        load_format="dummy",
     )
 
+    rollout.init_engine(seed=config.rollout.seed, load_format="dummy")
     parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
     parallel_dims.build_mesh(device_type="cuda")
 
@@ -769,7 +768,7 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
 
     assert len(mapper.mapper_group) == 1, "Only one mapper group expected"
 
-    _, recv_param_key_n_rank_list = weight_mapper.rollout_prepare_recv(
+    _, recv_param_key_n_rank_list, _ = weight_mapper.rollout_prepare_recv(
         rollout.get_underlying_model()
     )
     local_shard_infos = mapper.prepare_local_shard_infos(

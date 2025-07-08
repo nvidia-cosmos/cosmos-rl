@@ -645,7 +645,7 @@ class RolloutConfig(BaseModel):
     quantization: str = Field(
         default="none",
         description="Quantization in vllm rollout generation.",
-        choices=["none", "rowwise"],
+        choices=["none", "fp8"],
     )
 
     seed: Optional[int] = Field(default=None, description="random seed for rollout.")
