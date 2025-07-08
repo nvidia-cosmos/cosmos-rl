@@ -170,8 +170,8 @@ class CosmosGRPOValDataset(CosmosGRPODataset):
         # This is a hack to make the dataset compatible with the training data
         # Change the training dataset name and subset to utilize the same data preparation logic
         self.mm_files_paths = self.get_mm_files_paths(
-            config.train.train_policy.dataset.name,
-            config.train.train_policy.dataset.subset,
+            config.validation.dataset.name,
+            config.validation.dataset.subset,
         )
 
 
