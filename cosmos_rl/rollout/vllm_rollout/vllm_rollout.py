@@ -118,9 +118,10 @@ class vLLMRollout(RolloutBase):
             if model_type in multimodal_type:
                 # for vllm nightly, this is only True for multimodal models, check here
                 disable_mm_preprocessor_cache = True
-            assert (
-                tp_size * pp_size == rollout_parallelism.world_size
-            ), "[Rollout] For tensor parallel, the tp_size * pp_size must be equal to world size."
+            assert tp_size * pp_size == rollout_parallelism.world_size, (
+                "[Rollout] For tensor parallel, the tp_size * pp_size must be equal to world size, but got tp_size: %d, pp_size: %d, world_size: %d"
+                % (tp_size, pp_size, rollout_parallelism.world_size)
+            )
 
             self.quantization = quantization
 

@@ -217,6 +217,12 @@ class TestRollout:
         )
         # just for testing
         tokenizer = AutoTokenizer.from_pretrained(self.config.policy.model_name_or_path)
+        # change the default parallelism config
+        self.config.rollout.parallelism.tp_size = 4
+        self.config.rollout.parallelism.pp_size = 1
+
+        self.consume_command = types.MethodType(vLLMRolloutWorker.consume_command, self)
+
         self.rollout = vLLMRollout(self.config, tokenizer)
 
     def get_underlying_model(self):
@@ -391,6 +397,7 @@ def run_rollout_recv_from_policy(shm_name, shm_size, rank):
         rollout.policy_to_rollout_unicast = types.MethodType(
             vLLMRolloutWorker.policy_to_rollout_unicast, rollout
         )
+        rollout.prepare_shard_infos_for_weight_sync_insts = lambda: None
         rollout.policy_to_rollout_unicast(command)
         rollout.inference_stream.synchronize()
 

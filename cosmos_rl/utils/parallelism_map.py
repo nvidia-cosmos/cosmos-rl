@@ -761,30 +761,26 @@ class ParallelTopoMapper:
             name_parts = param_name.split(".")
             part = self.underlying_model
             is_bias = False
-            try:
-                for part_name in name_parts:
-                    if hasattr(part, part_name):
-                        if isinstance(getattr(part, part_name), Parameter):
-                            if part_name == "bias":
-                                is_bias = True
-                            elif part_name == "weight":
-                                is_bias = False
-                            else:
-                                raise ValueError(
-                                    f"Part {part_name} is not a Parameter. Skipping."
-                                )
-                            break
-                        part = getattr(part, part_name)
-                    elif str.isdigit(part_name):
-                        part = part[int(part_name)]
-                    else:
-                        raise ValueError(
-                            f"Part {part_name} not found in {part}. Skipping."
-                        )
-            except Exception as e:
-                logger.error(
-                    f"Error in parallelism_info_for_vllm_params for {param_name}: {e}"
-                )
+            should_skip = False
+            for part_name in name_parts:
+                if hasattr(part, part_name):
+                    if isinstance(getattr(part, part_name), Parameter):
+                        if part_name == "bias":
+                            is_bias = True
+                        elif part_name == "weight":
+                            is_bias = False
+                        else:
+                            logger.warning(
+                                f"Part {part_name} is not a Parameter. Skipping."
+                            )
+                            should_skip = True
+                        break
+                    part = getattr(part, part_name)
+                elif str.isdigit(part_name):
+                    part = part[int(part_name)]
+                else:
+                    raise ValueError(f"Part {part_name} not found in {part}. Skipping.")
+            if should_skip:
                 continue
 
             dims_map = {}
