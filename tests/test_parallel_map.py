@@ -22,6 +22,9 @@ from cosmos_rl.utils.parallelism_map import (
 )
 from cosmos_rl.policy.model.gpt.weight_mapper import GPTWeightMapper
 from cosmos_rl.utils.parallelism import ParallelismConfig, ParallelDims
+import os
+import sys
+import subprocess
 
 
 class TestModelType:
@@ -182,6 +185,107 @@ class TestParallelMap(unittest.TestCase):
                     assert p_rank >= p_rank_max
                     if p_rank > p_rank_max:
                         p_rank_max = p_rank
+
+    def test_policy_parallelism_extract(self):
+        """Test policy parallelism extraction using torchrun."""
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+
+        cases = [
+            [2, 1, 2],  # fsdp: 2, tp: 1, pp: 2
+            [2, 2, 1],  # fsdp: 2, tp: 2, pp: 1
+            [1, 1, 1],  # fsdp: 1, tp: 1, pp: 1
+        ]
+
+        for case in cases:
+            fsdp = case[0]
+            tp = case[1]
+            pp = case[2]
+
+            world_size = fsdp * tp * pp  # Total number of processes
+
+            # Create the Python command for torchrun
+            cmd = [
+                "torchrun",
+                f"--nproc_per_node={world_size}",  # Use 4 GPUs
+                "--role=rank",
+                "--tee=3",
+                "--rdzv_backend=c10d",
+                "--rdzv_endpoint=localhost:0",
+                os.path.join(cur_dir, "launch_test_worker.py"),
+                "-1",  # Use -1 to indicate no need for shared memory
+                "-1",  # Use -1 to indicate no need for shared memory size
+                "policy_parallelism_extract",
+                f"fsdp:{fsdp};tp:{tp};pp:{pp}",
+            ]
+
+            env = dict(os.environ)
+            # Start the process
+            policy_process = subprocess.Popen(
+                cmd,
+                stdout=sys.stderr,
+                stderr=sys.stderr,
+                env=env,
+            )
+            try:
+                # Wait for process to complete
+                for process in [policy_process]:
+                    stdout, stderr = process.communicate()
+
+                    # Check if process completed successfully
+                    assert process.returncode == 0, f"Process failed: {stderr.decode()}"
+
+            finally:
+                # Ensure process is terminated
+                for process in [policy_process]:
+                    process.wait()
+
+    def test_rollout_parallelism_extract(self):
+        """Test rollout parallelism extraction using torchrun."""
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+
+        cases = [[4, 1], [1, 1]]
+
+        for case in cases:
+            fsdp = 1  # always FSDP to be 1 for rollout parallelism.
+            tp = case[0]
+            pp = case[1]
+            world_size = fsdp * tp * pp  # Total number of processes
+
+            # Create the Python command for torchrun
+            cmd = [
+                "torchrun",
+                f"--nproc_per_node={world_size}",  # Use 4 GPUs
+                "--role=rank",
+                "--tee=3",
+                "--rdzv_backend=c10d",
+                "--rdzv_endpoint=localhost:0",
+                os.path.join(cur_dir, "launch_test_worker.py"),
+                "-1",  # Use -1 to indicate no need for shared memory
+                "-1",  # Use -1 to indicate no need for shared memory size
+                "rollout_parallelism_extract",
+                f"fsdp:{fsdp};tp:{tp};pp:{pp}",
+            ]
+
+            env = dict(os.environ)
+            # Start the process
+            policy_process = subprocess.Popen(
+                cmd,
+                stdout=sys.stderr,
+                stderr=sys.stderr,
+                env=env,
+            )
+            try:
+                # Wait for process to complete
+                for process in [policy_process]:
+                    stdout, stderr = process.communicate()
+
+                    # Check if process completed successfully
+                    assert process.returncode == 0, f"Process failed: {stderr.decode()}"
+
+            finally:
+                # Ensure process is terminated
+                for process in [policy_process]:
+                    process.wait()
 
 
 if __name__ == "__main__":

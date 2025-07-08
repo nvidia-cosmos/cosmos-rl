@@ -618,6 +618,7 @@ class ParallelTopoMapper:
         self.parallelism_info_for_params = {}
         for name, param in self.underlying_model.named_parameters():
             is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
+            dims_rank_info = {}
             if not is_dist_tensor:
                 dims_map = {}
             else:
@@ -648,7 +649,6 @@ class ParallelTopoMapper:
                     == len(tuple(local.shape))
                 ), f"Offsets {meta.offsets} and sizes {meta.sizes} must match global shape {global_shape} and local shape {tuple(local.shape)}."
 
-                dims_rank_info = {}
                 for idx, g_size in enumerate(global_shape):
                     offset = int(meta.offsets[idx])
                     total_size = int(g_size)

@@ -204,7 +204,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # For Polocy to Rollout weight mapping
         hf_config = util.retry(AutoConfig.from_pretrained)(
-            self.config.policy.model_name_or_path
+            self.config.policy.model_name_or_path,
+            trust_remote_code=True,
         )
         model_type = hf_config.model_type
         if not ModelRegistry.check_model_type_supported(model_type):
