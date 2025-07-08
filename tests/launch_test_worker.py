@@ -218,7 +218,6 @@ class TestRollout:
         # just for testing
         tokenizer = AutoTokenizer.from_pretrained(self.config.policy.model_name_or_path)
         self.rollout = vLLMRollout(self.config, tokenizer)
-        self.rollout._engine_initialized = True
 
     def get_underlying_model(self):
         return None
@@ -667,6 +666,7 @@ def run_dummy_rollout():
 
         self.rollout_engine = Rollout_engine()
         self.eos_token_ids = [0]
+        self._engine_initialized = True
 
         def rollout_generation(
             self,
