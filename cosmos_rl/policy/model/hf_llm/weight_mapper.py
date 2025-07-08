@@ -16,11 +16,6 @@
 import torch
 from typing import List, Tuple, Dict, Any
 from cosmos_rl.policy.model.base import WeightMapper
-from cosmos_rl.utils.parallelism import ParallelismConfig
-from cosmos_rl.utils.parallelism_registry import (
-    get_policy_parallelism_strategy,
-    get_rollout_parallelism_strategy,
-)
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 
@@ -65,7 +60,7 @@ class HFLLMWeightMapper(WeightMapper):
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            # logger.info(f"[Rollout] compatible_key: {compatible_key}")
+            # print(f"[Rollout] compatible_key: {param_name=} {compatible_key=}")
             if "qkv_proj" in compatible_key:
                 # must be inplace slicing.
                 # split qkv weight
@@ -108,15 +103,3 @@ class HFLLMWeightMapper(WeightMapper):
             if not name.startswith("model."):
                 name = "model." + name
         return name
-
-    def get_rollout_parallelism(self, replica_parallelism: ParallelismConfig):
-        return [replica_parallelism]
-
-    def get_policy_parallelism(self, replica_parallelism: ParallelismConfig):
-        return [replica_parallelism]
-
-    def get_policy_parallelism_strategy(self):
-        return [get_policy_parallelism_strategy("hfllm")]
-
-    def get_rollout_parallelism_strategy(self):
-        return [get_rollout_parallelism_strategy("hfllm")]
