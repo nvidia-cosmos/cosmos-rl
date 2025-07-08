@@ -22,6 +22,9 @@ import numpy as np
 import torch.distributed as dist
 import toml
 from transformers import AutoConfig
+import cosmos_rl.utils.util as util
+from transformers import AutoTokenizer
+from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 
 import threading
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
@@ -58,6 +61,7 @@ from cosmos_rl.utils.pynccl import (
     nccl_recv,
     nccl_broadcast,
 )
+import cosmos_rl.utils.distributed as dist_util
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -674,6 +678,111 @@ def run_dummy_rollout():
     run_rollout()
 
 
+def run_policy_parallelism_extract(rank, fsdp, tp, pp):
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_grpo.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.policy.parallelism.dp_shard_size = fsdp
+    config.policy.parallelism.tp_size = tp
+    config.policy.parallelism.pp_size = pp
+    hf_config = util.retry(AutoConfig.from_pretrained)(
+        config.policy.model_name_or_path,
+        trust_remote_code=True,
+    )
+    model = ModelRegistry.build_model(config)
+    parallel_dims = ParallelDims.from_config(config.policy.parallelism)
+    parallel_dims.build_mesh(device_type="cuda")
+
+    mapper = ParallelTopoMapperGroup(
+        parallel_dims,
+        hf_config=hf_config,
+        is_policy=True,
+        underlying_model=model,
+        weight_mapper=model.weight_mapper,
+    )
+
+    assert len(mapper.mapper_group) == 1, "Only one mapper group expected"
+    hf_key_n_rank = [[x] for x in model.sorted_hf_key_n_rank_for_sync]
+    local_shard_infos = mapper.prepare_local_shard_infos(hf_key_n_rank, rank)
+    all_rank_local_shard_infos = dist_util.all_gather_object_cpu(local_shard_infos)
+    if rank == 0:
+        name = config_path = os.path.join(
+            cur_dir, "data", f"test_policy_extract_pp_{pp}_fsdp_{fsdp}_tp_{tp}.npy"
+        )
+        gt = np.load(name, allow_pickle=True)
+        np.testing.assert_array_equal(
+            np.array(all_rank_local_shard_infos, dtype=object), gt
+        )
+
+
+def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_grpo.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.rollout.parallelism.tp_size = tp
+    config.rollout.parallelism.pp_size = pp
+
+    hf_config = util.retry(AutoConfig.from_pretrained)(
+        config.policy.model_name_or_path,
+        trust_remote_code=True,
+    )
+    tokenizer = util.retry(AutoTokenizer.from_pretrained)(
+        config.policy.model_name_or_path
+    )
+    rollout = vLLMRollout(
+        config,
+        tokenizer=tokenizer,
+        seed=config.rollout.seed,
+        load_format="dummy",
+    )
+
+    parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
+    parallel_dims.build_mesh(device_type="cuda")
+
+    weight_mapper = WeightMapper.get_weight_mapper(hf_config.model_type)(hf_config)
+    mapper = ParallelTopoMapperGroup(
+        parallel_dims,
+        hf_config=hf_config,
+        is_policy=False,
+        underlying_model=rollout.get_underlying_model(),
+        weight_mapper=weight_mapper,
+    )
+
+    assert len(mapper.mapper_group) == 1, "Only one mapper group expected"
+
+    _, recv_param_key_n_rank_list = weight_mapper.rollout_prepare_recv(
+        rollout.get_underlying_model()
+    )
+    local_shard_infos = mapper.prepare_local_shard_infos(
+        recv_param_key_n_rank_list, rank
+    )
+    all_rank_local_shard_infos = dist_util.all_gather_object_cpu(local_shard_infos)
+    if rank == 0:
+        name = config_path = os.path.join(
+            cur_dir, "data", f"test_rollout_extract_pp_{pp}_fsdp_{fsdp}_tp_{tp}.npy"
+        )
+        gt = np.load(name, allow_pickle=True)
+        np.testing.assert_array_equal(
+            np.array(all_rank_local_shard_infos, dtype=object), gt
+        )
+
+
 def main():
     # Get shared memory name and size from command line arguments
     shm_name = sys.argv[1]
@@ -696,8 +805,12 @@ def main():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
+    if not dist.is_initialized():
+        rank = 0
+        world_size = 1
+    else:
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
     print(f"Rank {rank} started with mode {mode} {torch.cuda.current_device()}")
 
     if mode == "policy_send_to_rollout":
@@ -718,6 +831,20 @@ def main():
         total_rep = int(mode.split(",")[1])
         self_rep = int(mode.split(",")[2])
         run_policy_broadcast_to_policy(shm_name, shm_size, rank, total_rep, self_rep)
+    elif mode == "policy_parallelism_extract":
+        sepc = sys.argv[4]
+        fsdp, tp, pp = sepc.split(";")
+        fsdp = int(fsdp.split(":")[1])
+        tp = int(tp.split(":")[1])
+        pp = int(pp.split(":")[1])
+        run_policy_parallelism_extract(rank, fsdp, tp, pp)
+    elif mode == "rollout_parallelism_extract":
+        sepc = sys.argv[4]
+        fsdp, tp, pp = sepc.split(";")
+        fsdp = int(fsdp.split(":")[1])
+        tp = int(tp.split(":")[1])
+        pp = int(pp.split(":")[1])
+        run_rollout_parallelism_extract(rank, fsdp, tp, pp)
     else:
         raise ValueError("Invalid mode.")
     # Clean up distributed environment
