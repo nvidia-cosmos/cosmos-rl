@@ -996,42 +996,36 @@ class ParallelizedShardMapper:
             and self.send_insts_for_policy is None
             and self.recv_insts_for_rollout is None
         ):
-            for i in range(10000):
-                print(
-                    f"[DEBUG]Generating send and receive instructions for policy and rollout for the {i}th time"
-                )
-                self.send_insts_for_policy = []
-                self.recv_insts_for_rollout = []
+            self.send_insts_for_policy = []
+            self.recv_insts_for_rollout = []
 
-                await self.sort_param_with_groups()
-                self.policy_shard_dicts = [
-                    {
-                        r["name"]: r
-                        for r_info_group in r_infos_per_rank
-                        for r in r_info_group
-                    }
-                    for r_infos_per_rank in self.policy_all_rank_shard_infos
-                ]
-                self.rollout_shard_dicts = [
-                    {
-                        r["name"]: r
-                        for r_info_group in r_infos_per_rank
-                        for r in r_info_group
-                    }
-                    for r_infos_per_rank in self.rollout_all_rank_shard_infos
-                ]
-                for p_rank in range(len(self.policy_all_rank_shard_infos)):
-                    self.send_insts_for_policy.append(
-                        await self.generate_parallelized_shard_send_insts_for_policy(
-                            p_rank
-                        )
+            await self.sort_param_with_groups()
+            self.policy_shard_dicts = [
+                {
+                    r["name"]: r
+                    for r_info_group in r_infos_per_rank
+                    for r in r_info_group
+                }
+                for r_infos_per_rank in self.policy_all_rank_shard_infos
+            ]
+            self.rollout_shard_dicts = [
+                {
+                    r["name"]: r
+                    for r_info_group in r_infos_per_rank
+                    for r in r_info_group
+                }
+                for r_infos_per_rank in self.rollout_all_rank_shard_infos
+            ]
+            for p_rank in range(len(self.policy_all_rank_shard_infos)):
+                self.send_insts_for_policy.append(
+                    await self.generate_parallelized_shard_send_insts_for_policy(p_rank)
+                )
+            for r_rank in range(len(self.rollout_all_rank_shard_infos)):
+                self.recv_insts_for_rollout.append(
+                    await self.generate_parallelized_shard_recv_insts_for_rollout(
+                        r_rank
                     )
-                for r_rank in range(len(self.rollout_all_rank_shard_infos)):
-                    self.recv_insts_for_rollout.append(
-                        await self.generate_parallelized_shard_recv_insts_for_rollout(
-                            r_rank
-                        )
-                    )
+                )
             self.scheme_generation_done.set()
 
     async def set_shard_infos_of_policy(
