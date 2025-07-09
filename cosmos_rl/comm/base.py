@@ -99,13 +99,6 @@ class CommMixin:
         )
 
         user_data_packer = metadata.get("user_data_packer", None)
-        model_type = hf_config.model_type
-        if model_type not in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY:
-            logger.warning(
-                f"{self.role} Replica can not find {model_type} in data packer, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
-            )
-            model_type = constant.COSMOS_HF_MODEL_TYPES
-
         if user_data_packer:
             user_data_packer = base64.b64decode(user_data_packer)
             user_data_packer = cloudpickle.loads(user_data_packer)
@@ -113,7 +106,9 @@ class CommMixin:
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
             try:
-                self.data_packer = DataPacker.get_default_data_packer(model_type)
+                self.data_packer = DataPacker.get_default_data_packer(
+                    hf_config.model_type
+                )
                 logger.info(f"Using default data packer: {self.data_packer}")
             except ValueError:
                 logger.warning(
@@ -132,7 +127,9 @@ class CommMixin:
             )
         else:
             try:
-                self.val_data_packer = DataPacker.get_default_data_packer(model_type)
+                self.val_data_packer = DataPacker.get_default_data_packer(
+                    hf_config.model_type
+                )
                 logger.info(
                     f"Using default validation data packer: {self.val_data_packer}"
                 )
