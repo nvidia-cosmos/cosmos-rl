@@ -49,6 +49,7 @@ from cosmos_rl.utils.util import (
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
+    WeightSyncInstructionsGroup,
 )
 from functools import cached_property
 from typing import List, Callable, Dict, Any, Tuple, Optional
@@ -538,8 +539,8 @@ class GRPOTrainer(Trainer):
     def pre_P2R_collect_parameters(self):
         needed_tensors = []
         for insts_group in self.policy_to_rollout_insts:
-            for insts_for_per_param in insts_group:
-                dest_name = insts_for_per_param["name"]
+            for insts_for_per_param in insts_group.param_instructions:
+                dest_name = insts_for_per_param.param_name
                 needed_tensors.append(dest_name)
         prepared_tensor_to_rollout = {}
         for dest_name, local_view in self.map_w_from_policy_to_rollout.items():
@@ -703,12 +704,14 @@ class GRPOTrainer(Trainer):
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
                 insts_meta = insts_meta.json()
-                self.policy_to_rollout_insts = insts_meta["insts"]
+                self.policy_to_rollout_insts = [
+                    WeightSyncInstructionsGroup.from_dict(inst)
+                    for inst in insts_meta["insts"]
+                ]
             except Exception as e:
                 raise RuntimeError(
                     f"[Policy] Failed in fetching policy to rollout insts from controller after retries {e}."
                 )
-
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
         # There is a local-replica comm in training step
@@ -719,10 +722,12 @@ class GRPOTrainer(Trainer):
                 self.pre_P2R_collect_parameters()
             )
             for insts_group in self.policy_to_rollout_insts:
-                for insts_for_per_param in insts_group:
-                    dest_name = insts_for_per_param["name"]
-                    for inst in insts_for_per_param["insts"]:
-                        p_rank, r_rank, tensor_split_strategys = inst
+                for insts_for_per_param in insts_group.param_instructions:
+                    dest_name = insts_for_per_param.param_name
+                    for inst in insts_for_per_param.instructions:
+                        p_rank = inst.policy_rank
+                        r_rank = inst.rollout_rank
+                        tensor_split_strategys = inst.slice_strategy
                         if dest_name not in self.map_w_from_policy_to_rollout:
                             raise RuntimeError(
                                 f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
