@@ -623,14 +623,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 logger.error(
                     f"[Rollout] Failed in query commands from controller for replica {self.replica_name}\n: {str(e)}"
                 )
-            try:
-                for instruction in commands:
-                    command = Command.depack(instruction)
-                    logger.debug(f"[Rollout] Received command: {command.command_type}")
-                    self._command_queue.put(command)
-            except Exception as e:
-                logger.error(e)
-                raise e
+
+            for instruction in commands:
+                command = Command.depack(instruction)
+                logger.debug(f"[Rollout] Received command: {command.command_type}")
+                self._command_queue.put(command)
 
     def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
         """
@@ -704,10 +701,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
                 )
             except Exception as e:
-                import traceback
-
-                traceback.print_exc()
-                logger.error(f"[Rollout] Command execution failed: {str(e)}")
+                raise RuntimeError(f"[Rollout] Command execution failed: {str(e)}")
 
     def send_end_signal(self, url_suffix: str):
         """

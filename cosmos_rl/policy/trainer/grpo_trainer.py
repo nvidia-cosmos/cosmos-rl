@@ -874,22 +874,18 @@ class GRPOTrainer(Trainer):
                     logger.debug(
                         f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
                     )
-                try:
-                    for x in commands:
-                        command = Command.depack(x)
-                        if isinstance(command, BuildMeshCommand):
-                            """ directly push the buildmesh command to the nccl comm, will not block main thread """
-                            # broadcast the buildmesh command to all ranks
-                            cmd = self.kv_store.broadcast_command(command, src=0)
-                            self.is_master_replica = (
-                                cmd.replica_name_to_rank[self.replica_name] == 0
-                            )
-                            self.inter_policy_nccl.push_cmd(cmd)
-                            continue
-                        self.fetch_command_buffer.put_nowait(command)
-                except Exception as e:
-                    logger.error(e)
-                    raise e
+                for x in commands:
+                    command = Command.depack(x)
+                    if isinstance(command, BuildMeshCommand):
+                        """ directly push the buildmesh command to the nccl comm, will not block main thread """
+                        # broadcast the buildmesh command to all ranks
+                        cmd = self.kv_store.broadcast_command(command, src=0)
+                        self.is_master_replica = (
+                            cmd.replica_name_to_rank[self.replica_name] == 0
+                        )
+                        self.inter_policy_nccl.push_cmd(cmd)
+                        continue
+                    self.fetch_command_buffer.put_nowait(command)
 
             else:
                 try:
@@ -903,8 +899,7 @@ class GRPOTrainer(Trainer):
                         )
                         self.inter_policy_nccl.push_cmd(bmcmd)
                 except Exception as e:
-                    logger.error(f"Failed to broadcast on slave workers: {e}")
-                    raise e
+                    raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
 
     def execute_command(self, command: Command):
         logger.debug(f"[Policy] Process command {command._serialize()}")
@@ -999,10 +994,9 @@ class GRPOTrainer(Trainer):
                 try:
                     rollout = self.data_queue.get(block=True, timeout=None)
                 except Empty:
-                    logger.error(
+                    raise Empty(
                         "[Policy] Rollouts queue is empty, please check the dispatcher."
                     )
-                    raise Empty
                 for i in range(self.world_size):
                     if self.parallel_dims.get_rank_in_dim("dp", i) == dp_id:
                         scattered_rollouts[i].append(rollout)
