@@ -29,6 +29,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from torch.nn.parameter import Parameter
 from math import gcd
 from functools import reduce, partial
+import asyncio
+from cosmos_rl.utils import util
 
 
 class DimSliceInfo:
@@ -979,46 +981,60 @@ class ParallelizedShardMapper:
         self.recv_insts_for_rollout: Optional[
             List[List[List[List[Dict[str, Any]]]]]
         ] = None
+        self.scheme_generation_done = asyncio.Event()
+        self.scheme_generation_done.clear()
 
-    def post_set_shard_infos(self):
+    async def post_set_shard_infos(self):
         """
         Post-process the shard infos after they are set.
         This method generates the send and receive instructions for policy and rollout based on the shard information provided.
         It initializes the send and receive instruction lists for policy and rollout, respectively.
         """
-        self.send_insts_for_policy = []
-        self.recv_insts_for_rollout = []
         if (
             self.policy_all_rank_shard_infos is not None
             and self.rollout_all_rank_shard_infos is not None
+            and self.send_insts_for_policy is None
+            and self.recv_insts_for_rollout is None
         ):
-            self.sort_param_with_groups()
-            self.policy_shard_dicts = [
-                {
-                    r["name"]: r
-                    for r_info_group in r_infos_per_rank
-                    for r in r_info_group
-                }
-                for r_infos_per_rank in self.policy_all_rank_shard_infos
-            ]
-            self.rollout_shard_dicts = [
-                {
-                    r["name"]: r
-                    for r_info_group in r_infos_per_rank
-                    for r in r_info_group
-                }
-                for r_infos_per_rank in self.rollout_all_rank_shard_infos
-            ]
-            for p_rank in range(len(self.policy_all_rank_shard_infos)):
-                self.send_insts_for_policy.append(
-                    self.generate_parallelized_shard_send_insts_for_policy(p_rank)
+            for i in range(10000):
+                print(
+                    f"[DEBUG]Generating send and receive instructions for policy and rollout for the {i}th time"
                 )
-            for r_rank in range(len(self.rollout_all_rank_shard_infos)):
-                self.recv_insts_for_rollout.append(
-                    self.generate_parallelized_shard_recv_insts_for_rollout(r_rank)
-                )
+                self.send_insts_for_policy = []
+                self.recv_insts_for_rollout = []
 
-    def set_shard_infos_of_policy(
+                await self.sort_param_with_groups()
+                self.policy_shard_dicts = [
+                    {
+                        r["name"]: r
+                        for r_info_group in r_infos_per_rank
+                        for r in r_info_group
+                    }
+                    for r_infos_per_rank in self.policy_all_rank_shard_infos
+                ]
+                self.rollout_shard_dicts = [
+                    {
+                        r["name"]: r
+                        for r_info_group in r_infos_per_rank
+                        for r in r_info_group
+                    }
+                    for r_infos_per_rank in self.rollout_all_rank_shard_infos
+                ]
+                for p_rank in range(len(self.policy_all_rank_shard_infos)):
+                    self.send_insts_for_policy.append(
+                        await self.generate_parallelized_shard_send_insts_for_policy(
+                            p_rank
+                        )
+                    )
+                for r_rank in range(len(self.rollout_all_rank_shard_infos)):
+                    self.recv_insts_for_rollout.append(
+                        await self.generate_parallelized_shard_recv_insts_for_rollout(
+                            r_rank
+                        )
+                    )
+            self.scheme_generation_done.set()
+
+    async def set_shard_infos_of_policy(
         self,
         policy_all_rank_shard_infos: List[List[List[Dict[str, Any]]]],
     ):
@@ -1027,9 +1043,9 @@ class ParallelizedShardMapper:
         :param policy_all_rank_shard_infos: A list of dictionaries containing shard info for each rank. For each rank, it contains a list of parameter groups, and each group contains a list of dictionaries with shard info. Each parameter group may contain multiple parameters with some connections such as from the same original param.
         """
         self.policy_all_rank_shard_infos = policy_all_rank_shard_infos
-        self.post_set_shard_infos()
+        util.create_async_task(self.post_set_shard_infos())
 
-    def set_shard_infos_of_rollout(
+    async def set_shard_infos_of_rollout(
         self,
         rollout_all_rank_shard_infos: List[List[List[Dict[str, Any]]]],
     ):
@@ -1038,9 +1054,9 @@ class ParallelizedShardMapper:
         :param policy_all_rank_shard_infos: A list of dictionaries containing shard info for each rank. For each rank, it contains a list of parameter groups, and each group contains a list of dictionaries with shard info. Each parameter group may contain multiple parameters with some connections such as from the same original param.
         """
         self.rollout_all_rank_shard_infos = rollout_all_rank_shard_infos
-        self.post_set_shard_infos()
+        util.create_async_task(self.post_set_shard_infos())
 
-    def sort_param_with_groups(
+    async def sort_param_with_groups(
         self,
     ):
         """
@@ -1057,6 +1073,7 @@ class ParallelizedShardMapper:
             [self.policy_all_rank_shard_infos, self.rollout_all_rank_shard_infos],
             [policy_params, rollout_params],
         ):
+            await asyncio.sleep(0.0001)
             for p_rank in all_rank_shard_infos:
                 for p_group in p_rank:
                     group_key = ";".join(sorted([p["name"] for p in p_group]))
@@ -1084,6 +1101,7 @@ class ParallelizedShardMapper:
         ]:
             for p_rank in all_rank_shard_infos:
                 for p_group in p_rank:
+                    await asyncio.sleep(0.0001)
                     group_key = ";".join(sorted([p["name"] for p in p_group]))
                     if group_key in group_key_map and group_key not in groups_map:
                         assert (
@@ -1104,7 +1122,7 @@ class ParallelizedShardMapper:
             == len(rollout_params)
         ), "The total number of parameters in sorted_param_groups does not match the number of parameters in policy and rollout shard infos."
 
-    def generate_parallelized_shard_send_insts_for_policy(
+    async def generate_parallelized_shard_send_insts_for_policy(
         self, p_rank: int
     ) -> List[List[Dict[str, Any]]]:
         """
@@ -1121,6 +1139,7 @@ class ParallelizedShardMapper:
         for info_group in self.sorted_param_groups:
             insts_for_group = []
             for info in info_group:
+                await asyncio.sleep(0.0001)
                 dest_name = info["name"]
                 if dest_name not in self.policy_shard_dicts[p_rank]:
                     continue
@@ -1223,7 +1242,7 @@ class ParallelizedShardMapper:
                     ranks.append(p_rank)
         return ranks
 
-    def generate_parallelized_shard_recv_insts_for_rollout(
+    async def generate_parallelized_shard_recv_insts_for_rollout(
         self, r_rank: int
     ) -> List[List[Dict[str, Any]]]:
         """
@@ -1241,6 +1260,7 @@ class ParallelizedShardMapper:
         for info_group in self.sorted_param_groups:
             insts_for_group = []
             for info in info_group:
+                await asyncio.sleep(0.0001)
                 dest_name = info["name"]
                 if dest_name not in self.rollout_shard_dicts[r_rank]:
                     continue

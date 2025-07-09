@@ -62,6 +62,7 @@ from cosmos_rl.utils.pynccl import (
     nccl_broadcast,
 )
 import cosmos_rl.utils.distributed as dist_util
+import asyncio
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -220,7 +221,7 @@ class TestRollout:
         pass
 
 
-def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
+async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
     policy_parallelism_config = ParallelismConfig(
         dp_shard_size=2, cp_size=1, tp_size=2, pp_size=1
     )
@@ -291,15 +292,19 @@ def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
         for r_rank in range(r_world_size)
     ]
     generator = ParallelizedShardMapper()
-    generator.set_shard_infos_of_policy(local_shards_p)
-    generator.set_shard_infos_of_rollout(local_shards_r)
+    await generator.set_shard_infos_of_policy(local_shards_p)
+    await generator.set_shard_infos_of_rollout(local_shards_r)
     if is_send:
-        return generator.generate_parallelized_shard_send_insts_for_policy(global_rank)
+        return await generator.generate_parallelized_shard_send_insts_for_policy(
+            global_rank
+        )
     else:
-        return generator.generate_parallelized_shard_recv_insts_for_rollout(global_rank)
+        return await generator.generate_parallelized_shard_recv_insts_for_rollout(
+            global_rank
+        )
 
 
-def run_policy_send_to_rollout(shm_name, shm_size, rank):
+async def run_policy_send_to_rollout(shm_name, shm_size, rank):
     """Run as a test policy process to send to rollout process"""
     # Set up NCCL communicator
     policy_name = "policy"
@@ -336,7 +341,7 @@ def run_policy_send_to_rollout(shm_name, shm_size, rank):
             POLICY_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
         )
-        policy.policy_to_rollout_insts = generate_send_recv_insts(
+        policy.policy_to_rollout_insts = await generate_send_recv_insts(
             policy.model, True, rank
         )
         policy.execute_policy_to_rollout_unicast = types.MethodType(
@@ -350,7 +355,7 @@ def run_policy_send_to_rollout(shm_name, shm_size, rank):
         shm.close()
 
 
-def run_rollout_recv_from_policy(shm_name, shm_size, rank):
+async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
     """Run as a rollout process to receive from policy process"""
     # Set up NCCL communicator
     policy_name = "policy"
@@ -379,7 +384,7 @@ def run_rollout_recv_from_policy(shm_name, shm_size, rank):
             ROLLOUT_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
         )
-        rollout.policy_to_rollout_recv_insts = generate_send_recv_insts(
+        rollout.policy_to_rollout_recv_insts = await generate_send_recv_insts(
             rollout.model, False, rank
         )
         rollout.policy_to_rollout_unicast = types.MethodType(
@@ -783,7 +788,7 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
         )
 
 
-def main():
+async def main():
     # Get shared memory name and size from command line arguments
     shm_name = sys.argv[1]
     shm_size = int(sys.argv[2])
@@ -817,12 +822,12 @@ def main():
         assert (
             world_size == POLICY_WORLD_SIZE
         ), "World size must match POLICY_WORLD_SIZE for policy process"
-        run_policy_send_to_rollout(shm_name, shm_size, rank)
+        await run_policy_send_to_rollout(shm_name, shm_size, rank)
     elif mode == "rollout_recv_from_policy":
         assert (
             world_size == ROLLOUT_WORLD_SIZE
         ), "World size must match ROLLOUT_WORLD_SIZE for rollout process"
-        run_rollout_recv_from_policy(shm_name, shm_size, rank)
+        await run_rollout_recv_from_policy(shm_name, shm_size, rank)
     elif mode == "policy_send_to_policy":
         run_policy_unicast_to_policy(shm_name, shm_size, rank, True)
     elif mode == "policy_recv_from_policy":
@@ -852,4 +857,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
