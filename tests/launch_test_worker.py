@@ -911,6 +911,11 @@ async def parallel_map_check():
 
     await generator.scheme_generation_done.wait()
     global_rank = 5
+    await generator.sort_param_with_groups()
+    generator.rollout_from_policy_insts_meta = [
+        {} for _ in range(len(generator.rollout_all_rank_shard_infos))
+    ]
+
     insts = await generator.generate_parallelized_shard_send_insts_for_policy(
         global_rank
     )
@@ -919,10 +924,11 @@ async def parallel_map_check():
 
     layers.sort(key=lambda x: x[0])
     for inst_group in insts:
-        for inst in inst_group:
-            dest_name = inst["name"]
-            for i in inst["insts"]:
-                p_rank, r_rank, tensor_split_strategys = i
+        for inst in inst_group.param_instructions:
+            dest_name = inst.param_name
+            for i in inst.instructions:
+                p_rank = i.policy_rank
+                r_rank = i.rollout_rank
                 assert p_rank == global_rank
                 while layers[layer_idx][0] != dest_name:
                     r_rank_max = 0
@@ -940,10 +946,11 @@ async def parallel_map_check():
     p_rank_max = 0
     layer_idx = 0
     for inst_group in insts:
-        for inst in inst_group:
-            dest_name = inst["name"]
-            for i in inst["insts"]:
-                p_rank, r_rank, tensor_split_strategys = i
+        for inst in inst_group.param_instructions:
+            dest_name = inst.param_name
+            for i in inst.instructions:
+                p_rank = i.policy_rank
+                r_rank = i.rollout_rank
                 assert r_rank == global_rank
                 while layers[layer_idx][0] != dest_name:
                     p_rank_max = 0
