@@ -46,6 +46,8 @@ def routine(N: int, device: torch.device, rank: int, world_size: int):
                         print(f"[RANK {rank}] arrived here")
                     except Exception as e:
                         print(f"[RANK {rank}] error in nccl_allreduce: {e}")
+                else:
+                    nccl_abort(comm)
         except Exception as e:
             print(f"[RANK {rank}] error in nccl_timeout_watchdog: {e}")
 
