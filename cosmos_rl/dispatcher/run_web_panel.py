@@ -349,7 +349,7 @@ async def validation_report(request: ValidationReportRequest):
     ]
 
     rollouts_list: List[List[Rollout]] = [
-        rollout_group.compute_rollouts(controller.rl_algo)
+        rollout_group.compute_rollouts(controller.val_rl_algo)
         for rollout_group in rollout_groups
     ]
     controller.policy_status_manager.validation_report_validation_results(
@@ -533,6 +533,7 @@ def main(
     data_packer: Optional[DataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
+    val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,
     **kwargs,
 ):
@@ -624,6 +625,7 @@ def main(
             reward_fns=reward_fns,
             data_packer=data_packer,
             val_dataset=val_dataset,
+            val_reward_fns=val_reward_fns,
             val_data_packer=val_data_packer,
         )
         logger.info(f"Successfully loaded configuration from {args.config_file}")

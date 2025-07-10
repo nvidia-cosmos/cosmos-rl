@@ -11,6 +11,7 @@ def main(
     data_packer: Optional[DataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
+    val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,
     *args,
     **kwargs,
@@ -28,6 +29,7 @@ def main(
             data_packer=data_packer,
             reward_fns=reward_fns,
             val_dataset=val_dataset,
+            val_reward_fns=val_reward_fns,
             val_data_packer=val_data_packer,
         )
     elif role == "Policy":
