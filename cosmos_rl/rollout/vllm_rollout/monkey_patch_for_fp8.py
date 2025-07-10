@@ -1,5 +1,4 @@
 import torch
-import types
 
 from torch.nn import Parameter
 
@@ -18,14 +17,6 @@ This file is used to patch the vllm model to use rowwise fp8 linear.
 """
 
 
-def is_cuda_tensor(tensor: torch.Tensor):
-    return tensor.device.type == "cuda"
-
-
-def add_method(obj, method, method_name):
-    setattr(obj, method_name, types.MethodType(method, obj))
-
-
 def apply_patch_to_dispatch():
     # dispatch fp8 linear func to torch._scaled_mm per token/rowwise
     def dispatch_fp8_linear_kernel_to_torch_scaled_mm(*args, **kwargs):
@@ -35,13 +26,6 @@ def apply_patch_to_dispatch():
 
 
 apply_patch_to_dispatch()
-
-
-def set_process_weights_after_loading_empty():
-    def empty_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
-
-    Fp8LinearMethod.process_weights_after_loading = empty_process_weights_after_loading
 
 
 def simplify_process_weights_after_loading():
@@ -76,7 +60,7 @@ def apply_fp8_linear_patch(model: torch.nn.Module):
             # that use rowwise fp8
             # WARNING: in `Fp8LinearOp` `__init__`, vllm will read the `vllm_config`
             # But at this time, `vllm_config` is empty. So there will have a warning that complains
-            # it is not set. This only affects the padding, seems no big problem.
+            # it is not set. This only affects the padding, seems not a big problem.
             quant_method.fp8_linear = Fp8LinearOp(
                 # disable cutlass fp8
                 cutlass_fp8_supported=False,
