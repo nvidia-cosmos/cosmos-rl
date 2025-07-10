@@ -149,7 +149,7 @@ def main():
         help="Path to the controller config file",
     )
     parser.add_argument(
-        "--repo-root-path", type=str, required=True, help="Path to the repository root"
+        "--repo-root-path", type=str, default=None, help="Path to the repository root"
     )
     parser.add_argument(
         "--output-root-path", type=str, required=True, help="Path to the output root"
@@ -220,7 +220,6 @@ def main():
     # Template for the slurm script
     template_vars = {
         "TOTAL_NODES": f"{n_policy_nodes + n_rollout_nodes}",
-        "REPO_ROOT_PATH": args.repo_root_path,
         "OUTPUT_ROOT_PATH": args.output_root_path,
         "COSMOS_CONTAINER": args.cosmos_container,
         "SLURM_PARTITION": args.slurm_partition,
@@ -239,6 +238,9 @@ def main():
         "NUM_ROLLOUT_NODES": f"{n_rollout_nodes}",
         "TOTAL_NODES": f"{n_policy_nodes + n_rollout_nodes}",
     }
+
+    if args.repo_root_path is not None:
+        env_vars["REPO_ROOT_PATH"] = args.repo_root_path
 
     # Read the template relative to the current file
     with open(
