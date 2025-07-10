@@ -59,11 +59,6 @@ def parallelize(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if config.train.compile:
-        # FIXME: (lms) For ulysses, an error will be raised by torch.compile:
-        # ... torch._dynamo.exc.Unsupported: Graph break due to unsupported builtin None.pybind11_object.__new__.
-        # This is caused by the custom SeqAllToAll in ulysses.py
-        # Related torch issue: https://github.com/pytorch/pytorch/issues/149586
-        # tmp workaround is set fullgraph to False. Figure it out later.
         apply_compile(model, not parallel_dims.cp_enabled)
 
     if (
