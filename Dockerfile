@@ -5,13 +5,13 @@ ARG ENABLE_AWS_EFA=true
 ARG GDRCOPY_VERSION=v2.4.4
 ARG EFA_INSTALLER_VERSION=1.42.0
 ARG AWS_OFI_NCCL_VERSION=v1.16.0
-ARG NCCL_VERSION=v2.27.5-1
-ARG NCCL_TESTS_VERSION=v2.16.4
+# NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
+ARG NCCL_VERSION=2.26.2-1+cuda12.8
 
 ENV TZ=Etc/UTC
 
 RUN apt-get update -y && apt-get upgrade -y
-RUN apt-get remove -y --allow-change-held-packages \
+RUN apt-get remove -y --purge --allow-change-held-packages \
     ibverbs-utils \
     libibverbs-dev \
     libibverbs1 \
@@ -54,7 +54,7 @@ RUN sed -i 's/[ #]\(.*StrictHostKeyChecking \).*/ \1no/g' /etc/ssh/ssh_config &&
     echo "    UserKnownHostsFile /dev/null" >> /etc/ssh/ssh_config && \
     sed -i 's/#\(StrictModes \).*/\1no/g' /etc/ssh/sshd_config
 
-ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/nccl/build/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
 ENV PATH /opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
 
 
@@ -98,11 +98,12 @@ RUN ! ${ENABLE_AWS_EFA} || ( \
     )
 
 ###################################################
-## Install NCCL
-RUN git clone -b ${NCCL_VERSION} https://github.com/NVIDIA/nccl.git  /opt/nccl \
-    && cd /opt/nccl \
-    && make -j $(nproc) src.build CUDA_HOME=/usr/local/cuda \
-    NVCC_GENCODE="-gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_86,code=sm_86 -gencode=arch=compute_89,code=sm_89 -gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100"
+## Install NCCL with specific version
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb \
+    && rm cuda-keyring_1.1-1_all.deb \
+    && apt-get update -y \
+    && apt-get install -y libnccl2=${NCCL_VERSION}
 
 ###################################################
 ## Install AWS-OFI-NCCL plugin
