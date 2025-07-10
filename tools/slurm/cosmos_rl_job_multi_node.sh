@@ -21,7 +21,15 @@
 echo "JOBID $SLURM_JOB_ID"
 echo "Using ${NUM_POLICY_NODES} policy nodes and ${NUM_ROLLOUT_NODES} rollout nodes, TOTAL_NODES: ${TOTAL_NODES}"
 
-MOUNTS="/lustre:/lustre/,[[REPO_ROOT_PATH]]:/opt/cosmos-rl,${HOME}/.cache/huggingface:/root/.cache/huggingface,$(dirname [[CONFIG_PATH]]):/opt/tmp_config"
+MOUNTS="/lustre:/lustre/,${HOME}/.cache/huggingface:/root/.cache/huggingface,$(dirname [[CONFIG_PATH]]):/opt/tmp_config"
+
+
+export COSMOS_RL_ROOT="/workspace/cosmos_rl"
+if [[ -n "${REPO_ROOT_PATH}" ]]; then
+    MOUNTS="${MOUNTS},${REPO_ROOT_PATH}:/opt/cosmos-rl"
+    export COSMOS_RL_ROOT="/opt/cosmos-rl"
+fi
+
 
 export OUTDIR="[[OUTPUT_ROOT_PATH]]/${SLURM_JOB_NAME}"
 mkdir -p ${OUTDIR}
@@ -57,7 +65,7 @@ srun \
     '
     # Start the controller
     export COSMOS_LOG_LEVEL=DEBUG
-    cd /opt/cosmos-rl
+    cd ${COSMOS_RL_ROOT}
     ./cosmos_rl/launcher/launch_controller.sh --port ${CONTROLLER_PORT} --config /opt/tmp_config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]]
     ' \
     &
@@ -77,7 +85,7 @@ srun \
     -e ${OUTDIR}/%j/policy/%t.err \
     bash -c \
     '
-    cd /opt/cosmos-rl
+    cd ${COSMOS_RL_ROOT}
     python ./tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]]
     ' \
     &
@@ -96,7 +104,7 @@ srun \
     -e ${OUTDIR}/%j/rollout/%t.err \
     bash -c \
     '
-    cd /opt/cosmos-rl
+    cd ${COSMOS_RL_ROOT}
     python ./tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]]
     ' \
     &
