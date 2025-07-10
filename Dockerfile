@@ -11,13 +11,19 @@ ARG NCCL_VERSION=2.26.2-1+cuda12.8
 ENV TZ=Etc/UTC
 
 RUN apt-get update -y && apt-get upgrade -y
-RUN apt-get remove -y --purge --allow-change-held-packages \
-    ibverbs-utils \
-    libibverbs-dev \
-    libibverbs1 \
-    libmlx5-1 \
-    libnccl2 \
-    libnccl-dev
+RUN if [ "${ENABLE_AWS_EFA}" == "true" ]; then \
+        apt-get remove -y --purge --allow-change-held-packages \
+        ibverbs-utils \
+        libibverbs-dev \
+        libibverbs1 \
+        libmlx5-1 \
+        libnccl2 \
+        libnccl-dev; \
+    else \
+        apt-get remove -y --purge --allow-change-held-packages \
+        libnccl2 \
+        libnccl-dev; \
+    fi
 
 RUN rm -rf /opt/hpcx \
     && rm -rf /usr/local/mpi \
