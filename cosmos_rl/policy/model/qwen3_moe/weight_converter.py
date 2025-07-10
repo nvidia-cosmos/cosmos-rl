@@ -165,7 +165,7 @@ def convert_weight_from_hf(
 @register_parallelism_strategy("qwen3_moe")
 def map_weight_parallel_dims(
     n_dim: int, dest_name: str, parallel_dims: ParallelDims, model_config: Any
-) -> Tuple[Dict[str, int], list, Dict[int, list]]:
+) -> Tuple[Dict[str, int], Dict[int, list], int]:
     tp_ep_size = parallel_dims.tp
     dp_shard_size = parallel_dims.dp_shard * parallel_dims.cp
 

@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 from typing import List, Dict, Any, TypeVar, Generic, Callable
 import functools
+from copy import deepcopy
+import itertools
 import copy
 import torch
 import torch.nn as nn
@@ -75,29 +78,50 @@ class OptimizersContainer(Optimizer, Generic[T]):
         optimizer_kwargs: List[Dict[str, Any]],
     ) -> None:
         all_params = []
-        self.optimizers: List[T] = []
         self.model_parts = model_parts
-        for model, optimizer_kwargs_i in zip(self.model_parts, optimizer_kwargs):
+        self.optimizers = [[] for _ in self.model_parts]
+        for model_id, (model, optimizer_kwargs_i) in enumerate(
+            zip(self.model_parts, optimizer_kwargs)
+        ):
             if model is None:
                 continue
-            params = [p for p in model.parameters() if p.requires_grad]
-            self.optimizers.append(optimizer_cls(params, **optimizer_kwargs_i))
-            all_params.extend(params)
+            optimizer_kwargs_copy = deepcopy(optimizer_kwargs_i)
+
+            if optimizer_kwargs_copy["fused"]:
+                # Group the parameters by device mesh to do optimizer fusion.
+                parameters_by_mesh = collections.defaultdict(list)
+                for p in model.parameters():
+                    if p.requires_grad:
+                        device_mesh = (
+                            p.device_mesh if hasattr(p, "device_mesh") else "default"
+                        )
+                        parameters_by_mesh[device_mesh].append(p)
+                        all_params.append(p)
+                for params in parameters_by_mesh.values():
+                    optimizer = optimizer_cls(params, **optimizer_kwargs_copy)
+                    self.optimizers[model_id].append(optimizer)
+            else:
+                for p in model.parameters():
+                    if p.requires_grad:
+                        optimizer = optimizer_cls([p], **optimizer_kwargs_copy)
+                        self.optimizers[model_id].append(optimizer)
+                        all_params.append(p)
+
         self._post_init(all_params, optimizer_kwargs)
 
     def __iter__(self) -> Optimizer:
-        return iter(self.optimizers)
+        return iter(itertools.chain(*self.optimizers))
 
     def __len__(self) -> int:
         return len(self.optimizers)
 
     def step(self, *args, **kwargs) -> None:
-        for optimizer in self.optimizers:
+        for optimizer in itertools.chain(*self.optimizers):
             # Check those grad is None:
             optimizer.step(*args, **kwargs)
 
     def zero_grad(self, *args, **kwargs) -> None:
-        for optimizer in self.optimizers:
+        for optimizer in itertools.chain(*self.optimizers):
             optimizer.zero_grad(*args, **kwargs)
 
     def state_dict(self) -> Dict[str, Any]:

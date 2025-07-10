@@ -109,9 +109,15 @@ if [ -n "$LOG_RANKS" ]; then
 fi
 
 if [ -n "$SCRIPT" ]; then
-  TORCHRUN_CMD+=(
-    "$SCRIPT"
-  )
+  if [[ "$SCRIPT" != *.py ]]; then
+    TORCHRUN_CMD+=(
+      -m "$SCRIPT"
+    )
+  else
+    TORCHRUN_CMD+=(
+      "$SCRIPT"
+    )
+  fi
 else
   TORCHRUN_CMD+=(
     -m "$DEFAULT_MODULE"

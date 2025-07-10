@@ -423,6 +423,18 @@ class WeightMapper(ABC):
 
         return WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY[model_type]
 
+    def policy_pre_P2R_gather_required_for_sync(self, name: str) -> bool:
+        """
+        For P->R weight sync, some weights need to be pre-collected before first `nccl_send/recv` instruction.
+        To not be messed up with the following `nccl_send/recv` instructions,
+        pre-collect those weights before first `nccl_send/recv` instruction.
+        Args:
+            name (str): The name of the tensor.
+        Returns:
+            bool: True if the tensor sync precollect is required, False otherwise.
+        """
+        return False
+
     @cached_property
     def packed_modules_mapping(self):
         """

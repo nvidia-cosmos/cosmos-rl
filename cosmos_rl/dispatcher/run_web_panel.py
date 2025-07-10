@@ -219,7 +219,7 @@ async def heartbeat(request: HeartbeatRequest):
 
 @app.post(COSMOS_API_POLICY_SHARD_INFOS_SUFFIX)
 async def policy_shard_infos(request: SetShardInfosRequest):
-    controller.policy_to_rollout_shard_mapper.set_shard_infos_of_policy(
+    await controller.policy_to_rollout_shard_mapper.set_shard_infos_of_policy(
         request.shard_infos
     )
     return {"message": "Policy shard infos set"}
@@ -227,7 +227,7 @@ async def policy_shard_infos(request: SetShardInfosRequest):
 
 @app.post(COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX)
 async def rollout_shard_infos(request: SetShardInfosRequest):
-    controller.policy_to_rollout_shard_mapper.set_shard_infos_of_rollout(
+    await controller.policy_to_rollout_shard_mapper.set_shard_infos_of_rollout(
         request.shard_infos
     )
     return {"message": "Rollout shard infos set"}
@@ -239,6 +239,7 @@ async def policy_shard_send_insts(request: GetShardSendRecvInstsRequest):
     Get the send instructions for policy.
     :return: A list of send instructions for policy.
     """
+    await controller.policy_to_rollout_shard_mapper.scheme_generation_done.wait()
     send_insts = controller.policy_to_rollout_shard_mapper.get_send_insts_for_policy(
         request.rank
     )
@@ -256,6 +257,7 @@ async def rollout_shard_recv_insts(request: GetShardSendRecvInstsRequest):
     Get the receive instructions for rollout.
     :return: A list of receive instructions for rollout.
     """
+    await controller.policy_to_rollout_shard_mapper.scheme_generation_done.wait()
     recv_insts = controller.policy_to_rollout_shard_mapper.get_recv_insts_for_rollout(
         request.rank
     )
