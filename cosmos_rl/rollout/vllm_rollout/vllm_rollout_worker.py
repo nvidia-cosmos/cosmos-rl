@@ -590,8 +590,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     if is_end:
                         break
 
-                should_report = self.parallel_dims.tp_coord[0] == 0 and (
-                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+                should_report = (
+                    self.parallel_dims.tp_coord[0] == 0
+                    and (
+                        self.parallel_dims.pp_coord[0]
+                        == self.parallel_dims.pp_coord[1] - 1
+                    )
+                    and len(validation_results) > 0
                 )
 
                 if should_report:
@@ -785,11 +790,16 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 )
                 logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
-                should_report = self.parallel_dims.tp_coord[0] == 0 and (
-                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+                should_report = (
+                    self.parallel_dims.tp_coord[0] == 0
+                    and (
+                        self.parallel_dims.pp_coord[0]
+                        == self.parallel_dims.pp_coord[1] - 1
+                    )
+                    and len(completions) > 0
                 )
 
-                if should_report and completions is not None:
+                if should_report:
                     url_suffix = COSMOS_API_ROLLOUT_SUFFIX
                     # only the first tp rank in the rollout replica will post the completion to the controller.
                     prompt_idxs = [prompt[0] for prompt in prompts]
