@@ -21,7 +21,7 @@ from queue import Queue
 import atexit
 import types
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
-from typing import List, Tuple, Optional, Callable, Any, Dict
+from typing import List, Tuple, Optional, Callable, Any
 from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase
@@ -49,6 +49,7 @@ from cosmos_rl.utils.pynccl import (
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
+    WeightSyncInstructionsGroup,
 )
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils.network_util import make_request_with_retry
@@ -69,6 +70,7 @@ from cosmos_rl.utils.fp8.fp8_util import (
 )
 
 from vllm import SamplingParams
+import time
 
 
 """
@@ -405,13 +407,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def recv_weight_shard(
         self,
         global_rank_of_rollout: int,
-        insts_group: List[Dict[str, Any]],
-        communicator_index: Dict[int, int],
+        insts_group: WeightSyncInstructionsGroup,
+        communicator_index: int,
         do_weight_sync_check: bool = False,
     ):
-        inst_group_weight_name = insts_group[0][
-            "name"
-        ]  # take a name from the inst group to determine the full weight name
+        inst_group_weight_name = (
+            insts_group.param_instructions[0].param_name
+        )  # take a name from the inst group to determine the full weight name
         # the full weight name that this inst group handles.
         inst_group_full_weight_name = self.weight_mapper.get_unsplited_weight_name(
             inst_group_weight_name
@@ -426,11 +428,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         total_bytes_received = 0
 
-        for insts_for_per_param in insts_group:
-            # insts_for_per_param: Dict[str, Any] -> inst list for a single tensor
-            insts = insts_for_per_param["insts"]
+        for insts_for_per_param in insts_group.param_instructions:
+            # insts_for_per_param: WeightSyncInstructionsPerParam -> inst collection for a single tensor
+            insts = insts_for_per_param.instructions
             # insts: List[Tuple[int, int, Dict[int, Any]]]
-            inst_dest_name = insts_for_per_param["name"]
+            inst_dest_name = insts_for_per_param.param_name
             target_tensor = self.vllm_weight_inplace_view_map[inst_dest_name]
 
             if check_inside_group:
@@ -439,7 +441,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 target_tensor.zero_()
 
             for inst in insts:
-                p_rank, r_rank, tensor_split_strategys = inst
+                p_rank = inst.policy_rank
+                r_rank = inst.rollout_rank
+                tensor_split_strategys = inst.slice_strategy
                 assert r_rank == global_rank_of_rollout
                 vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
                 recv_tensor = None
@@ -573,7 +577,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
                 insts_meta = insts_meta.json()
-                self.policy_to_rollout_recv_insts = insts_meta["insts"]
+                self.policy_to_rollout_recv_insts = [
+                    WeightSyncInstructionsGroup.from_dict(inst)
+                    for inst in insts_meta["insts"]
+                ]
             except Exception as e:
                 raise RuntimeError(
                     f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
@@ -581,10 +588,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         with torch.cuda.stream(self.inference_stream):
             # recv the weight from policy
-            # st = time.time()
+            st = time.time()
             total_bytes_received = 0
             for insts_group in self.policy_to_rollout_recv_insts:
-                # insts_group: List[Dict[str, Any]] -> inst list for a full weight tensor
+                # insts_group: WeightSyncInstructionsGroup -> inst collection for a full weight tensor
                 # handle inst group
                 total_bytes_received += self.recv_weight_shard(
                     self.global_rank,
@@ -592,6 +599,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     communicator_index,
                     command.do_weight_sync_check,
                 )
+            time_eclapsed = time.time() - st
+            logger.debug(
+                f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
+            )
             self.state.set_weight_synced()
 
     @RolloutWorkerBase.register_rollout_command_handler(
@@ -725,14 +736,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 logger.error(
                     f"[Rollout] Failed in query commands from controller for replica {self.replica_name}\n: {str(e)}"
                 )
-            try:
-                for instruction in commands:
-                    command = Command.depack(instruction)
-                    logger.debug(f"[Rollout] Received command: {command.command_type}")
-                    self._command_queue.put(command)
-            except Exception as e:
-                logger.error(e)
-                raise e
+
+            for instruction in commands:
+                command = Command.depack(instruction)
+                logger.debug(f"[Rollout] Received command: {command.command_type}")
+                self._command_queue.put(command)
 
     def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
         """
@@ -806,10 +814,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
                 )
             except Exception as e:
-                import traceback
-
-                traceback.print_exc()
-                logger.error(f"[Rollout] Command execution failed: {str(e)}")
+                raise RuntimeError(f"[Rollout] Command execution failed: {str(e)}")
 
     def send_end_signal(self, url_suffix: str):
         """

@@ -62,6 +62,7 @@ from cosmos_rl.utils.pynccl import (
     nccl_broadcast,
 )
 import cosmos_rl.utils.distributed as dist_util
+import asyncio
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -168,6 +169,9 @@ class TestPolicy:
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
 
+    def pre_P2R_collect_parameters(self):
+        return {}
+
 
 class TestRollout:
     def __init__(self, name, rollout_world_size, policies_comm):
@@ -232,7 +236,7 @@ class TestRollout:
         pass
 
 
-def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
+async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
     policy_parallelism_config = ParallelismConfig(
         dp_shard_size=2, cp_size=1, tp_size=2, pp_size=1
     )
@@ -303,15 +307,20 @@ def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
         for r_rank in range(r_world_size)
     ]
     generator = ParallelizedShardMapper()
-    generator.set_shard_infos_of_policy(local_shards_p)
-    generator.set_shard_infos_of_rollout(local_shards_r)
+    await generator.set_shard_infos_of_policy(local_shards_p)
+    await generator.set_shard_infos_of_rollout(local_shards_r)
+    await generator.scheme_generation_done.wait()
     if is_send:
-        return generator.generate_parallelized_shard_send_insts_for_policy(global_rank)
+        return await generator.generate_parallelized_shard_send_insts_for_policy(
+            global_rank
+        )
     else:
-        return generator.generate_parallelized_shard_recv_insts_for_rollout(global_rank)
+        return await generator.generate_parallelized_shard_recv_insts_for_rollout(
+            global_rank
+        )
 
 
-def run_policy_send_to_rollout(shm_name, shm_size, rank):
+async def run_policy_send_to_rollout(shm_name, shm_size, rank):
     """Run as a test policy process to send to rollout process"""
     # Set up NCCL communicator
     policy_name = "policy"
@@ -348,7 +357,7 @@ def run_policy_send_to_rollout(shm_name, shm_size, rank):
             POLICY_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
         )
-        policy.policy_to_rollout_insts = generate_send_recv_insts(
+        policy.policy_to_rollout_insts = await generate_send_recv_insts(
             policy.model, True, rank
         )
         policy.execute_policy_to_rollout_unicast = types.MethodType(
@@ -362,7 +371,7 @@ def run_policy_send_to_rollout(shm_name, shm_size, rank):
         shm.close()
 
 
-def run_rollout_recv_from_policy(shm_name, shm_size, rank):
+async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
     """Run as a rollout process to receive from policy process"""
     # Set up NCCL communicator
     policy_name = "policy"
@@ -391,7 +400,7 @@ def run_rollout_recv_from_policy(shm_name, shm_size, rank):
             ROLLOUT_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
         )
-        rollout.policy_to_rollout_recv_insts = generate_send_recv_insts(
+        rollout.policy_to_rollout_recv_insts = await generate_send_recv_insts(
             rollout.model, False, rank
         )
         rollout.policy_to_rollout_unicast = types.MethodType(
@@ -796,7 +805,176 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
         )
 
 
-def main():
+class TestModelType:
+    num_hidden_layers = 12
+    num_attention_heads = 32
+    num_key_value_heads = 32
+    hidden_size = 1024
+    num_attention_heads = 32
+    model_type = "gpt"
+
+
+async def parallel_map_check():
+    # Create a mock ParallelismConfig object
+    policy_parallelism_config = ParallelismConfig(
+        dp_shard_size=-1, cp_size=1, tp_size=2, pp_size=1
+    )
+    rollout_parallelism_config = ParallelismConfig(
+        dp_shard_size=-1, cp_size=1, tp_size=4, pp_size=1
+    )
+    p_world_size = 8
+    r_world_size = 4
+
+    policy_parallel_dims = ParallelDims.from_config_for_analysis(
+        policy_parallelism_config, p_world_size
+    )
+    rollout_parallel_dims = ParallelDims.from_config_for_analysis(
+        rollout_parallelism_config, r_world_size
+    )
+
+    policy_weight_mapper = GPTWeightMapper(
+        hf_config=TestModelType  # Assuming a mock config for testing
+    )
+    rollout_weight_mapper = GPTWeightMapper(
+        hf_config=TestModelType  # Assuming a mock config for testing
+    )
+
+    def dummy(*args, **kwargs):
+        return None
+
+    ParallelTopoMapper.parallelism_info_for_dtensor_params = dummy
+    ParallelTopoMapper.parallelism_info_for_vllm_params = dummy
+
+    policy_mapper = ParallelTopoMapperGroup(
+        global_parallelism=policy_parallel_dims,
+        hf_config=TestModelType,
+        is_policy=True,
+        underlying_model=None,
+        weight_mapper=policy_weight_mapper,
+    )
+    rollout_mapper = ParallelTopoMapperGroup(
+        global_parallelism=rollout_parallel_dims,
+        hf_config=TestModelType,
+        is_policy=False,
+        underlying_model=None,
+        weight_mapper=rollout_weight_mapper,
+    )
+
+    assert len(policy_mapper.mapper_group) == 1
+    assert len(rollout_mapper.mapper_group) == 1
+
+    def name_to_hf(name: str) -> str:
+        return name
+
+    #  insert_to_parallelism_info(
+    # self,
+    # param_name: str,
+    # dims_map: Dict[str, int],
+    # name_to_hf: Callable,
+
+    layers = [
+        ("model.layers.9.input_layernorm.weight", {}),
+        ("model.layers.9.mlp.down_proj.weight", {"tp": 1}),
+        ("model.layers.9.mlp.gate_proj.weight", {"tp": 0}),
+        ("model.layers.9.mlp.up_proj.weight", {"tp": 0}),
+        ("model.layers.9.post_attention_layernorm.weight", {}),
+        ("model.layers.9.self_attn.k_proj.bias", {"tp": 0}),
+        ("model.layers.9.self_attn.k_proj.weight", {"tp": 0}),
+        ("model.layers.9.self_attn.o_proj.weight", {"tp": 0}),
+        ("model.layers.9.self_attn.q_proj.bias", {"tp": 0}),
+        ("model.layers.9.self_attn.q_proj.weight", {"tp": 0}),
+        ("model.layers.9.self_attn.v_proj.bias", {"tp": 0}),
+        ("model.layers.9.self_attn.v_proj.weight", {"tp": 0}),
+        ("lm_head.weight", {"tp": 0}),
+        ("model.norm.weight", {}),
+        ("model.embed_tokens.weight", {"tp": 0}),
+    ]
+    policy_mapper.mapper_group[0].parallelism_info_for_params = {}
+    for k, v in layers:
+        policy_mapper.mapper_group[0].insert_to_parallelism_info(
+            param_name=k,
+            dims_map=v | {"dp_shard_cp": 0},
+            name_to_hf=name_to_hf,
+        )
+
+    rollout_mapper.mapper_group[0].parallelism_info_for_params = {}
+    for k, v in layers:
+        rollout_mapper.mapper_group[0].insert_to_parallelism_info(
+            param_name=k,
+            dims_map=v | {"dp_shard_cp": 0},
+            name_to_hf=name_to_hf,
+        )
+
+    local_shards_p = [
+        policy_mapper.prepare_local_shard_infos(
+            hf_key_n_rank=[[x] for x in layers], global_rank=p_rank
+        )
+        for p_rank in range(p_world_size)
+    ]
+    local_shards_r = [
+        rollout_mapper.prepare_local_shard_infos(
+            hf_key_n_rank=[[x] for x in layers], global_rank=r_rank
+        )
+        for r_rank in range(r_world_size)
+    ]
+
+    generator = ParallelizedShardMapper()
+    await generator.set_shard_infos_of_policy(local_shards_p)
+    await generator.set_shard_infos_of_rollout(local_shards_r)
+
+    await generator.scheme_generation_done.wait()
+    global_rank = 5
+    await generator.sort_param_with_groups()
+    generator.rollout_from_policy_insts_meta = [
+        {} for _ in range(len(generator.rollout_all_rank_shard_infos))
+    ]
+
+    insts = await generator.generate_parallelized_shard_send_insts_for_policy(
+        global_rank
+    )
+    r_rank_max = 0
+    layer_idx = 0
+
+    layers.sort(key=lambda x: x[0])
+    for inst_group in insts:
+        for inst in inst_group.param_instructions:
+            dest_name = inst.param_name
+            for i in inst.instructions:
+                p_rank = i.policy_rank
+                r_rank = i.rollout_rank
+                assert p_rank == global_rank
+                while layers[layer_idx][0] != dest_name:
+                    r_rank_max = 0
+                    layer_idx += 1
+                assert layers[layer_idx][0] == dest_name
+                assert r_rank >= r_rank_max
+                if r_rank > r_rank_max:
+                    r_rank_max = r_rank
+
+    global_rank = 2
+    insts = await generator.generate_parallelized_shard_recv_insts_for_rollout(
+        global_rank
+    )
+
+    p_rank_max = 0
+    layer_idx = 0
+    for inst_group in insts:
+        for inst in inst_group.param_instructions:
+            dest_name = inst.param_name
+            for i in inst.instructions:
+                p_rank = i.policy_rank
+                r_rank = i.rollout_rank
+                assert r_rank == global_rank
+                while layers[layer_idx][0] != dest_name:
+                    p_rank_max = 0
+                    layer_idx += 1
+                assert layers[layer_idx][0] == dest_name
+                assert p_rank >= p_rank_max
+                if p_rank > p_rank_max:
+                    p_rank_max = p_rank
+
+
+async def main():
     # Get shared memory name and size from command line arguments
     shm_name = sys.argv[1]
     shm_size = int(sys.argv[2])
@@ -830,12 +1008,12 @@ def main():
         assert (
             world_size == POLICY_WORLD_SIZE
         ), "World size must match POLICY_WORLD_SIZE for policy process"
-        run_policy_send_to_rollout(shm_name, shm_size, rank)
+        await run_policy_send_to_rollout(shm_name, shm_size, rank)
     elif mode == "rollout_recv_from_policy":
         assert (
             world_size == ROLLOUT_WORLD_SIZE
         ), "World size must match ROLLOUT_WORLD_SIZE for rollout process"
-        run_rollout_recv_from_policy(shm_name, shm_size, rank)
+        await run_rollout_recv_from_policy(shm_name, shm_size, rank)
     elif mode == "policy_send_to_policy":
         run_policy_unicast_to_policy(shm_name, shm_size, rank, True)
     elif mode == "policy_recv_from_policy":
@@ -858,6 +1036,8 @@ def main():
         tp = int(tp.split(":")[1])
         pp = int(pp.split(":")[1])
         run_rollout_parallelism_extract(rank, fsdp, tp, pp)
+    elif mode == "parallel_map_check":
+        await parallel_map_check()
     else:
         raise ValueError("Invalid mode.")
     # Clean up distributed environment
@@ -865,4 +1045,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

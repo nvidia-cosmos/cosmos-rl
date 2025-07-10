@@ -29,6 +29,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from torch.nn.parameter import Parameter
 from math import gcd
 from functools import reduce, partial
+import asyncio
+from cosmos_rl.utils import util
 
 
 class DimSliceInfo:
@@ -131,6 +133,97 @@ def slice_tensor_with_strategies(
 
 
 torch.Tensor.cosmos_slice = slice_tensor_with_strategies
+
+
+class WeightSyncInstruction:
+    """
+    A class to represent a weight synchronization instruction for a specific parameter.
+    This class contains the parameter name, the global rank, and the instruction.
+    """
+
+    def __init__(
+        self,
+        policy_rank: int,
+        rollout_rank: int,
+        slice_strategy: Dict[int, DimSliceInfo],
+    ):
+        """
+        Initialize the WeightSyncInstruction with the given policy rank, rollout rank, and slice strategy.
+        :param policy_rank: The rank of the policy in the parallelism configuration.
+        :param rollout_rank: The rank of the rollout in the parallelism configuration.
+        :param slice_strategy: A dictionary mapping dimension indices to DimSliceInfo objects representing the slicing strategy.
+        """
+        self.policy_rank = policy_rank
+        self.rollout_rank = rollout_rank
+        self.slice_strategy = slice_strategy
+
+    def __repr__(self):
+        # Returning a dictionary representation
+        return f"{self.__dict__}"
+
+
+class WeightSyncInstructionsPerParam:
+    """
+    A class to represent a collection of weight synchronization instructions for a specific param.
+    This class contains the parameter name and a list of synchronization instructions.
+    """
+
+    def __init__(self, param_name: str, instructions: List[WeightSyncInstruction]):
+        """
+        Initialize the WeightSyncInstructionsPerParam with the given parameter name and instructions.
+        :param param_name: The name of the parameter for which the instructions are created.
+        :param instructions: A list of WeightSyncInstruction objects representing the synchronization instructions.
+        """
+        self.param_name = param_name
+        self.instructions = instructions
+
+    def __repr__(self):
+        # Returning a dictionary representation
+        return f"{self.__dict__}"
+
+
+class WeightSyncInstructionsGroup:
+    """
+    A class to represent a group of weight synchronization instructions for multiple parameters.
+    This class contains a list of WeightSyncInstructionsPerParam objects.
+    """
+
+    def __init__(self, param_instructions: List[WeightSyncInstructionsPerParam]):
+        """
+        Initialize the WeightSyncInstructionsGroup with the given instructions.
+        :param param_instructions: A list of WeightSyncInstructionsPerParam objects representing the synchronization instructions for multiple parameters in one group.
+        """
+        self.param_instructions = param_instructions
+
+    def __repr__(self):
+        # Returning a dictionary representation
+        return f"{self.__dict__}"
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]):
+        """
+        Create a WeightSyncInstructionsGroup object from a dictionary.
+        :param data: A dictionary containing the keys 'instructions' and 'param_names'.
+        :return: A WeightSyncInstructionsGroup object.
+        """
+        instructions = [
+            WeightSyncInstructionsPerParam(
+                param_name=insts["param_name"],
+                instructions=[
+                    WeightSyncInstruction(
+                        policy_rank=inst["policy_rank"],
+                        rollout_rank=inst["rollout_rank"],
+                        slice_strategy={
+                            k: DimSliceInfo.from_dict(v)
+                            for k, v in inst["slice_strategy"].items()
+                        },
+                    )
+                    for inst in insts["instructions"]
+                ],
+            )
+            for insts in data["param_instructions"]
+        ]
+        return cls(instructions)
 
 
 class ParallelTopoMapper:
@@ -393,39 +486,35 @@ class ParallelTopoMapper:
 
     @classmethod
     def policy_to_rollout_assign(
-        cls, policys: List[int], rollouts: List[int]
-    ) -> Tuple[Dict[int, List[int]], Dict[int, List[int]]]:
+        cls, policys: List[int], rollouts: List[int], p_rank: int, r_rank: int
+    ) -> Tuple[List[int], List[int]]:
         """
-        Assign policy ranks to rollout ranks sharing the same sharded part.
+        Assign policy ranks to rollout ranks sharing the same sharded part related between the given policy and rollout rank.
         :param policys: The list of policy ranks sharing the same sharded part.
         :param rollouts: The list of rollout ranks sharing the same sharded part.
-        :return: A tuple containing two dictionaries: policy assignment and rollout assignment.
+        :param p_rank: The given parallelism rank of the policy to consider.
+        :param r_rank: The given parallelism rank of the rollout to consider.
+        :return: A tuple containing two list: policy assignment and rollout assignment related between the given policy and rollout rank.
         """
-        p_assignment = {}
-        r_assignment = {}
+        p_assignment = []
+        r_assignment = []
         if len(policys) >= len(rollouts):
             for i, p in enumerate(policys):
                 if i >= len(rollouts):
                     break
-                p_assignment[p] = [rollouts[i]]
-                r_assignment[rollouts[i]] = [p]
+                if p == p_rank and rollouts[i] == r_rank:
+                    p_assignment = [r_rank]
+                    r_assignment = [p_rank]
         else:
             group_size = ((len(rollouts) - 1) // len(policys)) + 1
             for i, p in enumerate(policys):
-                rs = rollouts[
-                    i * group_size : min(i * group_size + group_size, len(rollouts))
-                ]
-                p_assignment[p] = rs
-                for r in rs:
-                    if r not in r_assignment:
-                        r_assignment[r] = []
-                    r_assignment[r].append(p)
-        for p in policys:
-            if p not in p_assignment:
-                p_assignment[p] = []
-        for r in rollouts:
-            if r not in r_assignment:
-                r_assignment[r] = []
+                if p == p_rank:
+                    rs = rollouts[
+                        i * group_size : min(i * group_size + group_size, len(rollouts))
+                    ]
+                    if r_rank in rs:
+                        p_assignment = [r_rank]
+                        r_assignment = [p_rank]
         return p_assignment, r_assignment
 
     def generate_local_shard_info(
@@ -484,20 +573,29 @@ class ParallelTopoMapper:
                 """
 
                 split_dim_map, dim_to_parallel, pp_rank, dims_rank_info = (
-                    self.parallelism_info_for_param(dest_name)
+                    None,
+                    None,
+                    None,
+                    None,
                 )
+                if self.parallelism_strategy is not None:
+                    # If custom parallelism strategy is provided, use it to get the split dimensions and parallel mapping.
+                    # The custom parallelism strategy has high priority.
+                    # The custom parallelism strategy is specified from `get_policy_parallelism_strategy` and `get_rollout_parallelism_strategy` in weight mapper.
+                    split_dim_map, dim_to_parallel, pp_rank = self.parallelism_strategy(
+                        shape, dest_name, self.parallelism, self.hf_config
+                    )
 
                 if (
                     split_dim_map is None
                     and dim_to_parallel is None
                     and pp_rank is None
                 ):
-                    if self.parallelism_strategy is not None:
-                        split_dim_map, dim_to_parallel, pp_rank = (
-                            self.parallelism_strategy(
-                                shape, dest_name, self.parallelism, self.hf_config
-                            )
-                        )
+                    # If no custom parallelism strategy is provided, use the default automatically inferred parallelism info for the parameter.
+                    split_dim_map, dim_to_parallel, pp_rank, dims_rank_info = (
+                        self.parallelism_info_for_param(dest_name)
+                    )
+
                 if (
                     split_dim_map is None
                     and dim_to_parallel is None
@@ -507,11 +605,6 @@ class ParallelTopoMapper:
 
                 ranks = self.full_mesh_rank_info_map[global_rank]
                 if ranks["pp"].offset != pp_rank:
-                    # group_info.append(
-                    #     {
-                    #         "name": dest_name,
-                    #     }
-                    # )
                     continue
 
                 group_info.append(
@@ -729,7 +822,8 @@ class ParallelTopoMapper:
                                     part_name
                                 ),
                                 partial(
-                                    slice_tensor_with_part, part_in_local=part_in_local
+                                    slice_tensor_with_part,
+                                    part_in_local=part_in_local,
                                 ),
                             )
 
@@ -782,7 +876,6 @@ class ParallelTopoMapper:
                     raise ValueError(f"Part {part_name} not found in {part}. Skipping.")
             if should_skip:
                 continue
-
             dims_map = {}
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
@@ -966,50 +1059,55 @@ class ParallelizedShardMapper:
         self.rollout_all_rank_shard_infos: Optional[
             List[List[List[Dict[str, Any]]]]
         ] = None
-        self.send_insts_for_policy: Optional[List[List[List[Dict[str, Any]]]]] = None
-        self.recv_insts_for_rollout: Optional[
-            List[List[List[List[Dict[str, Any]]]]]
-        ] = None
 
-    def post_set_shard_infos(self):
+        self.send_insts_for_policy: Optional[
+            List[List[WeightSyncInstructionsGroup]]
+        ] = None  # List of instructions of different ranks and for each rank it contains a list of instructions for each parameter group.
+        self.recv_insts_for_rollout: Optional[
+            List[List[WeightSyncInstructionsGroup]]
+        ] = None  # List of instructions of different ranks and for each rank it contains a list of instructions for each parameter group.
+
+        self.scheme_generation_done = asyncio.Event()
+        self.scheme_generation_done.clear()
+
+    async def post_set_shard_infos(self):
         """
         Post-process the shard infos after they are set.
         This method generates the send and receive instructions for policy and rollout based on the shard information provided.
         It initializes the send and receive instruction lists for policy and rollout, respectively.
         """
-        self.send_insts_for_policy = []
-        self.recv_insts_for_rollout = []
         if (
             self.policy_all_rank_shard_infos is not None
             and self.rollout_all_rank_shard_infos is not None
+            and self.send_insts_for_policy is None
+            and self.recv_insts_for_rollout is None
         ):
-            self.sort_param_with_groups()
+            self.send_insts_for_policy = []
+            self.recv_insts_for_rollout = []
             self.policy_shard_dicts = [
-                {
-                    r["name"]: r
-                    for r_info_group in r_infos_per_rank
-                    for r in r_info_group
-                }
-                for r_infos_per_rank in self.policy_all_rank_shard_infos
+                {} for _ in range(len(self.policy_all_rank_shard_infos))
             ]
             self.rollout_shard_dicts = [
-                {
-                    r["name"]: r
-                    for r_info_group in r_infos_per_rank
-                    for r in r_info_group
-                }
-                for r_infos_per_rank in self.rollout_all_rank_shard_infos
+                {} for _ in range(len(self.rollout_all_rank_shard_infos))
+            ]
+
+            await self.sort_param_with_groups()
+            self.rollout_from_policy_insts_meta = [
+                {} for _ in range(len(self.rollout_all_rank_shard_infos))
             ]
             for p_rank in range(len(self.policy_all_rank_shard_infos)):
                 self.send_insts_for_policy.append(
-                    self.generate_parallelized_shard_send_insts_for_policy(p_rank)
+                    await self.generate_parallelized_shard_send_insts_for_policy(p_rank)
                 )
             for r_rank in range(len(self.rollout_all_rank_shard_infos)):
                 self.recv_insts_for_rollout.append(
-                    self.generate_parallelized_shard_recv_insts_for_rollout(r_rank)
+                    await self.generate_parallelized_shard_recv_insts_for_rollout(
+                        r_rank
+                    )
                 )
+            self.scheme_generation_done.set()
 
-    def set_shard_infos_of_policy(
+    async def set_shard_infos_of_policy(
         self,
         policy_all_rank_shard_infos: List[List[List[Dict[str, Any]]]],
     ):
@@ -1018,9 +1116,9 @@ class ParallelizedShardMapper:
         :param policy_all_rank_shard_infos: A list of dictionaries containing shard info for each rank. For each rank, it contains a list of parameter groups, and each group contains a list of dictionaries with shard info. Each parameter group may contain multiple parameters with some connections such as from the same original param.
         """
         self.policy_all_rank_shard_infos = policy_all_rank_shard_infos
-        self.post_set_shard_infos()
+        util.create_async_task(self.post_set_shard_infos())
 
-    def set_shard_infos_of_rollout(
+    async def set_shard_infos_of_rollout(
         self,
         rollout_all_rank_shard_infos: List[List[List[Dict[str, Any]]]],
     ):
@@ -1029,9 +1127,9 @@ class ParallelizedShardMapper:
         :param policy_all_rank_shard_infos: A list of dictionaries containing shard info for each rank. For each rank, it contains a list of parameter groups, and each group contains a list of dictionaries with shard info. Each parameter group may contain multiple parameters with some connections such as from the same original param.
         """
         self.rollout_all_rank_shard_infos = rollout_all_rank_shard_infos
-        self.post_set_shard_infos()
+        util.create_async_task(self.post_set_shard_infos())
 
-    def sort_param_with_groups(
+    async def sort_param_with_groups(
         self,
     ):
         """
@@ -1039,55 +1137,37 @@ class ParallelizedShardMapper:
         Merge the parameter groups from policy and rollout shard infos into a single sorted order.
         Consider the grouping of parameters specified by policy and rollout shard infos.
         """
-        group_key_map = {}
         param_group_map = {}
+        param_in_group = {}
 
         policy_params = set()
         rollout_params = set()
-        for all_rank_shard_infos, params_set in zip(
+        for all_rank_shard_infos, params_set, shard_dicts in zip(
             [self.policy_all_rank_shard_infos, self.rollout_all_rank_shard_infos],
             [policy_params, rollout_params],
+            [self.policy_shard_dicts, self.rollout_shard_dicts],
         ):
-            for p_rank in all_rank_shard_infos:
+            await asyncio.sleep(0.0001)
+            for r_idx, p_rank in enumerate(all_rank_shard_infos):
                 for p_group in p_rank:
-                    group_key = ";".join(sorted([p["name"] for p in p_group]))
                     if len(p_group) > 1:
-                        if p_group[0]["name"] not in param_group_map:
-                            assert (
-                                group_key not in group_key_map
-                            ), f"Parameter {p_group[0]['name']} is not in any group, but group {group_key} already exists."
+                        group_key = ";".join(sorted([p["name"] for p in p_group]))
+                        param_group_map[group_key] = p_group
                         for p_info in p_group:
+                            shard_dicts[r_idx][p_info["name"]] = p_info
                             params_set.add(p_info["name"])
-                            if p_info["name"] not in param_group_map:
-                                param_group_map[p_info["name"]] = group_key
-                                group_key_map[group_key] = p_group
-                            else:
-                                assert (
-                                    param_group_map[p_info["name"]] == group_key
-                                ), f"Parameter {p_info['name']} is in different groups: {param_group_map[p_info['name']]} and {group_key}"
+                            param_in_group[p_info["name"]] = group_key
+                            if p_info["name"] in param_group_map:
+                                del param_group_map[p_info["name"]]
                     else:
+                        if p_group[0]["name"] not in param_in_group:
+                            param_group_map[p_group[0]["name"]] = p_group
+                        shard_dicts[r_idx][p_group[0]["name"]] = p_group[0]
                         params_set.add(p_group[0]["name"])
 
-        groups_map = {}
-        for all_rank_shard_infos in [
-            self.policy_all_rank_shard_infos,
-            self.rollout_all_rank_shard_infos,
-        ]:
-            for p_rank in all_rank_shard_infos:
-                for p_group in p_rank:
-                    group_key = ";".join(sorted([p["name"] for p in p_group]))
-                    if group_key in group_key_map and group_key not in groups_map:
-                        assert (
-                            len(p_group) > 1
-                        ), f"Parameter group {group_key} should have more than one parameter, but has only {len(p_group)}."
-                        groups_map[group_key] = p_group
-                    elif len(p_group) == 1 and p_group[0]["name"] in param_group_map:
-                        pass
-                    else:
-                        if group_key not in groups_map:
-                            groups_map[group_key] = p_group
-
-        self.sorted_param_groups = [groups_map[key] for key in sorted(groups_map)]
+        self.sorted_param_groups = [
+            param_group_map[key] for key in sorted(param_group_map)
+        ]
         assert (
             sum(len(sublist) for sublist in self.sorted_param_groups)
             == len(policy_params)
@@ -1095,23 +1175,25 @@ class ParallelizedShardMapper:
             == len(rollout_params)
         ), "The total number of parameters in sorted_param_groups does not match the number of parameters in policy and rollout shard infos."
 
-    def generate_parallelized_shard_send_insts_for_policy(
+    async def generate_parallelized_shard_send_insts_for_policy(
         self, p_rank: int
-    ) -> List[List[Dict[str, Any]]]:
+    ) -> List[WeightSyncInstructionsGroup]:
         """
         Generate the send instructions for policy based on the shard information.
         :param p_rank: The rank of the policy to generate send instructions for.
         :return: A list of send instructions for policy.
         In the returned list, each element corresponds to a parameter group.
-        Each parameter group contains a list of instructions for each parameter in the group.
-        One parameter group contains the paramters with some connections such as from the same original param.
-        Each instruction is a dictionary containing the parameter name and the corresponding sharded tensor split strategies.
+        Each parameter group contains a list of instructions for each parameter in a group represented by `WeightSyncInstructionsGroup`.
+        One parameter group includes the parameters with some connections such as from the same original param.
+        Correspondingly, each `WeightSyncInstructionsGroup` includes `WeightSyncInstructionsPerTensor` for each parameter in the group.
+        Each instruction is a `WeightSyncInstruction` containing the parameter name and the corresponding sharded tensor split strategies.
         """
 
         policy_to_rollout_insts = []
         for info_group in self.sorted_param_groups:
             insts_for_group = []
             for info in info_group:
+                await asyncio.sleep(0.0001)
                 dest_name = info["name"]
                 if dest_name not in self.policy_shard_dicts[p_rank]:
                     continue
@@ -1139,6 +1221,7 @@ class ParallelizedShardMapper:
                     all_dims = shard_info.keys() | r_shard_info.keys()
 
                     p_tensor_split_strategys = {}
+                    r_tensor_split_strategys = {}
                     for d in all_dims:
                         p_tensor_split_strategy, r_tensor_split_strategy = (
                             ParallelTopoMapper.tensor_overlap_info_at_dim(
@@ -1150,22 +1233,44 @@ class ParallelizedShardMapper:
                             p_tensor_split_strategys = None
                             break
                         p_tensor_split_strategys[d] = p_tensor_split_strategy
+                        r_tensor_split_strategys[d] = r_tensor_split_strategy
                     if p_tensor_split_strategys is None:
                         continue
                     else:
-                        assignments, _ = ParallelTopoMapper.policy_to_rollout_assign(
-                            p_dup_ranks, r_dup_ranks
+                        p_assignments, r_assignments = (
+                            ParallelTopoMapper.policy_to_rollout_assign(
+                                p_dup_ranks, r_dup_ranks, p_rank, r_rank
+                            )
                         )
-                        assignment = assignments[p_rank]
-                        for r in assignment:
-                            if r == r_rank:
-                                insts_for_param_name.append(
-                                    (p_rank, r, p_tensor_split_strategys)
+                        for r in p_assignments:
+                            insts_for_param_name.append(
+                                WeightSyncInstruction(
+                                    p_rank, r, p_tensor_split_strategys
                                 )
-                insts_for_group.append(
-                    {"name": dest_name, "insts": insts_for_param_name}
+                            )
+                        for p in r_assignments:
+                            if (
+                                dest_name
+                                not in self.rollout_from_policy_insts_meta[r_rank]
+                            ):
+                                self.rollout_from_policy_insts_meta[r_rank][
+                                    dest_name
+                                ] = []
+                            self.rollout_from_policy_insts_meta[r_rank][
+                                dest_name
+                            ].append(
+                                WeightSyncInstruction(
+                                    p, r_rank, r_tensor_split_strategys
+                                )
+                            )
+                if insts_for_param_name:
+                    insts_for_group.append(
+                        WeightSyncInstructionsPerParam(dest_name, insts_for_param_name)
+                    )
+            if insts_for_group:
+                policy_to_rollout_insts.append(
+                    WeightSyncInstructionsGroup(insts_for_group)
                 )
-            policy_to_rollout_insts.append(insts_for_group)
         return policy_to_rollout_insts
 
     def get_dup_ranks_for_policy(
@@ -1214,90 +1319,51 @@ class ParallelizedShardMapper:
                     ranks.append(p_rank)
         return ranks
 
-    def generate_parallelized_shard_recv_insts_for_rollout(
+    async def generate_parallelized_shard_recv_insts_for_rollout(
         self, r_rank: int
-    ) -> List[List[Dict[str, Any]]]:
+    ) -> List[WeightSyncInstructionsGroup]:
         """
         Generate the receive instructions for rollout based on the shard information.
         :param r_rank: The rank of the rollout to generate receive instructions for.
         :return: A list of receive instructions for rollout.
         In the returned list, each element corresponds to a parameter group.
-        Each parameter group contains a list of instructions for each parameter in the group.
-        One parameter group contains the paramters with some connections such as from the same original param.
-        Each instruction is a dictionary containing the parameter name and the corresponding sharded tensor split strategies.
+        Each parameter group contains a list of instructions for each parameter in a group represented by `WeightSyncInstructionsGroup`.
+        One parameter group includes the parameters with some connections such as from the same original param.
+        Correspondingly, each `WeightSyncInstructionsGroup` includes `WeightSyncInstructionsPerTensor` for each parameter in the group.
+        Each instruction is a `WeightSyncInstruction` containing the parameter name and the corresponding sharded tensor split strategies.
+        Make use of the information collected in `self.rollout_from_policy_insts_meta` from `generate_parallelized_shard_send_insts_for_policy`to generate the receive instructions.
         """
-
         rollout_from_policy_insts = []
-
         for info_group in self.sorted_param_groups:
             insts_for_group = []
             for info in info_group:
+                await asyncio.sleep(0.0001)
                 dest_name = info["name"]
-                if dest_name not in self.rollout_shard_dicts[r_rank]:
-                    continue
-                r_info = self.rollout_shard_dicts[r_rank][dest_name]
                 insts_for_param_name = []
-                for p_rank, p_infos in enumerate(self.policy_shard_dicts):
-                    if dest_name not in p_infos:
-                        continue
-                    p_info = p_infos[dest_name]
-
-                    if "shard_info" not in p_info or "shard_info" not in r_info:
-                        continue
-
-                    shard_info = {
-                        k: DimSliceInfo.from_dict(v)
-                        for k, v in p_info["shard_info"].items()
-                    }
-
-                    p_dup_ranks = self.get_dup_ranks_for_policy(p_rank, dest_name)
-                    r_shard_info = {
-                        k: DimSliceInfo.from_dict(v)
-                        for k, v in r_info["shard_info"].items()
-                    }
-                    r_dup_ranks = self.get_dup_ranks_for_rollout(r_rank, dest_name)
-
-                    all_dims = shard_info.keys() | r_shard_info.keys()
-
-                    r_tensor_split_strategys = {}
-                    for d in all_dims:
-                        p_tensor_split_strategy, r_tensor_split_strategy = (
-                            ParallelTopoMapper.tensor_overlap_info_at_dim(
-                                shard_info, r_shard_info, d
-                            )
-                        )
-                        if r_tensor_split_strategy is None:
-                            assert p_tensor_split_strategy is None
-                            r_tensor_split_strategys = None
-                            break
-                        r_tensor_split_strategys[d] = r_tensor_split_strategy
-                    if r_tensor_split_strategys is None:
-                        continue
-                    else:
-                        _, assignments = ParallelTopoMapper.policy_to_rollout_assign(
-                            p_dup_ranks, r_dup_ranks
-                        )
-                        assignment = assignments[r_rank]
-
-                        for p in assignment:
-                            if p == p_rank:
-                                insts_for_param_name.append(
-                                    (p_rank, r_rank, r_tensor_split_strategys)
-                                )
-                insts_for_group.append(
-                    {"name": dest_name, "insts": insts_for_param_name}
+                if dest_name in self.rollout_from_policy_insts_meta[r_rank]:
+                    insts_for_param_name = self.rollout_from_policy_insts_meta[r_rank][
+                        dest_name
+                    ]
+                if insts_for_param_name:
+                    insts_for_group.append(
+                        WeightSyncInstructionsPerParam(dest_name, insts_for_param_name)
+                    )
+            if insts_for_group:
+                rollout_from_policy_insts.append(
+                    WeightSyncInstructionsGroup(insts_for_group)
                 )
-            rollout_from_policy_insts.append(insts_for_group)
         return rollout_from_policy_insts
 
-    def get_send_insts_for_policy(self, rank: int) -> List[List[Dict[str, Any]]]:
+    def get_send_insts_for_policy(self, rank: int) -> List[WeightSyncInstructionsGroup]:
         """
         Get the send instructions for policy of the given rank.
         :return: A list of send instructions for policy.
         """
         return self.send_insts_for_policy[rank]
 
-    def get_recv_insts_for_rollout(self, rank: int) -> List[List[Dict[str, Any]]]:
+    def get_recv_insts_for_rollout(
+        self, rank: int
+    ) -> List[WeightSyncInstructionsGroup]:
         """
         Get the receive instructions for rollout of the given rank.
         :return: A list of receive instructions for rollout.
