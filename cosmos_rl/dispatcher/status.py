@@ -100,6 +100,14 @@ class PolicyStatusManager:
         self.val_dataloader = val_dataloader
         self.current_step = current_step
 
+    def n_atoms_per_replica(self) -> int:
+        """
+        Get the number of GPUs per replica.
+        """
+        if len(self.policy_replicas) == 0:
+            return 0
+        return next(iter(self.policy_replicas.values())).n_atoms_per_replica()
+
     def __len__(self) -> int:
         """
         Get the number of policies.
@@ -822,6 +830,14 @@ class RolloutStatusManager:
         Maintain the life status of the policy and rollout replicas.
         """
         return len(self.rollout_replicas)
+
+    def n_atoms_per_replica(self) -> int:
+        """
+        Get the number of GPUs per replica.
+        """
+        if len(self.rollout_replicas) == 0:
+            return 0
+        return next(iter(self.rollout_replicas.values())).n_atoms_per_replica()
 
     def __len__(self) -> int:
         """
