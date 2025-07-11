@@ -189,23 +189,9 @@ class vLLMRollout(RolloutBase):
                 )
 
             for output in results:
-                skip_output = False
-                total_completion_count = len(output.outputs)
-                empty_completion_count = 0
-                output_texts = []
-                for i in range(total_completion_count):
-                    output_text = output.outputs[i].text
-                    if output_text == "":
-                        logger.warning(
-                            f"[Rollout] Got empty completion for {i}th generation"
-                        )
-                        empty_completion_count += 1
-                    else:
-                        output_texts.append(output_text)
-                # Skip the output if there is one or zero non-empty completions
-                skip_output = (total_completion_count - empty_completion_count) <= 1
-                if not skip_output:
-                    response.append(output_texts)
+                response.append(
+                    [output.outputs[i].text for i in range(len(output.outputs))]
+                )
         except Exception as e:
             logger.error(f"[Rollout] Failed in rollout generation: {str(e)}")
             import traceback

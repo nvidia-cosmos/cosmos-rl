@@ -788,6 +788,45 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
+                # Remove empty completions
+                valid_completions: List[List[str]] = []
+                prompt_indices_to_remove: List[int] = []
+                if len(completions):
+                    batch_size = len(prompts)
+                    for i in range(batch_size):
+                        completion = completions[i]
+                        skip_output = False
+                        total_generation_count = len(completion)
+                        empty_generation_count = 0
+                        output_texts = []
+                        for j in range(total_generation_count):
+                            output_text = completion[j]
+                            if output_text == "":
+                                logger.warning(
+                                    f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                                )
+                                empty_generation_count += 1
+                            else:
+                                output_texts.append(output_text)
+                        # Skip the output if there is one or zero non-empty completions
+                        skip_output = (
+                            total_generation_count - empty_generation_count
+                        ) <= 1
+                        if not skip_output:
+                            valid_completions.append(output_texts)
+                        else:
+                            prompt_indices_to_remove.append(i)
+
+                if len(prompt_indices_to_remove):
+                    prompts = [
+                        prompt
+                        for i, prompt in enumerate(prompts)
+                        if i not in prompt_indices_to_remove
+                    ]
+                    assert (
+                        len(prompts) == len(valid_completions)
+                    ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+
                 logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
                 should_report = (
