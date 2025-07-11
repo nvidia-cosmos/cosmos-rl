@@ -505,10 +505,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 quantized_weight, weight_scale = self.rollout.fp8_quantization(
                     weight_to_quantize
                 )
-
-                vllm_native_weight = self.rollout.model_param_map[
-                    inst_group_full_weight_name
-                ]
+                model_param_map = self.rollout.model_param_map(self.weight_mapper)
+                vllm_native_weight = model_param_map[inst_group_full_weight_name]
 
                 # check weight sync
                 if do_weight_sync_check:
@@ -526,7 +524,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 scale_key = inst_group_full_weight_name.replace(
                     ".weight", ".weight_scale"
                 )
-                scale_tensor = self.rollout.model_param_map[scale_key]
+                scale_tensor = model_param_map[scale_key]
                 assert (
                     scale_tensor.shape == weight_scale.shape
                 ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"

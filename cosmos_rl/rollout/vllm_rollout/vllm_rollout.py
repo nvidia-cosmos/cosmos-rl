@@ -19,7 +19,6 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 import vllm
 import torch
 from typing import List, Tuple, Any, Optional
-from functools import cached_property
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
@@ -30,6 +29,7 @@ from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.policy.model import WeightMapper
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -84,6 +84,8 @@ class vLLMRollout(RolloutBase):
         self.tokenizer = tokenizer
         self._engine_initialized = False
         self.rollout_engine = None
+
+        self._model_param_map = None  # key: compatible name, value: param
 
     def init_engine(
         self,
@@ -252,10 +254,13 @@ class vLLMRollout(RolloutBase):
 
         return qweight.t(), weight_scale
 
-    @cached_property
-    def model_param_map(self):
+    def model_param_map(self, weight_mapper: WeightMapper):
+        if self._model_param_map:
+            return self._model_param_map
         model = self.get_underlying_model()
         param_map = {}
         for name, param in model.named_parameters():
-            param_map[name] = param
-        return param_map
+            compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
+            param_map[compatible_name] = param
+        self._model_param_map = param_map
+        return self._model_param_map
