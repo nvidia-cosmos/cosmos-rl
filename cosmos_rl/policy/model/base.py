@@ -45,28 +45,11 @@ class BaseModel(torch.nn.Module, ABC):
         self,
     ) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         from cosmos_rl.utils.parallelism_map import DimSliceInfo, ParallelTopoMapper
-        # all_param_data = {p.data for p in self.parameters()}
-
-        # self_state_dict = self.state_dict()
-        # keys = list(self_state_dict.keys())
-        # keys.sort(key=lambda x: x[0])
-        # transforms = collections.OrderedDict()
-        # for k in keys:
-        #     v = self_state_dict[k]
-        #     if v not in all_param_data:
-        #         continue
-        #     is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
-        #     local_view = v.to_local() if is_dist_tensor else v
-        #     transforms[
-        #         self.weight_mapper.policy_map_local_key_to_hf_key(
-        #             util.clear_weight_name(k)
-        #         )
-        #     ] = local_view
 
         # 1. get all parameters, but not buffers
         named_parameters = {name: param for name, param in self.named_parameters()}
         keys = list(named_parameters.keys())
-        keys.sort(key=lambda x: x[0])
+        keys = sorted(keys, key=lambda x: x[0])
         transforms = collections.OrderedDict()
         for k in keys:
             v = named_parameters[k]
