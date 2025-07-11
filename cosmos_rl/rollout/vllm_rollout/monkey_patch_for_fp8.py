@@ -8,6 +8,8 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils import w8a8_utils
 
+from cosmos_rl.policy.model import WeightMapper
+
 
 """
 This file is used to patch the vllm model to use rowwise fp8 linear.
@@ -77,18 +79,25 @@ def apply_fp8_linear_patch(model: torch.nn.Module):
 
 
 def replace_weight_of_quantized_module(
-    vllm_model: torch.nn.Module, cached_weight_map: Dict[str, torch.Tensor]
+    vllm_model: torch.nn.Module,
+    cached_weight_map: Dict[str, torch.Tensor],
+    weight_mapper: WeightMapper,
 ):
     """
     Temporarily replace the quantized fp8 layer's weight with the cached weight.
     """
     for name, module in vllm_model.named_modules():
-        if name in cached_weight_map:
-            module.weight = cached_weight_map[name]
+        # Here we use the compatible name as the key, aligned with what we do in
+        # `cache_weight_of_quantized_module` and `rollout_prepare_recv`.
+        compatible_name = weight_mapper._rollout_vllm_name_to_hf(name + ".weight")
+        if compatible_name in cached_weight_map:
+            module.weight = cached_weight_map[compatible_name]
 
 
 def cache_weight_of_quantized_module(
-    vllm_model: torch.nn.Module, promotion_dtype: torch.dtype
+    vllm_model: torch.nn.Module,
+    promotion_dtype: torch.dtype,
+    weight_mapper: WeightMapper,
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """Get the weight from the quantized module."""
     original_weight_map = {}
@@ -98,11 +107,15 @@ def cache_weight_of_quantized_module(
         if quant_method is None:
             continue
         elif isinstance(quant_method, Fp8LinearMethod):
-            original_weight_map[name] = (
+            weight_name = name + ".weight"
+            compatible_name = weight_mapper._rollout_vllm_name_to_hf(weight_name)
+            original_weight_map[compatible_name] = (
                 module.weight
-            )  # weight has shape [in_dim, out_dim]
-            hp_weight = module.weight.t().to(promotion_dtype).contiguous()
-            hp_weight_map[name] = Parameter(hp_weight, requires_grad=False)
+            )  # qweight has shape [in_dim, out_dim]
+            hp_weight = (
+                module.weight.t().to(promotion_dtype).contiguous()
+            )  # hp weight has shape [out_dim, in_dim]
+            hp_weight_map[compatible_name] = Parameter(hp_weight, requires_grad=False)
         else:
             # We will not handle other quant methods.
             pass

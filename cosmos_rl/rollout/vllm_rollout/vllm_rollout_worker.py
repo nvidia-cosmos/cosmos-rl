@@ -271,6 +271,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 cache_weight_of_quantized_module(
                     self.get_underlying_model(),
                     promotion_dtype,
+                    self.weight_mapper,
                 )
             )
             # replace the weight of quantized module with the high precision weight.
@@ -279,6 +280,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             replace_weight_of_quantized_module(
                 self.get_underlying_model(),
                 self.vllm_hp_weight_map,
+                self.weight_mapper,
             )
 
         self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
@@ -293,6 +295,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             replace_weight_of_quantized_module(
                 self.get_underlying_model(),
                 self.vllm_quantized_weight_map,
+                self.weight_mapper,
             )
 
         local_shard_infos = ParallelTopoMapperGroup(
@@ -448,8 +451,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             inst_group_full_weight_name = self.weight_mapper.get_unsplited_weight_name(
                 inst_group_weight_name
             )
-            module_name = inst_group_full_weight_name.replace(".weight", "")
-            is_fp8_quantized_module = module_name in self.vllm_quantized_weight_map
+            is_fp8_quantized_module = (
+                inst_group_full_weight_name in self.vllm_quantized_weight_map
+            )
             check_inside_group = do_weight_sync_check and (not is_fp8_quantized_module)
 
         total_bytes_received = 0
@@ -494,9 +498,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # here we got one full weight tensor sync done, if it is fp8 weight, we should do the quantization and check the numerical error.
         if self.quantization_type == "fp8":
-            if module_name in self.vllm_hp_weight_map:
+            if inst_group_full_weight_name in self.vllm_hp_weight_map:
                 weight_to_quantize = self.vllm_hp_weight_map[
-                    module_name
+                    inst_group_full_weight_name
                 ]  # [out_dim, in_dim]
                 quantized_weight, weight_scale = self.rollout.fp8_quantization(
                     weight_to_quantize
