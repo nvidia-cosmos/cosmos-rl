@@ -281,7 +281,7 @@ class Reward:
         self,
         config: Config,
         tokenier: PreTrainedTokenizer,
-        reward_function: Dict[str, float] = {},
+        reward_function: Optional[Dict[str, float]] = None,
         explicit_reward_fn: Optional[List[Callable]] = None,
     ):
         self.config = config
