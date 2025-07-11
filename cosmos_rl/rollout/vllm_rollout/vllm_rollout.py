@@ -211,7 +211,7 @@ class vLLMRollout(RolloutBase):
             import traceback
 
             traceback.print_exc()
-            return None
+            return []
 
         return response
 

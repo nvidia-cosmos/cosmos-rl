@@ -590,8 +590,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     if is_end:
                         break
 
-                should_report = self.parallel_dims.tp_coord[0] == 0 and (
-                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+                should_report = (
+                    self.parallel_dims.tp_coord[0] == 0
+                    and (
+                        self.parallel_dims.pp_coord[0]
+                        == self.parallel_dims.pp_coord[1] - 1
+                    )
+                    and len(validation_results) > 0
                 )
 
                 if should_report:
@@ -783,13 +788,55 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
+                valid_completions: List[List[str]] = []
+                prompt_indices_to_remove: List[int] = []
+                if len(completions):
+                    batch_size = len(prompts)
+                    for i in range(batch_size):
+                        completion = completions[i]
+                        skip_output = False
+                        total_generation_count = len(completion)
+                        empty_generation_count = 0
+                        output_texts = []
+                        for j in range(total_generation_count):
+                            output_text = completion[j]
+                            if output_text == "":
+                                logger.warning(
+                                    f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                                )
+                                empty_generation_count += 1
+                            else:
+                                output_texts.append(output_text)
+                        # Skip the output if there is one or zero non-empty completions
+                        skip_output = (
+                            total_generation_count - empty_generation_count
+                        ) <= 1
+                        if not skip_output:
+                            valid_completions.append(output_texts)
+                        else:
+                            prompt_indices_to_remove.append(i)
+                if len(prompt_indices_to_remove):
+                    prompts = [
+                        prompt
+                        for i, prompt in enumerate(prompts)
+                        if i not in prompt_indices_to_remove
+                    ]
+                    assert (
+                        len(prompts) == len(valid_completions)
+                    ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+
                 logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
-                should_report = self.parallel_dims.tp_coord[0] == 0 and (
-                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+                should_report = (
+                    self.parallel_dims.tp_coord[0] == 0
+                    and (
+                        self.parallel_dims.pp_coord[0]
+                        == self.parallel_dims.pp_coord[1] - 1
+                    )
+                    and len(valid_completions) > 0
                 )
 
-                if should_report and completions is not None:
+                if should_report:
                     url_suffix = COSMOS_API_ROLLOUT_SUFFIX
                     # only the first tp rank in the rollout replica will post the completion to the controller.
                     prompt_idxs = [prompt[0] for prompt in prompts]
@@ -799,7 +846,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         src_replica_name=self.replica_name,
                         prompt_idxs=prompt_idxs,
                         payloads=payloads,
-                        completions=completions,
+                        completions=valid_completions,
                         is_end=False,
                     )
                     try:
