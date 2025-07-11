@@ -66,9 +66,6 @@ class GPTWeightMapper(WeightMapper):
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
-            if "weight_scale" in param_name:
-                # do not map weight_scale to vllm weight_inplace_view_map
-                continue
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
             if "qkv_proj" in compatible_key:
@@ -122,16 +119,4 @@ class GPTWeightMapper(WeightMapper):
         for key in ["gate_proj", "up_proj"]:
             if key in weight_key:
                 return weight_key.replace(key, "gate_up_proj")
-        return weight_key  # return compatible key
-
-    # def is_fp8_quantized_weight(self, weight_key: str) -> bool:
-    #     quantized_weight_partial_keys = [
-    #         "qkv_proj",
-    #         "gate_up_proj",
-    #         "down_proj",
-    #         "o_proj",
-    #     ]
-    #     for key in quantized_weight_partial_keys:
-    #         if key in weight_key and "bias" not in weight_key:
-    #             return True
-    #     return False
+        return weight_key  # return full weight key

@@ -202,18 +202,4 @@ class QwenVL25WeightMapper(WeightMapper):
         for key in ["q", "k", "v"]:
             if "visual" in weight_key and key in weight_key:
                 return weight_key.replace(key, "qkv")
-        return weight_key  # return compatible key
-
-    # def is_fp8_quantized_weight(self, weight_key: str) -> bool:
-    #     quantized_weight_partial_keys = [
-    #         "qkv_proj",
-    #         "gate_up_proj",
-    #         "down_proj",
-    #         "o_proj",
-    #         # visual part
-    #         "qkv",
-    #     ]
-    #     for key in quantized_weight_partial_keys:
-    #         if key in weight_key and "bias" not in weight_key:
-    #             return True
-    #     return False
+        return weight_key  # return full weight key
