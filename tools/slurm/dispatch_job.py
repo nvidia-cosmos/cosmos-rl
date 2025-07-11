@@ -183,10 +183,14 @@ def main():
         * config["policy"]["parallelism"]["pp_size"]
         * config["policy"]["parallelism"]["cp_size"]
     )
-    min_n_gpus_rollout = (
-        config["rollout"]["parallelism"]["tp_size"]
-        * config["rollout"]["parallelism"]["pp_size"]
-    )
+    train_type = config["train"]["train_policy"]["type"]
+
+    if "rollout" in config:
+        # sft case may not have rollout config
+        min_n_gpus_rollout = (
+            config["rollout"]["parallelism"]["tp_size"]
+            * config["rollout"]["parallelism"]["pp_size"]
+        )
     if config["policy"]["parallelism"]["dp_shard_size"] >= 1:
         min_n_gpus_policy = (
             min_n_gpus_policy * config["policy"]["parallelism"]["dp_shard_size"]
@@ -210,11 +214,14 @@ def main():
     policy_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
         args.ngpu_per_node, min_n_gpus_policy, args.n_policy_replicas, "policy"
     )
-    rollout_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
-        args.ngpu_per_node, min_n_gpus_rollout, args.n_rollout_replicas, "rollout"
-    )
-
     n_policy_nodes = len(policy_node_launch_metadata)
+
+    if train_type == "sft":
+        rollout_node_launch_metadata = []
+    else:
+        rollout_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
+            args.ngpu_per_node, min_n_gpus_rollout, args.n_rollout_replicas, "rollout"
+        )
     n_rollout_nodes = len(rollout_node_launch_metadata)
 
     # Template for the slurm script

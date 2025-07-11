@@ -48,7 +48,11 @@ export CONTROLLER_NODE=$(echo $POLICY_NODES | cut -d' ' -f1)
 export COSMOS_CONTROLLER_HOST="${CONTROLLER_NODE}:${CONTROLLER_PORT}"
 
 # Get rollout nodes
-export ROLLOUT_NODES=$(echo $NODELIST | cut -d' ' -f$((NUM_POLICY_NODES+1))-$((TOTAL_NODES)))
+# Only in NUM_ROLLOUT_NODES is larger than 0
+if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
+    export ROLLOUT_NODES=$(echo $NODELIST | cut -d' ' -f$((NUM_POLICY_NODES+1))-$((TOTAL_NODES)))
+fi
+
 
 # Start controller on first policy node
 srun \
@@ -91,24 +95,27 @@ srun \
     &
 pid_policy=$!
 
-export LOCAL_NODE_LIST=${ROLLOUT_NODES}
-# Start rollout nodes
-srun \
-    --nodes="${NUM_ROLLOUT_NODES}" \
-    --nodelist="${LOCAL_NODE_LIST}" \
-    --container-image [[COSMOS_CONTAINER]] \
-    --container-mounts "${MOUNTS}" \
-    --no-container-mount-home \
-    --export=ALL \
-    -o ${OUTDIR}/%j/rollout/%t.out \
-    -e ${OUTDIR}/%j/rollout/%t.err \
-    bash -c \
-    '
-    cd ${COSMOS_RL_ROOT}
-    python ./tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]]
-    ' \
-    &
-pid_rollout=$!
+
+if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
+    export LOCAL_NODE_LIST=${ROLLOUT_NODES}
+    # Start rollout nodes
+    srun \
+        --nodes="${NUM_ROLLOUT_NODES}" \
+        --nodelist="${LOCAL_NODE_LIST}" \
+        --container-image [[COSMOS_CONTAINER]] \
+        --container-mounts "${MOUNTS}" \
+        --no-container-mount-home \
+        --export=ALL \
+        -o ${OUTDIR}/%j/rollout/%t.out \
+        -e ${OUTDIR}/%j/rollout/%t.err \
+        bash -c \
+        '
+        cd ${COSMOS_RL_ROOT}
+        python ./tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]]
+        ' \
+        &
+    pid_rollout=$!
+fi
 
 echo "Waiting for policy and rollout jobs to end. If fails, will cancel at ${SLURM_JOB_ID}"
 
@@ -117,8 +124,13 @@ while true; do
     kill -0 $pid_policy 2>/dev/null
     pol_alive=$?
 
-    kill -0 $pid_rollout 2>/dev/null
-    roll_alive=$?
+    if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
+        kill -0 $pid_rollout 2>/dev/null
+        roll_alive=$?
+    else
+        roll_alive=1
+        exit_code_rollout=0
+    fi
 
     kill -0 $pid_controller 2>/dev/null
     crl_alive=$?
@@ -128,8 +140,11 @@ while true; do
         wait $pid_policy
         exit_code_policy=$?
 
-        wait $pid_rollout
-        exit_code_rollout=$?
+        if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
+            wait $pid_rollout
+            exit_code_rollout=$?
+        fi
+
 
         wait $pid_controller
         exit_code_controller=$?
@@ -151,23 +166,27 @@ while true; do
         ec=$?
         if [ $ec -ne 0 ]; then
             echo "Policy failed. Killing rollout."
-            kill $pid_rollout 2>/dev/null || true
+            if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
+                kill $pid_rollout 2>/dev/null || true
+            fi
             kill $pid_controller 2>/dev/null || true
             scancel $SLURM_JOB_ID
             exit $ec
         fi
     fi
 
-    if [ $roll_alive -ne 0 ]; then
-        # Rollout ended — check if it failed
-        wait $pid_rollout
-        ec=$?
-        if [ $ec -ne 0 ]; then
-            echo "Rollout failed. Killing policy."
-            kill $pid_policy 2>/dev/null || true
-            kill $pid_controller 2>/dev/null || true
-            scancel $SLURM_JOB_ID
-            exit $ec
+    if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
+        if [ $roll_alive -ne 0 ]; then
+            # Rollout ended — check if it failed
+            wait $pid_rollout
+            ec=$?
+            if [ $ec -ne 0 ]; then
+                echo "Rollout failed. Killing policy."
+                kill $pid_policy 2>/dev/null || true
+                kill $pid_controller 2>/dev/null || true
+                scancel $SLURM_JOB_ID
+                exit $ec
+            fi
         fi
     fi
 
@@ -178,7 +197,9 @@ while true; do
         if [ $ec -ne 0 ]; then
             echo "Controller failed. Killing policy and rollout."
             kill $pid_policy 2>/dev/null || true
-            kill $pid_rollout 2>/dev/null || true
+            if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
+                kill $pid_rollout 2>/dev/null || true
+            fi
             scancel $SLURM_JOB_ID
             exit $ec
         fi
