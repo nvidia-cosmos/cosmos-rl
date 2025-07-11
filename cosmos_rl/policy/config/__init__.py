@@ -610,6 +610,9 @@ class ValidationConfig(BaseModel):
         default=2048,
         description="Max output length of rollout generation during validation.",
     )
+    reward_function: Optional[Union[str, List[str]]] = Field(
+        default=None, description="Reward function for validation."
+    )
 
 
 class RolloutConfig(BaseModel):

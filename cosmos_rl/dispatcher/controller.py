@@ -102,6 +102,7 @@ class Controller:
         reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[DataPacker] = None,
         val_dataset: Optional[Dataset] = None,
+        val_reward_fns: Optional[List[Callable]] = None,
         val_data_packer: Optional[DataPacker] = None,
     ):
         if self.config is not None:
@@ -177,7 +178,6 @@ class Controller:
                     self.val_dataset = CosmosValidationDataset(
                         config=config, tokenizer=self.tokenizer
                     )
-
                 val_dataloader = DataLoader(
                     self.val_dataset.val_set,
                     batch_size=1,  # batch size is 1 is mandatory
@@ -186,12 +186,36 @@ class Controller:
                     prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=RLPayload.collate_fn,
                 )
+
+                if not config.validation.reward_function:
+                    if val_reward_fns is None:
+                        val_reward_fns = reward_fns
+                        if val_reward_fns is not None:
+                            logger.info(
+                                "[Controller] No validation reward functions provided, using the same reward functions as training."
+                            )
+                    config.validation.reward_function = (
+                        config.train.train_policy.reward_function
+                    )
+                    logger.info(
+                        "[Controller] No validation reward function config specified, using the same reward function as training."
+                    )
+                self.val_rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
+                    reward_fn=Reward(
+                        config=config,
+                        tokenier=self.tokenizer,
+                        reward_function=config.validation.reward_function,
+                        explicit_reward_fn=val_reward_fns,
+                    )
+                )
             else:
                 self.val_dataset = None
+                self.val_rl_algo = None
                 val_dataloader = None
         else:
             self.rl_algo = None
             self.val_dataset = None
+            self.val_rl_algo = None
             val_dataloader = None
 
         redis_free_port = util.find_available_port(redis_port)

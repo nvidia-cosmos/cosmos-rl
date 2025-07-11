@@ -33,6 +33,29 @@ logger = logging.getLogger("cosmos")
 COSMOS_RL_DIR = "/workspace/cosmos_rl"
 TOOLS_RELATIVE_DIR = "cosmos_rl/launcher"
 
+# ---------------------------------------------------------------------------
+# Queue priority helper
+# ---------------------------------------------------------------------------
+# Map numeric queue-priority (1-9) to the corresponding Lepton priority_class
+# string expected by the backend API.
+#
+# 1-3  → low-1000 / 2000 / 3000
+# 4-6  → mid-4000 / 5000 / 6000
+# 7-9  → high-7000 / 8000 / 9000
+#
+# Note: keep in sync with lepton-cli definitions.
+NUM_PRIORITY_MAPPING = {
+    1: "low-1000",
+    2: "low-2000",
+    3: "low-3000",
+    4: "mid-4000",
+    5: "mid-5000",
+    6: "mid-6000",
+    7: "high-7000",
+    8: "high-8000",
+    9: "high-9000",
+}
+
 
 def wait_for_url_ready(url: str, process: Optional[subprocess.Popen] = None):
     """
@@ -363,7 +386,38 @@ def parse_args():
         "--lepton-node-id", "-ni", type=str, help="Node for the job", action="append"
     )
     lepton_group.add_argument(
-        "--lepton-queue-priority", "-qp", type=str, help="Queue priority for the job"
+        "--lepton-queue-priority",
+        "-qp",
+        type=int,
+        choices=list(NUM_PRIORITY_MAPPING.keys()),
+        help=(
+            "Queue priority for dedicated node groups. Provide a number 1-9 which"
+            " will be mapped to priority classes low-1000 … high-9000."
+        ),
+    )
+    # Whether the job can be preempted by higher-priority jobs (only valid for
+    # dedicated node groups). Tri-state: flag present → True; absent → None.
+    lepton_group.add_argument(
+        "--lepton-can-be-preempted",
+        "-cbp",
+        action="store_true",
+        default=None,
+        help=(
+            "Allow this job to be preempted by higher priority jobs (only for"
+            " dedicated node groups)."
+        ),
+    )
+
+    # Whether the job itself is allowed to preempt lower-priority jobs.
+    lepton_group.add_argument(
+        "--lepton-can-preempt",
+        "-cp",
+        action="store_true",
+        default=None,
+        help=(
+            "Allow this job to preempt lower priority jobs (only for dedicated"
+            " node groups)."
+        ),
     )
     lepton_group.add_argument(
         "--lepton-visibility", type=str, help="Visibility of the job (public/private)"
@@ -773,9 +827,18 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
         if script is not None:
             launch_cmd += f" {script}"
 
-        # Handle node groups and queue priority
-        if args.lepton_node_group or args.lepton_queue_priority:
-            if args.lepton_queue_priority and not args.lepton_node_group:
+        # Handle node groups, queue priority and preemption flags
+        if (
+            args.lepton_node_group
+            or args.lepton_queue_priority is not None
+            or args.lepton_can_be_preempted is not None
+            or args.lepton_can_preempt is not None
+        ):
+            if (
+                args.lepton_queue_priority is not None
+                or args.lepton_can_be_preempted is not None
+                or args.lepton_can_preempt is not None
+            ) and not args.lepton_node_group:
                 logger.error(
                     "Error: Queue priority is only available for dedicated node groups"
                 )
@@ -786,7 +849,11 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
 
             node_group_ids = _get_valid_nodegroup_ids(
                 args.lepton_node_group,
-                need_queue_priority=(args.lepton_queue_priority is not None),
+                need_queue_priority=(
+                    args.lepton_queue_priority is not None
+                    or args.lepton_can_be_preempted is not None
+                    or args.lepton_can_preempt is not None
+                ),
             )
             valid_node_ids = (
                 _get_valid_node_ids(node_group_ids, args.lepton_node_id)
@@ -799,10 +866,29 @@ python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
                 allowed_nodes_in_node_group=valid_node_ids,
             )
 
-            if args.lepton_queue_priority:
-                job_spec.queue_config = QueueConfig(
-                    priority_class=args.lepton_queue_priority
-                )
+            if (
+                args.lepton_queue_priority is not None
+                or args.lepton_can_be_preempted is not None
+                or args.lepton_can_preempt is not None
+            ):
+                # Ensure queue_config exists
+                if job_spec.queue_config is None:
+                    job_spec.queue_config = QueueConfig()
+
+                priority_class = None
+                if args.lepton_queue_priority is not None:
+                    # Convert numeric priority to the Lepton priority_class string.
+                    priority_class = NUM_PRIORITY_MAPPING[args.lepton_queue_priority]
+
+                job_spec.queue_config.priority_class = priority_class or "mid-4000"
+
+                if args.lepton_can_be_preempted is not None:
+                    job_spec.queue_config.can_be_preempted = bool(
+                        args.lepton_can_be_preempted
+                    )
+
+                if args.lepton_can_preempt is not None:
+                    job_spec.queue_config.can_preempt = bool(args.lepton_can_preempt)
 
         # Set resource shape
         if args.lepton_resource_shape:

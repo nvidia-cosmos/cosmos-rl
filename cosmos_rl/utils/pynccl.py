@@ -220,7 +220,6 @@ def _worker_loop(device_idx: int):
             # Poll async error status until success or timeout.
             while time.monotonic() < deadline:
                 err = _nccl.ncclCommGetAsyncError(comm)
-                logger.debug(f"[Worker] ncclCommGetAsyncError(comm={comm}) = {err}")
                 if err == ncclResultEnum.ncclSuccess:
                     break
                 if err != ncclResultEnum.ncclInProgress:
