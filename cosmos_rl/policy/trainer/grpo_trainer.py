@@ -703,10 +703,9 @@ class GRPOTrainer(Trainer):
                     ),
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
-                insts_meta = insts_meta.json()
+                insts = msgpack.unpackb(insts_meta.content)
                 self.policy_to_rollout_insts = [
-                    WeightSyncInstructionsGroup.from_dict(inst)
-                    for inst in insts_meta["insts"]
+                    WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
                 ]
             except Exception as e:
                 raise RuntimeError(

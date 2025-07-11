@@ -67,7 +67,7 @@ from cosmos_rl.utils.api_suffix import (
 )
 from vllm import SamplingParams
 import time
-
+import msgpack
 
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
@@ -497,10 +497,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     ),
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
-                insts_meta = insts_meta.json()
+                insts = msgpack.unpackb(insts_meta.content)
                 self.policy_to_rollout_recv_insts = [
-                    WeightSyncInstructionsGroup.from_dict(inst)
-                    for inst in insts_meta["insts"]
+                    WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
                 ]
             except Exception as e:
                 raise RuntimeError(

@@ -75,6 +75,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
 )
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from fastapi.responses import Response
 
 
 def create_error_response(
@@ -239,16 +240,17 @@ async def policy_shard_send_insts(request: GetShardSendRecvInstsRequest):
     Get the send instructions for policy.
     :return: A list of send instructions for policy.
     """
-    await controller.policy_to_rollout_shard_mapper.scheme_generation_done.wait()
-    send_insts = controller.policy_to_rollout_shard_mapper.get_send_insts_for_policy(
-        request.rank
+    send_insts = (
+        await controller.policy_to_rollout_shard_mapper.get_send_insts_for_policy(
+            request.rank
+        )
     )
     if send_insts is None:
         return create_error_response(
             constant.ErrorCode.INTERNAL_ERROR,
             "Policy shard send instructions not found",
         )
-    return {"insts": send_insts}
+    return Response(content=send_insts, media_type="application/msgpack")
 
 
 @app.post(COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX)
@@ -257,16 +259,17 @@ async def rollout_shard_recv_insts(request: GetShardSendRecvInstsRequest):
     Get the receive instructions for rollout.
     :return: A list of receive instructions for rollout.
     """
-    await controller.policy_to_rollout_shard_mapper.scheme_generation_done.wait()
-    recv_insts = controller.policy_to_rollout_shard_mapper.get_recv_insts_for_rollout(
-        request.rank
+    recv_insts = (
+        await controller.policy_to_rollout_shard_mapper.get_recv_insts_for_rollout(
+            request.rank
+        )
     )
     if recv_insts is None:
         return create_error_response(
             constant.ErrorCode.INTERNAL_ERROR,
             "Rollout shard receive instructions not found",
         )
-    return {"insts": recv_insts}
+    return Response(content=recv_insts, media_type="application/msgpack")
 
 
 """
