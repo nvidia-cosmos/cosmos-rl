@@ -1,11 +1,8 @@
-import torch
+from typing import Dict, Tuple
 
+import torch
 from torch.nn import Parameter
 
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
-)
-from vllm.model_executor.layers.quantization.fp8 import Fp8KVCacheMethod
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm import _custom_ops as ops
@@ -74,13 +71,57 @@ def apply_fp8_linear_patch(model: torch.nn.Module):
                 # enable per token, because we are using rowwise now.
                 use_per_token_if_dynamic=True,
             )
-        elif isinstance(quant_method, UnquantizedEmbeddingMethod):
-            # do nothing for this special method.
-            pass
-        elif isinstance(quant_method, Fp8KVCacheMethod):
-            # do nothing for attention.
-            pass
         else:
-            raise NotImplementedError(
-                f"[Rollout] There are some non-linear quantized method: {type(quant_method)} that are not supported yet. Please contact the maintainer."
-            )
+            # We will not handle other quant methods.
+            pass
+
+
+def replace_weight_of_quantized_module(
+    vllm_model: torch.nn.Module, cached_weight_map: Dict[str, torch.Tensor]
+):
+    """
+    Temporarily replace the quantized fp8 layer's weight with the cached weight.
+    """
+    for name, module in vllm_model.named_modules():
+        if name in cached_weight_map:
+            module.weight = cached_weight_map[name]
+
+
+def cache_weight_of_quantized_module(
+    vllm_model: torch.nn.Module, promotion_dtype: torch.dtype
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """Get the weight from the quantized module."""
+    original_weight_map = {}
+    hp_weight_map = {}
+    for name, module in vllm_model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if quant_method is None:
+            continue
+        elif isinstance(quant_method, Fp8LinearMethod):
+            original_weight_map[name] = (
+                module.weight
+            )  # weight has shape [in_dim, out_dim]
+            hp_weight = module.weight.t().to(promotion_dtype).contiguous()
+            hp_weight_map[name] = Parameter(hp_weight, requires_grad=False)
+        else:
+            # We will not handle other quant methods.
+            pass
+    return hp_weight_map, original_weight_map
+
+
+def post_process_view_map_for_fp8(
+    vllm_weight_inplace_view_map: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    """Process the view map returned by `rollout_prepare_recv`.
+            - remove the weight_scale from the view map.
+    Args:
+        vllm_weight_inplace_view_map (Dict[str, torch.Tensor]): view map returned by `rollout_prepare_recv`
+    Returns:
+        Dict[str, torch.Tensor]: view map doesn't contain weight_scale.
+    """
+    processed_view_map = {}
+    for key, value in vllm_weight_inplace_view_map.items():
+        if "weight_scale" in key:
+            continue
+        processed_view_map[key] = value
+    return processed_view_map

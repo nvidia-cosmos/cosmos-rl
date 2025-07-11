@@ -15,7 +15,7 @@
 
 import re
 import torch
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
@@ -69,31 +69,16 @@ class Qwen3MoeWeightMapper(WeightMapper):
     def rollout_prepare_recv(
         self,
         vllm_model: Qwen3MoeForCausalLM,
-        quantization: bool = False,
-        promotion_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[
         Dict[str, torch.Tensor],
         List[List[Tuple[str, torch.Size]]],
-        Dict[str, torch.Tensor],
     ]:
         assert isinstance(vllm_model, Qwen3MoeForCausalLM)
-        if quantization:
-            assert (
-                promotion_dtype is not None
-            ), "promotion_dtype is required when quantization is enabled"
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
-        vllm_full_weight_map = {}  # only for weight that need fp8 quantization.
         for param_name, param in vllm_model.named_parameters():
-            if "weight_scale" in param_name:
-                # do not map weight_scale to vllm weight_inplace_view_map
-                continue
             group_keys = []
             param_name_hf = self._rollout_vllm_name_to_hf(param_name)
-            if quantization and self.is_fp8_quantized_weight(param_name_hf):
-                # logger.info(f"[Rollout] re-materialize weight: {compatible_key} to shape: {param.shape}")
-                param = param = param.t().to(promotion_dtype).contiguous()
-                vllm_full_weight_map[param_name_hf] = param
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:
                 # must be inplace slicing.
@@ -128,7 +113,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 vllm_weight_inplace_view_map[param_name_hf] = param
                 group_keys.append((param_name_hf, param.ndim))
             recv_key_n_rank_list.append(group_keys)
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list, vllm_full_weight_map
+        return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     @torch.no_grad()
     def policy_maybe_decompose_weights_to_hf_naming(
@@ -173,14 +158,14 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 return weight_key.replace(key, "gate_up_proj")
         return weight_key  # return compatible key
 
-    def is_fp8_quantized_weight(self, weight_key: str) -> bool:
-        quantized_weight_partial_keys = [
-            "qkv_proj",
-            "gate_up_proj",
-            "down_proj",
-            "o_proj",
-        ]
-        for key in quantized_weight_partial_keys:
-            if key in weight_key and "bias" not in weight_key:
-                return True
-        return False
+    # def is_fp8_quantized_weight(self, weight_key: str) -> bool:
+    #     quantized_weight_partial_keys = [
+    #         "qkv_proj",
+    #         "gate_up_proj",
+    #         "down_proj",
+    #         "o_proj",
+    #     ]
+    #     for key in quantized_weight_partial_keys:
+    #         if key in weight_key and "bias" not in weight_key:
+    #             return True
+    #     return False

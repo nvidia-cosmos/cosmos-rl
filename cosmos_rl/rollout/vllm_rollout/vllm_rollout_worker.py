@@ -68,6 +68,11 @@ from cosmos_rl.utils.fp8.fp8_util import (
     IS_TORCH_COMPATIBLE_WITH_FP8,
     MIN_TORCH_VERSION_FOR_FP8,
 )
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+    cache_weight_of_quantized_module,
+    replace_weight_of_quantized_module,
+    post_process_view_map_for_fp8,
+)
 
 from vllm import SamplingParams
 import time
@@ -259,15 +264,37 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
 
     def prepare_shard_infos_for_weight_sync_insts(self):
-        (
-            self.vllm_weight_inplace_view_map,
-            self.recv_param_key_n_rank_list,
-            self.vllm_full_weight_map,
-        ) = self.weight_mapper.rollout_prepare_recv(
-            self.get_underlying_model(),
-            quantization=self.quantization_type == "fp8",
-            promotion_dtype=util.str2torch_dtype(self.config.train.param_dtype),
+        if self.quantization_type == "fp8":
+            promotion_dtype = util.str2torch_dtype(self.config.train.param_dtype)
+            # FIXME: (lms) name keep same with weight mapper?
+            self.vllm_hp_weight_map, self.vllm_quantized_weight_map = (
+                cache_weight_of_quantized_module(
+                    self.get_underlying_model(),
+                    promotion_dtype,
+                )
+            )
+            # replace the weight of quantized module with the high precision weight.
+            # let weight in vllm_weight_inplace_view_map always in high precision for recv
+            # high precision weight from policy.
+            replace_weight_of_quantized_module(
+                self.get_underlying_model(),
+                self.vllm_hp_weight_map,
+            )
+
+        self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
+            self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
         )
+
+        if self.quantization_type == "fp8":
+            self.vllm_weight_inplace_view_map = post_process_view_map_for_fp8(
+                self.vllm_weight_inplace_view_map
+            )
+            # Get vllm weight back into quantized.
+            replace_weight_of_quantized_module(
+                self.get_underlying_model(),
+                self.vllm_quantized_weight_map,
+            )
+
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             self.model_config,
@@ -411,20 +438,19 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         communicator_index: int,
         do_weight_sync_check: bool = False,
     ):
-        inst_group_weight_name = (
-            insts_group.param_instructions[0].param_name
-        )  # take a name from the inst group to determine the full weight name
-        # the full weight name that this inst group handles.
-        inst_group_full_weight_name = self.weight_mapper.get_unsplited_weight_name(
-            inst_group_weight_name
-        )
-
-        check_inside_group = do_weight_sync_check and (
-            self.quantization_type != "fp8"
-            or not self.weight_mapper.is_fp8_quantized_weight(
-                inst_group_full_weight_name
+        is_fp8_quantized_module = False
+        check_inside_group = do_weight_sync_check
+        if self.quantization_type == "fp8":
+            inst_group_weight_name = (
+                insts_group.param_instructions[0].param_name
+            )  # take a name from the inst group to determine the full weight name
+            # the full weight name that this inst group handles.
+            inst_group_full_weight_name = self.weight_mapper.get_unsplited_weight_name(
+                inst_group_weight_name
             )
-        )
+            module_name = inst_group_full_weight_name.replace(".weight", "")
+            is_fp8_quantized_module = module_name in self.vllm_quantized_weight_map
+            check_inside_group = do_weight_sync_check and (not is_fp8_quantized_module)
 
         total_bytes_received = 0
 
@@ -451,7 +477,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     recv_tensor = vllm_tensor_view
                 else:
                     # new a temp tensor
-                    recv_tensor = torch.empty_like(vllm_tensor_view)
+                    recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
 
                 nccl_recv(recv_tensor, p_rank, communicator_index)
                 # inplace copy
@@ -467,36 +493,40 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     )
 
         # here we got one full weight tensor sync done, if it is fp8 weight, we should do the quantization and check the numerical error.
-        if (
-            self.quantization_type == "fp8"
-            and self.weight_mapper.is_fp8_quantized_weight(inst_group_full_weight_name)
-        ):
-            weight_to_quantize = self.vllm_full_weight_map[inst_group_full_weight_name]
-            quantized_weight, weight_scale = self.rollout.fp8_quantization(
-                weight_to_quantize
-            )
+        if self.quantization_type == "fp8":
+            if module_name in self.vllm_hp_weight_map:
+                weight_to_quantize = self.vllm_hp_weight_map[
+                    module_name
+                ]  # [out_dim, in_dim]
+                quantized_weight, weight_scale = self.rollout.fp8_quantization(
+                    weight_to_quantize
+                )
 
-            vllm_native_weight = self.rollout.model_param_map[
-                inst_group_full_weight_name
-            ]
+                vllm_native_weight = self.rollout.model_param_map[
+                    inst_group_full_weight_name
+                ]
 
-            # check weight sync
-            if do_weight_sync_check:
-                # allclose doesn't support fp8, promote it.
-                bf16_vllm_native_weight = vllm_native_weight.to(torch.bfloat16)
-                bf16_quantized_weight = quantized_weight.to(torch.bfloat16)
-                if not torch.allclose(bf16_vllm_native_weight, bf16_quantized_weight):
-                    raise ValueError(
-                        f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
-                    )
-            vllm_native_weight.copy_(quantized_weight)
-            # get the scale key.
-            scale_key = inst_group_full_weight_name.replace(".weight", ".weight_scale")
-            scale_tensor = self.rollout.model_param_map[scale_key]
-            assert (
-                scale_tensor.shape == weight_scale.shape
-            ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
-            scale_tensor.copy_(weight_scale)
+                # check weight sync
+                if do_weight_sync_check:
+                    # allclose doesn't support fp8, promote it.
+                    bf16_vllm_native_weight = vllm_native_weight.to(torch.bfloat16)
+                    bf16_quantized_weight = quantized_weight.to(torch.bfloat16)
+                    if not torch.allclose(
+                        bf16_vllm_native_weight, bf16_quantized_weight
+                    ):
+                        raise ValueError(
+                            f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
+                        )
+                vllm_native_weight.copy_(quantized_weight)
+                # get the scale key.
+                scale_key = inst_group_full_weight_name.replace(
+                    ".weight", ".weight_scale"
+                )
+                scale_tensor = self.rollout.model_param_map[scale_key]
+                assert (
+                    scale_tensor.shape == weight_scale.shape
+                ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
+                scale_tensor.copy_(weight_scale)
         else:
             # For non-fp8 weights and fp8 not enabled cases, we just do nothing
             pass
@@ -814,7 +844,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
                 )
             except Exception as e:
-                raise RuntimeError(f"[Rollout] Command execution failed: {str(e)}")
+                raise RuntimeError(
+                    f"[Rollout] Command execution failed for {current_command._serialize()}"
+                ) from e
 
     def send_end_signal(self, url_suffix: str):
         """

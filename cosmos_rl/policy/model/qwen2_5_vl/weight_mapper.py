@@ -21,7 +21,7 @@ import torch
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 import re
 
 
@@ -78,32 +78,17 @@ class QwenVL25WeightMapper(WeightMapper):
     def rollout_prepare_recv(
         self,
         vllm_model: Qwen2_5_VLForConditionalGeneration,
-        quantization: bool = False,
-        promotion_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[
         Dict[str, torch.Tensor],
         List[List[Tuple[str, torch.Size]]],
-        Dict[str, torch.Tensor],
     ]:
         assert isinstance(vllm_model, Qwen2_5_VLForConditionalGeneration)
-        if quantization:
-            assert (
-                promotion_dtype is not None
-            ), "promotion_dtype is required when quantization is enabled"
 
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
-        vllm_full_weight_map = {}  # rematerialized weights for fp8 quantization.
         for param_name, param in vllm_model.named_parameters():
-            if "weight_scale" in param_name:
-                # do not map weight_scale to vllm weight_inplace_view_map
-                continue
-
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            if quantization and self.is_fp8_quantized_weight(compatible_key):
-                param = param.t().to(promotion_dtype).contiguous()
-                vllm_full_weight_map[compatible_key] = param
 
             if "qkv_proj" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
@@ -149,7 +134,7 @@ class QwenVL25WeightMapper(WeightMapper):
                 vllm_weight_inplace_view_map[compatible_key] = param
                 group_keys.append((compatible_key, param.ndim))
             recv_key_n_rank_list.append(group_keys)
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list, vllm_full_weight_map
+        return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
@@ -219,16 +204,16 @@ class QwenVL25WeightMapper(WeightMapper):
                 return weight_key.replace(key, "qkv")
         return weight_key  # return compatible key
 
-    def is_fp8_quantized_weight(self, weight_key: str) -> bool:
-        quantized_weight_partial_keys = [
-            "qkv_proj",
-            "gate_up_proj",
-            "down_proj",
-            "o_proj",
-            # visual part
-            "qkv",
-        ]
-        for key in quantized_weight_partial_keys:
-            if key in weight_key and "bias" not in weight_key:
-                return True
-        return False
+    # def is_fp8_quantized_weight(self, weight_key: str) -> bool:
+    #     quantized_weight_partial_keys = [
+    #         "qkv_proj",
+    #         "gate_up_proj",
+    #         "down_proj",
+    #         "o_proj",
+    #         # visual part
+    #         "qkv",
+    #     ]
+    #     for key in quantized_weight_partial_keys:
+    #         if key in weight_key and "bias" not in weight_key:
+    #             return True
+    #     return False

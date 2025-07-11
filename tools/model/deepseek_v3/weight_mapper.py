@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import torch
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils import util
 from transformers import AutoConfig
@@ -27,10 +27,9 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
     def rollout_prepare_recv(
         self,
         vllm_model: Any,
-        quantization: bool = False,
-        promotion_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[
-        Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], Dict[str, torch.Tensor]
+        Dict[str, torch.Tensor],
+        List[Tuple[str, torch.Size]],
     ]:
         raise NotImplementedError
 

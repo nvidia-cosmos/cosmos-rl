@@ -210,7 +210,8 @@ class TestRollout:
 
         self.vllm_weight_inplace_view_map = compatibale_map
         self.recv_key_n_rank_list = compatibale_list
-        self.vllm_full_weight_map = {}
+        self.vllm_quantized_weight_map = {}
+        self.vllm_hp_weight_map = {}
 
         self.operate_compatibale_map = operate_compatibale_map
         self.inference_stream = torch.cuda.Stream()
