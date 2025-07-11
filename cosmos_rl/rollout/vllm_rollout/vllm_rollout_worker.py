@@ -483,6 +483,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.rollout.reload_weight()
 
         if not hasattr(self, "policy_to_rollout_recv_insts"):
+            logger.info(
+                "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
+            )
             self.policy_to_rollout_recv_insts = []
             try:
                 insts_meta = make_request_with_retry(
@@ -506,6 +509,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 raise RuntimeError(
                     f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
                 )
+            logger.info(
+                "[Rollout] Finished policy_to_rollout_recv_insts from controller."
+            )
 
         with torch.cuda.stream(self.inference_stream):
             # recv the weight from policy

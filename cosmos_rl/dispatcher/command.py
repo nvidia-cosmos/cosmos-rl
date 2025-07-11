@@ -221,7 +221,7 @@ class PolicyToRolloutUnicastCommand(Command):
         - weight initialization of first rollout replica.
     """
 
-    _do_weight_sync_check_flag: bool = True
+    _do_weight_sync_check_flag: bool = False
 
     def __init__(
         self,

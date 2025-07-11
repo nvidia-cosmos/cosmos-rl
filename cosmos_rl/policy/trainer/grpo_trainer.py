@@ -689,6 +689,7 @@ class GRPOTrainer(Trainer):
         st = time.time()
 
         if self.policy_to_rollout_insts is None:
+            logger.info("[Policy] Fetching policy to rollout insts from controller ...")
             self.policy_to_rollout_insts = []
             try:
                 insts_meta = make_request_with_retry(
@@ -712,6 +713,8 @@ class GRPOTrainer(Trainer):
                 raise RuntimeError(
                     f"[Policy] Failed in fetching policy to rollout insts from controller after retries {e}."
                 )
+            logger.info("[Policy] Fetched policy to rollout insts.")
+
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
         # There is a local-replica comm in training step
