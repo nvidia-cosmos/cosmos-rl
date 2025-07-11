@@ -46,10 +46,6 @@ class Trainer(CommMixin):
         self.config = config
         if self.config.policy.parallelism.dp_shard_size == -1:
             self.config.policy.parallelism.dp_shard_size = parallel_dims.dp_shard
-        assert self.config.policy.parallelism.dp_shard_size == parallel_dims.dp_shard
-        assert (
-            self.config.policy.parallelism.dp_shard_size > 0
-        ), "dp_shard_size must be greater than 0"
         self.parallel_dims = parallel_dims
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.global_rank = int(os.environ.get("RANK", 0))
@@ -57,6 +53,7 @@ class Trainer(CommMixin):
         self.world_size = int(os.environ.get("WORLD_SIZE", 1))
         self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
+        self.check_config()
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
             config.policy.model_name_or_path,
             trust_remote_code=True,
@@ -155,6 +152,20 @@ class Trainer(CommMixin):
             f"Trainer initialized at local rank {self.local_rank}, with seq_len_multiple: {self.seq_len_multiple}"
         )
         self.upload_thread = None
+
+    def check_config(self):
+        mini_batch = 1
+        policy_type = self.config.train.train_policy.type
+        train_batch_per_replica = self.config.train.train_batch_per_replica
+        dp_shard_size = self.config.policy.parallelism.dp_shard_size
+        error_msg = f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by dp_shard_size({dp_shard_size})"
+        if policy_type == "grpo":
+            mini_batch = self.config.train.train_policy.mini_batch
+            error_msg += f" * mini_batch({mini_batch})"
+        assert dp_shard_size == self.parallel_dims.dp_shard
+        assert dp_shard_size > 0, "dp_shard_size must be greater than 0"
+        assert train_batch_per_replica % (dp_shard_size * mini_batch) == 0, error_msg
+        logger.info("Config checked successfully")
 
     @property
     def pp_loss_fn(self):
