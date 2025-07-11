@@ -45,20 +45,9 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
     git \
     gcc \
     gdb \
-    kmod \
-    libsubunit-dev \
-    libtool \
-    openssh-client \
-    openssh-server \
     pkg-config \
-    python3-distutils \
-    vim
+    wget
 RUN apt-get purge -y cuda-compat-*
-
-RUN mkdir -p /var/run/sshd
-RUN sed -i 's/[ #]\(.*StrictHostKeyChecking \).*/ \1no/g' /etc/ssh/ssh_config && \
-    echo "    UserKnownHostsFile /dev/null" >> /etc/ssh/ssh_config && \
-    sed -i 's/#\(StrictModes \).*/\1no/g' /etc/ssh/sshd_config
 
 ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
 ENV PATH /opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
