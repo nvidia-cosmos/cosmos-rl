@@ -590,13 +590,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     if is_end:
                         break
 
-                should_report = (
-                    self.parallel_dims.tp_coord[0] == 0
-                    and (
-                        self.parallel_dims.pp_coord[0]
-                        == self.parallel_dims.pp_coord[1] - 1
-                    )
-                    and len(validation_results) > 0
+                should_report = self.parallel_dims.tp_coord[0] == 0 and (
+                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
                 )
 
                 if should_report:
