@@ -78,6 +78,7 @@ class QwenVL25WeightMapper(WeightMapper):
         assert isinstance(vllm_model, Qwen2_5_VLForConditionalGeneration)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
+        groups = []
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
@@ -124,8 +125,9 @@ class QwenVL25WeightMapper(WeightMapper):
             else:
                 vllm_weight_inplace_view_map[compatible_key] = param
                 group_keys.append((compatible_key, param.ndim))
-            recv_key_n_rank_list.append(group_keys)
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list
+            recv_key_n_rank_list.extend(group_keys)
+            groups.append([key for key, _ in group_keys])
+        return vllm_weight_inplace_view_map, recv_key_n_rank_list, groups
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)

@@ -68,10 +68,11 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def rollout_prepare_recv(
         self, vllm_model: Qwen3MoeForCausalLM
-    ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, torch.Size]]]]:
+    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], List[List[str]]]:
         assert isinstance(vllm_model, Qwen3MoeForCausalLM)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
+        groups = []
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             param_name_hf = self._rollout_vllm_name_to_hf(param_name)
@@ -108,8 +109,9 @@ class Qwen3MoeWeightMapper(WeightMapper):
             else:
                 vllm_weight_inplace_view_map[param_name_hf] = param
                 group_keys.append((param_name_hf, param.ndim))
-            recv_key_n_rank_list.append(group_keys)
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list
+            recv_key_n_rank_list.extend(group_keys)
+            groups.append([key for key, _ in group_keys])
+        return vllm_weight_inplace_view_map, recv_key_n_rank_list, groups
 
     @torch.no_grad()
     def policy_maybe_decompose_weights_to_hf_naming(

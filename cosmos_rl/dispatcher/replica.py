@@ -365,6 +365,15 @@ class Replica:
                 tp_size * cp_size * dp_shard_size * pp_size == len(self.atoms)
             ), f"Group sizes must be consistent with the number of atoms, got {tp_size} * {cp_size} * {dp_shard_size} * {pp_size} = {tp_size * cp_size * dp_shard_size * pp_size} and {len(self.atoms)}"
 
+    def n_atoms_per_replica(self) -> int:
+        """
+        Returns the number of atoms per replica.
+        This is the product of all group sizes.
+        """
+        assert len(self.atoms) > 0, f"Replica {self.name} has no atoms"
+        atom = next(iter(self.atoms.values()))
+        return math.prod(atom.group_size)
+
     @property
     def all_atoms_arrived(self) -> bool:
         assert len(self.atoms) > 0, f"Replica {self.name} has no atoms"

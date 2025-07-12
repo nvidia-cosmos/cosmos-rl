@@ -335,11 +335,12 @@ class WeightMapper(ABC):
     @abstractmethod
     def rollout_prepare_recv(
         self, vllm_model: Any
-    ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
+    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, int]], List[List[str]]]:
         """
         Rollout prepare recv list for P2R weight sync:
             - vllm_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
-            - recv_key_n_rank_list: List[List[Tuple[str, int]]]: the list of grouped recv key and its tensor rank
+            - recv_key_n_rank_list: List[Tuple[str, int]]: the list of recv key and its tensor rank
+            - grouped_keys: List[List[str]]: the list of grouped keys for the grouped parameter
         """
         pass
 

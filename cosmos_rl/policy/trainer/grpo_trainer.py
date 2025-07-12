@@ -266,9 +266,7 @@ class GRPOTrainer(Trainer):
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         # Ordered list of (hf_key, tensor_dim)
-        hf_key_n_rank: List[List[Tuple[str, int]]] = [
-            [x] for x in self.model.sorted_hf_key_n_rank_for_sync
-        ]
+        hf_key_n_rank: List[Tuple[str, int]] = self.model.sorted_hf_key_n_rank_for_sync
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config=self.hf_config,
@@ -279,14 +277,27 @@ class GRPOTrainer(Trainer):
         self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
             local_shard_infos
         )
+        sorted_params_all_rank = dist_util.all_gather_object_cpu(
+            [x[0] for x in hf_key_n_rank]
+        )
+        sorted_params_all_rank = [
+            x
+            for r, x in enumerate(sorted_params_all_rank)
+            if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
+        ]
         if self.global_rank == 0:
+            body = {
+                "shard_infos": self.all_rank_local_shard_infos,
+                "param_groups": [],
+                "sorted_params": sorted_params_all_rank,
+            }
+            data = msgpack.packb(body)
             try:
                 make_request_with_retry(
                     partial(
                         requests.post,
-                        json={
-                            "shard_infos": self.all_rank_local_shard_infos,
-                        },
+                        data=data,
+                        headers={"Content-Type": "application/msgpack"},
                     ),
                     self.get_alternative_urls(COSMOS_API_POLICY_SHARD_INFOS_SUFFIX),
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
@@ -703,10 +714,9 @@ class GRPOTrainer(Trainer):
                     ),
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
-                insts_meta = insts_meta.json()
+                insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
                 self.policy_to_rollout_insts = [
-                    WeightSyncInstructionsGroup.from_dict(inst)
-                    for inst in insts_meta["insts"]
+                    WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
                 ]
             except Exception as e:
                 raise RuntimeError(

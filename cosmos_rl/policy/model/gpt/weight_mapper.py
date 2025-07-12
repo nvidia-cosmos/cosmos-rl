@@ -55,12 +55,13 @@ class GPTWeightMapper(WeightMapper):
 
     def rollout_prepare_recv(
         self, vllm_model: Qwen2ForCausalLM
-    ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, torch.Size]]]]:
+    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]], List[List[str]]]:
         assert (
             "qwen" in type(vllm_model).__name__.lower()
         ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
+        groups = []
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
@@ -98,8 +99,9 @@ class GPTWeightMapper(WeightMapper):
                 vllm_weight_inplace_view_map[compatible_key] = param
                 group_keys.append((compatible_key, param.ndim))
 
-            recv_key_n_shape_list.append(group_keys)
-        return vllm_weight_inplace_view_map, recv_key_n_shape_list
+            recv_key_n_shape_list.extend(group_keys)
+            groups.append([key for key, _ in group_keys])
+        return vllm_weight_inplace_view_map, recv_key_n_shape_list, groups
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
