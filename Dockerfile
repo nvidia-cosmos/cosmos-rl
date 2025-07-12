@@ -76,9 +76,5 @@ RUN pip install \
 
 FROM base AS package
 
-COPY README.md pyproject.toml /workspace/cosmos_rl/
-COPY tools /workspace/cosmos_rl/tools
-COPY configs /workspace/cosmos_rl/configs
-COPY cosmos_rl /workspace/cosmos_rl/cosmos_rl
-
-RUN pip install -e /workspace/cosmos_rl
+COPY . /workspace/cosmos_rl
+RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
