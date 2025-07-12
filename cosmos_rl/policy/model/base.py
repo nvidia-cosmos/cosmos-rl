@@ -20,6 +20,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 import cosmos_rl.utils.util as util
+from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 import torch
 from transformers import AutoConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
@@ -28,6 +29,7 @@ from cosmos_rl.dispatcher.data.packer import DataPacker
 class BaseModel(torch.nn.Module, ABC):
     def __init__(self, hf_config: AutoConfig):
         super().__init__()
+        self.tie_word_embeddings = getattr(hf_config, "tie_word_embeddings", False)
         self.weight_mapper = WeightMapper.get_weight_mapper(
             self.supported_model_types()[0]
         )(hf_config)
@@ -45,6 +47,9 @@ class BaseModel(torch.nn.Module, ABC):
         """
         sorted_key_n_rank = []
         for k, v in self.named_parameters():
+            if self.tie_word_embeddings and "lm_head.weight" in k:
+                logger.info(f"Sort {k} skipped because of tie_word_embeddings")
+                continue
             k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
@@ -291,9 +296,15 @@ class ModelRegistry:
         hf_config = util.retry(AutoConfig.from_pretrained)(
             model_name_or_path, trust_remote_code=True
         )
-        if hf_config.model_type not in ModelRegistry._MODEL_REGISTRY:
-            raise ValueError(f"Model {hf_config.model_type} not supported.")
-        model_cls = ModelRegistry._MODEL_REGISTRY[hf_config.model_type]
+        model_type = hf_config.model_type
+        is_supported_model_type = model_type in ModelRegistry._MODEL_REGISTRY
+        if not is_supported_model_type:
+            logger.info(
+                f"Model type {hf_config.model_type} not registered, using {COSMOS_HF_MODEL_TYPES} instead."
+            )
+            model_type = COSMOS_HF_MODEL_TYPES
+
+        model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
         with torch.device("meta"):
             with util.cosmos_default_dtype(
