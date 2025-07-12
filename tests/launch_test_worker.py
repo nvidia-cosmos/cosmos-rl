@@ -205,9 +205,13 @@ class TestRollout:
             for k, v in compatibale_map.items()
         }
         self.ref_compatibale_map = compatibale_map
+        self.quantization_type = None
+        self.config = CosmosConfig()
 
         self.vllm_weight_inplace_view_map = compatibale_map
         self.recv_key_n_rank_list = compatibale_list
+        self.vllm_quantized_weight_map = {}
+        self.vllm_hp_weight_map = {}
 
         self.operate_compatibale_map = operate_compatibale_map
         self.inference_stream = torch.cuda.Stream()
@@ -216,6 +220,15 @@ class TestRollout:
         self.recv_weight_shard = types.MethodType(
             vLLMRolloutWorker.recv_weight_shard, self
         )
+        # just for testing
+        tokenizer = AutoTokenizer.from_pretrained(self.config.policy.model_name_or_path)
+        # change the default parallelism config
+        self.config.rollout.parallelism.tp_size = 4
+        self.config.rollout.parallelism.pp_size = 1
+
+        self.consume_command = types.MethodType(vLLMRolloutWorker.consume_command, self)
+
+        self.rollout = vLLMRollout(self.config, tokenizer)
 
     def get_underlying_model(self):
         return None
@@ -394,6 +407,7 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
         rollout.policy_to_rollout_unicast = types.MethodType(
             vLLMRolloutWorker.policy_to_rollout_unicast, rollout
         )
+        rollout.prepare_shard_infos_for_weight_sync_insts = lambda: None
         rollout.policy_to_rollout_unicast(command)
         rollout.inference_stream.synchronize()
 
@@ -669,6 +683,7 @@ def run_dummy_rollout():
 
         self.rollout_engine = Rollout_engine()
         self.eos_token_ids = [0]
+        self._engine_initialized = True
 
         def rollout_generation(
             self,
@@ -757,10 +772,9 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
     rollout = vLLMRollout(
         config,
         tokenizer=tokenizer,
-        seed=config.rollout.seed,
-        load_format="dummy",
     )
 
+    rollout.init_engine(seed=config.rollout.seed, load_format="dummy")
     parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
     parallel_dims.build_mesh(device_type="cuda")
 

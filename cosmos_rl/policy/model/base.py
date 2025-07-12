@@ -334,7 +334,8 @@ class WeightMapper(ABC):
 
     @abstractmethod
     def rollout_prepare_recv(
-        self, vllm_model: Any
+        self,
+        vllm_model: Any,
     ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
         """
         Rollout prepare recv list for P2R weight sync:
