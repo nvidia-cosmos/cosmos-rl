@@ -310,7 +310,12 @@ class Reward:
 
     def compute_reward(self, to_be_evaluated: str, reference: Union[str, None]):
         total_reward = 0.0
-        for func, weight in self.reward_funcs:
+        for x in self.reward_funcs:
+            if isinstance(x, tuple):
+                func, weight = x
+            else:
+                func = x
+                weight = 1.0
             total_reward += weight * func(
                 to_be_evaluated, reference, config=self.config, tokenizer=self.tokenizer
             )
