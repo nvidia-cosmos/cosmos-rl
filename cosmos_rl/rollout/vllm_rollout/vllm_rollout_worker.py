@@ -74,6 +74,28 @@ Keep in mind that torch distributed is not thread safe. So try to keep the usage
 """
 
 
+def process_weights_after_loading(model, model_config, device):
+    from vllm.attention import Attention
+    from vllm.model_executor.model_loader.loader import device_loading_context
+
+    for _, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if False:  # quant_method is not None: # TODO(aazolini) figure this out
+            # When quant methods need to process weights after loading
+            # (for repacking, quantizing, etc), they expect parameters
+            # to be on the global target device. This scope is for the
+            # case where cpu offloading is used, where we will move the
+            # parameters onto device for processing and back off after.
+            with device_loading_context(module, torch.device(device)):
+                quant_method.process_weights_after_loading(module)
+        if isinstance(module, Attention) and hasattr(
+            module, "process_weights_after_loading"
+        ):
+            # When attention modules need to process weights after
+            # currently only used by MLA
+            module.process_weights_after_loading(model_config.dtype)
+
+
 def _patch_vllm_rollout_locked_step(rollout, consume_command, enable_validation):
     llm_engine = rollout.rollout_engine.llm_engine
     orig_step = llm_engine.step
@@ -439,6 +461,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
+        if not hasattr(self, "loaded"):
+            self.rollout.reload_weight()
+            self.loaded = True
+        logger.info("Weights loaded.")
+        self.state.set_weight_synced()
+        return
+
         """
         Sync the weight from policy to rollout.
         This is Policy -> Rollout replica. Will only happen between
@@ -448,6 +477,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             return
         # get the nccl_unique_id from the controller
         communicator_index = {}
+
+        logger.info("Testing post processing of weights.")
+        self.rollout.process_weights_after_loading()
+        logger.info("Post processing of weights works.")
 
         nccl_unique_id_key = command.src_replica_name + "_" + command.dst_replica_name
         if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
@@ -514,6 +547,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
 
         with torch.cuda.stream(self.inference_stream):
+            logger.info(
+                f"Starting to execute {len(self.policy_to_rollout_recv_insts)} weight sync receives ..."
+            )
             # recv the weight from policy
             st = time.time()
             total_bytes_received = 0
@@ -526,9 +562,14 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         command.do_weight_sync_check,
                     )
             time_eclapsed = time.time() - st
-            logger.debug(
+            logger.info(
                 f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
             )
+
+            logger.info("Post processing of weights after receiving new weights ...")
+            self.rollout.process_weights_after_loading()
+            logger.info("Post processing of weights finished.")
+
             self.state.set_weight_synced()
 
     @RolloutWorkerBase.register_rollout_command_handler(
@@ -781,7 +822,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             elif self._prompt_queue.empty():
                 continue
             else:
-                logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
+                logger.info(f"[Rollout] generate start for rank {self.global_rank}")
                 prompts: List[Tuple[int, str]] = self._prompt_queue.get()
                 completions: List[List[str]] = self.rollout.rollout_generation(
                     prompt_id_and_payload_list=prompts,
@@ -789,7 +830,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
-                logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
+                logger.info(f"[Rollout] generate end for rank {self.global_rank}")
 
                 should_report = self.parallel_dims.tp_coord[0] == 0 and (
                     self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1

@@ -26,6 +26,7 @@ from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.rollout.vllm_rollout.vllm_patch import (
     patch_vllm_model_to_reload_weight,
+    process_weights_after_loading,
 )
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
@@ -150,6 +151,13 @@ class vLLMRollout(RolloutBase):
     def reload_weight(self):
         self.rollout_engine.llm_engine.vllm_config.load_config.load_format = "auto"
         self.rollout_engine.collective_rpc("reload_model")
+
+    def process_weights_after_loading(self):
+        process_weights_after_loading(
+            self.rollout_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model,
+            self.rollout_engine.llm_engine.model_config,
+            torch.device("cuda"),  # TODO(aazzolini) generalize this.
+        )
 
     @torch.no_grad()
     def rollout_generation(
