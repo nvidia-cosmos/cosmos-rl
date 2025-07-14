@@ -21,6 +21,19 @@ RUN apt-get update -qq
 # Install specific Redis version
 RUN apt-get install -qq -y redis-server
 
+###################################################
+## Remove AWS-EFA related packages
+RUN apt-get remove -y --purge --allow-change-held-packages \
+    ibverbs-utils \
+    libibverbs-dev \
+    libibverbs1 \
+    libmlx5-1 \
+    libnccl2 \
+    libnccl-dev
+
+ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
+ENV PATH /opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
+
 #################################################
 ## Install EFA installer
 ARG EFA_INSTALLER_VERSION=1.42.0
