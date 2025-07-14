@@ -90,4 +90,4 @@ RUN pip install \
 FROM base AS package
 
 COPY . /workspace/cosmos_rl
-RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
+RUN pip install -e /workspace/cosmos_rl
