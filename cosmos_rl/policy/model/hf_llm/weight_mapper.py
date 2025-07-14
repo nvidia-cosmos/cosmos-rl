@@ -116,13 +116,20 @@ class HFLLMWeightMapper(WeightMapper):
             r"model\.layers\.(\d+)\.self_attn\.qkv_proj\.(weight|bias)",
             name,
         ):
+            total_size = self.kv_head_ratio + 2
             split_strategy = []
             # The first part of the split:
             # the dictionary means at dimension 0, extract the part of offset 0 and length 1 when regarding the whole 0 dimension as length 3.
             split_strategy.append(
                 (
                     name.replace("qkv_proj", "q_proj"),
-                    {0: {"offset": 0, "total_size": 3, "length": 1}},
+                    {
+                        0: {
+                            "offset": 0,
+                            "total_size": total_size,
+                            "length": self.kv_head_ratio,
+                        }
+                    },
                 )
             )
             # The second part of the split:
@@ -130,7 +137,13 @@ class HFLLMWeightMapper(WeightMapper):
             split_strategy.append(
                 (
                     name.replace("qkv_proj", "k_proj"),
-                    {0: {"offset": 1, "total_size": 3, "length": 1}},
+                    {
+                        0: {
+                            "offset": self.kv_head_ratio,
+                            "total_size": total_size,
+                            "length": 1,
+                        }
+                    },
                 )
             )
             # The third part of the split:
@@ -138,7 +151,13 @@ class HFLLMWeightMapper(WeightMapper):
             split_strategy.append(
                 (
                     name.replace("qkv_proj", "v_proj"),
-                    {0: {"offset": 2, "total_size": 3, "length": 1}},
+                    {
+                        0: {
+                            "offset": self.kv_head_ratio + 1,
+                            "total_size": total_size,
+                            "length": 1,
+                        }
+                    },
                 )
             )
             return split_strategy
