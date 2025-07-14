@@ -923,51 +923,6 @@ class Qwen3MoE(BaseModel):
     def get_nparams_and_flops(self, seq_len: int) -> tuple[int, int]:
         return self._get_nparams_and_flops_fn(seq_len)
 
-    def weight_sync_transform_by_key_internal(
-        self, dest_name: str, self_state_dict
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        if dest_name.startswith("model."):
-            dest_name = dest_name.replace("model.", "")
-        assert dest_name in self_state_dict, f"Unsupported weight: {dest_name}"
-
-        import weakref
-
-        weak_self = weakref.ref(self)
-
-        def policy_to_rollout_weight_transform(
-            dest_name: str, weak_self: weakref.ref
-        ) -> torch.Tensor:
-            assert weak_self is not None, "Model has been destroyed"
-            self = weak_self()
-            state_dict = self.state_dict()
-            state_dict = {clear_weight_name(k): v for k, v in state_dict.items()}
-            target_tensor = state_dict[dest_name]
-            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
-            # if it is up_proj or down_proj, gate_proj, we need to transpose the tensor back to the original shape
-            if dest_name.endswith(
-                ("up_proj.weight", "down_proj.weight", "gate_proj.weight")
-            ):
-                target_tensor = target_tensor.permute(
-                    0, 2, 1
-                )  # Share storage with in-contiguous stride
-            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-            return local_view
-
-        f = partial(
-            policy_to_rollout_weight_transform, dest_name=dest_name, weak_self=weak_self
-        )
-
-        # Return callable if the weight is up_proj, down_proj, gate_proj
-        # Otherwise, return the tensor directly
-        # This is to avoid the overhead of redo the extraction if no real transform is needed
-        return (
-            f
-            if dest_name.endswith(
-                ("up_proj.weight", "down_proj.weight", "gate_proj.weight")
-            )
-            else f()
-        )
-
     @cached_property
     def weight_sync_transforms_per_model(
         self,
@@ -975,11 +930,48 @@ class Qwen3MoE(BaseModel):
         self_state_dict = self.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         transforms = {}
-        for dest_name, _ in self.sorted_hf_key_n_rank:
-            local_view = self.weight_sync_transform_by_key_internal(
-                dest_name, self_state_dict
+        for hf_name, _ in self.sorted_hf_key_n_rank:
+            inter_name = (
+                hf_name[len("model.") :] if hf_name.startswith("model.") else hf_name
             )
-            transforms[dest_name] = local_view
+            assert inter_name in self_state_dict, f"Unsupported weight: {inter_name}"
+
+            def policy_to_rollout_weight_transform(
+                dest_name: str, state_dict: Dict[str, torch.Tensor]
+            ) -> torch.Tensor:
+                target_tensor = state_dict[dest_name]
+                is_dist_tensor = isinstance(
+                    target_tensor, torch.distributed.tensor.DTensor
+                )
+                # if it is up_proj or down_proj, gate_proj, we need to transpose the tensor back to the original shape
+                if dest_name.endswith(
+                    ("up_proj.weight", "down_proj.weight", "gate_proj.weight")
+                ):
+                    target_tensor = target_tensor.permute(
+                        0, 2, 1
+                    )  # Share storage with in-contiguous stride
+                local_view = (
+                    target_tensor.to_local() if is_dist_tensor else target_tensor
+                )
+                return local_view
+
+            f = partial(
+                policy_to_rollout_weight_transform,
+                dest_name=inter_name,
+                state_dict=self_state_dict,
+            )
+
+            # Return callable if the weight is up_proj, down_proj, gate_proj
+            # Otherwise, return the tensor directly
+            local_view = (
+                f
+                if inter_name.endswith(
+                    ("up_proj.weight", "down_proj.weight", "gate_proj.weight")
+                )
+                else f()
+            )
+
+            transforms[hf_name] = local_view
         return transforms
 
     @classmethod

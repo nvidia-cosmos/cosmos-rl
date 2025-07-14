@@ -55,23 +55,21 @@ class BaseModel(torch.nn.Module, ABC):
     @cached_property
     def sorted_hf_key_n_rank_for_sync(self) -> List[Tuple[str, int]]:
         """
-        Return sorted parameter tensor name and their rank of local view after applying the tensor name mapping transform for synchronization.
-        This is used to get the parameters that need to be synchronized.
+        Potentially the weights of policy model need to be decomposed into fine-grained weights for synchronization.
+        This method returns the sorted list of fine-grained weights and their ranks.
         """
         sorted_key_n_rank = []
-        for k, v in self.sorted_hf_key_n_rank:
-            if self.weight_mapper.policy_map_param_to_transformed_params_for_sync(k):
-                for (
-                    sync_param
-                ) in self.weight_mapper.policy_map_param_to_transformed_params_for_sync(
-                    k
-                ):
-                    # The splitted params from the original param usually have the same rank as the original param.
-                    # So we can use the local view of the original param to get the rank.
-                    sorted_key_n_rank.append((sync_param[0], v))
-            else:
-                # If the parameter is not transformed, we can use the original parameter name and its rank.
-                sorted_key_n_rank.append((k, v))
+        for k, n_dim in self.sorted_hf_key_n_rank:
+            decomposed_key_and_slices = (
+                self.weight_mapper.policy_decompose_param_1_to_n_for_sync(k)
+            )
+            if not decomposed_key_and_slices:
+                decomposed_key_and_slices = [(k, n_dim)]
+
+            for name, slice in decomposed_key_and_slices:
+                # The splitted params from the original param usually have the same rank as the original param.
+                # So we can use the local view of the original param to get the rank.
+                sorted_key_n_rank.append((name, n_dim))
         sorted_key_n_rank.sort(key=lambda x: x[0])
         return sorted_key_n_rank
 
@@ -181,32 +179,39 @@ class BaseModel(torch.nn.Module, ABC):
         """
         weight_sync_transforms = []
         for name, _ in self.sorted_hf_key_n_rank:
-            if self.weight_mapper.policy_map_param_to_transformed_params_for_sync(name):
-                local_view = self.weight_sync_transforms_per_model[name]
-                for (
-                    sync_param
-                ) in self.weight_mapper.policy_map_param_to_transformed_params_for_sync(
-                    name
-                ):
-                    if sync_param[0] in self.weight_sync_transforms_per_model:
+            decomposed_key_and_ranks: List[Tuple[str, int]] = (
+                self.weight_mapper.policy_decompose_param_1_to_n_for_sync(name)
+            )
+
+            if decomposed_key_and_ranks:
+                # The current parameter is decomposed into multiple parameters, so we need to transform each of them.
+                # (This does not happen for most cases, i.e. `qkv_proj.weight` to be decomposed into `q.weight`, `k.weight`, and `v.weight`)
+                direct_view = self.weight_sync_transforms_per_model[name]
+                for decomposed_name, _ in decomposed_key_and_ranks:
+                    # There are three cases:
+                    # 1. The transformation logic of the decomposed parameter is already in the `weight_sync_transforms_per_model`,
+                    #    so we can directly use it.
+                    # 2. The transformation logic of the decomposed parameter is specified in weight mapper for 1 to n decomposition,
+                    #    so we can use it.
+                    # 3. The decomposed parameter does not reside in the current rank, skip it.
+                    if decomposed_name in self.weight_sync_transforms_per_model:
                         weight_sync_transforms.append(
                             (
-                                sync_param[0],
-                                self.weight_sync_transforms_per_model[sync_param[0]],
+                                decomposed_name,
+                                self.weight_sync_transforms_per_model[decomposed_name],
                             )
                         )
-                        continue
-                    if (
+                    elif (
                         self.weight_mapper.get_transform_func_from_local_param_for_sync(
-                            sync_param[0]
+                            decomposed_name
                         )
                         is not None
                     ):
                         transform = self.weight_mapper.get_transform_func_from_local_param_for_sync(
-                            sync_param[0]
+                            decomposed_name
                         )
                         weight_sync_transforms.append(
-                            (sync_param[0], transform(local_view))
+                            (decomposed_name, transform(direct_view))
                         )
                     else:
                         # If no transform function is set, means the current parameter is not transformed and synchronized at this rank.
@@ -452,7 +457,7 @@ class WeightMapper(ABC):
             ],
         }
 
-    def policy_map_param_to_transformed_params_for_sync(self, name):
+    def policy_decompose_param_1_to_n_for_sync(self, name):
         """
         Map a parameter of the policy model to set of transformed parameters that need to be synchronized.
         This method returns a list containing tuples of the new parameter name and the corresponding new tensor transformed from the original tensor of the given name.

@@ -755,13 +755,13 @@ class ParallelTopoMapper:
                             total_size=total_size,
                             length=length,
                         ).__dict__
-                reformatted = (
-                    self.weight_mapper.policy_map_param_to_transformed_params_for_sync(
+                decomposed_key_and_slices = (
+                    self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
                         self.weight_mapper.policy_map_local_key_to_hf_key(name)
                     )
                 )
-                if reformatted:
-                    for part_name, part_slice in reformatted:
+                if decomposed_key_and_slices:
+                    for part_name, part_slice in decomposed_key_and_slices:
                         splitted_dim_rank_info = {}
                         part_in_local = {}
                         part_slice = {
