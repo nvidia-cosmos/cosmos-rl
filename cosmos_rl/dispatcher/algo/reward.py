@@ -21,7 +21,7 @@ from cosmos_rl.policy.config import Config
 from typing import Union, Callable
 from cosmos_rl.utils.constant import RewardFn
 from cosmos_rl.utils.logging import logger
-from typing import Optional, List
+from typing import Dict, Optional, List
 
 math_comparer = math_metric(
     gold_extraction_target=(LatexExtractionConfig(),),
@@ -281,7 +281,7 @@ class Reward:
         self,
         config: Config,
         tokenier: PreTrainedTokenizer,
-        reward_function: List[str] = [],
+        reward_function: Optional[Dict[str, float]] = None,
         explicit_reward_fn: Optional[List[Callable]] = None,
     ):
         self.config = config
@@ -299,17 +299,24 @@ class Reward:
             if not reward_function:
                 reward_function = config.train.train_policy.reward_function
             self.reward_funcs = []
-            for name in reward_function:
+            for name, weight in reward_function.items():
                 reward_func = RewardFn.from_string(name)
-            if reward_func not in REWARD_FUNC_MAPPING:
-                raise ValueError(f"Reward function {reward_func} not found in mapping.")
-            self.reward_funcs.append(REWARD_FUNC_MAPPING[name])
-            logger.info(f"[Reward] Using reward functions: {reward_function}")
+                if reward_func not in REWARD_FUNC_MAPPING:
+                    raise ValueError(
+                        f"Reward function {reward_func} not found in mapping."
+                    )
+                self.reward_funcs.append((REWARD_FUNC_MAPPING[name], weight))
+                logger.info(f"[Reward] Using reward functions: {reward_function}")
 
     def compute_reward(self, to_be_evaluated: str, reference: Union[str, None]):
         total_reward = 0.0
-        for func in self.reward_funcs:
-            total_reward += func(
+        for x in self.reward_funcs:
+            if isinstance(x, tuple):
+                func, weight = x
+            else:
+                func = x
+                weight = 1.0
+            total_reward += weight * func(
                 to_be_evaluated, reference, config=self.config, tokenizer=self.tokenizer
             )
         return total_reward
