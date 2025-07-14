@@ -1,7 +1,12 @@
+# Usage:
+# To build without AWS-EFA:
+#   docker build -t cosmos_rl:latest -f Dockerfile --target package .
+# To build with AWS-EFA:
+#   docker build -t cosmos_rl:latest -f Dockerfile --target package_aws_efa .
+
 ARG CUDA_VERSION=12.8.1
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
 
-ARG ENABLE_AWS_EFA=true
 ARG GDRCOPY_VERSION=v2.4.4
 ARG EFA_INSTALLER_VERSION=1.42.0
 ARG AWS_OFI_NCCL_VERSION=v1.16.0
@@ -11,19 +16,6 @@ ARG NCCL_VERSION=2.26.2-1+cuda12.8
 ENV TZ=Etc/UTC
 
 RUN apt-get update -y && apt-get upgrade -y
-RUN if [ "${ENABLE_AWS_EFA}" == "true" ]; then \
-        apt-get remove -y --purge --allow-change-held-packages \
-        ibverbs-utils \
-        libibverbs-dev \
-        libibverbs1 \
-        libmlx5-1 \
-        libnccl2 \
-        libnccl-dev; \
-    else \
-        apt-get remove -y --purge --allow-change-held-packages \
-        libnccl2 \
-        libnccl-dev; \
-    fi
 
 RUN rm -rf /opt/hpcx \
     && rm -rf /usr/local/mpi \
@@ -49,11 +41,6 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
     wget
 RUN apt-get purge -y cuda-compat-*
 
-ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
-ENV PATH /opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
-
-
-
 #################################################
 ## Install NVIDIA GDRCopy
 ##
@@ -69,66 +56,15 @@ ENV CPATH /opt/gdrcopy/include:$CPATH
 ENV PATH /opt/gdrcopy/bin:$PATH
 
 ###################################################
-## Remove AWS-EFA related packages
+## Install NCCL with specific version
 RUN apt-get remove -y --purge --allow-change-held-packages \
-    ibverbs-utils \
-    libibverbs-dev \
-    libibverbs1 \
-    libmlx5-1 \
     libnccl2 \
     libnccl-dev
-
-ENV LD_LIBRARY_PATH=/usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
-ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
-
-#################################################
-## Install EFA installer
-RUN ! ${ENABLE_AWS_EFA} || ( \
-    cd $HOME \
-    && curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
-    && tar -xf $HOME/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
-    && cd aws-efa-installer \
-    && ./efa_installer.sh -y -g -d --skip-kmod --skip-limit-conf --no-verify \
-    && rm -rf $HOME/aws-efa-installer \
-    )
-
-###################################################
-## Install NCCL with specific version
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
     && dpkg -i cuda-keyring_1.1-1_all.deb \
     && rm cuda-keyring_1.1-1_all.deb \
     && apt-get update -y \
     && apt-get install -y libnccl2=${NCCL_VERSION}
-
-###################################################
-## Install AWS-OFI-NCCL plugin
-RUN DEBIAN_FRONTEND=noninteractive apt-get install -y libhwloc-dev
-#Switch from sh to bash to allow parameter expansion
-SHELL ["/bin/bash", "-c"]
-RUN ! ${ENABLE_AWS_EFA} || ( \
-    curl -OL https://github.com/aws/aws-ofi-nccl/releases/download/${AWS_OFI_NCCL_VERSION}/aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz \
-    && tar -xf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz \
-    && cd aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} \
-    && ./configure --prefix=/opt/aws-ofi-nccl/install \
-        --with-mpi=/opt/amazon/openmpi \
-        --with-libfabric=/opt/amazon/efa \
-        --with-cuda=/usr/local/cuda \
-        --enable-platform-aws \
-    && make -j $(nproc) \
-    && make install \
-    && cd .. \
-    && rm -rf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} \
-    && rm aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz \
-    )
-
-
-###################################################
-## Install python
-RUN apt-get update -qq && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
-    build-essential tzdata netcat \
-    python3.10 python3.10-dev python3.10-venv python3-pip python-is-python3 \
-    lsb-release gpg
 
 ###################################################
 ## Install redis
@@ -140,6 +76,14 @@ RUN curl -fsSL https://packages.redis.io/gpg  | gpg --dearmor -o /usr/share/keyr
 # Update package list
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y redis-server
+
+###################################################
+## Install python
+RUN apt-get update -qq && \
+DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
+build-essential tzdata netcat \
+python3.10 python3.10-dev python3.10-venv python3-pip python-is-python3 \
+lsb-release gpg
 
 RUN pip install -U pip setuptools wheel packaging
 # even though we don't depend on torchaudio, vllm does. in order to
@@ -156,8 +100,57 @@ RUN pip install \
 
 
 ###################################################
-## Install cosmos_rl
+FROM base AS aws_efa_base
+
+RUN apt-get remove -y --purge --allow-change-held-packages \
+    ibverbs-utils \
+    libibverbs-dev \
+    libibverbs1 \
+    libmlx5-1
+
+###################################################
+## Install EFA installer
+RUN cd $HOME \
+    && curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
+    && tar -xf $HOME/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
+    && cd aws-efa-installer \
+    && ./efa_installer.sh -y -g -d --skip-kmod --skip-limit-conf --no-verify \
+    && rm -rf $HOME/aws-efa-installer
+
+###################################################
+## Install AWS-OFI-NCCL plugin
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y libhwloc-dev
+#Switch from sh to bash to allow parameter expansion
+SHELL ["/bin/bash", "-c"]
+RUN curl -OL https://github.com/aws/aws-ofi-nccl/releases/download/${AWS_OFI_NCCL_VERSION}/aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz \
+    && tar -xf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz \
+    && cd aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} \
+    && ./configure --prefix=/opt/aws-ofi-nccl/install \
+        --with-mpi=/opt/amazon/openmpi \
+        --with-libfabric=/opt/amazon/efa \
+        --with-cuda=/usr/local/cuda \
+        --enable-platform-aws \
+    && make -j $(nproc) \
+    && make install \
+    && cd .. \
+    && rm -rf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} \
+    && rm aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz
+
+ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
+ENV PATH /opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
+
+
+###################################################
+## Image target: cosmos_rl
 FROM base AS package
 
 COPY . /workspace/cosmos_rl
-RUN pip install -e /workspace/cosmos_rl
+RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
+
+
+###################################################
+## Image target: cosmos_rl with aws-efa
+FROM aws_efa_base AS package_aws_efa
+
+COPY . /workspace/cosmos_rl
+RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
