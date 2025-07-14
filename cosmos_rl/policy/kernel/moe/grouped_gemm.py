@@ -88,14 +88,14 @@ def run_group_gemm_hopper(
 ):
     gate_proj = FakeGroupMMBackwardCheck.apply(
         contig_tokens,
-        gate_weight,
+        gate_weight.transpose(-2, -1).contiguous(),
         m_offsets,
         torch.bfloat16,
     )
 
     up_proj = FakeGroupMMBackwardCheck.apply(
         contig_tokens,
-        up_weight,
+        up_weight.transpose(-2, -1).contiguous(),
         m_offsets,
         torch.bfloat16,
     )
@@ -106,7 +106,7 @@ def run_group_gemm_hopper(
     # Run the third GEMM (down projection)
     hidden_outputs = FakeGroupMMBackwardCheck.apply(
         hidden_outputs,
-        down_weight,
+        down_weight.transpose(-2, -1).contiguous(),
         m_offsets,
         torch.bfloat16,
     )
@@ -120,14 +120,14 @@ def run_group_gemm_3rd_party(
 
     gate_proj = FallbackGroupedGemmImpl.apply(
         contig_tokens,
-        gate_weight,
+        gate_weight.transpose(-2, -1).contiguous(),
         sizes_cpu,
         False,
     )
 
     up_proj = FallbackGroupedGemmImpl.apply(
         contig_tokens,
-        up_weight,
+        up_weight.transpose(-2, -1).contiguous(),
         sizes_cpu,
         False,
     )
@@ -138,7 +138,7 @@ def run_group_gemm_3rd_party(
     # Run the third GEMM (down projection)
     hidden_outputs = FallbackGroupedGemmImpl.apply(
         hidden_outputs,
-        down_weight,
+        down_weight.transpose(-2, -1).contiguous(),
         sizes_cpu,
         False,
     )

@@ -31,8 +31,8 @@ RUN apt-get remove -y --purge --allow-change-held-packages \
     libnccl2 \
     libnccl-dev
 
-ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
-ENV PATH /opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
+ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
 
 #################################################
 ## Install EFA installer
@@ -90,4 +90,4 @@ RUN pip install \
 FROM base AS package
 
 COPY . /workspace/cosmos_rl
-RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
+RUN pip install -e /workspace/cosmos_rl

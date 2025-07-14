@@ -734,7 +734,15 @@ def run_policy_parallelism_extract(rank, fsdp, tp, pp):
     )
 
     assert len(mapper.mapper_group) == 1, "Only one mapper group expected"
-    hf_key_n_rank = [[x] for x in model.sorted_hf_key_n_rank_for_sync]
+    keys_n_ranks = []
+    for name, tensor_or_callable in model.weight_sync_transforms:
+        if isinstance(tensor_or_callable, torch.Tensor):
+            keys_n_ranks.append((name, tensor_or_callable.ndim))
+        else:
+            tensor_or_callable = tensor_or_callable()
+            keys_n_ranks.append((name, tensor_or_callable.ndim))
+    keys_n_ranks = sorted(keys_n_ranks, key=lambda x: x[0])
+    hf_key_n_rank = [[x] for x in keys_n_ranks]
     local_shard_infos = mapper.prepare_local_shard_infos(hf_key_n_rank, rank)
     all_rank_local_shard_infos = dist_util.all_gather_object_cpu(local_shard_infos)
     if rank == 0:

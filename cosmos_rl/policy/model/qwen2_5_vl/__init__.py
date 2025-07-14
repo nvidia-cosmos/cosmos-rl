@@ -15,7 +15,7 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Callable, Union, Dict
+from typing import List, Optional, Tuple, Callable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1432,50 +1432,6 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             n_params += lm_n_params
             n_flops += lm_n_flops
         return n_params, n_flops
-
-    def weight_sync_transform_by_key_internal(
-        self, dest_name: str, lm_state_dict, visual_state_dict
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        is_visual = dest_name.startswith("visual.")
-        # Handle qkv weights for separate q, k, v tensors
-        if is_visual:
-            dest_name = dest_name.replace("visual.", "")
-            assert dest_name in visual_state_dict, f"Unsupported weight: {dest_name}"
-        elif dest_name.startswith("model."):
-            dest_name = dest_name.replace("model.", "")
-            assert dest_name in lm_state_dict, f"Unsupported weight: {dest_name}"
-        elif dest_name == "lm_head.weight":
-            assert dest_name in lm_state_dict, f"Unsupported weight: {dest_name}"
-        else:
-            raise ValueError(f"Unsupported weight: {dest_name} in state_dict")
-
-        target_tensor = (
-            visual_state_dict[dest_name] if is_visual else lm_state_dict[dest_name]
-        )
-        is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
-        local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-        return local_view
-
-    @cached_property
-    def weight_sync_transforms_per_model(
-        self,
-    ) -> Dict[str, Union[torch.Tensor, Callable]]:
-        lm_state_dict = self.model.state_dict()
-        if self.visual is not None:
-            visual_state_dict = self.visual.state_dict()
-        else:
-            visual_state_dict = {}
-        lm_state_dict = {clear_weight_name(k): v for k, v in lm_state_dict.items()}
-        visual_state_dict = {
-            clear_weight_name(k): v for k, v in visual_state_dict.items()
-        }
-        transforms = {}
-        for dest_name, _ in self.sorted_hf_key_n_rank:
-            local_view = self.weight_sync_transform_by_key_internal(
-                dest_name, lm_state_dict, visual_state_dict
-            )
-            transforms[dest_name] = local_view
-        return transforms
 
     @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:

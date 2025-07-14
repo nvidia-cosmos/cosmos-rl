@@ -154,14 +154,9 @@ class QwenVL25WeightMapper(WeightMapper):
         else:
             raise ValueError(f"Unsupported weight: {dest_name}")
 
-    def policy_map_param_to_transformed_params_for_sync(self, name):
-        """
-        Map a parameter of the policy model to set of transformed parameters that need to be synchronized.
-        This method returns a list containing tuples of the new parameter name and the corresponding new tensor transformed from the original tensor of the given name.
-        Each tuple element includes a transformed tensor and its corresponding slice strategy to derive from the original tensor.
-        """
+    def policy_decompose_param_1_to_n_for_sync(self, name):
         if match := re.search(  # noqa: F841
-            r"blocks\.(\d+)\.attn\.qkv\.(weight|bias)",
+            r"visual\.blocks\.(\d+)\.attn\.qkv\.(weight|bias)",
             name,
         ):
             split_strategy = []
