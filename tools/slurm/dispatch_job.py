@@ -149,7 +149,7 @@ def main():
         help="Path to the controller config file",
     )
     parser.add_argument(
-        "--repo-root-path", type=str, required=True, help="Path to the repository root"
+        "--repo-root-path", type=str, default=None, help="Path to the repository root"
     )
     parser.add_argument(
         "--output-root-path", type=str, required=True, help="Path to the output root"
@@ -183,10 +183,14 @@ def main():
         * config["policy"]["parallelism"]["pp_size"]
         * config["policy"]["parallelism"]["cp_size"]
     )
-    min_n_gpus_rollout = (
-        config["rollout"]["parallelism"]["tp_size"]
-        * config["rollout"]["parallelism"]["pp_size"]
-    )
+    train_type = config["train"]["train_policy"]["type"]
+
+    if "rollout" in config:
+        # sft case may not have rollout config
+        min_n_gpus_rollout = (
+            config["rollout"]["parallelism"]["tp_size"]
+            * config["rollout"]["parallelism"]["pp_size"]
+        )
     if config["policy"]["parallelism"]["dp_shard_size"] >= 1:
         min_n_gpus_policy = (
             min_n_gpus_policy * config["policy"]["parallelism"]["dp_shard_size"]
@@ -210,17 +214,19 @@ def main():
     policy_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
         args.ngpu_per_node, min_n_gpus_policy, args.n_policy_replicas, "policy"
     )
-    rollout_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
-        args.ngpu_per_node, min_n_gpus_rollout, args.n_rollout_replicas, "rollout"
-    )
-
     n_policy_nodes = len(policy_node_launch_metadata)
+
+    if train_type == "sft":
+        rollout_node_launch_metadata = []
+    else:
+        rollout_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
+            args.ngpu_per_node, min_n_gpus_rollout, args.n_rollout_replicas, "rollout"
+        )
     n_rollout_nodes = len(rollout_node_launch_metadata)
 
     # Template for the slurm script
     template_vars = {
         "TOTAL_NODES": f"{n_policy_nodes + n_rollout_nodes}",
-        "REPO_ROOT_PATH": args.repo_root_path,
         "OUTPUT_ROOT_PATH": args.output_root_path,
         "COSMOS_CONTAINER": args.cosmos_container,
         "SLURM_PARTITION": args.slurm_partition,
@@ -239,6 +245,9 @@ def main():
         "NUM_ROLLOUT_NODES": f"{n_rollout_nodes}",
         "TOTAL_NODES": f"{n_policy_nodes + n_rollout_nodes}",
     }
+
+    if args.repo_root_path is not None:
+        env_vars["REPO_ROOT_PATH"] = args.repo_root_path
 
     # Read the template relative to the current file
     with open(

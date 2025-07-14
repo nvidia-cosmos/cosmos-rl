@@ -23,6 +23,8 @@ import cosmos_rl.utils.util as util
 import torch
 from transformers import AutoConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
+import collections
+from functools import partial
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -39,41 +41,210 @@ class BaseModel(torch.nn.Module, ABC):
         return next(self.parameters()).device
 
     @cached_property
-    def sorted_hf_key_n_rank(self) -> List[Tuple[str, int]]:
-        """
-        Return sorted parameter tensor name and their rank of local view.
-        """
-        sorted_key_n_rank = []
-        for k, v in self.named_parameters():
-            k = self.weight_mapper.policy_map_local_key_to_hf_key(k)
+    def weight_sync_transforms(
+        self,
+    ) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+        from cosmos_rl.utils.parallelism_map import DimSliceInfo, ParallelTopoMapper
+        # all_param_data = {p.data for p in self.parameters()}
+
+        # self_state_dict = self.state_dict()
+        # keys = list(self_state_dict.keys())
+        # keys.sort(key=lambda x: x[0])
+        # transforms = collections.OrderedDict()
+        # for k in keys:
+        #     v = self_state_dict[k]
+        #     if v not in all_param_data:
+        #         continue
+        #     is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
+        #     local_view = v.to_local() if is_dist_tensor else v
+        #     transforms[
+        #         self.weight_mapper.policy_map_local_key_to_hf_key(
+        #             util.clear_weight_name(k)
+        #         )
+        #     ] = local_view
+
+        # 1. get all parameters, but not buffers
+        named_parameters = {name: param for name, param in self.named_parameters()}
+        keys = list(named_parameters.keys())
+        keys.sort(key=lambda x: x[0])
+        transforms = collections.OrderedDict()
+        for k in keys:
+            v = named_parameters[k]
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
-            sorted_key_n_rank.append((k, local_view.ndim))
-        sorted_key_n_rank.sort(key=lambda x: x[0])
-        return sorted_key_n_rank
+            transforms[
+                self.weight_mapper.policy_map_local_key_to_hf_key(
+                    util.clear_weight_name(k)
+                )
+            ] = local_view
 
-    @cached_property
-    def sorted_hf_key_n_rank_for_sync(self) -> List[Tuple[str, int]]:
-        """
-        Return sorted parameter tensor name and their rank of local view after applying the tensor name mapping transform for synchronization.
-        This is used to get the parameters that need to be synchronized.
-        """
-        sorted_key_n_rank = []
-        for k, v in self.sorted_hf_key_n_rank:
-            if self.weight_mapper.policy_map_param_to_transformed_params_for_sync(k):
-                for (
-                    sync_param
-                ) in self.weight_mapper.policy_map_param_to_transformed_params_for_sync(
-                    k
-                ):
-                    # The splitted params from the original param usually have the same rank as the original param.
-                    # So we can use the local view of the original param to get the rank.
-                    sorted_key_n_rank.append((sync_param[0], v))
+        # 2. do 1->n decomposition on weights like qkv_proj.weight -> q.weight, k.weight, v.weight
+        for name, param in self.named_parameters():
+            is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
+            dims_rank_info = {}
+            if not is_dist_tensor:
+                dims_map = {}
             else:
-                # If the parameter is not transformed, we can use the original parameter name and its rank.
-                sorted_key_n_rank.append((k, v))
-        sorted_key_n_rank.sort(key=lambda x: x[0])
-        return sorted_key_n_rank
+                dims_map = {}
+                global_shape = tuple(param.shape)
+                mesh = param.device_mesh
+                placements = param.placements
+                assert (
+                    len(placements) == len(mesh.mesh_dim_names)
+                ), f"Number of placements {placements} does not match number of mesh dimensions {mesh}."
+                for dim, placement in zip(mesh.mesh_dim_names, placements):
+                    if placement.is_shard():
+                        dims_map[dim] = placement.dim
+                    elif placement.is_replicate():
+                        pass
+                    else:
+                        raise ValueError(f"Unsupported placement type: {placement}")
+                chunk_meta_list = param.__create_chunk_list__()
+                local = param.to_local()
+                assert (
+                    len(chunk_meta_list) == 1
+                ), f"Expected only one chunk meta, but got {len(chunk_meta_list)} for {name}."
+                meta = chunk_meta_list[0]
+                assert (
+                    len(meta.offsets)
+                    == len(meta.sizes)
+                    == len(global_shape)
+                    == len(tuple(local.shape))
+                ), f"Offsets {meta.offsets} and sizes {meta.sizes} must match global shape {global_shape} and local shape {tuple(local.shape)}."
+
+                for idx, g_size in enumerate(global_shape):
+                    offset = int(meta.offsets[idx])
+                    total_size = int(g_size)
+                    length = int(meta.sizes[idx])
+                    if total_size == length:
+                        assert (
+                            offset == 0
+                        ), f"Expected rank 0 for full size dimension {idx}, but got {offset}."
+                    else:
+                        dims_rank_info[idx] = DimSliceInfo(
+                            offset=offset,
+                            total_size=total_size,
+                            length=length,
+                        ).__dict__
+                decomposed_key_and_slices = (
+                    self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
+                        self.weight_mapper.policy_map_local_key_to_hf_key(name)
+                    )
+                )
+                if decomposed_key_and_slices:
+                    for part_name, part_slice in decomposed_key_and_slices:
+                        splitted_dim_rank_info = {}
+                        part_in_local = {}
+                        part_slice = {
+                            len(global_shape) + k if k < 0 else k: v
+                            for k, v in part_slice.items()
+                        }
+                        all_dims = part_slice.keys() | dims_rank_info.keys()
+                        for dim in all_dims:
+                            if dim not in part_slice:
+                                dim_slice = DimSliceInfo(
+                                    offset=0,
+                                    total_size=1,
+                                )
+                            else:
+                                dim_slice = DimSliceInfo.from_dict(part_slice[dim])
+                            if dim not in dims_rank_info:
+                                assert (
+                                    len(global_shape) > dim
+                                ), f"Dimension {dim} is out of bounds for global shape {global_shape}."
+                                local_part = DimSliceInfo(offset=0, total_size=1)
+                            else:
+                                local_part = DimSliceInfo.from_dict(dims_rank_info[dim])
+                            slice_in_splited, overlap_in_local = (
+                                ParallelTopoMapper.tensor_overlap_info_at_dim(
+                                    {dim: dim_slice}, {dim: local_part}, dim
+                                )
+                            )
+                            if slice_in_splited is None:
+                                splitted_dim_rank_info = None
+                                break
+
+                            splitted_dim_rank_info[dim] = slice_in_splited.__dict__
+                            part_in_local[dim] = overlap_in_local
+                        if splitted_dim_rank_info is not None:
+
+                            def slice_tensor_with_part(
+                                local: torch.Tensor,
+                                part_in_local: Dict[int, DimSliceInfo],
+                            ) -> torch.Tensor:
+                                """
+                                Slice the local tensor with the part in local information.
+                                :param local: The local tensor to be sliced.
+                                :param part_in_local: The part in local information for slicing.
+                                :return: The sliced tensor.
+                                """
+                                return local.cosmos_slice(part_in_local)
+
+                            self.weight_mapper.set_transform_func_from_local_param_for_sync(
+                                self.weight_mapper.policy_map_local_key_to_hf_key(
+                                    part_name
+                                ),
+                                partial(
+                                    slice_tensor_with_part,
+                                    part_in_local=part_in_local,
+                                ),
+                            )
+
+        weight_sync_transforms = []
+        for name, _ in transforms.items():
+            decomposed_key_and_ranks: List[Tuple[str, int]] = (
+                self.weight_mapper.policy_decompose_param_1_to_n_for_sync(name)
+            )
+
+            if decomposed_key_and_ranks:
+                # The current parameter is decomposed into multiple parameters, so we need to transform each of them.
+                # (This does not happen for most cases, i.e. `qkv_proj.weight` to be decomposed into `q.weight`, `k.weight`, and `v.weight`)
+                for decomposed_name, _ in decomposed_key_and_ranks:
+                    # There are three cases:
+                    # 1. The transformation logic of the decomposed parameter is already in the `weight_sync_transforms_per_model`,
+                    #    so we can directly use it.
+                    # 2. The transformation logic of the decomposed parameter is specified in weight mapper for 1 to n decomposition,
+                    #    so we can use it.
+                    # 3. The decomposed parameter does not reside in the current rank, skip it.
+                    if decomposed_name in transforms:
+                        weight_sync_transforms.append(
+                            (
+                                decomposed_name,
+                                transforms[decomposed_name],
+                            )
+                        )
+                    elif (
+                        self.weight_mapper.get_transform_func_from_local_param_for_sync(
+                            decomposed_name
+                        )
+                        is not None
+                    ):
+                        transform = self.weight_mapper.get_transform_func_from_local_param_for_sync(
+                            decomposed_name
+                        )
+                        direct_view = transforms[name]
+                        if isinstance(direct_view, torch.Tensor):
+                            weight_sync_transforms.append(
+                                (decomposed_name, transform(direct_view))
+                            )
+                        else:
+                            assert isinstance(direct_view, Callable)
+
+                            def wrapper(transform, direct_view):
+                                return transform(direct_view())
+
+                            weight_sync_transforms.append(
+                                (
+                                    decomposed_name,
+                                    partial(wrapper, transform, direct_view),
+                                )
+                            )
+                    else:
+                        # If no transform function is set, means the current parameter is not transformed and synchronized at this rank.
+                        pass
+            else:
+                weight_sync_transforms.append((name, transforms[name]))
+        return weight_sync_transforms
 
     """
     Abstract methods
@@ -151,71 +322,6 @@ class BaseModel(torch.nn.Module, ABC):
         max_position_embeddings: Optional[int] = None,
     ) -> "BaseModel":
         raise NotImplementedError
-
-    @cached_property
-    def weight_sync_transforms_per_model(
-        self,
-    ) -> Dict[str, Union[torch.Tensor, Callable]]:
-        """
-        Get the local view of the tensors from the state dict.
-        This method retrieves the state dict of the model, clears the weight names,
-        and returns a dict containing the destination name, and either a tensor or a callable returning a tensor.
-        Returns:
-            Dict[str, Union[torch.Tensor, Callable]]: A dictionary containing the destination name as the key,
-            and either a tensor or a callable returning a tensor as the value.
-        """
-        raise NotImplementedError
-
-    @cached_property
-    def weight_sync_transforms(
-        self,
-    ) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
-        """
-        Get the local view of the tensors after remapping and transforms for weight synchronization.
-        Add more specific tensor transforms for weight synchronization in addition to `_weight_sync_transforms_per_model`.
-        Specifically, we apply the transform function set in the weight mapper for each parameter that needs to be transformed before synchronization.
-        and returns a list of tuples containing the destination name, and either a tensor or a callable returning a tensor.
-        Returns:
-            List[Tuple[str, Union[torch.Tensor, Callable]]]: A list of tuples containing the destination name,
-            and either a tensor or a callable returning a tensor.
-        """
-        weight_sync_transforms = []
-        for name, _ in self.sorted_hf_key_n_rank:
-            if self.weight_mapper.policy_map_param_to_transformed_params_for_sync(name):
-                local_view = self.weight_sync_transforms_per_model[name]
-                for (
-                    sync_param
-                ) in self.weight_mapper.policy_map_param_to_transformed_params_for_sync(
-                    name
-                ):
-                    if sync_param[0] in self.weight_sync_transforms_per_model:
-                        weight_sync_transforms.append(
-                            (
-                                sync_param[0],
-                                self.weight_sync_transforms_per_model[sync_param[0]],
-                            )
-                        )
-                        continue
-                    if (
-                        self.weight_mapper.get_transform_func_from_local_param_for_sync(
-                            sync_param[0]
-                        )
-                        is not None
-                    ):
-                        transform = self.weight_mapper.get_transform_func_from_local_param_for_sync(
-                            sync_param[0]
-                        )
-                        weight_sync_transforms.append(
-                            (sync_param[0], transform(local_view))
-                        )
-                    else:
-                        # If no transform function is set, means the current parameter is not transformed and synchronized at this rank.
-                        pass
-            else:
-                weight_sync_transforms.append(
-                    (name, self.weight_sync_transforms_per_model[name])
-                )
-        return weight_sync_transforms
 
     @classmethod
     @abstractmethod
@@ -452,7 +558,7 @@ class WeightMapper(ABC):
             ],
         }
 
-    def policy_map_param_to_transformed_params_for_sync(self, name):
+    def policy_decompose_param_1_to_n_for_sync(self, name):
         """
         Map a parameter of the policy model to set of transformed parameters that need to be synchronized.
         This method returns a list containing tuples of the new parameter name and the corresponding new tensor transformed from the original tensor of the given name.

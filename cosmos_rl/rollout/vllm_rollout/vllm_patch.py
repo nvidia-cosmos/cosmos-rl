@@ -4,15 +4,14 @@ import types
 import torch
 import torch.nn as nn
 
-import vllm
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 
-if vllm.__version__ >= "0.9.0":
+try:
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-else:
+except ImportError:
     from vllm.model_executor.model_loader.loader import (
         _process_weights_after_loading as process_weights_after_loading,
     )

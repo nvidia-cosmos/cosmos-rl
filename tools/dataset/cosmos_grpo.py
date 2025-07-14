@@ -186,6 +186,12 @@ def custom_reward_fn(
     )
 
 
+def custom_val_reward_fn(
+    to_be_evaluated: str, reference: Optional[str] = None, *args, **kwargs
+) -> float:
+    return single_choice_reward_fn(to_be_evaluated, reference, *args, **kwargs)
+
+
 class DemoDataPacker(DataPacker):
     """
     This is a demo data packer that wraps the underlying data packer of the selected model.
@@ -276,5 +282,6 @@ if __name__ == "__main__":
         reward_fns=[custom_reward_fn],
         data_packer=DemoDataPacker(),
         val_dataset=get_val_dataset,
+        val_reward_fns=[custom_val_reward_fn],
         val_data_packer=DemoDataPacker(),
     )

@@ -251,9 +251,19 @@ Option Reference for `cosmos-rl` command
      - Specific node(s) to run on.
    * - `--lepton-queue-priority`
      - `-qp`
-     - `str`
+     - `int`
      - `None`
-     - Queue priority.
+     - Queue priority for dedicated node groups (1-9, mapped to low-1000…high-9000).
+   * - `--lepton-can-be-preempted`
+     - `-cbp`
+     - `store_true`
+     - `False`
+     - Allow this job to be preempted by higher priority jobs (dedicated node groups only).
+   * - `--lepton-can-preempt`
+     - `-cp`
+     - `store_true`
+     - `False`
+     - Allow this job to preempt lower priority jobs (dedicated node groups only).
    * - `--lepton-visibility`
      - —
      - `str`
