@@ -23,8 +23,8 @@ sync_weight_interval = 1
 
 [rollout]
 gpu_memory_utilization = 0.7
-enable_chunked_prefill = true
-n_generation = 2
+enable_chunked_prefill = false
+n_generation = 16
 batch_size = 2
 quantization = "none"
 max_response_length = 1024
@@ -32,7 +32,7 @@ max_response_length = 1024
 
 [policy]
 model_name_or_path = "mistralai/Mistral-7B-Instruct-v0.3"
-model_max_length = 1024
+model_max_length = 4096
 model_gradient_checkpointing = true
 
 [logging]
@@ -64,6 +64,10 @@ n_init_replicas = 1
 tp_size = 4
 pp_size = 1
 
+[rollout.sampling_config]
+temperature = 0.9
+top_p = 1.0
+top_k = 10
 
 [policy.parallelism]
 n_init_replicas = 1
