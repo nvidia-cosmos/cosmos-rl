@@ -44,6 +44,8 @@ jobs:
           echo "container_id=${container_id}" >> $GITHUB_OUTPUT
           DOCKER_RUN="timeout 10m docker exec ${container_id}"
 
+          ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
+
           # run tests
           ${DOCKER_RUN} python tests/test_cache.py
           ${DOCKER_RUN} python tests/test_comm.py

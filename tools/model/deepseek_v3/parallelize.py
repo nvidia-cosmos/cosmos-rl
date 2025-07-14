@@ -321,8 +321,8 @@ def apply_tp_ep(
                         nn.Parameter(
                             torch.empty(
                                 transformer_block.mlp.local_experts,
-                                transformer_block.mlp.experts_ep.hidden_size,
                                 transformer_block.mlp.experts_ep.intermediate_size,
+                                transformer_block.mlp.experts_ep.hidden_size,
                                 dtype=transformer_block.mlp.experts_ep.up_proj.weight.dtype,
                                 device=transformer_block.mlp.experts_ep.up_proj.weight.device,
                             )
@@ -340,8 +340,8 @@ def apply_tp_ep(
                         nn.Parameter(
                             torch.empty(
                                 transformer_block.mlp.local_experts,
-                                transformer_block.mlp.experts_ep.intermediate_size,
                                 transformer_block.mlp.experts_ep.hidden_size,
+                                transformer_block.mlp.experts_ep.intermediate_size,
                                 dtype=transformer_block.mlp.experts_ep.down_proj.weight.dtype,
                                 device=transformer_block.mlp.experts_ep.down_proj.weight.device,
                             )
@@ -359,8 +359,8 @@ def apply_tp_ep(
                         nn.Parameter(
                             torch.empty(
                                 transformer_block.mlp.local_experts,
-                                transformer_block.mlp.experts_ep.hidden_size,
                                 transformer_block.mlp.experts_ep.intermediate_size,
+                                transformer_block.mlp.experts_ep.hidden_size,
                                 dtype=transformer_block.mlp.experts_ep.gate_proj.weight.dtype,
                                 device=transformer_block.mlp.experts_ep.gate_proj.weight.device,
                             )

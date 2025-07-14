@@ -105,7 +105,7 @@ class HFLLMWeightMapper(WeightMapper):
                 name = "model." + name
         return name
 
-    def policy_map_param_to_transformed_params_for_sync(self, name):
+    def policy_decompose_param_1_to_n_for_sync(self, name):
         """
         Map a parameter of the policy model to set of transformed parameters that need to be synchronized.
         This method returns a list containing tuples of the new parameter name and the corresponding new tensor transformed from the original tensor of the given name.

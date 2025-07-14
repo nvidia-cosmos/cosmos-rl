@@ -783,6 +783,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
+                # Remove empty completions
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []
                 if len(completions):

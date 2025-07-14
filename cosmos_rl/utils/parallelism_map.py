@@ -29,7 +29,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 
 from torch.nn.parameter import Parameter
 from math import gcd
-from functools import reduce, partial
+from functools import reduce
 import asyncio
 from cosmos_rl.utils import util
 
@@ -757,79 +757,54 @@ class ParallelTopoMapper:
                             total_size=total_size,
                             length=length,
                         ).__dict__
-
-            reformatted = (
-                self.weight_mapper.policy_map_param_to_transformed_params_for_sync(
-                    self.weight_mapper.policy_map_local_key_to_hf_key(name)
+                decomposed_key_and_slices = (
+                    self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
+                        self.weight_mapper.policy_map_local_key_to_hf_key(name)
+                    )
                 )
-            )
-            if reformatted:
-                for part_name, part_slice in reformatted:
-                    splitted_dim_rank_info = {}
-                    part_in_local = {}
-                    part_slice = {
-                        len(global_shape) + k if k < 0 else k: v
-                        for k, v in part_slice.items()
-                    }
-                    all_dims = part_slice.keys() | dims_rank_info.keys()
-                    for dim in all_dims:
-                        if dim not in part_slice:
-                            dim_slice = DimSliceInfo(
-                                offset=0,
-                                total_size=1,
+                if decomposed_key_and_slices:
+                    for part_name, part_slice in decomposed_key_and_slices:
+                        splitted_dim_rank_info = {}
+                        part_in_local = {}
+                        part_slice = {
+                            len(global_shape) + k if k < 0 else k: v
+                            for k, v in part_slice.items()
+                        }
+                        all_dims = part_slice.keys() | dims_rank_info.keys()
+                        for dim in all_dims:
+                            if dim not in part_slice:
+                                dim_slice = DimSliceInfo(
+                                    offset=0,
+                                    total_size=1,
+                                )
+                            else:
+                                dim_slice = DimSliceInfo.from_dict(part_slice[dim])
+                            if dim not in dims_rank_info:
+                                assert (
+                                    len(global_shape) > dim
+                                ), f"Dimension {dim} is out of bounds for global shape {global_shape}."
+                                local_part = DimSliceInfo(offset=0, total_size=1)
+                            else:
+                                local_part = DimSliceInfo.from_dict(dims_rank_info[dim])
+                            slice_in_splited, overlap_in_local = (
+                                self.tensor_overlap_info_at_dim(
+                                    {dim: dim_slice}, {dim: local_part}, dim
+                                )
                             )
-                        else:
-                            dim_slice = DimSliceInfo.from_dict(part_slice[dim])
-                        if dim not in dims_rank_info:
-                            assert (
-                                len(global_shape) > dim
-                            ), f"Dimension {dim} is out of bounds for global shape {global_shape}."
-                            local_part = DimSliceInfo(offset=0, total_size=1)
-                        else:
-                            local_part = DimSliceInfo.from_dict(dims_rank_info[dim])
-                        slice_in_splited, overlap_in_local = (
-                            self.tensor_overlap_info_at_dim(
-                                {dim: dim_slice}, {dim: local_part}, dim
+                            if slice_in_splited is None:
+                                splitted_dim_rank_info = None
+                                break
+
+                            splitted_dim_rank_info[dim] = slice_in_splited.__dict__
+                            part_in_local[dim] = overlap_in_local
+                        if splitted_dim_rank_info is not None:
+                            self.insert_to_parallelism_info(
+                                part_name,
+                                dims_map,
+                                self.weight_mapper.policy_map_local_key_to_hf_key,
+                                dims_rank_info=splitted_dim_rank_info,
                             )
-                        )
-                        if slice_in_splited is None:
-                            splitted_dim_rank_info = None
-                            break
-
-                        splitted_dim_rank_info[dim] = slice_in_splited.__dict__
-                        part_in_local[dim] = overlap_in_local
-                    if splitted_dim_rank_info is not None:
-                        self.insert_to_parallelism_info(
-                            part_name,
-                            dims_map,
-                            self.weight_mapper.policy_map_local_key_to_hf_key,
-                            dims_rank_info=splitted_dim_rank_info,
-                        )
-
-                        def slice_tensor_with_part(
-                            local: torch.Tensor,
-                            part_in_local: Dict[int, DimSliceInfo],
-                        ) -> torch.Tensor:
-                            """
-                            Slice the local tensor with the part in local information.
-                            :param local: The local tensor to be sliced.
-                            :param part_in_local: The part in local information for slicing.
-                            :return: The sliced tensor.
-                            """
-                            return slice_tensor_with_strategies(local, part_in_local)
-
-                        self.weight_mapper.set_transform_func_from_local_param_for_sync(
-                            self.weight_mapper.policy_map_local_key_to_hf_key(
-                                part_name
-                            ),
-                            partial(
-                                slice_tensor_with_part,
-                                part_in_local=part_in_local,
-                            ),
-                        )
-
-                continue
-
+                    continue
             self.insert_to_parallelism_info(
                 name,
                 dims_map,

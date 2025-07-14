@@ -108,9 +108,7 @@ def convert_weight_from_hf(
         ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
         if belongs_to_current_ep and belongs_to_current_dp_shard:
             should_do_fsdp_sharding = False
-            shard = tensor.transpose(
-                -2, -1
-            )  # For torch._grouped_mm, the weight should be in (in_features, out_features) shape
+            shard = tensor
         else:
             # If the expert does not belong to the current process, return None to skip this weight
             return None, None
@@ -131,9 +129,7 @@ def convert_weight_from_hf(
         ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
         if belongs_to_current_ep and belongs_to_current_dp_shard:
             should_do_fsdp_sharding = False
-            shard = tensor.transpose(
-                -2, -1
-            )  # For torch._grouped_mm, the weight should be in (in_features, out_features) shape
+            shard = tensor
         else:
             # If the expert does not belong to the current process, return None to skip this weight
             return None, None

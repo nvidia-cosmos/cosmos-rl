@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import core_schema
 from datetime import datetime
-from typing import Any, Union, Optional, List, Literal
+from typing import Any, Dict, Union, Optional, List, Literal
 import os
 import json
 import hashlib
@@ -254,9 +254,9 @@ class GrpoConfig(BaseModel):
         default="",
         description="Column name for response/reference answer",
     )
-    reward_function: Union[str, List[str]] = Field(
+    reward_function: Union[str, List[str], Dict[str, float]] = Field(
         default_factory=lambda: ["single_choice"],
-        description="A List of reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. ",
+        description="Reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. You can add weight to each reward function by passing a dict, e.g., {'single_choice': 0.9, 'format': 0.1}",
     )
     temperature: float = Field(
         default=1.0,
@@ -346,10 +346,12 @@ class GrpoConfig(BaseModel):
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
         if isinstance(self.reward_function, str):
-            self.reward_function = [self.reward_function]
+            self.reward_function = {self.reward_function: 1.0}
+        elif isinstance(self.reward_function, list):
+            self.reward_function = {k: 1.0 for k in self.reward_function}
         assert (
             len(self.reward_function) > 0
-        ), "reward_function must be a list of reward functions"
+        ), "reward_function must be a dict of reward functions"
         return self
 
 
@@ -610,6 +612,21 @@ class ValidationConfig(BaseModel):
         default=2048,
         description="Max output length of rollout generation during validation.",
     )
+    reward_function: Union[str, List[str], Dict[str, float]] = Field(
+        default_factory=lambda: ["single_choice"],
+        description="Reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. You can add weight to each reward function by passing a dict, e.g., {'single_choice': 0.9, 'format': 0.1}",
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if isinstance(self.reward_function, str):
+            self.reward_function = {self.reward_function: 1.0}
+        elif isinstance(self.reward_function, list):
+            self.reward_function = {k: 1.0 for k in self.reward_function}
+        assert (
+            len(self.reward_function) > 0
+        ), "reward_function must be a dict of reward functions"
+        return self
 
 
 class RolloutConfig(BaseModel):

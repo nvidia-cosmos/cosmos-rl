@@ -18,7 +18,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from dataclasses import dataclass, field
-from typing import Tuple, List, Optional, Callable, Union, Dict
+from typing import Tuple, List, Optional, Callable
 from transformers import AutoConfig
 from cosmos_rl.utils.util import (
     resolve_model_path,
@@ -623,33 +623,6 @@ class GPT(BaseModel):
 
     def get_nparams_and_flops(self, seq_len: int) -> tuple[int, int]:
         return self._get_nparams_and_flops_fn(seq_len)
-
-    def weight_sync_transform_by_key_internal(
-        self,
-        dest_name: str,
-        self_state_dict,
-    ) -> Union[Callable[[], torch.Tensor], torch.Tensor]:
-        if dest_name.startswith("model."):
-            dest_name = dest_name[len("model.") :]
-        assert dest_name in self_state_dict, f"Unsupported weight: {dest_name}"
-        target_tensor = self_state_dict[dest_name]
-        is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
-        local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-        return local_view
-
-    @cached_property
-    def weight_sync_transforms_per_model(
-        self,
-    ) -> Dict[str, Union[torch.Tensor, Callable]]:
-        self_state_dict = self.state_dict()
-        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        transforms = {}
-        for dest_name, _ in self.sorted_hf_key_n_rank:
-            local_view = self.weight_sync_transform_by_key_internal(
-                dest_name, self_state_dict
-            )
-            transforms[dest_name] = local_view
-        return transforms
 
     @classmethod
     def from_model_args(cls, model_args: GPTArgs) -> "GPT":
