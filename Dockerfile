@@ -50,10 +50,10 @@ RUN git clone -b ${GDRCOPY_VERSION} https://github.com/NVIDIA/gdrcopy.git /tmp/g
     && cd /tmp/gdrcopy \
     && make prefix=/opt/gdrcopy install
 
-ENV LD_LIBRARY_PATH /opt/gdrcopy/lib:$LD_LIBRARY_PATH
-ENV LIBRARY_PATH /opt/gdrcopy/lib:$LIBRARY_PATH
-ENV CPATH /opt/gdrcopy/include:$CPATH
-ENV PATH /opt/gdrcopy/bin:$PATH
+ENV LD_LIBRARY_PATH=/opt/gdrcopy/lib:$LD_LIBRARY_PATH
+ENV LIBRARY_PATH=/opt/gdrcopy/lib:$LIBRARY_PATH
+ENV CPATH=/opt/gdrcopy/include:$CPATH
+ENV PATH=/opt/gdrcopy/bin:$PATH
 
 ###################################################
 ## Install NCCL with specific version
@@ -136,8 +136,8 @@ RUN curl -OL https://github.com/aws/aws-ofi-nccl/releases/download/${AWS_OFI_NCC
     && rm -rf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} \
     && rm aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz
 
-ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
-ENV PATH /opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
+ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
 
 
 ###################################################
