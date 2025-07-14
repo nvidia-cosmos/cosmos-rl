@@ -17,28 +17,8 @@ ENV TZ=Etc/UTC
 
 RUN apt-get update -y && apt-get upgrade -y
 
-RUN rm -rf /opt/hpcx \
-    && rm -rf /usr/local/mpi \
-    && rm -f /etc/ld.so.conf.d/hpcx.conf \
-    && ldconfig
-
-ENV OPAL_PREFIX=
-
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
-    apt-utils \
-    autoconf \
-    automake \
-    build-essential \
-    check \
-    cmake \
-    curl \
-    debhelper \
-    devscripts \
-    git \
-    gcc \
-    gdb \
-    pkg-config \
-    wget
+    curl git gpg lsb-release tzdata wget 
 RUN apt-get purge -y cuda-compat-*
 
 #################################################
@@ -52,7 +32,6 @@ RUN git clone -b ${GDRCOPY_VERSION} https://github.com/NVIDIA/gdrcopy.git /tmp/g
 
 ENV LD_LIBRARY_PATH=/opt/gdrcopy/lib:$LD_LIBRARY_PATH
 ENV LIBRARY_PATH=/opt/gdrcopy/lib:$LIBRARY_PATH
-ENV CPATH=/opt/gdrcopy/include:$CPATH
 ENV PATH=/opt/gdrcopy/bin:$PATH
 
 ###################################################
@@ -80,10 +59,8 @@ RUN apt-get update -qq && \
 ###################################################
 ## Install python
 RUN apt-get update -qq && \
-DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
-build-essential tzdata netcat \
-python3.10 python3.10-dev python3.10-venv python3-pip python-is-python3 \
-lsb-release gpg
+    DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
+    python3.10 python3.10-dev python3.10-venv python3-pip python-is-python3
 
 RUN pip install -U pip setuptools wheel packaging
 # even though we don't depend on torchaudio, vllm does. in order to
@@ -101,6 +78,12 @@ RUN pip install \
 
 ###################################################
 FROM base AS aws_efa_base
+
+# Remove HPCX and MPI to avoid conflicts with AWS-EFA
+RUN rm -rf /opt/hpcx \
+    && rm -rf /usr/local/mpi \
+    && rm -f /etc/ld.so.conf.d/hpcx.conf \
+    && ldconfig
 
 RUN apt-get remove -y --purge --allow-change-held-packages \
     ibverbs-utils \
