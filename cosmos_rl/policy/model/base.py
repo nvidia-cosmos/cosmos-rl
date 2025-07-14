@@ -45,13 +45,31 @@ class BaseModel(torch.nn.Module, ABC):
         self,
     ) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         from cosmos_rl.utils.parallelism_map import DimSliceInfo, ParallelTopoMapper
+        # all_param_data = {p.data for p in self.parameters()}
 
-        self_state_dict = self.state_dict()
-        keys = list(self_state_dict.keys())
+        # self_state_dict = self.state_dict()
+        # keys = list(self_state_dict.keys())
+        # keys.sort(key=lambda x: x[0])
+        # transforms = collections.OrderedDict()
+        # for k in keys:
+        #     v = self_state_dict[k]
+        #     if v not in all_param_data:
+        #         continue
+        #     is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
+        #     local_view = v.to_local() if is_dist_tensor else v
+        #     transforms[
+        #         self.weight_mapper.policy_map_local_key_to_hf_key(
+        #             util.clear_weight_name(k)
+        #         )
+        #     ] = local_view
+
+        # 1. get all parameters, but not buffers
+        named_parameters = {name: param for name, param in self.named_parameters()}
+        keys = list(named_parameters.keys())
         keys.sort(key=lambda x: x[0])
         transforms = collections.OrderedDict()
         for k in keys:
-            v = self_state_dict[k]
+            v = named_parameters[k]
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
             transforms[
@@ -60,6 +78,7 @@ class BaseModel(torch.nn.Module, ABC):
                 )
             ] = local_view
 
+        # 2. do 1->n decomposition on weights like qkv_proj.weight -> q.weight, k.weight, v.weight
         for name, param in self.named_parameters():
             is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
             dims_rank_info = {}
