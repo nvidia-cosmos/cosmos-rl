@@ -22,7 +22,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from safetensors import safe_open
 from dataclasses import dataclass, field
-from typing import Tuple, List, Optional, Callable, Union, Dict
+from typing import Tuple, List, Optional, Callable
 from transformers import AutoConfig
 import torch.distributed._symmetric_memory as symm_mem
 from cosmos_rl.utils.util import (
@@ -395,7 +395,7 @@ class DeepseekV3Attention(nn.Module):
 class FakeLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int, num_experts: int):
         super().__init__()
-        self.weight = nn.Parameter(torch.empty(num_experts, in_features, out_features))
+        self.weight = nn.Parameter(torch.empty(num_experts, out_features, in_features))
 
 
 class DeepseekV3MLP(nn.Module):
@@ -1135,14 +1135,6 @@ class DeepseekV3MoEModel(BaseModel):
 
     def get_nparams_and_flops(self, seq_len: int) -> tuple[int, int]:
         return self._get_nparams_and_flops_fn(seq_len)
-
-    @cached_property
-    def weight_sync_transforms_per_model(
-        self,
-    ) -> Dict[str, Union[torch.Tensor, Callable]]:
-        raise NotImplementedError(
-            "Weight sync transforms are not supported for DeepseekV3MoEModel now."
-        )
 
     @classmethod
     def from_model_args(cls, model_args: DeepseekV3MoeArgs) -> "DeepseekV3MoEModel":

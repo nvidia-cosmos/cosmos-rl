@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from safetensors import safe_open
 from dataclasses import dataclass, field
-from typing import Tuple, List, Optional, Callable, Union, Dict
+from typing import Tuple, List, Optional, Callable
 from transformers import AutoConfig
 import torch.distributed._symmetric_memory as symm_mem
 from cosmos_rl.utils.util import (
@@ -43,7 +43,7 @@ from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from functools import cached_property, partial
+from functools import cached_property
 from flash_attn import flash_attn_func
 
 
@@ -317,7 +317,7 @@ class MoEGate(nn.Module):
 class FakeLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int, num_experts: int):
         super().__init__()
-        self.weight = nn.Parameter(torch.empty(num_experts, in_features, out_features))
+        self.weight = nn.Parameter(torch.empty(num_experts, out_features, in_features))
 
 
 class FeedForward(nn.Module):
@@ -922,57 +922,6 @@ class Qwen3MoE(BaseModel):
 
     def get_nparams_and_flops(self, seq_len: int) -> tuple[int, int]:
         return self._get_nparams_and_flops_fn(seq_len)
-
-    @cached_property
-    def weight_sync_transforms_per_model(
-        self,
-    ) -> Dict[str, Union[torch.Tensor, Callable]]:
-        self_state_dict = self.state_dict()
-        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        transforms = {}
-        for hf_name, _ in self.sorted_hf_key_n_rank:
-            inter_name = (
-                hf_name[len("model.") :] if hf_name.startswith("model.") else hf_name
-            )
-            assert inter_name in self_state_dict, f"Unsupported weight: {inter_name}"
-
-            def policy_to_rollout_weight_transform(
-                dest_name: str, state_dict: Dict[str, torch.Tensor]
-            ) -> torch.Tensor:
-                target_tensor = state_dict[dest_name]
-                is_dist_tensor = isinstance(
-                    target_tensor, torch.distributed.tensor.DTensor
-                )
-                # if it is up_proj or down_proj, gate_proj, we need to transpose the tensor back to the original shape
-                if dest_name.endswith(
-                    ("up_proj.weight", "down_proj.weight", "gate_proj.weight")
-                ):
-                    target_tensor = target_tensor.permute(
-                        0, 2, 1
-                    )  # Share storage with in-contiguous stride
-                local_view = (
-                    target_tensor.to_local() if is_dist_tensor else target_tensor
-                )
-                return local_view
-
-            f = partial(
-                policy_to_rollout_weight_transform,
-                dest_name=inter_name,
-                state_dict=self_state_dict,
-            )
-
-            # Return callable if the weight is up_proj, down_proj, gate_proj
-            # Otherwise, return the tensor directly
-            local_view = (
-                f
-                if inter_name.endswith(
-                    ("up_proj.weight", "down_proj.weight", "gate_proj.weight")
-                )
-                else f()
-            )
-
-            transforms[hf_name] = local_view
-        return transforms
 
     @classmethod
     def from_model_args(cls, model_args: Qwen3MoeArgs) -> "Qwen3MoE":

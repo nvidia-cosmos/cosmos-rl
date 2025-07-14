@@ -122,9 +122,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
             w_name = match.group(2)
             n_experts = expert_weight.shape[0]
             for expert_id in range(n_experts):
-                single_expert_weight = (
-                    expert_weight[expert_id].transpose(0, 1).contiguous()
-                )
+                single_expert_weight = expert_weight[expert_id].contiguous()
                 yield (
                     f"model.layers.{layer_id}.mlp.experts.{expert_id}.{w_name}.weight",
                     single_expert_weight,

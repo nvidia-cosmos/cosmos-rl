@@ -147,7 +147,7 @@ class QwenVL25WeightMapper(WeightMapper):
 
     def policy_decompose_param_1_to_n_for_sync(self, name):
         if match := re.search(  # noqa: F841
-            r"blocks\.(\d+)\.attn\.qkv\.(weight|bias)",
+            r"visual\.blocks\.(\d+)\.attn\.qkv\.(weight|bias)",
             name,
         ):
             split_strategy = []

@@ -15,7 +15,7 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Callable, Union, Dict
+from typing import List, Optional, Tuple, Callable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1432,46 +1432,6 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             n_params += lm_n_params
             n_flops += lm_n_flops
         return n_params, n_flops
-
-    @cached_property
-    def weight_sync_transforms_per_model(
-        self,
-    ) -> Dict[str, Union[torch.Tensor, Callable]]:
-        lm_state_dict = self.model.state_dict()
-        if self.visual is not None:
-            visual_state_dict = self.visual.state_dict()
-        else:
-            visual_state_dict = {}
-        lm_state_dict = {clear_weight_name(k): v for k, v in lm_state_dict.items()}
-        visual_state_dict = {
-            clear_weight_name(k): v for k, v in visual_state_dict.items()
-        }
-        transforms = {}
-        for hf_name, _ in self.sorted_hf_key_n_rank:
-            is_visual = hf_name.startswith("visual.")
-            # Handle qkv weights for separate q, k, v tensors
-            if is_visual:
-                inter_name = hf_name.replace("visual.", "")
-                assert inter_name in visual_state_dict, f"Unsupported weight: {hf_name}"
-            elif hf_name.startswith("model."):
-                inter_name = hf_name.replace("model.", "")
-                assert inter_name in lm_state_dict, f"Unsupported weight: {hf_name}"
-            elif hf_name == "lm_head.weight":
-                assert hf_name in lm_state_dict, f"Unsupported weight: {hf_name}"
-                inter_name = hf_name
-            else:
-                raise ValueError(f"Unsupported weight: {hf_name} in state_dict")
-
-            target_tensor = (
-                visual_state_dict[inter_name]
-                if is_visual
-                else lm_state_dict[inter_name]
-            )
-            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
-            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-
-            transforms[hf_name] = local_view
-        return transforms
 
     @classmethod
     def fqn_filter_for_fp8(cls) -> List[str]:
