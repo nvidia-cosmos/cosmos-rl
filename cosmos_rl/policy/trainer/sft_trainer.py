@@ -329,7 +329,7 @@ class SFTTrainer(Trainer):
                     **val_batch
                 )
 
-                batch["position_ids"] = val_position_ids
+                val_batch["position_ids"] = val_position_ids
                 val_padding_mask = val_batch.get("padding_mask", None)
 
                 if self.parallel_dims.cp_enabled:
@@ -342,10 +342,10 @@ class SFTTrainer(Trainer):
                         self.parallel_dims.mesh["cp"],
                     )
 
-                    batch["input_ids"] = val_inputs
-                    batch["position_ids"] = val_position_ids
+                    val_batch["input_ids"] = val_inputs
+                    val_batch["position_ids"] = val_position_ids
                     if val_padding_mask is not None:
-                        batch["padding_mask"] = val_padding_mask
+                        val_batch["padding_mask"] = val_padding_mask
 
                 if self.parallel_dims.pp_enabled:
                     pp_last_stage = (
@@ -380,12 +380,13 @@ class SFTTrainer(Trainer):
                     val_logits = self.model(**val_batch, position_ids=val_position_ids)[
                         :, :-1
                     ].contiguous()
+
                     # recover from ulysses if cp is enabled
                     if self.parallel_dims.cp_enabled:
-                        batch["input_ids"] = input_ids_before_cp
-                        batch["position_ids"] = position_ids_before_cp
+                        val_batch["input_ids"] = input_ids_before_cp
+                        val_batch["position_ids"] = position_ids_before_cp
                         if padding_mask_before_cp is not None:
-                            batch["padding_mask"] = padding_mask_before_cp
+                            val_batch["padding_mask"] = padding_mask_before_cp
 
                     val_loss = self.loss_fn(
                         val_logits.view(-1, val_logits.size(-1)),
