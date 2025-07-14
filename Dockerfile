@@ -64,7 +64,7 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86
     && dpkg -i cuda-keyring_1.1-1_all.deb \
     && rm cuda-keyring_1.1-1_all.deb \
     && apt-get update -y \
-    && apt-get install -y libnccl2=${NCCL_VERSION}
+    && apt-get install -y libnccl2=${NCCL_VERSION} libnccl-dev=${NCCL_VERSION}
 
 ###################################################
 ## Install redis
