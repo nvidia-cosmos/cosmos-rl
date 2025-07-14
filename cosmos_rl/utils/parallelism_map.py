@@ -28,7 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 
 from torch.nn.parameter import Parameter
 from math import gcd
-from functools import reduce, partial
+from functools import reduce
 import asyncio
 from cosmos_rl.utils import util
 
@@ -755,13 +755,13 @@ class ParallelTopoMapper:
                             total_size=total_size,
                             length=length,
                         ).__dict__
-                reformatted = (
-                    self.weight_mapper.policy_map_param_to_transformed_params_for_sync(
+                decomposed_key_and_slices = (
+                    self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
                         self.weight_mapper.policy_map_local_key_to_hf_key(name)
                     )
                 )
-                if reformatted:
-                    for part_name, part_slice in reformatted:
+                if decomposed_key_and_slices:
+                    for part_name, part_slice in decomposed_key_and_slices:
                         splitted_dim_rank_info = {}
                         part_in_local = {}
                         part_slice = {
@@ -802,31 +802,6 @@ class ParallelTopoMapper:
                                 self.weight_mapper.policy_map_local_key_to_hf_key,
                                 dims_rank_info=splitted_dim_rank_info,
                             )
-
-                            def slice_tensor_with_part(
-                                local: torch.Tensor,
-                                part_in_local: Dict[int, DimSliceInfo],
-                            ) -> torch.Tensor:
-                                """
-                                Slice the local tensor with the part in local information.
-                                :param local: The local tensor to be sliced.
-                                :param part_in_local: The part in local information for slicing.
-                                :return: The sliced tensor.
-                                """
-                                return slice_tensor_with_strategies(
-                                    local, part_in_local
-                                )
-
-                            self.weight_mapper.set_transform_func_from_local_param_for_sync(
-                                self.weight_mapper.policy_map_local_key_to_hf_key(
-                                    part_name
-                                ),
-                                partial(
-                                    slice_tensor_with_part,
-                                    part_in_local=part_in_local,
-                                ),
-                            )
-
                     continue
             self.insert_to_parallelism_info(
                 name,

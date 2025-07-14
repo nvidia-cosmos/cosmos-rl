@@ -74,28 +74,6 @@ Keep in mind that torch distributed is not thread safe. So try to keep the usage
 """
 
 
-def process_weights_after_loading(model, model_config, device):
-    from vllm.attention import Attention
-    from vllm.model_executor.model_loader.loader import device_loading_context
-
-    for _, module in model.named_modules():
-        quant_method = getattr(module, "quant_method", None)
-        if False:  # quant_method is not None: # TODO(aazolini) figure this out
-            # When quant methods need to process weights after loading
-            # (for repacking, quantizing, etc), they expect parameters
-            # to be on the global target device. This scope is for the
-            # case where cpu offloading is used, where we will move the
-            # parameters onto device for processing and back off after.
-            with device_loading_context(module, torch.device(device)):
-                quant_method.process_weights_after_loading(module)
-        if isinstance(module, Attention) and hasattr(
-            module, "process_weights_after_loading"
-        ):
-            # When attention modules need to process weights after
-            # currently only used by MLA
-            module.process_weights_after_loading(model_config.dtype)
-
-
 def _patch_vllm_rollout_locked_step(rollout, consume_command, enable_validation):
     llm_engine = rollout.rollout_engine.llm_engine
     orig_step = llm_engine.step
@@ -830,13 +808,57 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
+                # Remove empty completions
+                valid_completions: List[List[str]] = []
+                prompt_indices_to_remove: List[int] = []
+                if len(completions):
+                    batch_size = len(prompts)
+                    for i in range(batch_size):
+                        completion = completions[i]
+                        skip_output = False
+                        total_generation_count = len(completion)
+                        empty_generation_count = 0
+                        output_texts = []
+                        for j in range(total_generation_count):
+                            output_text = completion[j]
+                            if output_text == "":
+                                logger.warning(
+                                    f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                                )
+                                empty_generation_count += 1
+                            else:
+                                output_texts.append(output_text)
+                        # Skip the output if there is one or zero non-empty completions
+                        skip_output = (
+                            total_generation_count - empty_generation_count
+                        ) <= 1
+                        if not skip_output:
+                            valid_completions.append(output_texts)
+                        else:
+                            prompt_indices_to_remove.append(i)
+
+                if len(prompt_indices_to_remove):
+                    prompts = [
+                        prompt
+                        for i, prompt in enumerate(prompts)
+                        if i not in prompt_indices_to_remove
+                    ]
+                    assert (
+                        len(prompts) == len(valid_completions)
+                    ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+
                 logger.info(f"[Rollout] generate end for rank {self.global_rank}")
 
-                should_report = self.parallel_dims.tp_coord[0] == 0 and (
-                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+                should_report = (
+                    self.parallel_dims.tp_coord[0] == 0
+                    and (
+                        self.parallel_dims.pp_coord[0]
+                        == self.parallel_dims.pp_coord[1] - 1
+                    )
+                    and len(completions) > 0
                 )
 
-                if should_report and completions is not None:
+                if should_report:
                     url_suffix = COSMOS_API_ROLLOUT_SUFFIX
                     # only the first tp rank in the rollout replica will post the completion to the controller.
                     prompt_idxs = [prompt[0] for prompt in prompts]

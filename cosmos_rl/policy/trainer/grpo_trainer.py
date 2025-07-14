@@ -265,10 +265,16 @@ class GRPOTrainer(Trainer):
         self.prepare_shard_infos_for_weight_sync_insts()
 
     def prepare_shard_infos_for_weight_sync_insts(self):
-        # Ordered list of (hf_key, tensor_dim)
-        hf_key_n_rank: List[List[Tuple[str, int]]] = [
-            [x] for x in self.model.sorted_hf_key_n_rank_for_sync
-        ]
+        keys_n_ranks = []
+        for name, tensor_or_callable in self.model.weight_sync_transforms:
+            if isinstance(tensor_or_callable, torch.Tensor):
+                keys_n_ranks.append((name, tensor_or_callable.ndim))
+            else:
+                assert isinstance(tensor_or_callable, Callable)
+                tensor_or_callable = tensor_or_callable()
+                keys_n_ranks.append((name, tensor_or_callable.ndim))
+        hf_key_n_rank: List[List[Tuple[str, int]]] = [[x] for x in keys_n_ranks]
+        del keys_n_ranks
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config=self.hf_config,
@@ -615,9 +621,7 @@ class GRPOTrainer(Trainer):
         and replacing certain substrings in the parameter names.
         """
         name_to_transform = {}
-        assert (
-            len(self.model.sorted_hf_key_n_rank_for_sync) > 0
-        ), "No sorted parameters found."
+        assert len(self.model.weight_sync_transforms) > 0, "No sorted parameters found."
         for name, transform_block in self.model.weight_sync_transforms:
             assert isinstance(transform_block, Callable) or isinstance(
                 transform_block, torch.Tensor
