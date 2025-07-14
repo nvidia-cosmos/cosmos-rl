@@ -357,7 +357,6 @@ class SFTTrainer(Trainer):
                     if pp_first_stage:
                         self.pp_scheduler_val.step(
                             **val_batch,
-                            position_ids=val_position_ids,
                             pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
                             seq_len_multiple=self.seq_len_multiple,
                         )
@@ -377,9 +376,7 @@ class SFTTrainer(Trainer):
                     else:
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
-                    val_logits = self.model(**val_batch, position_ids=val_position_ids)[
-                        :, :-1
-                    ].contiguous()
+                    val_logits = self.model(**val_batch)[:, :-1].contiguous()
 
                     # recover from ulysses if cp is enabled
                     if self.parallel_dims.cp_enabled:
