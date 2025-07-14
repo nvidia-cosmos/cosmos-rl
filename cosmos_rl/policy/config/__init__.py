@@ -437,6 +437,12 @@ class TrainingConfig(BaseModel):
         default=1.0, description="Gradient norm clip for optimizer"
     )
 
+    # --------- smoke-test helpers ---------
+    max_num_steps: Optional[int] = Field(
+        default=None,
+        description="When set, overrides the automatically calculated total training steps and takes precedence over `epoch`; training stops once this step count is reached (even if `epoch` > 1). Useful for quick smoke tests.",
+    )
+
     async_tp_enabled: bool = Field(
         default=False, description="Whether to use async tensor parallelism"
     )
@@ -494,6 +500,8 @@ class TrainingConfig(BaseModel):
             raise ValueError(
                 "Async tensor parallelism requires torch.compile to be enabled"
             )
+        if self.max_num_steps is not None and self.max_num_steps <= 0:
+            raise ValueError("max_num_steps must be positive if specified")
         return self
 
 

@@ -278,9 +278,13 @@ class SFTTrainer(Trainer):
         )
         # For iteration control
         self.epoch = config.train.epoch
-        self.total_steps = (
-            len(self.train_data_loader) * self.epoch // self.dp_world_size
-        )
+        # If max_num_steps is provided, use it; otherwise compute from dataset size
+        if config.train.max_num_steps is not None:
+            self.total_steps = config.train.max_num_steps
+        else:
+            self.total_steps = (
+                len(self.train_data_loader) * self.epoch // self.dp_world_size
+            )
         self.train_step = 0
 
         # Load model
@@ -537,6 +541,14 @@ class SFTTrainer(Trainer):
                 self.lr_schedulers.step()
 
                 self.train_step += 1
+
+                # Early stop only when max_num_steps is specified
+                if (
+                    self.config.train.max_num_steps is not None
+                    and self.train_step >= self.total_steps
+                ):
+                    break
+
                 end_event.record()
 
                 if (
@@ -639,6 +651,11 @@ class SFTTrainer(Trainer):
                         pp_master_rank=self.parallel_dims.world_size
                         - self.parallel_dims.world_size / self.parallel_dims.pp,
                     )
+            if (
+                self.config.train.max_num_steps is not None
+                and self.train_step >= self.total_steps
+            ):
+                break  # break outer epoch loop
 
         # process the final step
         if self.config.train.enable_validation:
