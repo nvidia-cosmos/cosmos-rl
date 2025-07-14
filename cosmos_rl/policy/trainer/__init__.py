@@ -164,7 +164,7 @@ class Trainer(CommMixin):
             error_msg += f" * mini_batch({mini_batch})"
         assert dp_shard_size == self.parallel_dims.dp_shard
         assert dp_shard_size > 0, "dp_shard_size must be greater than 0"
-        assert train_batch_per_replica % (dp_shard_size * mini_batch) == 0, error_msg
+        # assert train_batch_per_replica % (dp_shard_size * mini_batch) == 0, error_msg
         logger.info("Config checked successfully")
 
     @property

@@ -57,7 +57,7 @@ import types
 from functools import partial
 import msgpack
 from cosmos_rl.utils.network_util import make_request_with_retry
-from cosmos_rl.utils.ulysses import slice_input_for_ulysses
+from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
@@ -1228,18 +1228,21 @@ class GRPOTrainer(Trainer):
                             )
                             acc_n_tokens += np.prod(input_ids.shape)
                             user_mini_batch["position_ids"] = position_ids
+                            padding_mask = user_mini_batch.get("padding_mask", None)
 
                             input_ids_before_cp = user_mini_batch["input_ids"]
                             position_ids_before_cp = user_mini_batch["position_ids"]
+                            padding_mask_before_cp = padding_mask
 
                             if self.parallel_dims.cp_enabled:
-                                input_ids, position_ids = slice_input_for_ulysses(
-                                    input_ids,
-                                    position_ids,
+                                [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
+                                    [input_ids, position_ids, padding_mask],
                                     self.parallel_dims.mesh["cp"],
                                 )
                                 user_mini_batch["position_ids"] = position_ids
                                 user_mini_batch["input_ids"] = input_ids
+                                if padding_mask is not None:
+                                    user_mini_batch["padding_mask"] = padding_mask
 
                             if self.parallel_dims.pp_enabled:
                                 if pp_last_stage:
@@ -1348,10 +1351,10 @@ class GRPOTrainer(Trainer):
 
                                 if self.parallel_dims.cp_enabled:
                                     # reset the position ids and input ids
-                                    user_mini_batch["position_ids"] = (
-                                        position_ids_before_cp
-                                    )
+                                    user_mini_batch["position_ids"] = position_ids_before_cp
                                     user_mini_batch["input_ids"] = input_ids_before_cp
+                                    if padding_mask_before_cp is not None:
+                                        user_mini_batch["padding_mask"] = padding_mask_before_cp
 
                                 if self.config.train.train_policy.temperature > 1e-6:
                                     raw_logits = (

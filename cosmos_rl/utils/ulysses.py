@@ -21,6 +21,7 @@ from typing import Any, Tuple, Callable
 from functools import partial
 
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor, Shard
 import torch.distributed as dist
 import torch.nn as nn
 
@@ -221,25 +222,24 @@ def slice_input_tensor(
     return data[slc].contiguous()
 
 
-def slice_input_for_ulysses(
-    input_ids: torch.Tensor, position_ids: torch.Tensor, cp_mesh: DeviceMesh
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def slice_inputs_for_ulysses(
+    input_tensors: list[torch.Tensor | None], cp_mesh: DeviceMesh
+) -> list[torch.Tensor]:
     """
-    `input_ids` and `position_ids` are already padded by cosmos-rl datapacker.
+    The input tensors are already padded by cosmos-rl datapacker.
     Args:
-        input_ids: shape of [bsz, seqlen]
-        position_ids: shape of [bsz, seqlen]
+        input_tensors: Input tensors with shape of [bsz, seqlen]
         cp_mesh: ulysses sequence parallelism size
 
     Returns:
-        torch.Tensor: input_ids for current rank
+        list[torch.Tensor]: Input tensors for current CP rank.
         torch.Tensor: position_ids for current rank
     """
-    input_for_current_rank = slice_input_tensor(input_ids, dim=1, cp_mesh=cp_mesh)
-    position_ids_for_current_rank = slice_input_tensor(
-        position_ids, dim=1, cp_mesh=cp_mesh
-    )
-    return input_for_current_rank, position_ids_for_current_rank
+    return [
+        slice_input_tensor(t, dim=1, cp_mesh=cp_mesh)
+        if t is not None else None
+        for t in input_tensors
+    ]
 
 
 def gather_outputs_for_ulysses(
@@ -295,7 +295,7 @@ def gather_heads_scatter_seq(
     return SeqAllToAll.apply(cp_mesh, x, seq_dim, head_dim, False)
 
 
-def ulysses_wrapper_of_flash_attn(
+def ulysses_wrapper_of_attn_func(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
     value_states: torch.Tensor,
@@ -356,9 +356,12 @@ def ulysses_wrapper_of_flash_attn(
     return attn_output
 
 
-def ulysses_attn_func(original_attn_func: Callable, cp_mesh: DeviceMesh):
+def ulysses_attn_func(
+    original_attn_func: Callable,
+    cp_mesh: DeviceMesh,
+):
     return partial(
-        ulysses_wrapper_of_flash_attn,
+        ulysses_wrapper_of_attn_func,
         original_attn_func=original_attn_func,
         cp_mesh=cp_mesh,
     )
@@ -391,15 +394,6 @@ def swizzle_cp_forward(model: nn.Module, parallel_dims: ParallelDims):
     else:
         # non-pp case, just use hook is perfect.
         def gather_output_hook(model, args, output):
-            if parallel_dims.pp_enabled:
-                last_stage = parallel_dims.pp_coord[0] == parallel_dims.pp_coord[1] - 1
-                if last_stage:
-                    return gather_outputs_for_ulysses(
-                        output, gather_dim=1, cp_mesh=cp_mesh
-                    )
-                else:
-                    return output
-            else:
-                return gather_outputs_for_ulysses(output, gather_dim=1, cp_mesh=cp_mesh)
+            return gather_outputs_for_ulysses(output, gather_dim=1, cp_mesh=cp_mesh)
 
         model.register_forward_hook(gather_output_hook)
