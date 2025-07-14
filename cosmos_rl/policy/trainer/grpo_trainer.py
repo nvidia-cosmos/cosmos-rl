@@ -627,8 +627,8 @@ class GRPOTrainer(Trainer):
 
     @Trainer.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        logger.info("Bypassing execute_policy_to_rollout_unicast")
-        return False
+        # logger.info("Bypassing execute_policy_to_rollout_unicast")
+        # return False
 
         assert command.src_replica_size == self.world_size
         if not command.src_replica_name == self.replica_name:

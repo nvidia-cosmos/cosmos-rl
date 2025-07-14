@@ -461,12 +461,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        if not hasattr(self, "loaded"):
-            self.rollout.reload_weight()
-            self.loaded = True
-        logger.info("Weights loaded.")
-        self.state.set_weight_synced()
-        return
+        # if not hasattr(self, "loaded"):
+        #    self.rollout.reload_weight()
+        #    self.loaded = True
+        # logger.info("Weights loaded.")
+        # self.state.set_weight_synced()
+        # return
 
         """
         Sync the weight from policy to rollout.
