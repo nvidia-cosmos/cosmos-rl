@@ -56,7 +56,7 @@ min_filter_prefix_tokens = 1
 
 [train.ckpt]
 enable_checkpoint = true
-save_freq = 30000
+save_freq = 100
 save_mode = "async"
 
 [rollout.parallelism]
