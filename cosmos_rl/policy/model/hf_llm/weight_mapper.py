@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import torch
+import re
 from typing import List, Tuple, Dict, Any
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils import util
@@ -103,3 +104,60 @@ class HFLLMWeightMapper(WeightMapper):
             if not name.startswith("model."):
                 name = "model." + name
         return name
+
+    def policy_map_param_to_transformed_params_for_sync(self, name):
+        """
+        Map a parameter of the policy model to set of transformed parameters that need to be synchronized.
+        This method returns a list containing tuples of the new parameter name and the corresponding new tensor transformed from the original tensor of the given name.
+        Each tuple element includes a transformed tensor and its corresponding slice strategy to derive from the original tensor.
+        """
+        # Addedd for models with qkv_proj and gate_up_proj like phi4
+        if match := re.search(  # noqa: F841
+            r"model\.layers\.(\d+)\.self_attn\.qkv_proj\.(weight|bias)",
+            name,
+        ):
+            split_strategy = []
+            # The first part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 0 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv_proj", "q_proj"),
+                    {0: {"offset": 0, "total_size": 3, "length": 1}},
+                )
+            )
+            # The second part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 1 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv_proj", "k_proj"),
+                    {0: {"offset": 1, "total_size": 3, "length": 1}},
+                )
+            )
+            # The third part of the split:
+            # the dictionary means at dimension 0, extract the part of offset 2 and length 1 when regarding the whole 0 dimension as length 3.
+            split_strategy.append(
+                (
+                    name.replace("qkv_proj", "v_proj"),
+                    {0: {"offset": 2, "total_size": 3, "length": 1}},
+                )
+            )
+            return split_strategy
+        elif match := re.search(  # noqa: F841
+            r"model\.layers\.(\d+)\.mlp\.gate_up_proj\.(weight|bias)",
+            name,
+        ):
+            split_strategy = []
+            split_strategy.append(
+                (
+                    name.replace("gate_up_proj", "gate_proj"),
+                    {0: {"offset": 0, "total_size": 2, "length": 1}},
+                )
+            )
+            split_strategy.append(
+                (
+                    name.replace("gate_up_proj", "up_proj"),
+                    {0: {"offset": 1, "total_size": 2, "length": 1}},
+                )
+            )
+            return split_strategy
+        return []
