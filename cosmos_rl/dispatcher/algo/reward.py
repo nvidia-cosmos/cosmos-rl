@@ -203,7 +203,9 @@ def boxed_math_reward_fn(
         score, _ = math_comparer([reference], [to_be_evaluated])
         return score
     except TimeoutException as e:
-        logger.error(f"TimeoutException: {e}")
+        logger.error(
+            f"TimeoutException: {e} with \nreference={reference}\nto_be_evaluated={to_be_evaluated}"
+        )
         return 0.0
     except Exception:
         return 0.0
