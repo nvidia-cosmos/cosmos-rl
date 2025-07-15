@@ -24,6 +24,7 @@ import asyncio
 import base64
 import cloudpickle
 
+
 from fastapi.responses import HTMLResponse, JSONResponse
 from typing import Dict, List, Optional, Callable, Tuple, Union
 from cosmos_rl.dispatcher.controller import Controller
@@ -44,7 +45,6 @@ from cosmos_rl.dispatcher.protocol import (
     SetTracePathRequest,
     NcclErrRequest,
     NcclStoreClearRequest,
-    SetShardInfosRequest,
     GetShardSendRecvInstsRequest,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -75,6 +75,8 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
 )
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from fastapi.responses import Response
+from fastapi import Request
 
 
 def create_error_response(
@@ -218,17 +220,35 @@ async def heartbeat(request: HeartbeatRequest):
 
 
 @app.post(COSMOS_API_POLICY_SHARD_INFOS_SUFFIX)
-async def policy_shard_infos(request: SetShardInfosRequest):
+async def policy_shard_infos(request: Request):
+    content_type = request.headers.get("Content-Type")
+    if content_type != "application/msgpack":
+        return create_error_response(
+            constant.ErrorCode.INVALID_REQUEST,
+            "Invalid Content-Type, expected application/msgpack",
+        )
+
+    raw_bytes = await request.body()
     await controller.policy_to_rollout_shard_mapper.set_shard_infos_of_policy(
-        request.shard_infos
+        raw_bytes,
+        controller.policy_status_manager.n_atoms_per_replica(),
     )
     return {"message": "Policy shard infos set"}
 
 
 @app.post(COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX)
-async def rollout_shard_infos(request: SetShardInfosRequest):
+async def rollout_shard_infos(request: Request):
+    content_type = request.headers.get("Content-Type")
+    if content_type != "application/msgpack":
+        return create_error_response(
+            constant.ErrorCode.INVALID_REQUEST,
+            "Invalid Content-Type, expected application/msgpack",
+        )
+
+    raw_bytes = await request.body()
     await controller.policy_to_rollout_shard_mapper.set_shard_infos_of_rollout(
-        request.shard_infos
+        raw_bytes,
+        controller.rollout_status_manager.n_atoms_per_replica(),
     )
     return {"message": "Rollout shard infos set"}
 
@@ -239,16 +259,26 @@ async def policy_shard_send_insts(request: GetShardSendRecvInstsRequest):
     Get the send instructions for policy.
     :return: A list of send instructions for policy.
     """
-    await controller.policy_to_rollout_shard_mapper.scheme_generation_done.wait()
-    send_insts = controller.policy_to_rollout_shard_mapper.get_send_insts_for_policy(
-        request.rank
+    logger.debug(
+        f"[Dispatcher] Get policy shard send instructions for rank {request.rank}"
     )
+    await controller.policy_to_rollout_shard_mapper.scheme_generation_done.wait()
+    # Get the send instructions for policy
+    send_insts = (
+        await controller.policy_to_rollout_shard_mapper.get_send_insts_for_policy(
+            request.rank
+        )
+    )
+    # If the send instructions are not found, return an error response
     if send_insts is None:
         return create_error_response(
             constant.ErrorCode.INTERNAL_ERROR,
             "Policy shard send instructions not found",
         )
-    return {"insts": send_insts}
+    logger.debug(
+        f"[Dispatcher] Received policy shard send instructions for rank {request.rank}"
+    )
+    return Response(content=send_insts, media_type="application/msgpack")
 
 
 @app.post(COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX)
@@ -257,16 +287,27 @@ async def rollout_shard_recv_insts(request: GetShardSendRecvInstsRequest):
     Get the receive instructions for rollout.
     :return: A list of receive instructions for rollout.
     """
-    await controller.policy_to_rollout_shard_mapper.scheme_generation_done.wait()
-    recv_insts = controller.policy_to_rollout_shard_mapper.get_recv_insts_for_rollout(
-        request.rank
+    logger.debug(
+        f"[Dispatcher] Get rollout shard receive instructions for rank {request.rank}"
     )
+    # Wait for the scheme generation to be done
+    await controller.policy_to_rollout_shard_mapper.scheme_generation_done.wait()
+    # Get the receive instructions for rollout
+    recv_insts = (
+        await controller.policy_to_rollout_shard_mapper.get_recv_insts_for_rollout(
+            request.rank
+        )
+    )
+    # If the receive instructions are not found, return an error response
     if recv_insts is None:
         return create_error_response(
             constant.ErrorCode.INTERNAL_ERROR,
             "Rollout shard receive instructions not found",
         )
-    return {"insts": recv_insts}
+    logger.debug(
+        f"[Dispatcher] Received rollout shard receive instructions for rank {request.rank}"
+    )
+    return Response(content=recv_insts, media_type="application/msgpack")
 
 
 """

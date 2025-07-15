@@ -67,7 +67,7 @@ from cosmos_rl.utils.api_suffix import (
 )
 from vllm import SamplingParams
 import time
-
+import msgpack
 
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
@@ -250,8 +250,18 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.prepare_shard_infos_for_weight_sync_insts()
 
     def prepare_shard_infos_for_weight_sync_insts(self):
-        self.vllm_weight_inplace_view_map, self.recv_param_key_n_rank_list = (
-            self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+        (
+            self.vllm_weight_inplace_view_map,
+            grouped_recv_param_key_n_rank_list,
+        ) = self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+        # Ordered list of (hf_key, tensor_dim)
+        self.recv_param_key_n_rank_list = []
+        param_groups = []
+        for group in grouped_recv_param_key_n_rank_list:
+            self.recv_param_key_n_rank_list.extend(group)
+            param_groups.append([x[0] for x in group])
+        self.recv_param_key_n_rank_list = sorted(
+            self.recv_param_key_n_rank_list, key=lambda x: x[0]
         )
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
@@ -263,15 +273,37 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
             local_shard_infos
         )
-        # Ordered list of (hf_key, tensor_dim)
+        all_param_groups = dist_util.all_gather_object_cpu(param_groups)
+        merged_groups = {}
+        for r, param_groups in enumerate(all_param_groups):
+            if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) != 0:
+                continue
+            for group in param_groups:
+                group = sorted(group)
+                key = tuple(group)
+                if key not in merged_groups:
+                    merged_groups[key] = group
+        sorted_params_all_rank = dist_util.all_gather_object_cpu(
+            [x[0] for x in self.recv_param_key_n_rank_list]
+        )
+        sorted_params_all_rank = [
+            x
+            for r, x in enumerate(sorted_params_all_rank)
+            if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
+        ]
         if self.global_rank == 0:
+            body = {
+                "shard_infos": self.all_rank_local_shard_infos,
+                "param_groups": list(merged_groups.values()),
+                "sorted_params": sorted_params_all_rank,
+            }
+            data = msgpack.packb(body)
             try:
                 make_request_with_retry(
                     partial(
                         requests.post,
-                        json={
-                            "shard_infos": self.all_rank_local_shard_infos,
-                        },
+                        data=data,
+                        headers={"Content-Type": "application/msgpack"},
                     ),
                     self.get_alternative_urls(COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX),
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
@@ -497,10 +529,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     ),
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
-                insts_meta = insts_meta.json()
+                insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
                 self.policy_to_rollout_recv_insts = [
-                    WeightSyncInstructionsGroup.from_dict(inst)
-                    for inst in insts_meta["insts"]
+                    WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
                 ]
             except Exception as e:
                 raise RuntimeError(
