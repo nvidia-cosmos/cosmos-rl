@@ -19,6 +19,7 @@ import os
 import re
 import time
 import threading
+from collections import defaultdict
 from queue import Queue, Empty
 from datetime import timedelta
 from typing import Dict, Iterable, Optional, Union, Callable
@@ -237,26 +238,57 @@ def gradient_norm_clipping(
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
-    grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = (
-        torch.nn.utils.get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
-        if len(grads) > 0
-        else torch.tensor(0.0).to(torch.cuda.current_device()).float()
-    )
+    # Group the parameters by their device meshes.
+    parameters_by_mesh = defaultdict(list)
+    for param in parameters:
+        if param.grad is not None:
+            # If one parameter belongs to multiple meshes, use a flattened mesh name
+            # by concatenating all the mesh names together.
+            if hasattr(param, "device_mesh"):
+                device_mesh_str = "-".join(list(param.device_mesh.mesh_dim_names))
+            else:
+                device_mesh_str = "default"
+            parameters_by_mesh[device_mesh_str].append(param)
 
-    # If total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`.
-    # We can simply reduce the DTensor to get the total norm in this tensor's process group
-    # and then convert it to a local tensor.
-    # NOTE: It has two purposes:
-    #       1. to make sure the total norm is computed correctly when PP is used (see below)
-    #       2. to return a reduced total_norm tensor whose .item() would return the correct value
-    if isinstance(total_norm, DTensor):
-        # Will reach here if any non-PP parallelism is used.
-        # If only using PP, total_norm will be a local tensor.
+    # Compute the norm for each mesh group
+    per_mesh_norm_list = []
+    for mesh, params in parameters_by_mesh.items():
+        grads = [p.grad for p in params if p.grad is not None]
+        mesh_norm = (
+            torch.nn.utils.get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
+            if len(grads) > 0
+            else torch.tensor(0.0).to(torch.cuda.current_device()).float()
+        )
+        # If mesh_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`.
+        # We can simply reduce the DTensor to get the total norm in this tensor's process group
+        # and then convert it to a local tensor.
+        # NOTE: It has two purposes:
+        #       1. to make sure the total norm is computed correctly when PP is used (see below)
+        #       2. to return a reduced mesh_norm tensor whose .item() would return the correct value
+        if isinstance(mesh_norm, DTensor):
+            # Will reach here if any non-PP parallelism is used.
+            # If only using PP, mesh_norm will be a local tensor.
 
-        # Remove FT replicate dimension if it exists.
-        total_norm = total_norm.full_tensor()
+            # Remove FT replicate dimension if it exists.
+            mesh_norm = mesh_norm.full_tensor()
+        # Make the norm to be a 1D tensor so we can call cat() later.
+        if mesh_norm.ndim == 0:
+            mesh_norm = mesh_norm.reshape(1)
+        per_mesh_norm_list.append(mesh_norm)
 
+    # Compute the total norm among all meshes.
+    if len(per_mesh_norm_list) > 1:
+        per_mesh_norm_tensor = torch.cat(per_mesh_norm_list)
+        if math.isinf(norm_type):
+            total_norm = torch.max(per_mesh_norm_tensor)
+        else:
+            per_mesh_norm_tensor **= norm_type
+            total_norm = torch.sum(per_mesh_norm_tensor)
+            total_norm **= 1.0 / norm_type
+    else:
+        total_norm = per_mesh_norm_list[0]
+
+    # Reduce the norm among the PP ranks.
     if pp_mesh is not None:
         if math.isinf(norm_type):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
@@ -265,7 +297,9 @@ def gradient_norm_clipping(
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
 
-    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    # Perform clipping on each mesh group
+    for mesh, params in parameters_by_mesh.items():
+        torch.nn.utils.clip_grads_with_norm_(params, max_norm, total_norm, foreach)
     return total_norm
 
 
