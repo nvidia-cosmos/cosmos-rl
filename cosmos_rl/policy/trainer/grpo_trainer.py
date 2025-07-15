@@ -1235,9 +1235,11 @@ class GRPOTrainer(Trainer):
                             padding_mask_before_cp = padding_mask
 
                             if self.parallel_dims.cp_enabled:
-                                [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
-                                    [input_ids, position_ids, padding_mask],
-                                    self.parallel_dims.mesh["cp"],
+                                [input_ids, position_ids, padding_mask] = (
+                                    slice_inputs_for_ulysses(
+                                        [input_ids, position_ids, padding_mask],
+                                        self.parallel_dims.mesh["cp"],
+                                    )
                                 )
                                 user_mini_batch["position_ids"] = position_ids
                                 user_mini_batch["input_ids"] = input_ids
@@ -1351,10 +1353,14 @@ class GRPOTrainer(Trainer):
 
                                 if self.parallel_dims.cp_enabled:
                                     # reset the position ids and input ids
-                                    user_mini_batch["position_ids"] = position_ids_before_cp
+                                    user_mini_batch["position_ids"] = (
+                                        position_ids_before_cp
+                                    )
                                     user_mini_batch["input_ids"] = input_ids_before_cp
                                     if padding_mask_before_cp is not None:
-                                        user_mini_batch["padding_mask"] = padding_mask_before_cp
+                                        user_mini_batch["padding_mask"] = (
+                                            padding_mask_before_cp
+                                        )
 
                                 if self.config.train.train_policy.temperature > 1e-6:
                                     raw_logits = (

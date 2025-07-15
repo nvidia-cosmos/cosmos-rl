@@ -337,9 +337,11 @@ class SFTTrainer(Trainer):
                     position_ids_before_cp = val_position_ids
                     padding_mask_before_cp = val_padding_mask
 
-                    [val_inputs, val_position_ids, val_padding_mask] = slice_inputs_for_ulysses(
-                        [val_inputs, val_position_ids, val_padding_mask],
-                        self.parallel_dims.mesh["cp"],
+                    [val_inputs, val_position_ids, val_padding_mask] = (
+                        slice_inputs_for_ulysses(
+                            [val_inputs, val_position_ids, val_padding_mask],
+                            self.parallel_dims.mesh["cp"],
+                        )
                     )
 
                     val_batch["input_ids"] = val_inputs

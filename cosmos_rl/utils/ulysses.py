@@ -21,7 +21,6 @@ from typing import Any, Tuple, Callable
 from functools import partial
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Shard
 import torch.distributed as dist
 import torch.nn as nn
 
@@ -236,8 +235,7 @@ def slice_inputs_for_ulysses(
         torch.Tensor: position_ids for current rank
     """
     return [
-        slice_input_tensor(t, dim=1, cp_mesh=cp_mesh)
-        if t is not None else None
+        slice_input_tensor(t, dim=1, cp_mesh=cp_mesh) if t is not None else None
         for t in input_tensors
     ]
 
