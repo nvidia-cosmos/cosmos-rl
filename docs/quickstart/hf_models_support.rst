@@ -46,5 +46,5 @@ Supported HF Models
 - Phi
 
 .. note::
-   Mistral and Gemma have been tested. Other HF models may also be supported. If you encounter any issues when training other models, please feel free to open an issue and let us know.
+   Mistral, Gemma, Phi have been tested. Other HF models may also be supported. If you encounter any issues when training other models, please feel free to open an issue and let us know.
 
