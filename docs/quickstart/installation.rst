@@ -25,6 +25,8 @@ You can either build docker image from source or install dependencies inside you
 .. note::
     EFA driver is included in the docker image specifically for aws instances with EFA net interface (Sagemaker AI Pod).
 
+    If you are not using EFA, you can build the docker image with `docker build --build-arg COSMOS_RL_BUILD_MODE=no-efa -t cosmos-rl-dev:dev --target package .`.
+
 🔨 Option 2: Run in your own environment
 :::::::::::::::::::::::::::::::::::::::::
 
