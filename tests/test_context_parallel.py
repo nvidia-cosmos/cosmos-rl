@@ -29,8 +29,7 @@ from cosmos_rl.policy.model.gpt import GPT
 import toml
 import random
 
-from cosmos_rl.utils.ulysses import slice_input_for_ulysses
-
+from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 
 """
 To run this test, execute like: `CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 test_context_parallel.py`
@@ -249,9 +248,8 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     input_ids_before_cp = user_mini_batch["input_ids"]
     position_ids_before_cp = user_mini_batch["position_ids"]
 
-    input_ids, position_ids = slice_input_for_ulysses(
-        input_ids,
-        position_ids,
+    input_ids, position_ids = slice_inputs_for_ulysses(
+        [input_ids, position_ids],
         cp_mesh,
     )
 
