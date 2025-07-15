@@ -484,23 +484,22 @@ class SFTTrainer(Trainer):
                     loss.backward()
                 loss = loss.detach()
 
-                for model_part in self.model_parts:
-                    """
-                    Do gradient clipping in group for unsymmetric sharding compatibility
-                    """
-                    if self.config.train.optm_grad_norm_clip > 0:
-                        dist_util.gradient_norm_clipping(
-                            # Must pass empty list even if model_part is None,
-                            # GradNorm across pp stages will fail if some rank does not join the barrier
-                            [p for p in model_part.parameters()]
-                            if model_part is not None
-                            else [],
-                            self.config.train.optm_grad_norm_clip,
-                            foreach=True,
-                            pp_mesh=self.parallel_dims.mesh["pp"]
-                            if self.parallel_dims.pp_enabled
-                            else None,
-                        )
+                """
+                Compute the global grad norm on all parameters and then apply
+                gradient clipping using the global grad norm.
+                """
+                if self.config.train.optm_grad_norm_clip > 0:
+                    # Must pass empty list even if model_part is None,
+                    # GradNorm across pp stages will fail if some rank does not join the barrier
+                    all_params = [p for m in self.model_parts for p in m.parameters()]
+                    dist_util.gradient_norm_clipping(
+                        all_params,
+                        self.config.train.optm_grad_norm_clip,
+                        foreach=True,
+                        pp_mesh=self.parallel_dims.mesh["pp"]
+                        if self.parallel_dims.pp_enabled
+                        else None,
+                    )
 
                 self.optimizers.step()
                 self.lr_schedulers.step()
