@@ -19,13 +19,13 @@ You can either build docker image from source or install dependencies inside you
 
 .. code-block:: bash
 
-    docker build -t cosmos-rl-dev:dev --target package_aws_efa .
+    docker build -t cosmos-rl-dev:dev .
     docker run -it --gpus all --shm-size=24G -w /workspace/cosmos-rl cosmos-rl-dev:dev
 
 .. note::
     EFA driver is included in the docker image specifically for aws instances with EFA net interface (Sagemaker AI Pod).
 
-    If you are not using EFA, you can build the docker image with `docker build -t cosmos-rl-dev:dev --target package .`.
+    If you are not using EFA, you can build the docker image with `docker build --build-arg COSMOS_RL_BUILD_MODE=no-efa -t cosmos-rl-dev:dev --target package .`.
 
 🔨 Option 2: Run in your own environment
 :::::::::::::::::::::::::::::::::::::::::

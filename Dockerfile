@@ -4,8 +4,10 @@
 # To build with AWS-EFA:
 #   docker build -t cosmos_rl:latest -f Dockerfile --target package_aws_efa .
 
+ARG COSMOS_RL_BUILD_MODE=efa
+
 ARG CUDA_VERSION=12.8.1
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS no-efa-base
 
 ARG GDRCOPY_VERSION=v2.4.4
 ARG EFA_INSTALLER_VERSION=1.42.0
@@ -77,7 +79,7 @@ RUN pip install \
 
 
 ###################################################
-FROM base AS aws_efa_base
+FROM no-efa-base AS efa-base
 
 # Remove HPCX and MPI to avoid conflicts with AWS-EFA
 RUN rm -rf /opt/hpcx \
@@ -125,15 +127,7 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 
 ###################################################
 ## Image target: cosmos_rl
-FROM base AS package
-
-COPY . /workspace/cosmos_rl
-RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
-
-
-###################################################
-## Image target: cosmos_rl with aws-efa
-FROM aws_efa_base AS package_aws_efa
+FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 
 COPY . /workspace/cosmos_rl
 RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
