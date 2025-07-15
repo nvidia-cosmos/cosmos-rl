@@ -285,7 +285,7 @@ class GRPOTrainer(Trainer):
             local_shard_infos
         )
         sorted_params_all_rank = dist_util.all_gather_object_cpu(
-            [x[0] for x in keys_n_ranks]
+            sorted([x[0] for x in keys_n_ranks])
         )
         sorted_params_all_rank = [
             x
