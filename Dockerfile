@@ -1,8 +1,8 @@
 # Usage:
 # To build without AWS-EFA:
-#   docker build -t cosmos_rl:latest -f Dockerfile --target package .
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_BUILD_MODE=no-efa .
 # To build with AWS-EFA:
-#   docker build -t cosmos_rl:latest -f Dockerfile --target package_aws_efa .
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_BUILD_MODE=efa .
 
 ARG COSMOS_RL_BUILD_MODE=efa
 
@@ -130,4 +130,4 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 
 COPY . /workspace/cosmos_rl
-RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
+RUN pip install -e /workspace/cosmos_rl
