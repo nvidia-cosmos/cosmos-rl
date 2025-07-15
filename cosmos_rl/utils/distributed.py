@@ -286,7 +286,8 @@ def gradient_norm_clipping(
             total_norm = torch.sum(per_mesh_norm_tensor)
             total_norm **= 1.0 / norm_type
     else:
-        total_norm = per_mesh_norm_list[0]
+        assert per_mesh_norm_list[0].numel() == 1, "total_norm should be a scalar"
+        total_norm = per_mesh_norm_list[0].view(-1)[0]
 
     # Reduce the norm among the PP ranks.
     if pp_mesh is not None:
