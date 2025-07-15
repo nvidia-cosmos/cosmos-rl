@@ -416,6 +416,26 @@ class SFTTrainer(Trainer):
                 if data_loader_bias > 0:
                     data_loader_bias -= 1
                     continue
+
+                # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
+                # settings from [profiler.sub_profiler_config] are reused
+                if (
+                    self.config.profiler.enable_nsys
+                    and self.profiler.global_rank in self.profiler.rank_filter
+                ):
+                    if (
+                        self.train_step
+                        == self.profiler.WAIT_STEPS + self.profiler.WARMUP_STEPS
+                    ):
+                        torch.cuda.cudart().cudaProfilerStart()
+                    elif (
+                        self.train_step
+                        == self.profiler.WAIT_STEPS
+                        + self.profiler.WARMUP_STEPS
+                        + self.profiler.active_steps
+                    ):
+                        torch.cuda.cudart().cudaProfilerStop()
+
                 self.model.train()
                 start_event = torch.cuda.Event(enable_timing=True)
                 end_event = torch.cuda.Event(enable_timing=True)
