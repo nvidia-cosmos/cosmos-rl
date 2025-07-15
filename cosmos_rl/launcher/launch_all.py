@@ -30,8 +30,6 @@ import tempfile
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")
 
-COSMOS_RL_DIR = "/workspace/cosmos_rl"
-TOOLS_RELATIVE_DIR = "cosmos_rl/launcher"
 
 # ---------------------------------------------------------------------------
 # Queue priority helper
@@ -675,7 +673,12 @@ def main():
 
     # Check if the config file is provided
     cosmos_config = read_config(args.config)
-    script = os.path.abspath(args.script) if args.script is not None else None
+    if args.script is not None and args.script.endswith(".py"):
+        # If the script is a Python file, we need to make sure it is absolute path
+        # so that it can be found by the launched processes
+        script = os.path.abspath(args.script)
+    else:
+        script = args.script if args.script is not None else None
 
     # Get the number of GPUs required for policy and rollout
     # and the number of replicas for each
@@ -790,13 +793,11 @@ def main():
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
         config_content = toml.dumps(cosmos_config)
         launch_cmd = f"""\
-cd {COSMOS_RL_DIR}
-
 cat >config.toml <<EOF
 {config_content}
 EOF
 
-python {TOOLS_RELATIVE_DIR}/launch_all.py --config config.toml"""
+cosmos-rl --config config.toml"""
 
         # Get all non-Lepton arguments
         non_lepton_args = []
