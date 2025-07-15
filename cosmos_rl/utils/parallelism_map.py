@@ -1225,11 +1225,13 @@ class ParallelizedShardMapper:
         ]
         policy_shard_dicts = self.policy_all_rank_shard_infos[p_rank]
         policy_to_rollout_insts = []
+        name_in_group = set()
         for dest_name in sorted_params:
-            if dest_name in self.param_to_param_groups:
-                continue
             insts_for_group = []
             if dest_name not in policy_shard_dicts:
+                continue
+            if dest_name in self.param_to_param_groups:
+                name_in_group.add(dest_name)
                 continue
             p_info = policy_shard_dicts[dest_name]
             insts_for_param_name = []
@@ -1282,11 +1284,17 @@ class ParallelizedShardMapper:
                 policy_to_rollout_insts.append(
                     WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
+            else:
+                logger.warning(
+                    f"No send instructions generated for parameter {dest_name} in policy rank {p_rank}."
+                )
         for group in self.param_groups:
             insts_for_group = []
             for dest_name in group:
                 if dest_name not in policy_shard_dicts:
                     continue
+                if dest_name in name_in_group:
+                    name_in_group.remove(dest_name)
                 p_info = policy_shard_dicts[dest_name]
                 insts_for_param_name = []
                 shard_info = {k: DimSliceInfo.from_dict(v) for k, v in p_info.items()}
@@ -1336,6 +1344,10 @@ class ParallelizedShardMapper:
                 policy_to_rollout_insts.append(
                     WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
+        if len(name_in_group) > 0:
+            logger.warning(
+                f"No send instructions generated for parameters {name_in_group} in policy rank {p_rank}."
+            )
         # Pack the instructions into msgpack format for efficient serialization.
         return msgpack.packb(policy_to_rollout_insts)
 
@@ -1403,11 +1415,13 @@ class ParallelizedShardMapper:
         ]
         rollout_shard_dicts = self.rollout_all_rank_shard_infos[r_rank]
         rollout_from_policy_insts = []
+        name_in_group = set()
         for dest_name in sorted_params:
-            if dest_name in self.param_to_param_groups:
-                continue
             insts_for_group = []
             if dest_name not in rollout_shard_dicts:
+                continue
+            if dest_name in self.param_to_param_groups:
+                name_in_group.add(dest_name)
                 continue
             r_info = rollout_shard_dicts[dest_name]
             insts_for_param_name = []
@@ -1455,12 +1469,17 @@ class ParallelizedShardMapper:
                 rollout_from_policy_insts.append(
                     WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
+            else:
+                raise ValueError(
+                    f"No recv instructions generated for parameter {dest_name} in rollout rank {r_rank}."
+                )
         for group in self.param_groups:
             insts_for_group = []
             for dest_name in group:
                 if dest_name not in rollout_shard_dicts:
                     continue
-
+                if dest_name in name_in_group:
+                    name_in_group.remove(dest_name)
                 r_info = rollout_shard_dicts[dest_name]
                 insts_for_param_name = []
                 shard_info = {k: DimSliceInfo.from_dict(v) for k, v in r_info.items()}
@@ -1509,6 +1528,9 @@ class ParallelizedShardMapper:
                 rollout_from_policy_insts.append(
                     WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
+        assert (
+            len(name_in_group) == 0
+        ), f"No recv instructions generated for parameters {name_in_group} in rollout rank {r_rank}."
         # Pack the instructions into msgpack format for efficient serialization.
         return msgpack.packb(rollout_from_policy_insts)
 

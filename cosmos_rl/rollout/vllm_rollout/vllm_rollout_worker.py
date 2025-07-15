@@ -259,7 +259,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         param_groups = []
         for group in grouped_recv_param_key_n_rank_list:
             self.recv_param_key_n_rank_list.extend(group)
-            param_groups.append([x[0] for x in group])
+            if len(group) > 1:
+                param_groups.append([x[0] for x in group])
         self.recv_param_key_n_rank_list = sorted(
             self.recv_param_key_n_rank_list, key=lambda x: x[0]
         )
