@@ -31,7 +31,6 @@ from functools import partial
 class BaseModel(torch.nn.Module, ABC):
     def __init__(self, hf_config: AutoConfig):
         super().__init__()
-        self.tie_word_embeddings = getattr(hf_config, "tie_word_embeddings", False)
         self.weight_mapper = WeightMapper.get_weight_mapper(
             self.supported_model_types()[0]
         )(hf_config)
@@ -54,9 +53,6 @@ class BaseModel(torch.nn.Module, ABC):
         keys = sorted(keys, key=lambda x: x[0])
         transforms = collections.OrderedDict()
         for k in keys:
-            if self.tie_word_embeddings and "lm_head.weight" in k:
-                logger.info(f"Sort {k} skipped because of tie_word_embeddings")
-                continue
             v = named_parameters[k]
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
@@ -68,9 +64,6 @@ class BaseModel(torch.nn.Module, ABC):
 
         # 2. do 1->n decomposition on weights like qkv_proj.weight -> q.weight, k.weight, v.weight
         for name, param in self.named_parameters():
-            if self.tie_word_embeddings and "lm_head.weight" in k:
-                logger.info(f"Sort {k} skipped because of tie_word_embeddings")
-                continue
             is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
             dims_rank_info = {}
             if not is_dist_tensor:
