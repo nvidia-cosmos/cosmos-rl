@@ -105,6 +105,16 @@ class HFLLMWeightMapper(WeightMapper):
                 name = "model." + name
         return name
 
+    def name_to_model_part_index(self, dest_name: str) -> int:
+        if dest_name in ["lm_head.weight", "lm_head.bias"]:
+            return 0
+        elif dest_name.startswith("visual."):
+            return 1
+        elif dest_name.startswith("model."):
+            return 0
+        else:
+            raise ValueError(f"Unsupported weight: {dest_name}")
+
     def policy_decompose_param_1_to_n_for_sync(self, name):
         """
         Map a parameter of the policy model to set of transformed parameters that need to be synchronized.

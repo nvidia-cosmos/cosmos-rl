@@ -209,7 +209,7 @@ class HFLLMModel(BaseModel):
         return position_ids, inputs, seq_dim_idx
 
     def separate_model_parts(self) -> List[nn.Module]:
-        return [self]
+        return [self.model]
 
     @cached_property
     def _get_nparams_and_flops_fn(self) -> Callable[[int], tuple[int, int]]:
