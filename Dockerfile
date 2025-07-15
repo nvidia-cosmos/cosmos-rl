@@ -130,4 +130,4 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 
 COPY . /workspace/cosmos_rl
-RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
+RUN pip install -e /workspace/cosmos_rl
