@@ -39,7 +39,7 @@ import functools
 import os
 from typing import Optional, Dict, Any
 from tqdm import tqdm
-from cosmos_rl.utils.ulysses import slice_input_for_ulysses
+from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 
 
 def collate_fn(
@@ -329,6 +329,26 @@ class SFTTrainer(Trainer):
                     **val_batch
                 )
 
+                val_batch["position_ids"] = val_position_ids
+                val_padding_mask = val_batch.get("padding_mask", None)
+
+                if self.parallel_dims.cp_enabled:
+                    input_ids_before_cp = val_inputs
+                    position_ids_before_cp = val_position_ids
+                    padding_mask_before_cp = val_padding_mask
+
+                    [val_inputs, val_position_ids, val_padding_mask] = (
+                        slice_inputs_for_ulysses(
+                            [val_inputs, val_position_ids, val_padding_mask],
+                            self.parallel_dims.mesh["cp"],
+                        )
+                    )
+
+                    val_batch["input_ids"] = val_inputs
+                    val_batch["position_ids"] = val_position_ids
+                    if val_padding_mask is not None:
+                        val_batch["padding_mask"] = val_padding_mask
+
                 if self.parallel_dims.pp_enabled:
                     pp_last_stage = (
                         self.parallel_dims.pp_coord[0]
@@ -339,7 +359,6 @@ class SFTTrainer(Trainer):
                     if pp_first_stage:
                         self.pp_scheduler_val.step(
                             **val_batch,
-                            position_ids=val_position_ids,
                             pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
                             seq_len_multiple=self.seq_len_multiple,
                         )
@@ -359,9 +378,15 @@ class SFTTrainer(Trainer):
                     else:
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
-                    val_logits = self.model(**val_batch, position_ids=val_position_ids)[
-                        :, :-1
-                    ].contiguous()
+                    val_logits = self.model(**val_batch)[:, :-1].contiguous()
+
+                    # recover from ulysses if cp is enabled
+                    if self.parallel_dims.cp_enabled:
+                        val_batch["input_ids"] = input_ids_before_cp
+                        val_batch["position_ids"] = position_ids_before_cp
+                        if padding_mask_before_cp is not None:
+                            val_batch["padding_mask"] = padding_mask_before_cp
+
                     val_loss = self.loss_fn(
                         val_logits.view(-1, val_logits.size(-1)),
                         val_labels[:, 1:].contiguous().view(-1),
@@ -391,6 +416,26 @@ class SFTTrainer(Trainer):
                 if data_loader_bias > 0:
                     data_loader_bias -= 1
                     continue
+
+                # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
+                # settings from [profiler.sub_profiler_config] are reused
+                if (
+                    self.config.profiler.enable_nsys
+                    and self.profiler.global_rank in self.profiler.rank_filter
+                ):
+                    if (
+                        self.train_step
+                        == self.profiler.WAIT_STEPS + self.profiler.WARMUP_STEPS
+                    ):
+                        torch.cuda.cudart().cudaProfilerStart()
+                    elif (
+                        self.train_step
+                        == self.profiler.WAIT_STEPS
+                        + self.profiler.WARMUP_STEPS
+                        + self.profiler.active_steps
+                    ):
+                        torch.cuda.cudart().cudaProfilerStop()
+
                 self.model.train()
                 start_event = torch.cuda.Event(enable_timing=True)
                 end_event = torch.cuda.Event(enable_timing=True)
@@ -405,16 +450,22 @@ class SFTTrainer(Trainer):
                 )
 
                 batch["position_ids"] = position_ids
+                padding_mask = batch.get("padding_mask", None)
 
                 if self.parallel_dims.cp_enabled:
-                    input_ids, position_ids = slice_input_for_ulysses(
-                        input_ids, position_ids, self.parallel_dims.mesh["cp"]
-                    )
                     input_ids_before_cp = input_ids
                     position_ids_before_cp = position_ids
+                    padding_mask_before_cp = padding_mask
+
+                    [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
+                        [input_ids, position_ids, padding_mask],
+                        self.parallel_dims.mesh["cp"],
+                    )
 
                     batch["input_ids"] = input_ids
                     batch["position_ids"] = position_ids
+                    if padding_mask is not None:
+                        batch["padding_mask"] = padding_mask
 
                 self.optimizers.zero_grad()
 
@@ -449,13 +500,14 @@ class SFTTrainer(Trainer):
                     )
                 else:
                     logits = self.model(**batch)
+
                     # recover from ulysses if cp is enabled
                     if self.parallel_dims.cp_enabled:
-                        # logits = gather_outputs_for_ulysses(
-                        #     logits, gather_dim=1, cp_mesh=self.parallel_dims.mesh["cp"]
-                        # )
                         batch["input_ids"] = input_ids_before_cp
                         batch["position_ids"] = position_ids_before_cp
+                        if padding_mask_before_cp is not None:
+                            batch["padding_mask"] = padding_mask_before_cp
+
                     logits = logits[:, :-1].contiguous()
                     loss = self.loss_fn(
                         logits.view(-1, logits.size(-1)),
@@ -464,23 +516,22 @@ class SFTTrainer(Trainer):
                     loss.backward()
                 loss = loss.detach()
 
-                for model_part in self.model_parts:
-                    """
-                    Do gradient clipping in group for unsymmetric sharding compatibility
-                    """
-                    if self.config.train.optm_grad_norm_clip > 0:
-                        dist_util.gradient_norm_clipping(
-                            # Must pass empty list even if model_part is None,
-                            # GradNorm across pp stages will fail if some rank does not join the barrier
-                            [p for p in model_part.parameters()]
-                            if model_part is not None
-                            else [],
-                            self.config.train.optm_grad_norm_clip,
-                            foreach=True,
-                            pp_mesh=self.parallel_dims.mesh["pp"]
-                            if self.parallel_dims.pp_enabled
-                            else None,
-                        )
+                """
+                Compute the global grad norm on all parameters and then apply
+                gradient clipping using the global grad norm.
+                """
+                if self.config.train.optm_grad_norm_clip > 0:
+                    # Must pass empty list even if model_part is None,
+                    # GradNorm across pp stages will fail if some rank does not join the barrier
+                    all_params = [p for m in self.model_parts for p in m.parameters()]
+                    dist_util.gradient_norm_clipping(
+                        all_params,
+                        self.config.train.optm_grad_norm_clip,
+                        foreach=True,
+                        pp_mesh=self.parallel_dims.mesh["pp"]
+                        if self.parallel_dims.pp_enabled
+                        else None,
+                    )
 
                 self.optimizers.step()
                 self.lr_schedulers.step()
