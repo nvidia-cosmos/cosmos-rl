@@ -454,7 +454,9 @@ def apply_compile(model: nn.Module, fullgraph: bool = True):
     # ``model.visual`` could get deleted by pipeline split
     if model.visual is not None:
         for layer_id, transformer_block in model.visual.blocks.named_children():
-            transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
+            transformer_block = torch.compile(
+                transformer_block, fullgraph=fullgraph, dynamic=True
+            )
             model.visual.blocks.register_module(layer_id, transformer_block)
 
     logger.info("Each TransformerBlock compiled with torch.compile")
