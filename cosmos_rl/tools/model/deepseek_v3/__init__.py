@@ -840,13 +840,15 @@ class DeepseekV3MoEModel(BaseModel):
             model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
         )
 
-        if not self.tie_word_embeddings:
+        if not model_args.hf_config.tie_word_embeddings:
+            self.tie_embed_tokens = False
             self.lm_head = nn.Linear(
                 model_args.dim,
                 model_args.vocab_size,
                 bias="lm_head" in model_args.biases,
             )
-
+        else:
+            self.tie_embed_tokens = True
         self.identity_layer = IdentityLayer()
 
     def forward(
@@ -873,7 +875,7 @@ class DeepseekV3MoEModel(BaseModel):
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
-            if not self.tie_word_embeddings:
+            if not self.tie_embed_tokens:
                 output = self.lm_head(hidden_states)
             else:
                 is_w_dist_tensor = isinstance(
