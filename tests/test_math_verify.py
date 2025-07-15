@@ -44,9 +44,6 @@ class TestMathVerify(unittest.TestCase):
             assert score >= 0.0
             assert score <= 1.0
 
-    def test_hang(self):
-        pass
-
 
 if __name__ == "__main__":
     unittest.main()
