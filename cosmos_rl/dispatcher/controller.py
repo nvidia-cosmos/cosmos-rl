@@ -76,7 +76,6 @@ class Controller:
     def _init_status(self):
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
-        self.policy_to_rollout_shard_mapper = ParallelizedShardMapper()
         self.epoch = 1
         self.stat_prompt_tokens_count = 0
         self.stat_completion_tokens_count = 0
@@ -115,6 +114,9 @@ class Controller:
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
             config.policy.model_name_or_path,
             trust_remote_code=True,
+        )
+        self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
+            config
         )
 
         if "wandb" in config.logging.logger and is_wandb_available():
