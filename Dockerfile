@@ -1,8 +1,8 @@
 # Usage:
 # To build without AWS-EFA:
-#   docker build -t cosmos_rl:latest -f Dockerfile --target package .
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_BUILD_MODE=no-efa .
 # To build with AWS-EFA:
-#   docker build -t cosmos_rl:latest -f Dockerfile --target package_aws_efa .
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_BUILD_MODE=efa .
 
 ARG COSMOS_RL_BUILD_MODE=efa
 
