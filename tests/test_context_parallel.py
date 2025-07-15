@@ -33,7 +33,7 @@ from cosmos_rl.utils.ulysses import slice_input_for_ulysses
 
 
 """
-To run this test, execute like: `CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=2 test_context_parallel.py`
+To run this test, execute like: `CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 test_context_parallel.py`
 """
 
 
