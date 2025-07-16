@@ -440,7 +440,7 @@ class TrainingConfig(BaseModel):
     # --------- smoke-test helpers ---------
     max_num_steps: Optional[int] = Field(
         default=None,
-        description="When set, overrides the automatically calculated total training steps and takes precedence over `epoch`; training stops once this step count is reached (even if `epoch` > 1). Useful for quick smoke tests.",
+        description="Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.",
     )
 
     async_tp_enabled: bool = Field(
