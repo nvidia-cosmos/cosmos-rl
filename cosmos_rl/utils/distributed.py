@@ -494,11 +494,7 @@ class HighAvailabilitylNccl:
             f"{self.__log_prefix()} build mesh with {cmd.replica_name_to_rank}"
         )
 
-        if self.replica_name not in cmd.replica_name_to_rank:
-            # TODO(zjx): need fix this
-            # In some case, current replica is not in the cmd.replica_name_to_rank, we should ignore this command, and wait for correct command.
-            self.is_comm_ready.clear()
-            return
+        assert self.replica_name in cmd.replica_name_to_rank, f"{self.__log_prefix()} replica_name {self.replica_name} not in cmd.replica_name_to_rank {cmd.replica_name_to_rank}"
 
         if len(cmd.replica_name_to_rank) == 1:
             self.is_single_peer.set()
