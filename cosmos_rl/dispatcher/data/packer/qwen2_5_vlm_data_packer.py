@@ -7,6 +7,9 @@ from cosmos_rl.policy.config import Config
 from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info
 import logging
+import copy
+
+IGNORE_LABEL_ID = -100
 
 
 class Qwen2_5_VLM_DataPacker(DataPacker):
@@ -95,24 +98,104 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                 "prompt": prompt,
             }
 
+    def _replace_assistant_content(
+        self,
+        token_ids: List[int],
+        label_ids: List[int],
+        pad_token_id: int,
+        replacement_ids: List[int],
+        pad_run_length: int = 10,
+    ) -> List[int]:
+        """
+        Find the first run of exactly `pad_run_length` pad_token_id's in token_ids,
+        replace that run with replacement_ids, and return the new list.
+        If no such run is found, returns the original list unchanged.
+        """
+        n = len(token_ids)
+        target_run = [pad_token_id] * pad_run_length
+
+        # find the start index of the first matching run
+        for i in range(n - pad_run_length + 1):
+            if token_ids[i : i + pad_run_length] == target_run:
+                # splice in the replacement
+                return (
+                    True,
+                    token_ids[:i] + replacement_ids + token_ids[i + pad_run_length :],
+                    label_ids[:i] + replacement_ids + label_ids[i + pad_run_length :],
+                )
+        # no match found
+        return False, token_ids, label_ids
+
     def _process_single_sample(
         self, conversation: "Qwen2_5_VLM_DataPacker.Payload"
     ) -> Dict[str, Any]:
-        prompt = self.hf_processor.apply_chat_template(
-            conversation,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-        image_inputs, video_inputs = process_vision_info(conversation)
-        inputs = self.hf_processor(
-            text=[prompt],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt",
-        )
+        original_conversation = copy.deepcopy(conversation)
+        try:
+            # Replace all the assistant content with consecutive `pad_token` * 10
+            pad_token = self.tokenizer.pad_token
+            pad_token_id = self.tokenizer.pad_token_id
+            pad_run_length = 10
+            assistant_content = []
+            for message in conversation:
+                if message["role"] == "assistant":
+                    assistant_content.append(message["content"])
+                    message["content"] = pad_token * pad_run_length
+
+            prompt = self.hf_processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            image_inputs, video_inputs = process_vision_info(conversation)
+            inputs = self.hf_processor(
+                text=[prompt],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+
+            input_ids = inputs["input_ids"][0].tolist()
+            label_ids = [IGNORE_LABEL_ID] * len(input_ids)
+
+            for assistant_content in assistant_content:
+                replacement_ids = self.tokenizer.encode(
+                    assistant_content, add_special_tokens=False
+                )
+                replaced, input_ids, label_ids = self._replace_assistant_content(
+                    input_ids,
+                    label_ids,
+                    pad_token_id=pad_token_id,
+                    replacement_ids=replacement_ids,
+                    pad_run_length=pad_run_length,
+                )
+                if not replaced:
+                    raise ValueError("No assistant content to replace")
+                if len(input_ids) != len(label_ids):
+                    raise ValueError(
+                        f"input_ids and label_ids should have the same length, but got {len(input_ids)} and {len(label_ids)}"
+                    )
+        except Exception:
+            # Fall back to the non-assistant-masking
+            prompt = self.hf_processor.apply_chat_template(
+                original_conversation,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            image_inputs, video_inputs = process_vision_info(original_conversation)
+            inputs = self.hf_processor(
+                text=[prompt],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            input_ids = inputs["input_ids"][0].tolist()
+            label_ids = input_ids.copy()
+
         result_dict = {
-            "input_ids": inputs["input_ids"][0].tolist(),
+            "input_ids": input_ids,
+            "label_ids": label_ids,
         }
         if "pixel_values_videos" in inputs:
             result_dict["pixel_values_videos"] = inputs["pixel_values_videos"]
@@ -133,61 +216,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
 
         return result_dict
 
-    def get_policy_input(
-        self,
-        sample: "Qwen2_5_VLM_DataPacker.Payload",
-        rollout_output: Optional[str] = None,
-        n_ignore_prefix_tokens: int = 0,
-    ) -> Any:
-        assert all(
-            isinstance(x, dict) and "role" in x and "content" in x for x in sample
-        ), "All samples should be in conversation format, but got: {}".format(sample)
-
-        x = self._process_single_sample(sample)
-
-        return_dict = {}
-        if "pixel_values_videos" in x:
-            return_dict["pixel_values_videos"] = x["pixel_values_videos"]
-            return_dict["video_grid_thw"] = x["video_grid_thw"]
-            return_dict["second_per_grid_ts"] = x["second_per_grid_ts"]
-            return_dict["pixel_values_videos_lengths_per_sample"] = x[
-                "pixel_values_videos_lengths_per_sample"
-            ]
-        else:
-            return_dict["pixel_values_videos"] = None
-            return_dict["video_grid_thw"] = None
-            return_dict["second_per_grid_ts"] = None
-            return_dict["pixel_values_videos_lengths_per_sample"] = None
-
-        if "pixel_values_images" in x:
-            return_dict["pixel_values_images"] = x["pixel_values_images"]
-            return_dict["image_grid_thw"] = x["image_grid_thw"]
-            return_dict["pixel_values_images_lengths_per_sample"] = x[
-                "pixel_values_images_lengths_per_sample"
-            ]
-        else:
-            return_dict["pixel_values_images"] = None
-            return_dict["image_grid_thw"] = None
-            return_dict["pixel_values_images_lengths_per_sample"] = None
-
-        # Common fields
-        input_ids = x["input_ids"]
-        completion_ids = []
-        if rollout_output:
-            completion_ids = self.tokenizer(rollout_output).input_ids  # Don't pad yet
-
-        return_dict["input_ids"] = input_ids + completion_ids
-        return_dict["logprob_masks"] = (
-            [0] * (len(input_ids) - 1 + n_ignore_prefix_tokens)
-            + [1] * (len(completion_ids) - n_ignore_prefix_tokens)
-            + [0]
-        )
-        return return_dict
-
-    def policy_compute_max_len(self, processed_samples: List[Dict[str, Any]]) -> int:
-        return max([len(x["input_ids"]) for x in processed_samples])
-
-    def policy_collate_fn(
+    def _collate_fn(
         self, processed_samples: List[Dict[str, Any]], computed_max_len: int
     ) -> Dict[str, Any]:
         pixel_values_videos = [x["pixel_values_videos"] for x in processed_samples]
@@ -283,6 +312,16 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             ],
             dtype=torch.long,
         )
+        if "label_ids" in processed_samples[0]:
+            batch["label_ids"] = torch.tensor(
+                [
+                    x["label_ids"]
+                    + [IGNORE_LABEL_ID]
+                    * (max(0, computed_max_len - len(x["label_ids"])))
+                    for x in processed_samples
+                ],
+                dtype=torch.long,
+            )
         batch["logprob_masks"] = torch.tensor(
             [
                 x["logprob_masks"]
@@ -297,6 +336,72 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         ), "The length of input_ids, logprob_masks should be the same"
 
         return batch
+
+    def get_policy_input(
+        self,
+        sample: "Qwen2_5_VLM_DataPacker.Payload",
+        rollout_output: Optional[str] = None,
+        n_ignore_prefix_tokens: int = 0,
+    ) -> Any:
+        assert all(
+            isinstance(x, dict) and "role" in x and "content" in x for x in sample
+        ), "All samples should be in conversation format, but got: {}".format(sample)
+
+        x = self._process_single_sample(sample)
+
+        return_dict = {}
+        if "pixel_values_videos" in x:
+            return_dict["pixel_values_videos"] = x["pixel_values_videos"]
+            return_dict["video_grid_thw"] = x["video_grid_thw"]
+            return_dict["second_per_grid_ts"] = x["second_per_grid_ts"]
+            return_dict["pixel_values_videos_lengths_per_sample"] = x[
+                "pixel_values_videos_lengths_per_sample"
+            ]
+        else:
+            return_dict["pixel_values_videos"] = None
+            return_dict["video_grid_thw"] = None
+            return_dict["second_per_grid_ts"] = None
+            return_dict["pixel_values_videos_lengths_per_sample"] = None
+
+        if "pixel_values_images" in x:
+            return_dict["pixel_values_images"] = x["pixel_values_images"]
+            return_dict["image_grid_thw"] = x["image_grid_thw"]
+            return_dict["pixel_values_images_lengths_per_sample"] = x[
+                "pixel_values_images_lengths_per_sample"
+            ]
+        else:
+            return_dict["pixel_values_images"] = None
+            return_dict["image_grid_thw"] = None
+            return_dict["pixel_values_images_lengths_per_sample"] = None
+
+        # Common fields
+        input_ids = x["input_ids"]
+        completion_ids = []
+        if rollout_output:
+            completion_ids = self.tokenizer(rollout_output).input_ids  # Don't pad yet
+
+        return_dict["input_ids"] = input_ids + completion_ids
+
+        return_dict["logprob_masks"] = (
+            [0] * (len(input_ids) - 1 + n_ignore_prefix_tokens)
+            + [1] * (len(completion_ids) - n_ignore_prefix_tokens)
+            + [0]
+        )
+
+        # TODO(jiaxin): this is special for SFT, will be removed in ``policy_collate_fn``
+        return_dict["label_ids"] = x["label_ids"]
+        return return_dict
+
+    def policy_compute_max_len(self, processed_samples: List[Dict[str, Any]]) -> int:
+        return max([len(x["input_ids"]) for x in processed_samples])
+
+    def policy_collate_fn(
+        self, processed_samples: List[Dict[str, Any]], computed_max_len: int
+    ) -> Dict[str, Any]:
+        for x in processed_samples:
+            if "label_ids" in x:
+                del x["label_ids"]
+        return self._collate_fn(processed_samples, computed_max_len)
 
     def sft_process_sample(
         self, sample: "Qwen2_5_VLM_DataPacker.Payload"
@@ -320,36 +425,16 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         # Reuse the RL collate minibatch function
-        model_inputs: Dict[str, Any] = self.policy_collate_fn(
+        model_inputs: Dict[str, Any] = self._collate_fn(
             processed_samples, computed_max_len
         )
         del model_inputs["logprob_masks"]
-
-        input_ids = torch.tensor(
-            [
-                x["input_ids"]
-                + [pad_token_id] * (max(0, computed_max_len - len(x["input_ids"])))
-                for x in processed_samples
-            ],
-            dtype=torch.long,
-        )
-        # Model accept unshifted label_ids for loss computation
-        label_ids = torch.tensor(
-            [
-                x["input_ids"]
-                + [ignore_label_id] * (max(0, computed_max_len - len(x["input_ids"])))
-                for x in processed_samples
-            ],
-            dtype=torch.long,
-        )
-
         # Mask the loss on vision padding tokens
         if self.vision_ids is not None:
             assert isinstance(self.vision_ids, list)
             for vision_id in self.vision_ids:
                 if vision_id is not None:
-                    label_ids[label_ids == vision_id] = ignore_label_id
-
-        model_inputs["input_ids"] = input_ids
-        model_inputs["label_ids"] = label_ids
+                    model_inputs["label_ids"][
+                        model_inputs["label_ids"] == vision_id
+                    ] = ignore_label_id
         return model_inputs
