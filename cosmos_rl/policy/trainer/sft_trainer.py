@@ -278,13 +278,14 @@ class SFTTrainer(Trainer):
         )
         # For iteration control
         self.epoch = config.train.epoch
-        # If max_num_steps is provided, use it; otherwise compute from dataset size
+        steps_by_dataset = (
+            len(self.train_data_loader) * self.epoch // self.dp_world_size
+        )
+
         if config.train.max_num_steps is not None:
-            self.total_steps = config.train.max_num_steps
+            self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
         else:
-            self.total_steps = (
-                len(self.train_data_loader) * self.epoch // self.dp_world_size
-            )
+            self.total_steps = steps_by_dataset
         self.train_step = 0
 
         # Load model

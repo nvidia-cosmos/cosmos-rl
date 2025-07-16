@@ -92,6 +92,7 @@ class PolicyStatusManager:
         tokenizer: AutoTokenizer,
         current_step: int = 0,
         val_dataloader: Optional[DataLoader] = None,
+        max_num_steps: Optional[int] = None,
     ):
         self.redis_handler = redis_handler
         self.config = config
@@ -99,7 +100,9 @@ class PolicyStatusManager:
         self.tokenizer = tokenizer
         self.val_dataloader = val_dataloader
         self.current_step = current_step
-
+        if max_num_steps is not None:
+            self.total_steps = max_num_steps
+            
     def n_atoms_per_replica(self) -> int:
         """
         Get the number of GPUs per replica.
@@ -107,6 +110,7 @@ class PolicyStatusManager:
         if len(self.policy_replicas) == 0:
             return 0
         return next(iter(self.policy_replicas.values())).n_atoms_per_replica()
+
 
     def __len__(self) -> int:
         """
@@ -173,17 +177,26 @@ class PolicyStatusManager:
         """
         Set the ranks of the policies.
         """
-        # Update total step when policy replicas are set
+        # Update total_steps based on remaining samples and replicas
         num_policy_replicas = len(self.get_all_atoms_arrived_replicas())
-        if num_policy_replicas > 0:
-            num_remaining_samples = (
-                explicit_num_remaining_samples
-                if explicit_num_remaining_samples is not None
-                else self.remain_samples_num
-            )
-            self.total_steps = self.current_step + num_remaining_samples // (
-                self.config.train.train_batch_per_replica * num_policy_replicas
-            )
+        if num_policy_replicas == 0:
+            return
+
+        num_remaining_samples = (
+            explicit_num_remaining_samples
+            if explicit_num_remaining_samples is not None
+            else self.remain_samples_num
+        )
+
+        steps_by_dataset = self.current_step + num_remaining_samples // (
+            self.config.train.train_batch_per_replica * num_policy_replicas
+        )
+
+        # If max_num_steps is set, honour the smaller one.
+        if self.config.train.max_num_steps is not None:
+            self.total_steps = min(steps_by_dataset, self.config.train.max_num_steps)
+        else:
+            self.total_steps = steps_by_dataset
 
     def get_status(self, name: str) -> PolicyStatus:
         """
