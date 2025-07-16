@@ -240,6 +240,7 @@ class TestHANccl(CommMixin):
             replica_name=self.replica_name,
             global_rank=self.global_rank,
             controller_hosts=self.remote_hosts,
+            replica_group=dist.new_group(ranks=[self.replica_rank]),
         )
 
         # wait all ranks fetch latest command from controller
@@ -255,11 +256,13 @@ class TestHANccl(CommMixin):
                 comm.push_cmd(cmd)
 
         # 2. wait for the comm to be ready
+        comm.is_ready()
+
         assert (
             comm.world_size() == dist.get_world_size()
         ), f"world size should be {dist.get_world_size()}"
         comm.destroy_nccl_comm()
-        logger.info("  === normal case, passed")
+        logger.info(f"  === normal case, passed {self.replica_name}")
 
     def test_comm_auto_rebuild_intiative_scale_down(self):
         logger.info(
@@ -274,6 +277,7 @@ class TestHANccl(CommMixin):
             replica_name=self.replica_name,
             global_rank=self.global_rank,
             controller_hosts=self.remote_hosts,
+            replica_group=dist.new_group(ranks=[self.replica_rank]),
         )
 
         # wait all ranks fetch latest command from controller
@@ -301,7 +305,7 @@ class TestHANccl(CommMixin):
             ), f"world size should be {dist.get_world_size() - 1}, actual {comm.world_size()}"
 
         comm.destroy_nccl_comm()
-        logger.info("  === intiative scale down, passed")
+        logger.info(f"  === intiative scale down, passed {self.replica_name}")
 
     def test_comm_auto_rebuild_timeout_scale_down(self):
         logger.info(
@@ -316,6 +320,7 @@ class TestHANccl(CommMixin):
             replica_name=self.replica_name,
             global_rank=self.global_rank,
             controller_hosts=self.remote_hosts,
+            replica_group=dist.new_group(ranks=[self.replica_rank]),
         )
 
         dist.barrier()
@@ -378,7 +383,7 @@ class TestHANccl(CommMixin):
 
         # finally, shutdown the comm
         comm.destroy_nccl_comm()
-        logger.info(" === test_comm_auto_rebuild passed")
+        logger.info(f" === test_comm_auto_rebuild passed {self.replica_name}")
 
     def test_allreduce_timeout_retry(self):
         """
@@ -430,20 +435,20 @@ def main():
     time.sleep(10)
 
     # 3. init the tester
-    # ctrl_ip, ctrl_port, metadata = get_controller_metadata()
-    # cosmos_config = Config.from_dict(metadata["config"])
-    # tester = TestHANccl(ctrl_ip, ctrl_port, cosmos_config)
-    # dist.barrier()
+    ctrl_ip, ctrl_port, metadata = get_controller_metadata()
+    cosmos_config = Config.from_dict(metadata["config"])
+    tester = TestHANccl(ctrl_ip, ctrl_port, cosmos_config)
+    dist.barrier()
 
     # 4. Run the test
-    # tester.test_comm_auto_rebuild_normal()
-    # dist.barrier()
+    tester.test_comm_auto_rebuild_normal()
+    dist.barrier()
 
-    # tester.test_comm_auto_rebuild_intiative_scale_down()
-    # dist.barrier()
+    tester.test_comm_auto_rebuild_intiative_scale_down()
+    dist.barrier()
 
-    # tester.test_comm_auto_rebuild_timeout_scale_down()
-    # dist.barrier()
+    tester.test_comm_auto_rebuild_timeout_scale_down()
+    dist.barrier()
 
     # finally, wait for all ranks to finish the test
     for hdl in ctrl_hdl:
