@@ -100,9 +100,9 @@ class PolicyStatusManager:
         self.tokenizer = tokenizer
         self.val_dataloader = val_dataloader
         self.current_step = current_step
-        if max_num_steps is not None:
-            self.total_steps = max_num_steps
-            
+        self.max_num_steps = max_num_steps
+        self.recompute_total_steps()
+
     def n_atoms_per_replica(self) -> int:
         """
         Get the number of GPUs per replica.
@@ -110,7 +110,6 @@ class PolicyStatusManager:
         if len(self.policy_replicas) == 0:
             return 0
         return next(iter(self.policy_replicas.values())).n_atoms_per_replica()
-
 
     def __len__(self) -> int:
         """
