@@ -264,6 +264,7 @@ class GRPOTrainer(Trainer):
         self.is_master_replica = True
         self.prepare_shard_infos_for_weight_sync_insts()
 
+    @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
         keys_n_ranks = []
         for name, tensor_or_callable in self.model.weight_sync_transforms:
@@ -284,7 +285,7 @@ class GRPOTrainer(Trainer):
             local_shard_infos
         )
         sorted_params_all_rank = dist_util.all_gather_object_cpu(
-            [x[0] for x in keys_n_ranks]
+            sorted([x[0] for x in keys_n_ranks])
         )
         sorted_params_all_rank = [
             x
