@@ -1,7 +1,7 @@
 FP8 Quantization
 ================
 
-`cosmos-rl` supports FP8 quantization for policy and rollout. Currently, only rowwise quantization is supported.
+Cosmos-RL supports FP8 quantization for policy and rollout. Currently, only rowwise quantization is supported.
 
 
 Enable FP8 Quantization
@@ -9,21 +9,25 @@ Enable FP8 Quantization
 
 To enable FP8 quantization, you need to set the following configuration:
 
-```toml
-[train.fp8]
-enable_fp8 = true
-fp8_recipe = "dynamic_scaling"
-quant_recipe = "rowwise"
+.. code-block:: toml
 
-[rollout]
-quantization = "fp8"
-```
+    [train.fp8]
+    enable_fp8 = true
+    fp8_recipe = "dynamic_scaling"
+    quant_recipe = "rowwise"
 
-For policy, `fp8_recipe` could only be set to `dynamic_scaling` now. `quant_recipe` could be set to `rowwise` or `tensorwise`.
-`rowwise` is recommended for better accuracy.
+    [rollout]
+    quantization = "fp8"
 
-For rollout, the only field to set is `quantization`, which should be set to `fp8`. Then the rollout will dynamically quantize
-weights from policy to `fp8` during weight synchronization in `rowwise` manner.
+
+For policy:
+
+- `fp8_recipe` could only be set to `dynamic_scaling` now. 
+- `quant_recipe` could be set to `rowwise` or `tensorwise`. `rowwise` is recommended for better accuracy.
+
+For rollout:
+
+- `quantization` should be set to `fp8`. Then the rollout will dynamically quantize weights from policy to `fp8` during weight synchronization in `rowwise` manner.
 
 
 

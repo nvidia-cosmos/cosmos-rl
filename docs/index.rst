@@ -62,4 +62,7 @@ Main Features
    
    parallelism/overview
 
+.. toctree::
+   :caption: Quantization
 
+   quantization/fp8
