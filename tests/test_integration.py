@@ -21,6 +21,7 @@ import tempfile
 import toml
 import re
 import threading
+import time
 
 
 from cosmos_rl.utils import util
@@ -238,7 +239,7 @@ def run_smoke(cfg_name: str, need_rollout: bool):
                 assert reward_vals, "No Reward Max found in logs"
                 assert any(v > 0 for v in reward_vals), "All Reward Max are 0"
                 print(
-                    f"[QUALITY] GRPO reward check passed, Reward Max list: {reward_vals}"
+                    f"[INTEGRATION TEST] GRPO reward check passed, Reward Max list: {reward_vals}"
                 )
             else:
                 loss_vals = [
@@ -249,7 +250,7 @@ def run_smoke(cfg_name: str, need_rollout: bool):
                 max_loss = max(loss_vals)
                 assert max_loss <= 1.3, f"Validation loss too high: {max_loss} > 1.3"
                 print(
-                    f"[QUALITY] SFT validation check passed, Validation loss: {max_loss}"
+                    f"[INTEGRATION TEST] SFT validation check passed, Validation loss: {max_loss}"
                 )
         except AssertionError:
             print("\n=== Captured logs (tail) ===")
@@ -268,11 +269,16 @@ def run_smoke(cfg_name: str, need_rollout: bool):
 
 if __name__ == "__main__":
     cases = [
-        ("sft_test_50_steps.toml", False),  # SFT
-        ("grpo_test_10_steps.toml", True),  # GRPO
+        ("sft_integration_test.toml", False),  # SFT
+        ("grpo_integration_test.toml", True),  # GRPO
     ]
 
+    total_start = time.time()
     for cfg, need_rollout in cases:
+        case_start = time.time()
         print(f"[INTEGRATION TEST] Running {cfg}  (rollout={need_rollout})")
         run_smoke(cfg, need_rollout)
-        print(f"[INTEGRATION TEST] ✅  {cfg} finished")
+        case_elapsed = time.time() - case_start
+        print(f"[INTEGRATION TEST] ✅  {cfg} finished in {case_elapsed:.1f} seconds")
+    total_elapsed = time.time() - total_start
+    print(f"[INTEGRATION TEST] All cases finished in {total_elapsed:.1f} seconds")
