@@ -20,7 +20,7 @@ import re
 import time
 import threading
 from collections import defaultdict
-from queue import Queue, Empty
+from queue import Queue
 from datetime import timedelta
 from typing import Dict, Iterable, Optional, Union, Callable
 from functools import partial
@@ -184,7 +184,9 @@ def gradient_reduce_across_dp_replicas_(
                 timeout_ms = 30 * 60 * 1000
                 gradient_reduce_across_dp_replicas_.first_invoke = False
 
-            comm.allreduce(tmp_buffer, tmp_buffer, dist.ReduceOp.AVG, timeout_ms=timeout_ms)
+            comm.allreduce(
+                tmp_buffer, tmp_buffer, dist.ReduceOp.AVG, timeout_ms=timeout_ms
+            )
             tmp_buffer = tmp_buffer.to(original_dtype)
 
             # copy the result back to original grad
@@ -400,8 +402,22 @@ def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
     return obj_lst
 
 
-class HighAvailabilitylNccl:
+def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
+    """
+    Gather an object from all processes.
+    The object is first converted to a list and then gathered.
+    """
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
 
+    if world_size == 1:
+        return [obj]
+
+    obj_lst = [None for i in range(world_size)]
+    dist.all_gather_object(obj_lst, obj, group=group)
+    return obj_lst
+
+
+class HighAvailabilitylNccl:
     def __init__(
         self,
         replica_name: str,
@@ -483,7 +499,9 @@ class HighAvailabilitylNccl:
             f"{self.__log_prefix()} build mesh with {cmd.replica_name_to_rank}"
         )
 
-        assert self.replica_name in cmd.replica_name_to_rank, f"{self.__log_prefix()} replica_name {self.replica_name} not in cmd.replica_name_to_rank {cmd.replica_name_to_rank}"
+        assert (
+            self.replica_name in cmd.replica_name_to_rank
+        ), f"{self.__log_prefix()} replica_name {self.replica_name} not in cmd.replica_name_to_rank {cmd.replica_name_to_rank}"
 
         if len(cmd.replica_name_to_rank) == 1:
             self.is_single_peer.set()
@@ -592,16 +610,14 @@ class HighAvailabilitylNccl:
                 max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
 
-    def __broadcast_cmd(self, force_wait_cmd: bool = False) -> BuildMeshCommand | None:
+    def __broadcast_cmd(self) -> BuildMeshCommand | None:
         """
         Let all ranks in this replica have the same cmd
-        When rank0 run out of cmd, it will return None
-        """
-        if not force_wait_cmd:
-            if self.is_comm_ready.is_set() and self.cmd_queue.empty():
-                return None
 
-        # wait cmd to buildmesh
+        Returns:
+            cmd: the cmd to buildmesh, or None if no cmd to buildmesh.
+        """
+        # check queue to get cmd to buildmesh, if cmd queue is empty, return immediately.
         cmd = None
         if self.global_rank == 0 and not self.cmd_queue.empty():
             cmd = self.cmd_queue.get()
@@ -613,18 +629,39 @@ class HighAvailabilitylNccl:
         # broadcast cmd to all ranks in this replica
         # here we assume that the first rank of replica always have the cmd
         first_rank_of_replica = dist.get_process_group_ranks(self.replica_group)[0]
-        cmd = broadcast_object_cpu(cmd, src=first_rank_of_replica, device=torch.device("cpu"), group=self.replica_group)
+        cmd = broadcast_object_cpu(
+            cmd,
+            src=first_rank_of_replica,
+            device=torch.device("cpu"),
+            group=self.replica_group,
+        )
         return cmd
 
-    def __do_nccl_op_with_retry(self, func: Callable, timeout_ms: Optional[int], **kwargs):
+    def __try_create_nccl_comm(self):
+        """
+        Use a greedy algorithm to create nccl comm.
+        We will execute every buildmesh command in order, and return until there is no newer buildmesh command.
+
+            - During register replica, controller will trigger a buildmesh command.
+            - Replica nccl timeout will also trigger a buildmesh command, which can be detected by this Object.
+        """
+
+        # rank0 will run out of cmd, until comm is ready.
+        while True:
+            cmd = self.__broadcast_cmd()
+            if cmd is None:
+                if self.is_comm_ready.is_set():
+                    break
+            else:
+                # execute a valid buildmesh command
+                self.__execute_build_mesh(cmd)
+
+    def __do_nccl_op_with_retry(
+        self, func: Callable, timeout_ms: Optional[int], **kwargs
+    ):
         self.__check_if_run_in_main_thread()
 
         for i in range(self.max_retry):
-            # TODO(zjx): question needs answer:
-            # 1. how to detect the buildmesh cmd need to be executed?
-            # 2. how to make sure all local_ranks run same cmd? (when multi buildmesh cmd are sent to the queue)
-            # 3. broadcast cmd in HANccl or outside?
-
             self.__try_create_nccl_comm()
 
             if self.is_single_peer.is_set():
@@ -661,29 +698,6 @@ class HighAvailabilitylNccl:
                 logger.error(
                     f"{self.__log_prefix()} recovering nccl op '{func.__name__}' with kwargs {kwargs} after {i} retries: {e}"
                 )
-
-    def __try_create_nccl_comm(self):
-        """
-        Use a greedy algorithm to create nccl comm.
-        We will execute every buildmesh command in order, and return until there is no newer buildmesh command.
-
-            - During register replica, controller will trigger a buildmesh command.
-                TODO(zjx): there is a risk that some node execute the latest buildmesh command, but other run out of cmd queue.
-            - Replica nccl timeout will also trigger a buildmesh command, which can be detected by this Object.
-        """
-
-        # FIXME(zjx): only rank0 will execute the buildmesh command
-        while True:
-            cmd = self.__broadcast_cmd(force_wait_cmd=True)
-            if cmd is None:
-                # rank0 run out of cmd
-                break
-            else:
-                self.__execute_build_mesh(cmd)
-
-        if not self.is_comm_ready.is_set():
-            raise RuntimeError(f"{self.__log_prefix()} nccl comm is not ready, but no newer buildmesh command")
-
 
     def destroy_nccl_comm(self):
         self.__execute_destroy_nccl_comm(abort=True)
@@ -722,7 +736,9 @@ class HighAvailabilitylNccl:
         self.__try_create_nccl_comm()
         return self.replica_name_to_rank[replica_name]
 
-    def broadcast(self, tensor: torch.Tensor, src_replica: str, timeout_ms: Optional[int] = None):
+    def broadcast(
+        self, tensor: torch.Tensor, src_replica: str, timeout_ms: Optional[int] = None
+    ):
         src_rank = self.get_replica_rank(src_replica)
         self.__do_nccl_op_with_retry(
             func=nccl_broadcast,
@@ -746,7 +762,9 @@ class HighAvailabilitylNccl:
             timeout_ms=timeout_ms,
         )
 
-    def send(self, tensor: torch.Tensor, dst_replica: str, timeout_ms: Optional[int] = None):
+    def send(
+        self, tensor: torch.Tensor, dst_replica: str, timeout_ms: Optional[int] = None
+    ):
         dst_rank = self.get_replica_rank(dst_replica)
         self.__do_nccl_op_with_retry(
             func=nccl_send,
@@ -755,7 +773,9 @@ class HighAvailabilitylNccl:
             timeout_ms=timeout_ms,
         )
 
-    def recv(self, tensor: torch.Tensor, src_replica: str, timeout_ms: Optional[int] = None):
+    def recv(
+        self, tensor: torch.Tensor, src_replica: str, timeout_ms: Optional[int] = None
+    ):
         src_rank = self.get_replica_rank(src_replica)
         self.__do_nccl_op_with_retry(
             func=nccl_recv,
