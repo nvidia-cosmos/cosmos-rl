@@ -46,7 +46,6 @@ def _calc_world_size(parallel_cfg: dict, is_rollout: bool = False) -> int:
 
 
 CUR_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_PATH = os.path.join(CUR_DIR, "test_dataset")  # local tiny dataset
 PYTHON = sys.executable
 CTRL_ENTRY = "cosmos_rl.dispatcher.run_web_panel"
 POLICY_ENTRY = "cosmos_rl.policy.train"
@@ -95,7 +94,6 @@ def _prepare_cfg(src_cfg: str) -> str:
     """Overwrite dataset.name to local tiny set and dump to temp file."""
     with open(src_cfg, "r") as f:
         cfg = toml.load(f)
-    cfg["train"]["train_policy"]["dataset"]["name"] = DATASET_PATH
     tmp = tempfile.NamedTemporaryFile(suffix=".toml", delete=False, mode="w+")
     toml.dump(cfg, tmp)
     tmp.close()
@@ -202,7 +200,7 @@ def run_smoke(cfg_name: str, need_rollout: bool):
             target=_reader_thread, args=(rollout, rollout_logs), daemon=True
         ).start()
 
-    timeout_sec = 300
+    timeout_sec = 1000
     try:
         # Wait for policy / rollout to finish
         for worker in (policy, rollout):
@@ -249,8 +247,10 @@ def run_smoke(cfg_name: str, need_rollout: bool):
                 ]
                 assert loss_vals, "No Validation loss found in logs"
                 max_loss = max(loss_vals)
-                assert max_loss <= 1.5, f"Validation loss too high: {max_loss} > 1.5"
-                print(f"[QUALITY] SFT validation check passed, max loss: {max_loss}")
+                assert max_loss <= 1.3, f"Validation loss too high: {max_loss} > 1.3"
+                print(
+                    f"[QUALITY] SFT validation check passed, Validation loss: {max_loss}"
+                )
         except AssertionError:
             print("\n=== Captured logs (tail) ===")
             print(all_logs[-5000:])
