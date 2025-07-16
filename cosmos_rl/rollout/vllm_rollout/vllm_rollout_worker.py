@@ -448,6 +448,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # new a temp tensor
                 recv_tensor = torch.empty_like(view)
 
+            logger.debug(
+                f"Recving tensor {dest_name} from policy rank {p_rank}, shape {view.shape} of {target_tensor.shape}."
+            )
             nccl_recv(recv_tensor, p_rank, communicator_index)
 
             # inplace copy
@@ -522,8 +525,16 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 communicator_index
             )
 
+        from vllm import SamplingParams
+
+        sampling_params = SamplingParams(temperature=0.0)
+
         if command.do_weight_sync_check:
+            self.rollout._do_test_rollout("before loading weights")
             self.rollout.reload_weight()
+            self.rollout._do_test_rollout(
+                "after loading weights, before receiving weights"
+            )
 
         if not hasattr(self, "policy_to_rollout_recv_insts"):
             logger.info(
@@ -580,6 +591,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             logger.info("Post processing of weights finished.")
 
             self.state.set_weight_synced()
+
+            self.rollout._do_test_rollout("after receiving weights, before generating")
+            self.rollout.rollout_engine.generate(
+                prompts=["What model are you?"], sampling_params=sampling_params
+            )
 
     @RolloutWorkerBase.register_rollout_command_handler(
         RolloutToRolloutBroadcastCommand

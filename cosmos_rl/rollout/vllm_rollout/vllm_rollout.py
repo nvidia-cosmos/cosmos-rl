@@ -30,6 +30,40 @@ from cosmos_rl.rollout.vllm_rollout.vllm_patch import (
 )
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
+from PIL import Image
+
+
+def make_prompt(tokenizer, image_or_image_url, question=None):
+    prompt_dict = {}
+
+    if image_or_image_url is not None:
+        # 1 image + text
+        img_token = "<image>"
+        question = "Describe the image with long caption."
+        prompt_str = f"{img_token}\n{question}"
+        if isinstance(image_or_image_url, str):
+            image = Image.open(image_or_image_url)
+        else:
+            image = image_or_image_url
+        prompt_dict["multi_modal_data"] = {"image": image}
+    else:
+        # text only
+        prompt_str = "Could you talk about what model you are and how you were trained?"
+
+    # Create chat template
+    messages = [{"role": "user", "content": prompt_str}]
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    # prompt = prompt.replace("<pad>", "")  # Remove the BOS token as the tokenization will add it later
+    prompt = prompt.replace(
+        "<｜begin▁of▁sentence｜>", ""
+    )  # Remove the BOS token as the tokenization will add it later
+    prompt_dict["prompt"] = prompt
+
+    logger.info(f"[Rollout] Full test prompt: {prompt_dict}")
+
+    return prompt_dict
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -69,17 +103,17 @@ class vLLMRollout(RolloutBase):
         )
 
         enable_ep_parallelism = False
-        disable_mm_preprocessor_cache = False
+        # disable_mm_preprocessor_cache = False
 
         moe_model_type = {"qwen3_moe"}
-        multimodal_type = {"qwen2_5_vl"}
+        # multimodal_type = {"qwen2_5_vl"}
 
         model_type = model_config.model_type
         if model_type in moe_model_type:
             enable_ep_parallelism = True
-        if model_type in multimodal_type:
-            # for vllm nightly, this is only True for multimodal models, check here
-            disable_mm_preprocessor_cache = True
+        # if model_type in multimodal_type:
+        # for vllm nightly, this is only True for multimodal models, check here
+        #    disable_mm_preprocessor_cache = True
 
         rollout_parallelism = self.rollout_config.parallelism
 
@@ -93,7 +127,7 @@ class vLLMRollout(RolloutBase):
         # disable VLLM_DISABLE_COMPILE_CACHE
         os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
-        self.rollout_engine = LLM(
+        llm_args = dict(
             model=model_path,
             enable_sleep_mode=False,  # enable sleep could corrupt the cuda allocator.
             tensor_parallel_size=tp_size,
@@ -104,7 +138,7 @@ class vLLMRollout(RolloutBase):
             enforce_eager=self.rollout_config.enforce_eager,  # enable cuda graph
             gpu_memory_utilization=self.rollout_config.gpu_memory_utilization,
             disable_custom_all_reduce=True,
-            disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+            disable_mm_preprocessor_cache=True,  # disable_mm_preprocessor_cache,
             skip_tokenizer_init=False,
             max_model_len=policy_config.model_max_length,
             disable_log_stats=True,
@@ -113,7 +147,7 @@ class vLLMRollout(RolloutBase):
             if 2048 >= policy_config.model_max_length
             else policy_config.model_max_length,
             enable_chunked_prefill=self.rollout_config.enable_chunked_prefill,
-            enable_prefix_caching=True,
+            enable_prefix_caching=False,  # True,
             trust_remote_code=trust_remote_code,
             seed=kwargs.get("seed") or 42,
             # Note: We set load_format="dummy" to avoid loading the HF model weights which could cause too many requests from multiple replicas.
@@ -124,6 +158,11 @@ class vLLMRollout(RolloutBase):
             #      1. The GRPO procedure won't be affected because we will first have a P2R before rollout generation. So it is safe.
             load_format=kwargs.get("load_format", "dummy"),
         )
+        logger.info(f"[Rollout] vLLM args: {llm_args}")
+
+        self.rollout_engine = LLM(**llm_args)
+
+        self._do_test_rollout(msg="right after creating vllm")
 
         # patch the vllm model to reload weight
         patch_vllm_model_to_reload_weight(self.rollout_engine)
@@ -151,6 +190,8 @@ class vLLMRollout(RolloutBase):
     def reload_weight(self):
         self.rollout_engine.llm_engine.vllm_config.load_config.load_format = "auto"
         self.rollout_engine.collective_rpc("reload_model")
+
+    GLOBAL_IDX = 0
 
     def process_weights_after_loading(self):
         process_weights_after_loading(
@@ -189,6 +230,19 @@ class vLLMRollout(RolloutBase):
 
         stream = torch.cuda.current_stream() if stream is None else stream
         try:
+            # Get SLURM job ID
+            # job_id = os.environ.get("SLURM_JOB_ID", "nojob")
+            # Get global rank from SLURM_PROCID (works with MPI / SLURM)
+            # global_rank = os.environ.get("SLURM_PROCID", "norank")
+            # Compose filename
+            # filename = f"/opt/cosmos-reason1/assets/output_rollout_prompts_{job_id}_rank{global_rank}_{self.GLOBAL_IDX}.txt"
+            # logger.info(f"[Rollout] Pickling prompts to file {filename}")
+            # import pickle
+            # with open(filename, "wb") as file:
+            #    pickle.dump(prompts, file)
+            # self.GLOBAL_IDX += 1
+            # logger.info(f"[Rollout] Pickled prompts to file {filename}")
+
             with torch.cuda.stream(stream):
                 results = self.rollout_engine.generate(
                     prompts=prompts,
@@ -211,6 +265,41 @@ class vLLMRollout(RolloutBase):
             return []
 
         return response
+
+    def _do_test_rollout(self, msg: str = ""):
+        # image_url = "/home/aazzolini/lustre/RL/ref-rl/assets/20250213_car1_resize_384_384.jpg"
+        llm = self.rollout_engine
+        directory = "/opt/cosmos-reason1/assets/"
+
+        logger.info(f"Generating sample output {msg}")
+        for image_index in [None, 0, 1, 2, 3]:
+            if image_index is not None:
+                if image_index == 0:
+                    image_url = f"{directory}/20250213_car1.jpg"
+                elif image_index == 1:
+                    image_url = (
+                        f"{directory}/20250213_cosmos_image_caption_data_batch.png"
+                    )
+                elif image_index == 2:
+                    image_url = f"{directory}/arch.png"
+                elif image_index == 3:
+                    image_url = f"{directory}/cosmos-rl-deepseek.png"
+                else:
+                    raise ValueError(f"Invalid image index: {image_index}")
+
+                img = Image.open(image_url)
+            else:
+                img = None
+
+            inputs = [make_prompt(llm.get_tokenizer(), img)]
+            sampling_params = SamplingParams(n=1, temperature=0.0, max_tokens=128)
+
+            outputs = llm.generate(inputs, sampling_params=sampling_params)
+            logger.info(
+                f"Sample output results {msg}, {image_index}: :: {outputs[0].outputs[0].text} ::"
+            )
+
+        return outputs
 
     def get_underlying_model(self):
         """

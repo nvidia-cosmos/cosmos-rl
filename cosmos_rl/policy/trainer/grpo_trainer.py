@@ -208,6 +208,10 @@ class GRPOTrainer(Trainer):
                 "Please use elastic scaling feature instead."
             )
 
+        torch.distributed.barrier()
+        torch.cuda.synchronize()
+        self.prepare_shard_infos_for_weight_sync_insts()
+
         self.grpo_config = self.config.train.train_policy
         # For model load
         self.model_ready = False
@@ -262,7 +266,6 @@ class GRPOTrainer(Trainer):
         # The master replica needs to:
         # - Save the checkpoint/safetensors
         self.is_master_replica = True
-        self.prepare_shard_infos_for_weight_sync_insts()
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         keys_n_ranks = []
@@ -738,40 +741,44 @@ class GRPOTrainer(Trainer):
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
         with torch.cuda.stream(self.train_stream):
-            pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
-                self.pre_P2R_collect_parameters()
-            )
-            for insts_group in self.policy_to_rollout_insts:
-                for insts_for_per_param in insts_group.param_instructions:
-                    dest_name = insts_for_per_param.param_name
-                    for inst in insts_for_per_param.instructions:
-                        p_rank = inst.policy_rank
-                        r_rank = inst.rollout_rank
-                        tensor_split_strategys = inst.slice_strategy
-                        if dest_name not in self.map_w_from_policy_to_rollout:
-                            raise RuntimeError(
-                                f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
-                            )
-                        local_view = self.map_w_from_policy_to_rollout[dest_name]
-                        if dest_name in pre_P2R_collected_tensors:
-                            local_view = pre_P2R_collected_tensors[dest_name]
-                        elif isinstance(local_view, Callable):
-                            local_view = local_view()
-                        else:
-                            pass
+            with torch.no_grad():
+                pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
+                    self.pre_P2R_collect_parameters()
+                )
+                for insts_group in self.policy_to_rollout_insts:
+                    for insts_for_per_param in insts_group.param_instructions:
+                        dest_name = insts_for_per_param.param_name
+                        for inst in insts_for_per_param.instructions:
+                            p_rank = inst.policy_rank
+                            r_rank = inst.rollout_rank
+                            tensor_split_strategys = inst.slice_strategy
+                            if dest_name not in self.map_w_from_policy_to_rollout:
+                                raise RuntimeError(
+                                    f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
+                                )
+                            local_view = self.map_w_from_policy_to_rollout[dest_name]
+                            if dest_name in pre_P2R_collected_tensors:
+                                local_view = pre_P2R_collected_tensors[dest_name]
+                            elif isinstance(local_view, Callable):
+                                local_view = local_view()
+                            else:
+                                pass
 
-                        view = (
-                            local_view.cosmos_slice(tensor_split_strategys)
-                            .contiguous()
-                            .cuda()
-                        )
-                        assert self.global_rank == p_rank
-                        nccl_send(
-                            view,
-                            self.world_size + r_rank,
-                            comm_id,
-                        )
-                        total_bytes_sent += view.numel() * view.element_size()
+                            view = (
+                                local_view.cosmos_slice(tensor_split_strategys)
+                                .contiguous()
+                                .cuda()
+                            )
+                            assert self.global_rank == p_rank
+                            logger.debug(
+                                f"Sending {dest_name} to rollout rank {r_rank}, {view.shape}"
+                            )
+                            nccl_send(
+                                view,
+                                self.world_size + r_rank,
+                                comm_id,
+                            )
+                            total_bytes_sent += view.numel() * view.element_size()
         # make sure all the send operations of all ranks are finished
         time_eclapsed = time.time() - st
         logger.debug(
