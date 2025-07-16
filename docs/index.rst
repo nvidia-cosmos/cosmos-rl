@@ -25,6 +25,13 @@ Main Features
    - **Robust**
       - Support `AIPO <https://arxiv.org/pdf/2505.24034>`_ for stable off-policy training.
       - Async/Sync strategy can be selected upon to user's choice.
+- **Multi-training Algorithms**
+      - Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, etc.).
+      - Well-architected design ensures high extensibility, requiring only minimal configuration to implement custom training algorithms.
+- **Diversified Model Support**
+      - Natively supports LLaMA/Qwen/Qwen-VL/Qwen3-MoE series models.
+      - Compatible with all Huggingface LLMs.
+      - Easily extensible to other model architectures by customizing interface.
 
 .. note::
    6D Parallelism is fully supported by Policy Model.
