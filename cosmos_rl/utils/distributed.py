@@ -151,8 +151,6 @@ def gradient_reduce_across_dp_replicas_(
         buckets[g.dtype].append(g.flatten())
 
     # move all grad into one bucket
-    comm.wait_comm_ready()
-
     for bucket in buckets.values():
         BUCKET_SIZE = 200 * 1024 * 1024
         sub_buckets = []
@@ -186,7 +184,7 @@ def gradient_reduce_across_dp_replicas_(
                 timeout_ms = 30 * 60 * 1000
                 gradient_reduce_across_dp_replicas_.first_invoke = False
 
-            comm.allreduce(tmp_buffer, tmp_buffer, "avg", timeout_ms=timeout_ms)
+            comm.allreduce(tmp_buffer, tmp_buffer, dist.ReduceOp.AVG, timeout_ms=timeout_ms)
             tmp_buffer = tmp_buffer.to(original_dtype)
 
             # copy the result back to original grad
@@ -403,15 +401,6 @@ def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
 
 
 class HighAvailabilitylNccl:
-    NCCL_REDUCE_OPS = {
-        "sum": 0,
-        "prod": 1,
-        "max": 2,
-        "min": 3,
-        "avg": 4,
-    }
-
-    DESTROY_CMD = "destroy"
 
     def __init__(
         self,
@@ -621,8 +610,6 @@ class HighAvailabilitylNccl:
         if self.replica_group is None:
             self.replica_group = dist.distributed_c10d._get_default_group()
 
-        logger.info(f"{self.__log_prefix()} broadcast cmd use group with ranks: {dist.get_process_group_ranks(self.replica_group)}")
-
         # broadcast cmd to all ranks in this replica
         # here we assume that the first rank of replica always have the cmd
         first_rank_of_replica = dist.get_process_group_ranks(self.replica_group)[0]
@@ -638,9 +625,7 @@ class HighAvailabilitylNccl:
             # 2. how to make sure all local_ranks run same cmd? (when multi buildmesh cmd are sent to the queue)
             # 3. broadcast cmd in HANccl or outside?
 
-            cmd = self.__broadcast_cmd()
-            if cmd is not None:
-                self.__execute_build_mesh(cmd)
+            self.__try_create_nccl_comm()
 
             if self.is_single_peer.is_set():
                 # Nothing to do for single peer
@@ -677,7 +662,7 @@ class HighAvailabilitylNccl:
                     f"{self.__log_prefix()} recovering nccl op '{func.__name__}' with kwargs {kwargs} after {i} retries: {e}"
                 )
 
-    def try_create_nccl_comm(self):
+    def __try_create_nccl_comm(self):
         """
         Use a greedy algorithm to create nccl comm.
         We will execute every buildmesh command in order, and return until there is no newer buildmesh command.
@@ -706,29 +691,21 @@ class HighAvailabilitylNccl:
     def push_cmd(self, cmd: BuildMeshCommand):
         self.cmd_queue.put(cmd)
 
-    def is_ready(self, blocking: bool = True) -> bool:
+    def is_ready(self) -> bool:
         """
         Check if the nccl comm is ready.
-        If not ready, a buildmesh routine will be triggered.
-
-        Args:
-            blocking: if True, the function will block until the nccl comm is ready.
-                If False, the function will return immediately.
         """
-        if not blocking:
-            return self.is_comm_ready.is_set()
+        # check the latest buildmesh command
+        self.__try_create_nccl_comm()
 
-        self.try_create_nccl_comm()
-        return True
+        return self.is_comm_ready.is_set()
 
     def world_size(self):
         """
         Get the world size of the nccl comm.
         """
-        if not self.is_ready():
-            raise RuntimeError(
-                f"{self.__log_prefix()} nccl comm is not ready, please wait for the nccl comm to be ready"
-            )
+        # check the latest buildmesh command
+        self.__try_create_nccl_comm()
 
         try:
             ws = get_nccl_comm_nranks(self.comm_idx)
@@ -741,6 +718,8 @@ class HighAvailabilitylNccl:
         return ws
 
     def get_replica_rank(self, replica_name: str):
+        # check the latest buildmesh command
+        self.__try_create_nccl_comm()
         return self.replica_name_to_rank[replica_name]
 
     def broadcast(self, tensor: torch.Tensor, src_replica: str, timeout_ms: Optional[int] = None):
@@ -756,10 +735,9 @@ class HighAvailabilitylNccl:
         self,
         sendbuff: torch.Tensor,
         recvbuff: torch.Tensor,
-        op: str,
+        op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
         timeout_ms: Optional[int] = None,
     ):
-        op = self.NCCL_REDUCE_OPS[op]
         self.__do_nccl_op_with_retry(
             func=nccl_allreduce,
             sendbuff=sendbuff,
