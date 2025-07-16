@@ -273,6 +273,6 @@ if __name__ == "__main__":
     ]
 
     for cfg, need_rollout in cases:
-        print(f"[QUALITY TEST] Running {cfg}  (rollout={need_rollout})")
+        print(f"[INTEGRATION TEST] Running {cfg}  (rollout={need_rollout})")
         run_smoke(cfg, need_rollout)
-        print(f"[QUALITY TEST] ✅  {cfg} finished")
+        print(f"[INTEGRATION TEST] ✅  {cfg} finished")
