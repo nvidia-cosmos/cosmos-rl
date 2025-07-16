@@ -862,7 +862,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         self.parallel_dims.pp_coord[0]
                         == self.parallel_dims.pp_coord[1] - 1
                     )
-                    and len(completions) > 0
+                    and len(valid_completions) > 0
                 )
 
                 if should_report:
@@ -875,7 +875,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         src_replica_name=self.replica_name,
                         prompt_idxs=prompt_idxs,
                         payloads=payloads,
-                        completions=completions,
+                        completions=valid_completions,
                         is_end=False,
                     )
                     try:
