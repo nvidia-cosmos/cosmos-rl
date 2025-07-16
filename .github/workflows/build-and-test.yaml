@@ -58,6 +58,7 @@ jobs:
           ${DOCKER_RUN} python tests/test_policy_to_policy.py
           ${DOCKER_RUN} python tests/test_policy_to_rollout.py
           ${DOCKER_RUN} python tests/test_process_flow.py
+          ${DOCKER_RUN} python tests/test_integration.py
 
       - name: Cleanup
         if: always()
