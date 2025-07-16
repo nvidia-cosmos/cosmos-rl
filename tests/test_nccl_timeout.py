@@ -42,7 +42,9 @@ def routine(N: int, device: torch.device, rank: int, world_size: int):
                 if rank != 3:
                     # Simulate a failed allreduce on rank 3
                     try:
-                        nccl_allreduce(send_buffer, recv_buffer, dist.ReduceOp.SUM, comm)
+                        nccl_allreduce(
+                            send_buffer, recv_buffer, dist.ReduceOp.SUM, comm
+                        )
                         print(f"[RANK {rank}] arrived here")
                     except Exception as e:
                         print(f"[RANK {rank}] error in nccl_allreduce: {e}")

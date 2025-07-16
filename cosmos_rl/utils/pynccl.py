@@ -235,7 +235,9 @@ def _worker_loop(device_idx: int):
 
             else:
                 # Enqueue timeout hit – abort communicator.
-                logger.error(f"NCCL: non-blocking enqueue timed out for task {task}, last Error {err}")
+                logger.error(
+                    f"NCCL: non-blocking enqueue timed out for task {task}, last Error {err}"
+                )
                 _safe_abort(task.comm_idx, comm)
                 task.timed_out.set()
         except Exception as e:
