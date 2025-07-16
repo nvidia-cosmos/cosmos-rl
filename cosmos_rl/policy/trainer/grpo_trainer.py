@@ -22,7 +22,6 @@ import torch
 import inspect
 import os
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import compute_mfu
 import cosmos_rl.utils.distributed as dist_util
 import time
 import torch.distributed as dist
@@ -46,6 +45,8 @@ from cosmos_rl.utils.util import (
     msgpack_c_long,
     msgunpack_c_long,
     fix_data_type_size,
+    sanitize,
+    compute_mfu,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
@@ -855,7 +856,7 @@ class GRPOTrainer(Trainer):
                             "weight_step": command.global_step,
                             "total_steps": command.total_steps,
                             "profile_finished": self.profiler.check_finished(),
-                            "report_data": report_data,
+                            "report_data": sanitize(report_data),
                         },
                     ),
                     self.get_alternative_urls(COSMOS_API_POLICY_TRAIN_ACK_SUFFIX),
@@ -1533,7 +1534,6 @@ class GRPOTrainer(Trainer):
 
         # For profiling
         self.profiler.step()
-
         return report_data
 
     @property
