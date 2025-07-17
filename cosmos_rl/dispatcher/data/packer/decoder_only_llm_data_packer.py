@@ -119,6 +119,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         token_ids: List[int],
         label_ids: List[int],
         pad_token_id: int,
+        eos_token_id: int,
         replacement_ids: List[int],
         pad_run_length: int = 10,
     ) -> List[int]:
@@ -134,10 +135,26 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         for i in range(n - pad_run_length + 1):
             if token_ids[i : i + pad_run_length] == target_run:
                 # splice in the replacement
+                if (
+                    len(token_ids) > i + pad_run_length
+                    and token_ids[i + pad_run_length] == eos_token_id
+                ):
+                    label_ids = (
+                        label_ids[:i]
+                        + replacement_ids
+                        + [eos_token_id]
+                        + label_ids[i + pad_run_length + 1 :]
+                    )
+                else:
+                    label_ids = (
+                        label_ids[:i]
+                        + replacement_ids
+                        + label_ids[i + pad_run_length :]
+                    )
                 return (
                     True,
                     token_ids[:i] + replacement_ids + token_ids[i + pad_run_length :],
-                    label_ids[:i] + replacement_ids + label_ids[i + pad_run_length :],
+                    label_ids,
                 )
         # no match found
         return False, token_ids, label_ids
@@ -184,6 +201,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
                 assistant_contents = []
                 pad_token = self.tokenizer.pad_token
                 pad_token_id = self.tokenizer.pad_token_id
+                eos_token_id = self.tokenizer.eos_token_id
                 pad_run_length = 10
 
                 for x in sample:
@@ -203,6 +221,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
                         token_ids,
                         label_ids,
                         pad_token_id=pad_token_id,
+                        eos_token_id=eos_token_id,
                         replacement_ids=self.tokenizer.encode(
                             assistant_content, add_special_tokens=False
                         ),

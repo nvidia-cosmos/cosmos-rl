@@ -7,7 +7,6 @@ from cosmos_rl.policy.config import Config
 from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info
 import logging
-import copy
 
 IGNORE_LABEL_ID = -100
 
@@ -103,6 +102,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         token_ids: List[int],
         label_ids: List[int],
         pad_token_id: int,
+        eos_token_id: int,
         replacement_ids: List[int],
         pad_run_length: int = 10,
     ) -> List[int]:
@@ -118,10 +118,26 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         for i in range(n - pad_run_length + 1):
             if token_ids[i : i + pad_run_length] == target_run:
                 # splice in the replacement
+                if (
+                    len(token_ids) > i + pad_run_length
+                    and token_ids[i + pad_run_length] == eos_token_id
+                ):
+                    label_ids = (
+                        label_ids[:i]
+                        + replacement_ids
+                        + [eos_token_id]
+                        + label_ids[i + pad_run_length + 1 :]
+                    )
+                else:
+                    label_ids = (
+                        label_ids[:i]
+                        + replacement_ids
+                        + label_ids[i + pad_run_length :]
+                    )
                 return (
                     True,
                     token_ids[:i] + replacement_ids + token_ids[i + pad_run_length :],
-                    label_ids[:i] + replacement_ids + label_ids[i + pad_run_length :],
+                    label_ids,
                 )
         # no match found
         return False, token_ids, label_ids
@@ -129,11 +145,11 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
     def _process_single_sample(
         self, conversation: "Qwen2_5_VLM_DataPacker.Payload"
     ) -> Dict[str, Any]:
-        original_conversation = copy.deepcopy(conversation)
         try:
             # Replace all the assistant content with consecutive `pad_token` * 10
             pad_token = self.tokenizer.pad_token
             pad_token_id = self.tokenizer.pad_token_id
+            eos_token_id = self.tokenizer.eos_token_id
             pad_run_length = 10
             assistant_content = []
             for message in conversation:
@@ -166,6 +182,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                     input_ids,
                     label_ids,
                     pad_token_id=pad_token_id,
+                    eos_token_id=eos_token_id,
                     replacement_ids=replacement_ids,
                     pad_run_length=pad_run_length,
                 )
@@ -175,23 +192,9 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                     raise ValueError(
                         f"input_ids and label_ids should have the same length, but got {len(input_ids)} and {len(label_ids)}"
                     )
-        except Exception:
-            # Fall back to the non-assistant-masking
-            prompt = self.hf_processor.apply_chat_template(
-                original_conversation,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-            image_inputs, video_inputs = process_vision_info(original_conversation)
-            inputs = self.hf_processor(
-                text=[prompt],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            input_ids = inputs["input_ids"][0].tolist()
-            label_ids = input_ids.copy()
+        except Exception as e:
+            print(f"Error processing sample: {e}, please fix to ensure SFT works")
+            raise e
 
         result_dict = {
             "input_ids": input_ids,
@@ -437,4 +440,5 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                     model_inputs["label_ids"][
                         model_inputs["label_ids"] == vision_id
                     ] = ignore_label_id
+
         return model_inputs
