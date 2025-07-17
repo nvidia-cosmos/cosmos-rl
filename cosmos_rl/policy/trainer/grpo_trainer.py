@@ -22,7 +22,6 @@ import torch
 import inspect
 import os
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import compute_mfu
 import cosmos_rl.utils.distributed as dist_util
 import time
 import torch.distributed as dist
@@ -46,6 +45,8 @@ from cosmos_rl.utils.util import (
     msgpack_c_long,
     msgunpack_c_long,
     fix_data_type_size,
+    sanitize,
+    compute_mfu,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
@@ -219,11 +220,6 @@ class GRPOTrainer(Trainer):
             controller_hosts=self.remote_hosts,
         )
         self.rollouts_comm = {}
-        self.kv_store = dist_util.DistKVStore(
-            group=dist.distributed_c10d._get_default_group(),
-            master_rank=0,
-            shutdown_event=self.shutdown_signal,
-        )
 
         # For command fetch
         self.fetch_command_buffer = Queue()
@@ -319,7 +315,6 @@ class GRPOTrainer(Trainer):
             self._handle_shutdown_called = True
 
             self.shutdown_signal.set()
-            self.inter_policy_nccl.shutdown()
             if self.fetch_rollouts_thread is not None:
                 self.fetch_rollouts_thread.join()
                 self.fetch_rollouts_thread = None
@@ -855,7 +850,7 @@ class GRPOTrainer(Trainer):
                             "weight_step": command.global_step,
                             "total_steps": command.total_steps,
                             "profile_finished": self.profiler.check_finished(),
-                            "report_data": report_data,
+                            "report_data": sanitize(report_data),
                         },
                     ),
                     self.get_alternative_urls(COSMOS_API_POLICY_TRAIN_ACK_SUFFIX),
@@ -905,47 +900,24 @@ class GRPOTrainer(Trainer):
         return True
 
     async def fetch_command(self):
-        # assert self.global_rank == 0, "Only rank 0 can fetch command"
+        assert self.global_rank == 0, "Only rank 0 can fetch command"
         while not self.shutdown_signal.is_set():
-            # TODO(zjx): will remove separate BuildMeshCommand, and here only fetch other commands
-            if self.global_rank == 0:
-                # rank 0 will get command from redis
-                # and broadcast the buildmesh command to all ranks
-                commands = []
-                try:
-                    commands = self.redis_controller.subscribe_command(
-                        self.replica_name
-                    )
-                except Exception as e:
-                    logger.debug(
-                        f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
-                    )
-                for x in commands:
-                    command = Command.depack(x)
-                    if isinstance(command, BuildMeshCommand):
-                        """ directly push the buildmesh command to the nccl comm, will not block main thread """
-                        # broadcast the buildmesh command to all ranks
-                        cmd = self.kv_store.broadcast_command(command, src=0)
-                        self.is_master_replica = (
-                            cmd.replica_name_to_rank[self.replica_name] == 0
-                        )
-                        self.inter_policy_nccl.push_cmd(cmd)
-                        continue
-                    self.fetch_command_buffer.put_nowait(command)
+            # rank 0 will get command from redis
+            commands = []
+            try:
+                commands = self.redis_controller.subscribe_command(self.replica_name)
+            except Exception as e:
+                logger.debug(
+                    f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+                )
 
-            else:
-                try:
-                    bmcmd = self.kv_store.broadcast_command(None, src=0)
-                    if bmcmd:
-                        assert isinstance(
-                            bmcmd, BuildMeshCommand
-                        ), "Only buildmesh command is supported"
-                        self.is_master_replica = (
-                            bmcmd.replica_name_to_rank[self.replica_name] == 0
-                        )
-                        self.inter_policy_nccl.push_cmd(bmcmd)
-                except Exception as e:
-                    raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
+            for x in commands:
+                command = Command.depack(x)
+                if isinstance(command, BuildMeshCommand):
+                    """ directly push the buildmesh command to the nccl comm, will not block main thread """
+                    self.inter_policy_nccl.push_cmd(command)
+                    continue
+                self.fetch_command_buffer.put_nowait(command)
 
     def execute_command(self, command: Command):
         logger.debug(f"[Policy] Process command {command._serialize()}")
@@ -989,16 +961,14 @@ class GRPOTrainer(Trainer):
             return
 
         # Start the thread with daemon=True, so it will exit when the main program exits.
-        # we need all ranks have fetch_command_thread, so that buildmesh command can be broadcasted to all ranks
-        # TODO(zjx): we will only let rank 0 fetch and broadcast command
-        self.fetch_command_thread = threading.Thread(
-            target=fetch_command_helper,
-            args=(self,),
-            daemon=True,
-            name="fetch_command_thread",
-        ).start()
-
         if self.global_rank == 0:
+            self.fetch_command_thread = threading.Thread(
+                target=fetch_command_helper,
+                args=(self,),
+                daemon=True,
+                name="fetch_command_thread",
+            ).start()
+
             self.fetch_rollouts_thread = threading.Thread(
                 target=fetch_rollouts_helper,
                 args=(self,),
@@ -1533,7 +1503,6 @@ class GRPOTrainer(Trainer):
 
         # For profiling
         self.profiler.step()
-
         return report_data
 
     @property

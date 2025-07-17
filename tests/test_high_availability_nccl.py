@@ -240,6 +240,7 @@ class TestHANccl(CommMixin):
             replica_name=self.replica_name,
             global_rank=self.global_rank,
             controller_hosts=self.remote_hosts,
+            replica_group=dist.new_group(ranks=[self.replica_rank]),
         )
 
         # wait all ranks fetch latest command from controller
@@ -255,13 +256,13 @@ class TestHANccl(CommMixin):
                 comm.push_cmd(cmd)
 
         # 2. wait for the comm to be ready
-        comm.wait_comm_ready()
+        comm.is_ready()
+
         assert (
             comm.world_size() == dist.get_world_size()
         ), f"world size should be {dist.get_world_size()}"
         comm.destroy_nccl_comm()
-        comm.shutdown()
-        logger.info("  === normal case, passed")
+        logger.info(f"  === normal case, passed {self.replica_name}")
 
     def test_comm_auto_rebuild_intiative_scale_down(self):
         logger.info(
@@ -276,6 +277,7 @@ class TestHANccl(CommMixin):
             replica_name=self.replica_name,
             global_rank=self.global_rank,
             controller_hosts=self.remote_hosts,
+            replica_group=dist.new_group(ranks=[self.replica_rank]),
         )
 
         # wait all ranks fetch latest command from controller
@@ -298,14 +300,12 @@ class TestHANccl(CommMixin):
                 for cmd in cmds:
                     comm.push_cmd(cmd)
                 break
-            comm.wait_comm_ready()
             assert (
                 comm.world_size() == dist.get_world_size() - 1
             ), f"world size should be {dist.get_world_size() - 1}, actual {comm.world_size()}"
 
         comm.destroy_nccl_comm()
-        comm.shutdown()
-        logger.info("  === intiative scale down, passed")
+        logger.info(f"  === intiative scale down, passed {self.replica_name}")
 
     def test_comm_auto_rebuild_timeout_scale_down(self):
         logger.info(
@@ -320,6 +320,7 @@ class TestHANccl(CommMixin):
             replica_name=self.replica_name,
             global_rank=self.global_rank,
             controller_hosts=self.remote_hosts,
+            replica_group=dist.new_group(ranks=[self.replica_rank]),
         )
 
         dist.barrier()
@@ -382,8 +383,7 @@ class TestHANccl(CommMixin):
 
         # finally, shutdown the comm
         comm.destroy_nccl_comm()
-        comm.shutdown()
-        logger.info(" === test_comm_auto_rebuild passed")
+        logger.info(f" === test_comm_auto_rebuild passed {self.replica_name}")
 
     def test_allreduce_timeout_retry(self):
         """
@@ -392,7 +392,7 @@ class TestHANccl(CommMixin):
         logger.info("run nccl test")
         pass
 
-    def test_send_recv_timeout_retry():
+    def test_send_recv_timeout_retry(self):
         """
         Run the NCCL test.
         """

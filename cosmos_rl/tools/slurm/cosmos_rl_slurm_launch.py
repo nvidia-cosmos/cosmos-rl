@@ -74,7 +74,6 @@ if __name__ == "__main__":
             os.path.dirname(__file__),
             "..",
             "..",
-            "cosmos_rl",
             "launcher",
             "launch_replica.sh",
         )

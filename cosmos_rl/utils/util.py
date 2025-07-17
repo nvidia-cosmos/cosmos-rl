@@ -52,6 +52,7 @@ import functools
 from cosmos_rl.utils.logging import logger
 from safetensors import safe_open
 from cosmos_rl.utils.constant import CACHE_DIR
+import math
 
 
 def create_cached_dir_if_needed():
@@ -1020,3 +1021,14 @@ class RollingDict(OrderedDict):
         super().__setitem__(key, value)
         if len(self) > self.maxlen:
             self.popitem(last=False)
+
+
+def sanitize(obj):
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    elif isinstance(obj, dict):
+        return {k: sanitize(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize(v) for v in obj]
+    else:
+        return obj

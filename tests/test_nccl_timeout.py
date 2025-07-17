@@ -42,7 +42,9 @@ def routine(N: int, device: torch.device, rank: int, world_size: int):
                 if rank != 3:
                     # Simulate a failed allreduce on rank 3
                     try:
-                        nccl_allreduce(send_buffer, recv_buffer, 0, comm)
+                        nccl_allreduce(
+                            send_buffer, recv_buffer, dist.ReduceOp.SUM, comm
+                        )
                         print(f"[RANK {rank}] arrived here")
                     except Exception as e:
                         print(f"[RANK {rank}] error in nccl_allreduce: {e}")
@@ -73,7 +75,7 @@ def routine(N: int, device: torch.device, rank: int, world_size: int):
             comm = create_nccl_comm(nccl_uid, rank, world_size)
             send_tensor = torch.arange(N, dtype=torch.float32, device=device)
             recv_tensor = torch.zeros(N, dtype=torch.float32, device=device)
-            nccl_allreduce(send_tensor, recv_tensor, 0, comm)
+            nccl_allreduce(send_tensor, recv_tensor, dist.ReduceOp.SUM, comm)
             torch.testing.assert_close(
                 recv_tensor,
                 torch.arange(N, dtype=torch.float32, device=device) * world_size,

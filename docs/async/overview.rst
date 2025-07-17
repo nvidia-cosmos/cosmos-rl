@@ -18,12 +18,6 @@ Key Features
     – Maximizes hardware utilization; rollouts never sleep while the policy trains  
   * Fine-grained scaling  
     – Independently scale policy (training) and rollout (data generation) workers
-  * Multi-training Algorithms
-    – Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, AIPO, etc.). Well-architected design ensures high extensibility, requiring only minimal configuration to implement custom training algorithms.
-  * Diversified Model Support
-    – Natively supports LLaMA/Qwen/Qwen-VL/Qwen3-MoE series models. Compatible with all Huggingface models, and easily extensible to other model architectures by customizing interface.
-  * 5D Parallelism
-    - Data Parallelism (DP), Pipeline Parallelism (PP), Tensor Parallelism (TP), Context Parallelism (CP), and Fully Sharded Data Parallelism (FSDP)
 
 Architecture
 ============

@@ -20,7 +20,7 @@ import re
 import time
 import threading
 from collections import defaultdict
-from queue import Queue, Empty
+from queue import Queue
 from datetime import timedelta
 from typing import Dict, Iterable, Optional, Union, Callable
 from functools import partial
@@ -151,8 +151,6 @@ def gradient_reduce_across_dp_replicas_(
         buckets[g.dtype].append(g.flatten())
 
     # move all grad into one bucket
-    comm.wait_comm_ready()
-
     for bucket in buckets.values():
         BUCKET_SIZE = 200 * 1024 * 1024
         sub_buckets = []
@@ -186,7 +184,9 @@ def gradient_reduce_across_dp_replicas_(
                 timeout_ms = 30 * 60 * 1000
                 gradient_reduce_across_dp_replicas_.first_invoke = False
 
-            comm.allreduce(tmp_buffer, tmp_buffer, "avg", timeout_ms=timeout_ms)
+            comm.allreduce(
+                tmp_buffer, tmp_buffer, dist.ReduceOp.AVG, timeout_ms=timeout_ms
+            )
             tmp_buffer = tmp_buffer.to(original_dtype)
 
             # copy the result back to original grad
@@ -403,46 +403,33 @@ def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
 
 
 class HighAvailabilitylNccl:
-    NCCL_REDUCE_OPS = {
-        "sum": 0,
-        "prod": 1,
-        "max": 2,
-        "min": 3,
-        "avg": 4,
-    }
-
-    DESTROY_CMD = "destroy"
-
     def __init__(
-        self, replica_name: str, global_rank: int, controller_hosts: list[str]
+        self,
+        replica_name: str,
+        global_rank: int,
+        controller_hosts: list[str],
+        max_retry: int = 100,
+        replica_group: Optional[dist.ProcessGroup] = None,
     ):
         self.replica_name = replica_name
         self.global_rank = global_rank
         self.remote_hosts = controller_hosts
         # max retry times for nccl op after nccl comm is rebuilt
-        self.max_retry = 3
+        self.max_retry = max_retry
         self.default_timeout_ms = get_nccl_timeout_ms()
+        self.replica_group = replica_group
 
         # The nccl group info
         self.comm_idx: int = -1
         self.nccl_comm_count_map = {}
         self.replica_name_to_rank: Dict[str, int] = {}
 
-        # For background thread
-        self.build_mesh_lock = threading.Lock()
-        self.shutdown_event = threading.Event()
-        self.is_single_peer = threading.Event()
-        self.is_single_peer.clear()
         self.is_comm_ready = threading.Event()
         self.is_comm_ready.clear()
+        self.is_single_peer = threading.Event()
+        self.is_single_peer.clear()
         self.is_first_time_build_mesh = True
         self.cmd_queue = Queue()
-        self.build_mesh_thread = threading.Thread(
-            target=self.__run_background_thread,
-            daemon=True,
-            name=f"HA_NCCL-{self.replica_name}-#{self.global_rank}",
-        )
-        self.build_mesh_thread.start()
 
     def __get_alternative_urls(self, suffix: str):
         # Get the alternative URLs for the given suffix
@@ -471,28 +458,12 @@ class HighAvailabilitylNccl:
         else:
             return f"[HA_NCCL][global_rank {self.global_rank}] {self.replica_name}"
 
-    def __run_background_thread(self):
-        # new thread will reset current device to 0, we fix it here.
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
-
-        while not self.shutdown_event.is_set():
-            try:
-                # non-blocking get the command from the queue
-                cmd = self.cmd_queue.get(timeout=1)
-            except Empty:
-                continue
-
-            # lock the build_mesh_lock to avoid abort in-flight nccl comm
-            with self.build_mesh_lock:
-                # 1. destory nccl comm immediately when receive any command
-                # need_abort = True if cmd == self.DESTROY_CMD else False
-                self.__execute_destroy_nccl_comm(abort=True)
-
-                # 2. build nccl comm if it is a buildmesh command
-                if isinstance(cmd, BuildMeshCommand):
-                    # first, destroy the nccl comm if it exists, then build the new nccl comm
-                    self.__execute_build_mesh(cmd)
+    def __check_if_run_in_main_thread(self):
+        if threading.current_thread() != threading.main_thread():
+            # To avoid nccl/gloo hanging, we only allow nccl op to be run in main thread
+            raise RuntimeError(
+                f"{self.__log_prefix()} nccl op should be run only in main thread"
+            )
 
     def __execute_destroy_nccl_comm(self, abort: bool = False):
         self.is_comm_ready.clear()
@@ -508,20 +479,21 @@ class HighAvailabilitylNccl:
             finally:
                 self.comm_idx = -1
 
-    def __execute_build_mesh(self, cmd: BuildMeshCommand) -> bool:
+    def __execute_build_mesh(self, cmd: BuildMeshCommand):
         logger.debug(
             f"{self.__log_prefix()} build mesh with {cmd.replica_name_to_rank}"
         )
 
+        assert (
+            self.replica_name in cmd.replica_name_to_rank
+        ), f"{self.__log_prefix()} replica_name {self.replica_name} not in cmd.replica_name_to_rank {cmd.replica_name_to_rank}"
+
         if len(cmd.replica_name_to_rank) == 1:
-            self.replica_name_to_rank = cmd.replica_name_to_rank
-            assert self.replica_name in cmd.replica_name_to_rank
             self.is_single_peer.set()
             self.is_comm_ready.set()
             return
 
         # continue to build nccl comm
-        assert self.replica_name in cmd.replica_name_to_rank
         rank = cmd.replica_name_to_rank[self.replica_name]
         nccl_group_id = None
         if rank == 0:
@@ -623,21 +595,69 @@ class HighAvailabilitylNccl:
                 max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
 
-    def __do_nccl_op_with_retry(self, func: Callable, timeout_ms: int, **kwargs):
-        if self.is_single_peer.is_set():
-            # single peer, no need to do nccl op
-            return
+    def __broadcast_cmd(self) -> BuildMeshCommand | None:
+        """
+        Let all ranks in this replica have the same cmd
+
+        Returns:
+            cmd: the cmd to buildmesh, or None if no cmd to buildmesh.
+        """
+        # check queue to get cmd to buildmesh, if cmd queue is empty, return immediately.
+        cmd = None
+        if self.global_rank == 0 and not self.cmd_queue.empty():
+            cmd = self.cmd_queue.get()
+
+        # Avoid default group no init before init_distributed
+        if self.replica_group is None:
+            self.replica_group = dist.distributed_c10d._get_default_group()
+
+        # broadcast cmd to all ranks in this replica
+        # here we assume that the first rank of replica always have the cmd
+        first_rank_of_replica = dist.get_process_group_ranks(self.replica_group)[0]
+        cmd = broadcast_object_cpu(
+            cmd,
+            src=first_rank_of_replica,
+            device=torch.device("cpu"),
+            group=self.replica_group,
+        )
+        return cmd
+
+    def __try_create_nccl_comm(self):
+        """
+        Use a greedy algorithm to create nccl comm.
+        We will execute every buildmesh command in order, and return until there is no newer buildmesh command.
+
+            - During register replica, controller will trigger a buildmesh command.
+            - Replica nccl timeout will also trigger a buildmesh command, which can be detected by this Object.
+        """
+
+        # rank0 will run out of cmd, until comm is ready.
+        while True:
+            cmd = self.__broadcast_cmd()
+            if cmd is None:
+                if self.is_comm_ready.is_set():
+                    break
+            else:
+                # execute a valid buildmesh command
+                self.__execute_build_mesh(cmd)
+
+    def __do_nccl_op_with_retry(
+        self, func: Callable, timeout_ms: Optional[int], **kwargs
+    ):
+        self.__check_if_run_in_main_thread()
 
         for i in range(self.max_retry):
+            self.__try_create_nccl_comm()
+
+            if self.is_single_peer.is_set():
+                # Nothing to do for single peer
+                return
+
             try:
-                self.wait_comm_ready()
                 timeout_ms = (
                     timeout_ms if timeout_ms is not None else self.default_timeout_ms
                 )
-                with (
-                    nccl_timeout_watchdog(wait_stream=True, timeout_ms=timeout_ms),
-                    self.build_mesh_lock,
-                ):
+                with nccl_timeout_watchdog(wait_stream=True, timeout_ms=timeout_ms):
                     func(
                         comm_idx=self.comm_idx,
                         timeout_ms=timeout_ms,
@@ -665,55 +685,28 @@ class HighAvailabilitylNccl:
                 )
 
     def destroy_nccl_comm(self):
-        self.cmd_queue.put(self.DESTROY_CMD)
+        self.__execute_destroy_nccl_comm(abort=True)
 
     def push_cmd(self, cmd: BuildMeshCommand):
         self.cmd_queue.put(cmd)
 
-    def shutdown(self):
-        self.shutdown_event.set()
-        self.build_mesh_thread.join()
-
-    def is_ready(self):
+    def is_ready(self) -> bool:
         """
         Check if the nccl comm is ready.
-        This is non-blocking check, user should ensure the nccl op won't be skipped.
         """
+        # check the latest buildmesh command
+        self.__try_create_nccl_comm()
+
         return self.is_comm_ready.is_set()
-
-    def wait_comm_ready(self, timeout: float = 0):
-        """
-        Wait for the nccl comm to be ready.
-
-        Args:
-            timeout (float): The timeout in seconds.
-        """
-        start_time = time.time()
-
-        if timeout == 0:
-            while not self.is_comm_ready.is_set():
-                time.sleep(0.1)
-        else:
-            done = self.is_comm_ready.wait(timeout=timeout)
-            if not done:
-                raise TimeoutError(
-                    f"{self.__log_prefix()} wait for nccl comm ready timeout, current time: {time.time()}, start time: {start_time}, timeout: {timeout}"
-                )
 
     def world_size(self):
         """
         Get the world size of the nccl comm.
         """
-        if self.is_single_peer.is_set():
-            return 1
-
-        if not self.is_ready():
-            raise RuntimeError(
-                f"{self.__log_prefix()} nccl comm is not ready, please wait for the nccl comm to be ready"
-            )
+        # check the latest buildmesh command
+        self.__try_create_nccl_comm()
 
         try:
-            # TODO(zjx): there will be a risk, if the nccl comm destroyed while get_nccl_comm_count,
             ws = get_nccl_comm_nranks(self.comm_idx)
         except Exception as e:
             ws = -1
@@ -724,10 +717,13 @@ class HighAvailabilitylNccl:
         return ws
 
     def get_replica_rank(self, replica_name: str):
-        self.wait_comm_ready()
+        # check the latest buildmesh command
+        self.__try_create_nccl_comm()
         return self.replica_name_to_rank[replica_name]
 
-    def broadcast(self, tensor: torch.Tensor, src_replica: str, timeout_ms: int = None):
+    def broadcast(
+        self, tensor: torch.Tensor, src_replica: str, timeout_ms: Optional[int] = None
+    ):
         src_rank = self.get_replica_rank(src_replica)
         self.__do_nccl_op_with_retry(
             func=nccl_broadcast,
@@ -740,10 +736,9 @@ class HighAvailabilitylNccl:
         self,
         sendbuff: torch.Tensor,
         recvbuff: torch.Tensor,
-        op: str,
-        timeout_ms: int = None,
+        op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
+        timeout_ms: Optional[int] = None,
     ):
-        op = self.NCCL_REDUCE_OPS[op]
         self.__do_nccl_op_with_retry(
             func=nccl_allreduce,
             sendbuff=sendbuff,
@@ -752,7 +747,9 @@ class HighAvailabilitylNccl:
             timeout_ms=timeout_ms,
         )
 
-    def send(self, tensor: torch.Tensor, dst_replica: str, timeout_ms: int = None):
+    def send(
+        self, tensor: torch.Tensor, dst_replica: str, timeout_ms: Optional[int] = None
+    ):
         dst_rank = self.get_replica_rank(dst_replica)
         self.__do_nccl_op_with_retry(
             func=nccl_send,
@@ -761,7 +758,9 @@ class HighAvailabilitylNccl:
             timeout_ms=timeout_ms,
         )
 
-    def recv(self, tensor: torch.Tensor, src_replica: str, timeout_ms: int = None):
+    def recv(
+        self, tensor: torch.Tensor, src_replica: str, timeout_ms: Optional[int] = None
+    ):
         src_rank = self.get_replica_rank(src_replica)
         self.__do_nccl_op_with_retry(
             func=nccl_recv,
