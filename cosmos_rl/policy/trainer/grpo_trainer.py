@@ -884,7 +884,11 @@ class GRPOTrainer(Trainer):
         if self.config.train.optm_grad_norm_clip > 0:
             # Must pass empty list even if model_part is None,
             # GradNorm across pp stages will fail if some rank does not join the barrier
-            all_params = [p for m in self.model_parts for p in m.parameters()]
+            all_params = [
+                p
+                for m in [model for model in self.model_parts if model is not None]
+                for p in m.parameters()
+            ]
             dist_util.gradient_norm_clipping(
                 all_params,
                 self.config.train.optm_grad_norm_clip,
