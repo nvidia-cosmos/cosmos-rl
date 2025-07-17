@@ -266,7 +266,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def prepare_shard_infos_for_weight_sync_insts(self):
         if self.quantization_type == "fp8":
             promotion_dtype = util.str2torch_dtype(self.config.train.param_dtype)
-            # FIXME: (lms) name keep same with weight mapper?
             self.vllm_hp_weight_map, self.vllm_quantized_weight_map = (
                 cache_weight_of_quantized_module(
                     self.get_underlying_model(),
@@ -472,7 +471,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         communicator_index: int,
         do_weight_sync_check: bool = False,
     ):
-        is_fp8_quantized_module = False
         check_inside_group = do_weight_sync_check
         if self.quantization_type == "fp8":
             inst_group_weight_name = (
