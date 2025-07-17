@@ -671,10 +671,11 @@ class RolloutConfig(BaseModel):
         description="Batch size for rollout generation during validation.",
     )
 
+    # not used yet.
     quantization: str = Field(
         default="none",
         description="Quantization in vllm rollout generation.",
-        choices=["none", "fp8"],
+        choices=["none"],
     )
 
     seed: int = Field(default=42, description="random seed for rollout.")

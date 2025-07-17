@@ -25,12 +25,8 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         super().__init__(hf_config)
 
     def rollout_prepare_recv(
-        self,
-        vllm_model: Any,
-    ) -> Tuple[
-        Dict[str, torch.Tensor],
-        List[Tuple[str, torch.Size]],
-    ]:
+        self, vllm_model: Any
+    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
         raise NotImplementedError
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:

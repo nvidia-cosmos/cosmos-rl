@@ -54,12 +54,8 @@ class GPTWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self,
-        vllm_model: Qwen2ForCausalLM,
-    ) -> Tuple[
-        Dict[str, torch.Tensor],
-        List[List[Tuple[str, torch.Size]]],
-    ]:
+        self, vllm_model: Qwen2ForCausalLM
+    ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, torch.Size]]]]:
         assert (
             "qwen" in type(vllm_model).__name__.lower()
         ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
@@ -68,6 +64,7 @@ class GPTWeightMapper(WeightMapper):
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
+            # logger.info(f"[Rollout] compatible_key: {compatible_key}")
             if "qkv_proj" in compatible_key:
                 # must be inplace slicing.
                 # split qkv weight
@@ -102,7 +99,6 @@ class GPTWeightMapper(WeightMapper):
                 group_keys.append((compatible_key, param.ndim))
 
             recv_key_n_shape_list.append(group_keys)
-
         return vllm_weight_inplace_view_map, recv_key_n_shape_list
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
@@ -111,12 +107,3 @@ class GPTWeightMapper(WeightMapper):
             if not name.startswith("model."):
                 name = "model." + name
         return name
-
-    def get_unsplited_weight_name(self, weight_key: str) -> str:
-        for key in ["q_proj", "k_proj", "v_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "qkv_proj")
-        for key in ["gate_proj", "up_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "gate_up_proj")
-        return weight_key  # return full weight key

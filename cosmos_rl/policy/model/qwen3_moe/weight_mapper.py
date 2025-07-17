@@ -67,12 +67,8 @@ class Qwen3MoeWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
-        self,
-        vllm_model: Qwen3MoeForCausalLM,
-    ) -> Tuple[
-        Dict[str, torch.Tensor],
-        List[List[Tuple[str, torch.Size]]],
-    ]:
+        self, vllm_model: Qwen3MoeForCausalLM
+    ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, torch.Size]]]]:
         assert isinstance(vllm_model, Qwen3MoeForCausalLM)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
@@ -146,12 +142,3 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("qwen3_moe")]
-
-    def get_unsplited_weight_name(self, weight_key: str) -> str:
-        for key in ["q_proj", "k_proj", "v_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "qkv_proj")
-        for key in ["gate_proj", "up_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "gate_up_proj")
-        return weight_key  # return full weight key
