@@ -152,7 +152,7 @@ class vLLMRollout(RolloutBase):
                 enable_prefix_caching=True,
                 trust_remote_code=trust_remote_code,
                 quantization=self.quantization,
-                seed=seed,
+                seed=seed or 42,
                 load_format=load_format,
             )
             self._engine_initialized = True
