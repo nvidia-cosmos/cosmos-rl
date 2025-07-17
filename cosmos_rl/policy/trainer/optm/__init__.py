@@ -129,9 +129,21 @@ class OptimizersContainer(Optimizer, Generic[T]):
             get_optimizer_state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
+        # valid_model_parts = [mp for mp in self.model_parts if mp is not None]
+        # valid_optimizers = [opt for opt in self.optimizers if opt is not None]
+        # assert len(valid_model_parts) == len(valid_optimizers), "The number of model parts and optimizers must be the same"
+
+        valid_model_parts = []
+        valid_optimizers = []
+        for mp, opt in zip(self.model_parts, self.optimizers):
+            if mp is None or opt is None:
+                continue
+            valid_model_parts.append(mp)
+            valid_optimizers.append(opt)
+
         return {
             k: v
-            for sd in map(func, self.model_parts, self.optimizers)
+            for sd in map(func, valid_model_parts, valid_optimizers)
             for k, v in sd.items()
         }
 
@@ -141,7 +153,15 @@ class OptimizersContainer(Optimizer, Generic[T]):
             optim_state_dict=state_dict,
             options=StateDictOptions(flatten_optimizer_state_dict=True),
         )
-        list(map(func, self.model_parts, self.optimizers))
+        valid_model_parts = []
+        valid_optimizers = []
+        for mp, opt in zip(self.model_parts, self.optimizers):
+            if mp is None or opt is None:
+                continue
+            valid_model_parts.append(mp)
+            valid_optimizers.append(opt)
+
+        list(map(func, valid_model_parts, valid_optimizers))
 
     def _post_init(
         self, all_params: list[nn.Parameter], optimizer_kwargs: dict[str, Any]

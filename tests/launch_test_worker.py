@@ -25,6 +25,7 @@ from transformers import AutoConfig
 import cosmos_rl.utils.util as util
 from transformers import AutoTokenizer
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
+import msgpack
 
 import threading
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
@@ -42,6 +43,7 @@ from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
     ParallelTopoMapper,
     ParallelizedShardMapper,
+    WeightSyncInstructionsGroup,
 )
 from cosmos_rl.utils.parallelism import ParallelismConfig, ParallelDims
 from cosmos_rl.utils.distributed import (
@@ -205,9 +207,13 @@ class TestRollout:
             for k, v in compatibale_map.items()
         }
         self.ref_compatibale_map = compatibale_map
+        self.quantization_type = None
+        self.config = CosmosConfig()
 
         self.vllm_weight_inplace_view_map = compatibale_map
         self.recv_key_n_rank_list = compatibale_list
+        self.vllm_quantized_weight_map = {}
+        self.vllm_hp_weight_map = {}
 
         self.operate_compatibale_map = operate_compatibale_map
         self.inference_stream = torch.cuda.Stream()
@@ -216,6 +222,15 @@ class TestRollout:
         self.recv_weight_shard = types.MethodType(
             vLLMRolloutWorker.recv_weight_shard, self
         )
+        # just for testing
+        tokenizer = AutoTokenizer.from_pretrained(self.config.policy.model_name_or_path)
+        # change the default parallelism config
+        self.config.rollout.parallelism.tp_size = 4
+        self.config.rollout.parallelism.pp_size = 1
+
+        self.consume_command = types.MethodType(vLLMRolloutWorker.consume_command, self)
+
+        self.rollout = vLLMRollout(self.config, tokenizer)
 
     def get_underlying_model(self):
         return None
@@ -284,28 +299,51 @@ async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank:
 
     local_shards_p = [
         policy_mapper.prepare_local_shard_infos(
-            hf_key_n_rank=[[x] for x in model.parallel_spec], global_rank=p_rank
+            hf_key_n_rank=model.sorted_hf_key_n_rank, global_rank=p_rank
         )
         for p_rank in range(p_world_size)
     ]
     local_shards_r = [
         rollout_mapper.prepare_local_shard_infos(
-            hf_key_n_rank=[[x] for x in model.parallel_spec], global_rank=r_rank
+            hf_key_n_rank=model.sorted_hf_key_n_rank, global_rank=r_rank
         )
         for r_rank in range(r_world_size)
     ]
-    generator = ParallelizedShardMapper()
-    await generator.set_shard_infos_of_policy(local_shards_p)
-    await generator.set_shard_infos_of_rollout(local_shards_r)
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(cur_dir, "configs", "test_simple_grpo.toml")
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    cosmos_config = CosmosConfig.from_dict(config_dict)
+    cosmos_config.policy.parallelism = policy_parallelism_config
+    cosmos_config.rollout.parallelism = rollout_parallelism_config
+    generator = ParallelizedShardMapper.get_instance(cosmos_config)
+    p_params = [[x[0] for x in model.sorted_hf_key_n_rank] for _ in range(p_world_size)]
+    r_params = [[x[0] for x in model.sorted_hf_key_n_rank] for _ in range(r_world_size)]
+    p_body = {
+        "shard_infos": local_shards_p,
+        "param_groups": [],
+        "sorted_params": p_params,
+    }
+    p_data = msgpack.packb(p_body)
+    r_body = {
+        "shard_infos": local_shards_r,
+        "param_groups": [],
+        "sorted_params": r_params,
+    }
+    r_data = msgpack.packb(r_body)
+
+    await generator.set_shard_infos_of_policy(p_data, p_world_size)
+    await generator.set_shard_infos_of_rollout(r_data, r_world_size)
     await generator.scheme_generation_done.wait()
     if is_send:
-        return await generator.generate_parallelized_shard_send_insts_for_policy(
-            global_rank
-        )
+        insts_meta = await generator.get_send_insts_for_policy(global_rank)
     else:
-        return await generator.generate_parallelized_shard_recv_insts_for_rollout(
-            global_rank
-        )
+        insts_meta = await generator.get_recv_insts_for_rollout(global_rank)
+    insts = msgpack.unpackb(insts_meta, strict_map_key=False)
+    policy_to_rollout_insts = [
+        WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
+    ]
+    return policy_to_rollout_insts
 
 
 async def run_policy_send_to_rollout(shm_name, shm_size, rank):
@@ -394,6 +432,7 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
         rollout.policy_to_rollout_unicast = types.MethodType(
             vLLMRolloutWorker.policy_to_rollout_unicast, rollout
         )
+        rollout.prepare_shard_infos_for_weight_sync_insts = lambda: None
         rollout.policy_to_rollout_unicast(command)
         rollout.inference_stream.synchronize()
 
@@ -669,6 +708,7 @@ def run_dummy_rollout():
 
         self.rollout_engine = Rollout_engine()
         self.eos_token_ids = [0]
+        self._engine_initialized = True
 
         def rollout_generation(
             self,
@@ -706,9 +746,18 @@ def run_policy_parallelism_extract(rank, fsdp, tp, pp):
         config.policy.model_name_or_path,
         trust_remote_code=True,
     )
-    model = ModelRegistry.build_model(config)
     parallel_dims = ParallelDims.from_config(config.policy.parallelism)
     parallel_dims.build_mesh(device_type="cuda")
+    model = ModelRegistry.build_model(config)
+    try:
+        # Apply parallelism to the model
+        parallelize_fn, _ = model.parallelize_fn
+        parallelize_fn(model, parallel_dims, config, pp_loss_fn=GRPOTrainer.pp_loss_fn)
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        raise e
 
     mapper = ParallelTopoMapperGroup(
         parallel_dims,
@@ -726,8 +775,7 @@ def run_policy_parallelism_extract(rank, fsdp, tp, pp):
         else:
             tensor_or_callable = tensor_or_callable()
             keys_n_ranks.append((name, tensor_or_callable.ndim))
-    keys_n_ranks = sorted(keys_n_ranks, key=lambda x: x[0])
-    hf_key_n_rank = [[x] for x in keys_n_ranks]
+    hf_key_n_rank = sorted(keys_n_ranks, key=lambda x: x[0])
     local_shard_infos = mapper.prepare_local_shard_infos(hf_key_n_rank, rank)
     all_rank_local_shard_infos = dist_util.all_gather_object_cpu(local_shard_infos)
     if rank == 0:
@@ -765,10 +813,9 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
     rollout = vLLMRollout(
         config,
         tokenizer=tokenizer,
-        seed=config.rollout.seed,
-        load_format="dummy",
     )
 
+    rollout.init_engine(seed=config.rollout.seed, load_format="dummy")
     parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
     parallel_dims.build_mesh(device_type="cuda")
 
@@ -783,9 +830,13 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
 
     assert len(mapper.mapper_group) == 1, "Only one mapper group expected"
 
-    _, recv_param_key_n_rank_list = weight_mapper.rollout_prepare_recv(
+    recv_param_key_n_rank_list = []
+    _, grouped_recv_param_key_n_rank_list = weight_mapper.rollout_prepare_recv(
         rollout.get_underlying_model()
     )
+    for group in grouped_recv_param_key_n_rank_list:
+        recv_param_key_n_rank_list.extend(group)
+
     local_shard_infos = mapper.prepare_local_shard_infos(
         recv_param_key_n_rank_list, rank
     )
@@ -861,12 +912,6 @@ async def parallel_map_check():
     def name_to_hf(name: str) -> str:
         return name
 
-    #  insert_to_parallelism_info(
-    # self,
-    # param_name: str,
-    # dims_map: Dict[str, int],
-    # name_to_hf: Callable,
-
     layers = [
         ("model.layers.9.input_layernorm.weight", {}),
         ("model.layers.9.mlp.down_proj.weight", {"tp": 1}),
@@ -885,6 +930,7 @@ async def parallel_map_check():
         ("model.embed_tokens.weight", {"tp": 0}),
     ]
     policy_mapper.mapper_group[0].parallelism_info_for_params = {}
+    layers.sort(key=lambda x: x[0])
     for k, v in layers:
         policy_mapper.mapper_group[0].insert_to_parallelism_info(
             param_name=k,
@@ -902,41 +948,62 @@ async def parallel_map_check():
 
     local_shards_p = [
         policy_mapper.prepare_local_shard_infos(
-            hf_key_n_rank=[[x] for x in layers], global_rank=p_rank
+            hf_key_n_rank=layers, global_rank=p_rank
         )
         for p_rank in range(p_world_size)
     ]
     local_shards_r = [
         rollout_mapper.prepare_local_shard_infos(
-            hf_key_n_rank=[[x] for x in layers], global_rank=r_rank
+            hf_key_n_rank=layers, global_rank=r_rank
         )
         for r_rank in range(r_world_size)
     ]
 
-    generator = ParallelizedShardMapper()
-    await generator.set_shard_infos_of_policy(local_shards_p)
-    await generator.set_shard_infos_of_rollout(local_shards_r)
+    p_params = [[x[0] for x in layers] for _ in range(p_world_size)]
+    r_params = [[x[0] for x in layers] for _ in range(r_world_size)]
+    p_body = {
+        "shard_infos": local_shards_p,
+        "param_groups": [],
+        "sorted_params": p_params,
+    }
+    p_data = msgpack.packb(p_body)
+    r_body = {
+        "shard_infos": local_shards_r,
+        "param_groups": [],
+        "sorted_params": r_params,
+    }
+    r_data = msgpack.packb(r_body)
+
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(cur_dir, "configs", "test_simple_grpo.toml")
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    cosmos_config = CosmosConfig.from_dict(config_dict)
+    cosmos_config.policy.parallelism = policy_parallelism_config
+    cosmos_config.rollout.parallelism = rollout_parallelism_config
+    generator = ParallelizedShardMapper.get_instance(cosmos_config)
+    await generator.set_shard_infos_of_policy(p_data, p_world_size)
+    await generator.set_shard_infos_of_rollout(r_data, r_world_size)
 
     await generator.scheme_generation_done.wait()
     global_rank = 5
-    await generator.sort_param_with_groups()
-    generator.rollout_from_policy_insts_meta = [
-        {} for _ in range(len(generator.rollout_all_rank_shard_infos))
-    ]
+    # generator.rollout_from_policy_insts_meta = [
+    #     [{} for _ in range(generator.rollout_world_size)]
+    #     for _ in range(generator.policy_world_size)
+    # ]
 
-    insts = await generator.generate_parallelized_shard_send_insts_for_policy(
-        global_rank
-    )
+    insts = await generator.get_send_insts_for_policy(global_rank)
     r_rank_max = 0
     layer_idx = 0
 
     layers.sort(key=lambda x: x[0])
+    insts = msgpack.unpackb(insts, strict_map_key=False)
     for inst_group in insts:
-        for inst in inst_group.param_instructions:
-            dest_name = inst.param_name
-            for i in inst.instructions:
-                p_rank = i.policy_rank
-                r_rank = i.rollout_rank
+        for inst in inst_group["param_instructions"]:
+            dest_name = inst["param_name"]
+            for i in inst["instructions"]:
+                p_rank = i["policy_rank"]
+                r_rank = i["rollout_rank"]
                 assert p_rank == global_rank
                 while layers[layer_idx][0] != dest_name:
                     r_rank_max = 0
@@ -947,18 +1014,17 @@ async def parallel_map_check():
                     r_rank_max = r_rank
 
     global_rank = 2
-    insts = await generator.generate_parallelized_shard_recv_insts_for_rollout(
-        global_rank
-    )
+    insts = await generator.get_recv_insts_for_rollout(global_rank)
+    insts = msgpack.unpackb(insts, strict_map_key=False)
 
     p_rank_max = 0
     layer_idx = 0
     for inst_group in insts:
-        for inst in inst_group.param_instructions:
-            dest_name = inst.param_name
-            for i in inst.instructions:
-                p_rank = i.policy_rank
-                r_rank = i.rollout_rank
+        for inst in inst_group["param_instructions"]:
+            dest_name = inst["param_name"]
+            for i in inst["instructions"]:
+                p_rank = i["policy_rank"]
+                r_rank = i["rollout_rank"]
                 assert r_rank == global_rank
                 while layers[layer_idx][0] != dest_name:
                     p_rank_max = 0

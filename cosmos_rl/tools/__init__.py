@@ -12,20 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from abc import ABC, abstractmethod
-
-
-class RolloutBase(ABC):
-    def __init__(self):
-        pass
-
-    @abstractmethod
-    def rollout_generation(self, prompts, *args, **kwargs):
-        """Generate sequences"""
-        pass
-
-    @abstractmethod
-    def init_engine(self, quantization: str, seed: int, load_format: str):
-        """Initialize the engine"""
-        pass

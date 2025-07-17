@@ -16,6 +16,7 @@
 import re
 from math_verify.metric import math_metric
 from math_verify.parser import LatexExtractionConfig, ExprExtractionConfig
+from math_verify.errors import TimeoutException
 from transformers import PreTrainedTokenizer
 from cosmos_rl.policy.config import Config
 from typing import Union, Callable
@@ -201,6 +202,11 @@ def boxed_math_reward_fn(
     try:
         score, _ = math_comparer([reference], [to_be_evaluated])
         return score
+    except TimeoutException as e:
+        logger.error(
+            f"Caught TimeoutException: {e}\nreference={reference}\nto_be_evaluated={to_be_evaluated}"
+        )
+        return 0.0
     except Exception:
         return 0.0
 

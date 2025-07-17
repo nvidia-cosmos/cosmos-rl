@@ -22,7 +22,6 @@ import torch
 import inspect
 import os
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import compute_mfu
 import cosmos_rl.utils.distributed as dist_util
 import time
 import torch.distributed as dist
@@ -46,6 +45,8 @@ from cosmos_rl.utils.util import (
     msgpack_c_long,
     msgunpack_c_long,
     fix_data_type_size,
+    sanitize,
+    compute_mfu,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
@@ -57,7 +58,7 @@ import types
 from functools import partial
 import msgpack
 from cosmos_rl.utils.network_util import make_request_with_retry
-from cosmos_rl.utils.ulysses import slice_input_for_ulysses
+from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
@@ -264,6 +265,7 @@ class GRPOTrainer(Trainer):
         self.is_master_replica = True
         self.prepare_shard_infos_for_weight_sync_insts()
 
+    @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
         keys_n_ranks = []
         for name, tensor_or_callable in self.model.weight_sync_transforms:
@@ -273,26 +275,37 @@ class GRPOTrainer(Trainer):
                 assert isinstance(tensor_or_callable, Callable)
                 tensor_or_callable = tensor_or_callable()
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
-        hf_key_n_rank: List[List[Tuple[str, int]]] = [[x] for x in keys_n_ranks]
-        del keys_n_ranks
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config=self.hf_config,
             is_policy=True,
             underlying_model=self.model,
             weight_mapper=self.model.weight_mapper,
-        ).prepare_local_shard_infos(hf_key_n_rank, self.global_rank)
+        ).prepare_local_shard_infos(keys_n_ranks, self.global_rank)
         self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
             local_shard_infos
         )
+        sorted_params_all_rank = dist_util.all_gather_object_cpu(
+            sorted([x[0] for x in keys_n_ranks])
+        )
+        sorted_params_all_rank = [
+            x
+            for r, x in enumerate(sorted_params_all_rank)
+            if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
+        ]
         if self.global_rank == 0:
+            body = {
+                "shard_infos": self.all_rank_local_shard_infos,
+                "param_groups": [],
+                "sorted_params": sorted_params_all_rank,
+            }
+            data = msgpack.packb(body)
             try:
                 make_request_with_retry(
                     partial(
                         requests.post,
-                        json={
-                            "shard_infos": self.all_rank_local_shard_infos,
-                        },
+                        data=data,
+                        headers={"Content-Type": "application/msgpack"},
                     ),
                     self.get_alternative_urls(COSMOS_API_POLICY_SHARD_INFOS_SUFFIX),
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
@@ -707,10 +720,9 @@ class GRPOTrainer(Trainer):
                     ),
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
-                insts_meta = insts_meta.json()
+                insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
                 self.policy_to_rollout_insts = [
-                    WeightSyncInstructionsGroup.from_dict(inst)
-                    for inst in insts_meta["insts"]
+                    WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
                 ]
             except Exception as e:
                 raise RuntimeError(
@@ -844,7 +856,7 @@ class GRPOTrainer(Trainer):
                             "weight_step": command.global_step,
                             "total_steps": command.total_steps,
                             "profile_finished": self.profiler.check_finished(),
-                            "report_data": report_data,
+                            "report_data": sanitize(report_data),
                         },
                     ),
                     self.get_alternative_urls(COSMOS_API_POLICY_TRAIN_ACK_SUFFIX),
@@ -871,20 +883,27 @@ class GRPOTrainer(Trainer):
                     [p for p in model_part.parameters()], self.inter_policy_nccl
                 )
 
-            if self.config.train.optm_grad_norm_clip > 0:
-                # Then clipping gradient norm
-                dist_util.gradient_norm_clipping(
-                    # Must pass empty list even if model_part is None,
-                    # GradNorm across pp stages will fail if some rank does not join the barrier
-                    [p for p in model_part.parameters()]
-                    if model_part is not None
-                    else [],
-                    self.config.train.optm_grad_norm_clip,
-                    foreach=True,
-                    pp_mesh=self.parallel_dims.mesh["pp"]
-                    if self.parallel_dims.pp_enabled
-                    else None,
-                )
+        """
+        Compute the global grad norm on all parameters and then apply
+        gradient clipping using the global grad norm.
+        """
+        if self.config.train.optm_grad_norm_clip > 0:
+            # Must pass empty list even if model_part is None,
+            # GradNorm across pp stages will fail if some rank does not join the barrier
+            all_params = [
+                p
+                for m in [model for model in self.model_parts if model is not None]
+                for p in m.parameters()
+            ]
+            dist_util.gradient_norm_clipping(
+                all_params,
+                self.config.train.optm_grad_norm_clip,
+                foreach=True,
+                pp_mesh=self.parallel_dims.mesh["pp"]
+                if self.parallel_dims.pp_enabled
+                else None,
+            )
+
         self.optimizers.step()
         self.lr_schedulers.step()
         self.optimizers.zero_grad()
@@ -1228,18 +1247,23 @@ class GRPOTrainer(Trainer):
                             )
                             acc_n_tokens += np.prod(input_ids.shape)
                             user_mini_batch["position_ids"] = position_ids
+                            padding_mask = user_mini_batch.get("padding_mask", None)
 
                             input_ids_before_cp = user_mini_batch["input_ids"]
                             position_ids_before_cp = user_mini_batch["position_ids"]
+                            padding_mask_before_cp = padding_mask
 
                             if self.parallel_dims.cp_enabled:
-                                input_ids, position_ids = slice_input_for_ulysses(
-                                    input_ids,
-                                    position_ids,
-                                    self.parallel_dims.mesh["cp"],
+                                [input_ids, position_ids, padding_mask] = (
+                                    slice_inputs_for_ulysses(
+                                        [input_ids, position_ids, padding_mask],
+                                        self.parallel_dims.mesh["cp"],
+                                    )
                                 )
                                 user_mini_batch["position_ids"] = position_ids
                                 user_mini_batch["input_ids"] = input_ids
+                                if padding_mask is not None:
+                                    user_mini_batch["padding_mask"] = padding_mask
 
                             if self.parallel_dims.pp_enabled:
                                 if pp_last_stage:
@@ -1352,6 +1376,10 @@ class GRPOTrainer(Trainer):
                                         position_ids_before_cp
                                     )
                                     user_mini_batch["input_ids"] = input_ids_before_cp
+                                    if padding_mask_before_cp is not None:
+                                        user_mini_batch["padding_mask"] = (
+                                            padding_mask_before_cp
+                                        )
 
                                 if self.config.train.train_policy.temperature > 1e-6:
                                     raw_logits = (
@@ -1510,7 +1538,6 @@ class GRPOTrainer(Trainer):
 
         # For profiling
         self.profiler.step()
-
         return report_data
 
     @property

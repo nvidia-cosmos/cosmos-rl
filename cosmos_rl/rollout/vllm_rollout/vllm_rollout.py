@@ -13,9 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
+
 import vllm
 import torch
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Optional
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
@@ -24,11 +27,9 @@ from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
-from cosmos_rl.rollout.vllm_rollout.vllm_patch import (
-    patch_vllm_model_to_reload_weight,
-)
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.policy.model import WeightMapper
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -59,73 +60,9 @@ class vLLMRollout(RolloutBase):
 
         vllm_version_check(self.rollout_config)
 
-        trust_remote_code = True  # set trust remote code default to True.
         model_path = policy_config.model_name_or_path
 
-        # Check if the model has MoE
-        model_config = util.retry(AutoConfig.from_pretrained)(
-            model_path, trust_remote_code=trust_remote_code
-        )
-
-        enable_ep_parallelism = False
-        disable_mm_preprocessor_cache = False
-
-        moe_model_type = {"qwen3_moe"}
-        multimodal_type = {"qwen2_5_vl"}
-
-        model_type = model_config.model_type
-        if model_type in moe_model_type:
-            enable_ep_parallelism = True
-        if model_type in multimodal_type:
-            # for vllm nightly, this is only True for multimodal models, check here
-            disable_mm_preprocessor_cache = True
-
-        rollout_parallelism = self.rollout_config.parallelism
-
-        tp_size = rollout_parallelism.tp_size
-        pp_size = rollout_parallelism.pp_size
-
-        assert (
-            tp_size * pp_size == rollout_parallelism.world_size
-        ), "[Rollout] For tensor parallel, the tp_size * pp_size must be equal to world size."
-
-        # disable VLLM_DISABLE_COMPILE_CACHE
-        os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
-
-        self.rollout_engine = LLM(
-            model=model_path,
-            enable_sleep_mode=False,  # enable sleep could corrupt the cuda allocator.
-            tensor_parallel_size=tp_size,
-            pipeline_parallel_size=pp_size,
-            enable_expert_parallel=enable_ep_parallelism,
-            distributed_executor_backend="external_launcher",
-            dtype="auto",
-            enforce_eager=self.rollout_config.enforce_eager,  # enable cuda graph
-            gpu_memory_utilization=self.rollout_config.gpu_memory_utilization,
-            disable_custom_all_reduce=True,
-            disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
-            skip_tokenizer_init=False,
-            max_model_len=policy_config.model_max_length,
-            disable_log_stats=True,
-            # default to 2048, this is related with chunked prefill. https://docs.vllm.ai/en/latest/performance/optimization.html
-            max_num_batched_tokens=2048
-            if 2048 >= policy_config.model_max_length
-            else policy_config.model_max_length,
-            enable_chunked_prefill=self.rollout_config.enable_chunked_prefill,
-            enable_prefix_caching=True,
-            trust_remote_code=trust_remote_code,
-            seed=kwargs.get("seed") or 42,
-            # Note: We set load_format="dummy" to avoid loading the HF model weights which could cause too many requests from multiple replicas.
-            # This will affect:
-            #      1. for the benchmark, the result won't be correct because now we have random weights. But it is fine for profiling.
-            #      2. TODO:(lms) this may have conflict with quantization. Check it when supporting quantization
-            # This won't affect:
-            #      1. The GRPO procedure won't be affected because we will first have a P2R before rollout generation. So it is safe.
-            load_format=kwargs.get("load_format", "dummy"),
-        )
-
-        # patch the vllm model to reload weight
-        patch_vllm_model_to_reload_weight(self.rollout_engine)
+        self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
 
         self.pad_token_id = tokenizer.pad_token_id
 
@@ -144,12 +81,91 @@ class vLLMRollout(RolloutBase):
             # self.eos_token_ids = [tokenizer.eos_token_id]
             # TODO(lms): remove this
             self.eos_token_ids = [151645, 151643]
-
         self.tokenizer = tokenizer
+        self._engine_initialized = False
+        self.rollout_engine = None
 
-    def reload_weight(self):
-        self.rollout_engine.llm_engine.vllm_config.load_config.load_format = "auto"
-        self.rollout_engine.collective_rpc("reload_model")
+        self._model_param_map = None  # key: compatible name, value: param
+
+    def init_engine(
+        self,
+        quantization: Optional[str] = None,
+        seed: int = 42,
+        load_format: str = "dummy",
+        **kwargs,
+    ):
+        if not self._engine_initialized:
+            trust_remote_code = True  # set trust remote code default to True.
+
+            model_path = self.config.policy.model_name_or_path
+
+            rollout_parallelism = self.rollout_config.parallelism
+
+            # disable VLLM_DISABLE_COMPILE_CACHE
+            os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
+
+            tp_size = rollout_parallelism.tp_size
+            pp_size = rollout_parallelism.pp_size
+
+            enable_ep_parallelism = False
+            disable_mm_preprocessor_cache = False
+
+            # Check if the model has MoE
+            moe_model_type = {"qwen3_moe"}
+            multimodal_type = {"qwen2_5_vl"}
+
+            model_type = self.model_config.model_type
+            if model_type in moe_model_type:
+                enable_ep_parallelism = True
+            if model_type in multimodal_type:
+                # for vllm nightly, this is only True for multimodal models, check here
+                disable_mm_preprocessor_cache = True
+            assert tp_size * pp_size == rollout_parallelism.world_size, (
+                "[Rollout] For tensor parallel, the tp_size * pp_size must be equal to world size, but got tp_size: %d, pp_size: %d, world_size: %d"
+                % (tp_size, pp_size, rollout_parallelism.world_size)
+            )
+
+            self.quantization = quantization
+
+            policy_config = self.config.policy
+
+            self.rollout_engine = LLM(
+                model=model_path,
+                enable_sleep_mode=False,  # enable sleep could corrupt the cuda allocator.
+                tensor_parallel_size=tp_size,
+                pipeline_parallel_size=pp_size,
+                enable_expert_parallel=enable_ep_parallelism,
+                distributed_executor_backend="external_launcher",
+                dtype="auto",
+                enforce_eager=self.rollout_config.enforce_eager,  # enable cuda graph
+                gpu_memory_utilization=self.rollout_config.gpu_memory_utilization,
+                disable_custom_all_reduce=True,
+                disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+                skip_tokenizer_init=False,
+                max_model_len=policy_config.model_max_length,
+                disable_log_stats=True,
+                # default to 2048, this is related with chunked prefill. https://docs.vllm.ai/en/latest/performance/optimization.html
+                max_num_batched_tokens=2048
+                if 2048 >= policy_config.model_max_length
+                else policy_config.model_max_length,
+                enable_chunked_prefill=self.rollout_config.enable_chunked_prefill,
+                enable_prefix_caching=True,
+                trust_remote_code=trust_remote_code,
+                quantization=self.quantization,
+                seed=seed or 42,
+                load_format=load_format,
+            )
+            self._engine_initialized = True
+            logger.info("[Rollout] Engine initialized.")
+            # initialization done.
+
+            # patch the vllm model to use rowwise fp8
+            if self.quantization == "fp8":
+                from vllm.config import set_current_vllm_config
+
+                vllm_config = self.rollout_engine.llm_engine.vllm_config
+                with set_current_vllm_config(vllm_config):
+                    apply_fp8_linear_patch(self.get_underlying_model())
 
     @torch.no_grad()
     def rollout_generation(
@@ -159,6 +175,11 @@ class vLLMRollout(RolloutBase):
         data_packer: DataPacker,
         sampling_params: SamplingParams,
     ) -> List[List[str]]:
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+
         # List of payloads.
         # [
         #   payload,
@@ -205,4 +226,41 @@ class vLLMRollout(RolloutBase):
         """
         Get the underlying parallelized model in vLLM internal.
         """
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
         return self.rollout_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+
+    def get_engine(self):
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+        return self.rollout_engine
+
+    def is_engine_initialized(self):
+        return self._engine_initialized
+
+    def fp8_quantization(self, weight: torch.Tensor):
+        # convert to fp8
+        from vllm import _custom_ops as ops
+
+        # quantization of rowwise torch scaled_mm.
+        # weight has shape [out_dim, in_dim]
+        qweight, weight_scale = ops.scaled_fp8_quant(
+            weight, scale=None, use_per_token_if_dynamic=True
+        )
+
+        return qweight.t(), weight_scale
+
+    def model_param_map(self, weight_mapper: WeightMapper):
+        if self._model_param_map:
+            return self._model_param_map
+        model = self.get_underlying_model()
+        param_map = {}
+        for name, param in model.named_parameters():
+            compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
+            param_map[compatible_name] = param
+        self._model_param_map = param_map
+        return self._model_param_map
