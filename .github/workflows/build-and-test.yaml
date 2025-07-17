@@ -43,10 +43,12 @@ jobs:
 
           echo "container_id=${container_id}" >> $GITHUB_OUTPUT
           DOCKER_RUN="timeout 10m docker exec ${container_id}"
+          LONG_DOCKER_RUN="timeout 15m docker exec ${container_id}"
 
           ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
 
           # run tests
+          ${DOCKER_RUN} /bin/bash -c "CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 tests/test_context_parallel.py"
           ${DOCKER_RUN} python tests/test_cache.py
           ${DOCKER_RUN} python tests/test_comm.py
           ${DOCKER_RUN} python tests/test_fp8.py
@@ -58,6 +60,8 @@ jobs:
           ${DOCKER_RUN} python tests/test_policy_to_policy.py
           ${DOCKER_RUN} python tests/test_policy_to_rollout.py
           ${DOCKER_RUN} python tests/test_process_flow.py
+          ${DOCKER_RUN} python tests/test_math_verify.py
+          ${LONG_DOCKER_RUN} python tests/test_integration.py
 
       - name: Cleanup
         if: always()

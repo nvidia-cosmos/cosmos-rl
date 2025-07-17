@@ -21,6 +21,7 @@ import torch
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from cosmos_rl.utils import util
 from transformers import AutoConfig
+from typing import Dict, List, Tuple
 import re
 
 
@@ -74,13 +75,21 @@ class QwenVL25WeightMapper(WeightMapper):
         up_proj_weight = weight[dim_0 // 2 :]
         return gate_proj_weight, up_proj_weight
 
-    def rollout_prepare_recv(self, vllm_model: Qwen2_5_VLForConditionalGeneration):
+    def rollout_prepare_recv(
+        self,
+        vllm_model: Qwen2_5_VLForConditionalGeneration,
+    ) -> Tuple[
+        Dict[str, torch.Tensor],
+        List[List[Tuple[str, torch.Size]]],
+    ]:
         assert isinstance(vllm_model, Qwen2_5_VLForConditionalGeneration)
+
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
+
             if "qkv_proj" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
                     compatible_key, param
@@ -177,3 +186,15 @@ class QwenVL25WeightMapper(WeightMapper):
             )
             return split_strategy
         return []
+
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        for key in ["q_proj", "k_proj", "v_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "qkv_proj")
+        for key in ["gate_proj", "up_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "gate_up_proj")
+        for key in ["q", "k", "v"]:
+            if "visual" in weight_key and key in weight_key:
+                return weight_key.replace(key, "qkv")
+        return weight_key  # return full weight key

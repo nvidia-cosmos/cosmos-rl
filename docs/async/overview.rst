@@ -1,7 +1,7 @@
 Overview
 ========
 
-Cosmos-RL is a fully native PyTorch, distributed reinforcement-learning framework built around a single, lightweight controller. By decoupling policy training from environment rollouts, it achieves:
+Cosmos-RL is a flexible and scalable Reinforcement Learning framework specialized for Physical AI applications, built around a single, lightweight controller. By decoupling policy training from environment rollouts, it achieves:
 
 - Seamless scalability to thousands of GPUs  
 - Modular, easy-to-extend design  
@@ -17,7 +17,7 @@ Key Features
   * Asynchronous, parallel policy and rollout  
     – Maximizes hardware utilization; rollouts never sleep while the policy trains  
   * Fine-grained scaling  
-    – Independently scale policy (training) and rollout (data generation) workers  
+    – Independently scale policy (training) and rollout (data generation) workers
 
 Architecture
 ============

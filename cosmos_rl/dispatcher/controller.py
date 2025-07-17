@@ -324,6 +324,7 @@ class Controller:
             tokenizer=self.tokenizer,
             val_dataloader=val_dataloader,
             current_step=self.ckpt_extra_info.get("step", 0),
+            max_num_steps=config.train.max_num_steps,
         )
         self.rollout_status_manager.setup(
             config, self.redis_controller, tokenizer=self.tokenizer

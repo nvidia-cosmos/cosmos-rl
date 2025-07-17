@@ -372,6 +372,10 @@ class ProfilerConfig(BaseModel):
         default=False,
         description="Enable profiler for training",
     )
+    enable_nsys: bool = Field(
+        default=False,
+        description="Enable nsys for training",
+    )
     sub_profiler_config: SubProfilerConfig = Field(
         default_factory=SubProfilerConfig, description="Sub profiler config"
     )
@@ -433,6 +437,12 @@ class TrainingConfig(BaseModel):
         default=1.0, description="Gradient norm clip for optimizer"
     )
 
+    # --------- smoke-test helpers ---------
+    max_num_steps: Optional[int] = Field(
+        default=None,
+        description="Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.",
+    )
+
     async_tp_enabled: bool = Field(
         default=False, description="Whether to use async tensor parallelism"
     )
@@ -490,6 +500,8 @@ class TrainingConfig(BaseModel):
             raise ValueError(
                 "Async tensor parallelism requires torch.compile to be enabled"
             )
+        if self.max_num_steps is not None and self.max_num_steps <= 0:
+            raise ValueError("max_num_steps must be positive if specified")
         return self
 
 
@@ -659,11 +671,10 @@ class RolloutConfig(BaseModel):
         description="Batch size for rollout generation during validation.",
     )
 
-    # not used yet.
     quantization: str = Field(
         default="none",
         description="Quantization in vllm rollout generation.",
-        choices=["none"],
+        choices=["none", "fp8"],
     )
 
     seed: Optional[int] = Field(default=None, description="random seed for rollout.")
