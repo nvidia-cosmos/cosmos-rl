@@ -677,7 +677,7 @@ class RolloutConfig(BaseModel):
         choices=["none", "fp8"],
     )
 
-    seed: int = Field(default=42, description="random seed for rollout.")
+    seed: Optional[int] = Field(default=None, description="random seed for rollout.")
 
     sampling_config: SamplingConfig = Field(default_factory=SamplingConfig)
 
