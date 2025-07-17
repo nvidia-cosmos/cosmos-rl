@@ -7,6 +7,7 @@
     ```
 
 3. In `docs` folder, run `make clean && make html` to build the static html files or host it with
+4. Either open static file located at `./_build/html/index.html` or host it with
     ``` bash
     python -m http.server -d _build/html/
     ```
