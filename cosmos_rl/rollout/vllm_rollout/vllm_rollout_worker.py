@@ -706,7 +706,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
                 src_rank = self.replica_name_to_rank[src_replica_name]
 
-                for parameter in self.get_underlying_model().parameters():
+                for parameter in self.get_underlying_model().state_dict().values():
                     recv_tensor = parameter
                     if not parameter.is_contiguous():
                         recv_tensor = parameter.contiguous()
