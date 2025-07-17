@@ -278,9 +278,14 @@ class SFTTrainer(Trainer):
         )
         # For iteration control
         self.epoch = config.train.epoch
-        self.total_steps = (
+        steps_by_dataset = (
             len(self.train_data_loader) * self.epoch // self.dp_world_size
         )
+
+        if config.train.max_num_steps is not None:
+            self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
+        else:
+            self.total_steps = steps_by_dataset
         self.train_step = 0
 
         # Load model
@@ -523,7 +528,13 @@ class SFTTrainer(Trainer):
                 if self.config.train.optm_grad_norm_clip > 0:
                     # Must pass empty list even if model_part is None,
                     # GradNorm across pp stages will fail if some rank does not join the barrier
-                    all_params = [p for m in self.model_parts for p in m.parameters()]
+                    all_params = [
+                        p
+                        for m in [
+                            model for model in self.model_parts if model is not None
+                        ]
+                        for p in m.parameters()
+                    ]
                     dist_util.gradient_norm_clipping(
                         all_params,
                         self.config.train.optm_grad_norm_clip,
@@ -537,6 +548,14 @@ class SFTTrainer(Trainer):
                 self.lr_schedulers.step()
 
                 self.train_step += 1
+
+                # Early stop only when max_num_steps is specified
+                if (
+                    self.config.train.max_num_steps is not None
+                    and self.train_step >= self.total_steps
+                ):
+                    break
+
                 end_event.record()
 
                 if (
@@ -639,6 +658,11 @@ class SFTTrainer(Trainer):
                         pp_master_rank=self.parallel_dims.world_size
                         - self.parallel_dims.world_size / self.parallel_dims.pp,
                     )
+            if (
+                self.config.train.max_num_steps is not None
+                and self.train_step >= self.total_steps
+            ):
+                break  # break outer epoch loop
 
         # process the final step
         if self.config.train.enable_validation:

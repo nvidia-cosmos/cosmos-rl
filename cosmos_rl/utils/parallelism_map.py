@@ -838,10 +838,7 @@ class ParallelTopoMapper:
                 continue
             dims_map = {}
             if isinstance(part, (QKVParallelLinear)):
-                output_dim = getattr(param, "output_dim", None)
-                assert (
-                    output_dim is not None
-                ), f"QKVParallelLinear {param_name} has no output_dim attribute."
+                output_dim = getattr(param, "output_dim", 0)
                 dims_map["tp"] = output_dim
                 assert any(
                     [
@@ -850,10 +847,7 @@ class ParallelTopoMapper:
                     ]
                 ), f"QKVParallelLinear {param_name} is not in packed_modules_mapping {self.weight_mapper.packed_modules_mapping}."
             elif isinstance(part, (MergedColumnParallelLinear)):
-                output_dim = getattr(param, "output_dim", None)
-                assert (
-                    output_dim is not None
-                ), f"MergedColumnParallelLinear {param_name} has no output_dim attribute."
+                output_dim = getattr(param, "output_dim", 0)
                 dims_map["tp"] = output_dim
                 assert any(
                     [
@@ -862,26 +856,20 @@ class ParallelTopoMapper:
                     ]
                 ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {self.weight_mapper.packed_modules_mapping}."
             elif isinstance(part, (RowParallelLinear)):
-                input_dim = getattr(param, "input_dim", None)
+                input_dim = getattr(param, "input_dim", 1)
                 if not is_bias:
                     assert (
                         input_dim is not None
                     ), f"RowParallelLinear {param_name} has no input_dim attribute."
                     dims_map["tp"] = input_dim
             elif isinstance(part, (ColumnParallelLinear)):
-                output_dim = getattr(param, "output_dim", None)
-                assert (
-                    output_dim is not None
-                ), f"ColumnParallelLinear {param_name} has no output_dim attribute."
+                output_dim = getattr(param, "output_dim", 0)
                 dims_map["tp"] = output_dim
             elif isinstance(part, VocabParallelEmbedding):
-                output_dim = getattr(param, "output_dim", None)
+                output_dim = getattr(param, "output_dim", 0)
                 assert (
                     not is_bias
                 ), f"VocabParallelEmbedding {param_name} should not have bias."
-                assert (
-                    output_dim is not None
-                ), f"VocabParallelEmbedding {param_name} has no output_dim attribute."
                 dims_map["tp"] = output_dim
             else:
                 assert (
