@@ -30,7 +30,7 @@ math_comparer = math_metric(
 )
 
 
-ANSWER_PATTERN = r"ANSWER::(.*?)::END_ANSWER"
+ANSWER_PATTERN = r"<answer>(.*?)</answer>"
 
 
 # Constants for normalization
@@ -147,7 +147,7 @@ def format_reward_fn(
             # TODO(aazzolini): fine-tune this
             return (
                 1.0
-                if len(choice) > 0 and len(chars_before) >= 32 and len(chars_after) <= 2
+                if len(choice) > 0 and chars_before >= 32 and chars_after <= 2
                 else 0.0
             )
         else:
