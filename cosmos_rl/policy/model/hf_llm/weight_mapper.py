@@ -190,3 +190,12 @@ class HFLLMWeightMapper(WeightMapper):
             )
             return split_strategy
         return []
+
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        for key in ["q_proj", "k_proj", "v_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "qkv_proj")
+        for key in ["gate_proj", "up_proj"]:
+            if key in weight_key:
+                return weight_key.replace(key, "gate_up_proj")
+        return weight_key  # return full weight key
