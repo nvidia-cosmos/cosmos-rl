@@ -592,8 +592,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         """
         # lazy initialization of the vllm engine.
         if not self.rollout.is_engine_initialized():
-            is_for_weight_resume = command.dst_replica_name == self.replica_name
-            load_format = "auto" if is_for_weight_resume else "dummy"
+            # is_for_weight_resume = command.dst_replica_name == self.replica_name
+            # load_format = "auto" if is_for_weight_resume else "dummy"
+            load_format = "dummy"
             self.rollout.init_engine(
                 quantization=self.quantization_type,
                 seed=self.config.rollout.seed,

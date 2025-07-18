@@ -30,7 +30,7 @@ math_comparer = math_metric(
 )
 
 
-ANSWER_PATTERN = r"<answer>(.*?)</answer>"
+ANSWER_PATTERN = r"ANSWER::(.*?)(::|\n)"
 
 
 # Constants for normalization
