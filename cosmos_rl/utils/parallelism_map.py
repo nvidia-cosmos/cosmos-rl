@@ -916,7 +916,7 @@ class ParallelTopoMapperGroup:
 
         if weight_mapper is None:
             if model_type not in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY:
-                print(
+                logger.warning(
                     f"[ParallelTopoMapperGroup] can not find {model_type} in weight mapper, use {COSMOS_HF_MODEL_TYPES} model type instead."
                 )
                 model_type = COSMOS_HF_MODEL_TYPES
