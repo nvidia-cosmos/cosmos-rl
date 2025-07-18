@@ -59,7 +59,7 @@ def parallelize(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if config.train.compile:
-        apply_compile(model, not parallel_dims.cp_enabled)
+        apply_compile(model)
 
     if (
         parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
