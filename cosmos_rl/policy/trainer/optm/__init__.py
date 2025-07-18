@@ -80,7 +80,6 @@ class OptimizersContainer(Optimizer, Generic[T]):
         all_params = []
         self.model_parts = model_parts
         self.optimizers = [[] for _ in self.model_parts]
-        all_optimizer_keys = set()
         for model_id, (model, optimizer_kwargs_i) in enumerate(
             zip(self.model_parts, optimizer_kwargs)
         ):
@@ -101,13 +100,6 @@ class OptimizersContainer(Optimizer, Generic[T]):
                 for params in parameters_by_mesh.values():
                     optimizer = optimizer_cls(params, **optimizer_kwargs_copy)
                     self.optimizers[model_id].append(optimizer)
-                    # Check if there are duplicated keys from the optimizers.
-                    for optimizer_key in optimizer.state_dict().keys():
-                        if optimizer_key in all_optimizer_keys:
-                            raise ValueError(
-                                f"Duplicated optimizer key is deteced! Key = {optimizer_key}"
-                            )
-                        all_optimizer_keys.add(optimizer_key)
             else:
                 for p in model.parameters():
                     if p.requires_grad:
@@ -133,43 +125,30 @@ class OptimizersContainer(Optimizer, Generic[T]):
             optimizer.zero_grad(*args, **kwargs)
 
     def state_dict(self) -> Dict[str, Any]:
-        func = functools.partial(
-            get_optimizer_state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        # valid_model_parts = [mp for mp in self.model_parts if mp is not None]
-        # valid_optimizers = [opt for opt in self.optimizers if opt is not None]
-        # assert len(valid_model_parts) == len(valid_optimizers), "The number of model parts and optimizers must be the same"
-
-        valid_model_parts = []
-        valid_optimizers = []
-        for mp, opt in zip(self.model_parts, self.optimizers):
-            if mp is None or opt is None:
+        state_dict = {}
+        for i, (mp, opt) in enumerate(zip(self.model_parts, self.optimizers)):
+            if mp is None or len(opt) == 0:
                 continue
-            valid_model_parts.append(mp)
-            valid_optimizers.append(opt)
-
-        return {
-            k: v
-            for sd in map(func, valid_model_parts, valid_optimizers)
-            for k, v in sd.items()
-        }
+            sd = get_optimizer_state_dict(
+                mp, opt, options=StateDictOptions(flatten_optimizer_state_dict=True)
+            )
+            for k, v in sd.items():
+                if f"idx-{i}-{k}" in state_dict:
+                    raise ValueError(f"Duplicated optimizer key is deteced! Key = {k}")
+                state_dict[f"idx-{i}-{k}"] = v
+        return state_dict
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        func = functools.partial(
-            set_optimizer_state_dict,
-            optim_state_dict=state_dict,
-            options=StateDictOptions(flatten_optimizer_state_dict=True),
-        )
-        valid_model_parts = []
-        valid_optimizers = []
-        for mp, opt in zip(self.model_parts, self.optimizers):
-            if mp is None or opt is None:
+        for i, (mp, opt) in enumerate(zip(self.model_parts, self.optimizers)):
+            if mp is None or len(opt) == 0:
                 continue
-            valid_model_parts.append(mp)
-            valid_optimizers.append(opt)
-
-        list(map(func, valid_model_parts, valid_optimizers))
+            # Filter the state_dict for the current model part
+            current_state_dict = {
+                k.replace(f"idx-{i}-", ""): v
+                for k, v in state_dict.items()
+                if k.startswith(f"idx-{i}-")
+            }
+            set_optimizer_state_dict(mp, opt, current_state_dict)
 
     def _post_init(
         self, all_params: list[nn.Parameter], optimizer_kwargs: dict[str, Any]

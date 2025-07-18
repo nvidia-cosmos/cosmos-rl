@@ -303,9 +303,9 @@ class SFTTrainer(Trainer):
                     )
                 else:
                     self.train_step = ckpt_extra_vars.get("step", 0)
-            except Exception:
+            except Exception as e:
                 logger.error(
-                    f"Cannot resume from {self.config.train.resume}. Trying to load from HuggingFace..."
+                    f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                 )
                 self.model.load_hf_weights(
                     config.policy.model_name_or_path, parallel_dims, self.device
