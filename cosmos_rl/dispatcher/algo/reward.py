@@ -30,6 +30,9 @@ math_comparer = math_metric(
 )
 
 
+ANSWER_PATTERN = r"ANSWER::(.*?)::END_ANSWER"
+
+
 # Constants for normalization
 SUBSTITUTIONS = [
     ("an ", ""),
@@ -134,13 +137,21 @@ def format_reward_fn(
     to_be_evaluated: str, reference: Union[str, None], **kwargs
 ) -> float:
     try:
-        pattern = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n\n<answer>([\s\S]*?)<\/answer>$"
-        match = re.search(pattern, to_be_evaluated, re.DOTALL)
-        # if the format is not correct, reward is 0
-        if match is None or len(match.groups()) != 2:
-            return 0.0
+        match = re.search(ANSWER_PATTERN, to_be_evaluated)
+        if match:
+            choice = match.group(1)
+            start = match.start(1)
+            end = match.end(1)
+            chars_before = start
+            chars_after = len(to_be_evaluated) - end
+            # TODO(aazzolini): fine-tune this
+            return (
+                1.0
+                if len(choice) > 0 and len(chars_before) >= 32 and len(chars_after) <= 2
+                else 0.0
+            )
         else:
-            return 1.0
+            return 0.0
     except Exception as e:  # noqa: BLE001
         logger.debug("Exception in format_reward_func: %s", e)
         return 0.0
@@ -218,11 +229,11 @@ def single_choice_reward_fn(
     reward = 0.0
     try:
         # Extract answer from solution if it has think/answer tags
-        sol_match = re.search(r"<answer>(.*?)</answer>", reference, re.DOTALL)
+        sol_match = re.search(ANSWER_PATTERN, reference, re.DOTALL)
         ground_truth = sol_match.group(1).strip() if sol_match else reference.strip()
 
         # Extract answer from content if it has think/answer tags
-        content_match = re.search(r"<answer>(.*?)</answer>", to_be_evaluated, re.DOTALL)
+        content_match = re.search(ANSWER_PATTERN, to_be_evaluated, re.DOTALL)
         student_answer = (
             content_match.group(1).strip() if content_match else to_be_evaluated.strip()
         )

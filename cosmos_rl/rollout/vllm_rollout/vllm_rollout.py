@@ -32,9 +32,14 @@ from cosmos_rl.dispatcher.data.packer import DataPacker
 from PIL import Image
 from cosmos_rl.policy.model import WeightMapper
 
-from cosmos_rl.rollout.vllm_rollout.vllm_patch import (
-    process_weights_after_loading,
-)
+
+# Still needed for MLA
+try:
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+except ImportError:
+    from vllm.model_executor.model_loader.loader import (
+        _process_weights_after_loading as process_weights_after_loading,
+    )
 
 
 def make_prompt(tokenizer, image_or_image_url, question=None):
@@ -95,12 +100,15 @@ class vLLMRollout(RolloutBase):
         policy_config = self.config.policy
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
+        self.trust_remote_code = True
 
         vllm_version_check(self.rollout_config)
 
         model_path = policy_config.model_name_or_path
 
-        self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
+        self.model_config = util.retry(AutoConfig.from_pretrained)(
+            model_path, trust_remote_code=True
+        )
 
         self.pad_token_id = tokenizer.pad_token_id
 
@@ -133,8 +141,6 @@ class vLLMRollout(RolloutBase):
         **kwargs,
     ):
         if not self._engine_initialized:
-            trust_remote_code = True  # set trust remote code default to True.
-
             model_path = self.config.policy.model_name_or_path
 
             rollout_parallelism = self.rollout_config.parallelism
@@ -193,10 +199,14 @@ class vLLMRollout(RolloutBase):
                 else policy_config.model_max_length,
                 enable_chunked_prefill=self.rollout_config.enable_chunked_prefill,
                 enable_prefix_caching=enable_prefix_caching,
-                trust_remote_code=trust_remote_code,
+                trust_remote_code=self.trust_remote_code,
                 quantization=self.quantization,
                 seed=seed or 42,
                 load_format=load_format,
+                limit_mm_per_prompt={
+                    "image": 32,
+                    "video": 0,
+                },  # TODO(aazzolini): pass as config? or figure out V1?
             )
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")

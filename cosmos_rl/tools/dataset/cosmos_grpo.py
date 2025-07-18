@@ -97,7 +97,7 @@ class CosmosGRPODataset(Dataset):
         user_prompt += (
             "\nAnswer with the option's letter from the given choices directly."
         )
-        user_prompt += "\nPlease answer the question in the following format: <think> your reasoning </think> <answer> your answer </answer>."
+        user_prompt += "\nPlease think about it first then give the answer in the format ANSWER::CHOICE::END_ANSWER"
 
         user_conv = [
             {

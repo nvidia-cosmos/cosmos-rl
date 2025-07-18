@@ -186,6 +186,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             else:
                 os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "1"
 
+        # FIXME(aazzolini): this is needed for correctnes, try new version
+        logger.info(
+            "Forcing VLLM_ATTENTION_BACKEND to CUTLASS_MLA_VLLM_V1 for correctness."
+        )
+        os.environ["VLLM_ATTENTION_BACKEND"] = "CUTLASS_MLA_VLLM_V1"
+        os.environ["VLLM_LOGGING_LEVEL"] = "INFO"
+
         # determine the quantization type
         self.quantization_type = None
         if self.config.rollout.quantization == "fp8":
@@ -999,6 +1006,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 prompt_indices_to_remove: List[int] = []
                 if len(completions):
                     batch_size = len(prompts)
+                    assert (
+                        len(completions) == batch_size
+                    ), f"Error: VLLM returned {len(completions)} for {batch_size}"
                     for i in range(batch_size):
                         completion = completions[i]
                         skip_output = False
