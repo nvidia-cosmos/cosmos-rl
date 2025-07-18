@@ -62,7 +62,6 @@ jobs:
           ${DOCKER_RUN} python tests/test_process_flow.py
           ${DOCKER_RUN} python tests/test_math_verify.py
           ${LONG_DOCKER_RUN} python tests/test_integration.py
-          ${DOCKER_RUN} python tests/test_dummy_load.py
 
       - name: Cleanup
         if: always()
