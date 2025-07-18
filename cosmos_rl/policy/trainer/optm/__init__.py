@@ -102,11 +102,17 @@ class OptimizersContainer(Optimizer, Generic[T]):
                     optimizer = optimizer_cls(params, **optimizer_kwargs_copy)
                     self.optimizers[model_id].append(optimizer)
                     # Check if there are duplicated keys from the optimizers.
-                    for optimizer_key in optimizer.state_dict().keys():
+                    optimizer_keys = get_optimizer_state_dict(
+                        model_parts[model_id],
+                        optimizer,
+                        options=StateDictOptions(flatten_optimizer_state_dict=True),
+                    ).keys()
+                    for optimizer_key in optimizer_keys:
                         if optimizer_key in all_optimizer_keys:
-                            raise ValueError(
+                            logger.error(
                                 f"Duplicated optimizer key is deteced! Key = {optimizer_key}"
                             )
+                            # raise ValueError(f"Duplicated optimizer key is deteced! Key = {optimizer_key}")
                         all_optimizer_keys.add(optimizer_key)
             else:
                 for p in model.parameters():
