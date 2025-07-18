@@ -40,6 +40,9 @@ COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY = int(
     os.environ.get("COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY", "10")
 )
 
+# Internal model type for HFLLMModel
+COSMOS_HF_MODEL_TYPES = "hfllm"
+
 
 class CosmosHttpRetryConfig:
     max_retries: int = 60

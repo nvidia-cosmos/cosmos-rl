@@ -19,7 +19,7 @@ Main Features
       - **Rollout** and **Policy** are decoupled into independent processes/GPUs.
       - No colocation of **Rollout** and **Policy** is required.
       - Number of **Rollout/Policy** instances can be scaled independently.
-   - **Fast** 
+   - **Fast**
       - *IB/NVLink* are used for high-speed weight synchronization.
       - **Policy** training and **Rollout** weight synchronization are **PARALLELIZED**.
    - **Robust**
@@ -45,6 +45,7 @@ Main Features
    quickstart/configuration
    quickstart/dataflow
    quickstart/customization
+   quickstart/hf_models_support
 
 .. toctree::
    :caption: Multi nodes training
@@ -56,17 +57,17 @@ Main Features
 
 .. toctree::
    :caption: Elastic & Fault Tolerance
-   
+
    elastic/overview
 
 .. toctree::
    :caption: Async RL
-   
+
    async/overview
 
 .. toctree::
    :caption: Parallelism
-   
+
    parallelism/overview
 
 .. toctree::

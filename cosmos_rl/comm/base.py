@@ -84,7 +84,6 @@ class CommMixin:
         self.remote_ips, self.remote_port, metadata = (
             dist_utils.get_controller_metadata()
         )
-
         # `sft_user_dataset` is only used in SFT mode when the user provides a dataset
         self.sft_user_dataset = None
         sft_user_dataset = metadata.get("sft_user_dataset", None)
