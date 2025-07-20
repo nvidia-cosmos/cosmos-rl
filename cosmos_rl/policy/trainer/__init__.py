@@ -26,7 +26,6 @@ from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationCon
 from cosmos_rl.policy.trainer.optm import build_optimizers, build_lr_schedulers
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.wandb_logger import is_wandb_available, init_wandb
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.comm.base import CommMixin
@@ -133,12 +132,6 @@ class Trainer(CommMixin):
         )
 
         self.report_data = {}
-        if "wandb" in config.logging.logger and is_wandb_available():
-            init_wandb(config, parallel_dims)
-        else:
-            logger.warning(
-                "Wandb is not available. Please install it to use wandb logging features."
-            )
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(self.model_parts, self.config)
 

@@ -24,7 +24,11 @@ from cosmos_rl.policy.config import (
 )
 from cosmos_rl.utils.util import compute_mfu
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.wandb_logger import is_wandb_available, log_wandb
+from cosmos_rl.utils.wandb_logger import (
+    init_wandb,
+    is_wandb_available,
+    log_wandb,
+)
 import torch
 import numpy as np
 from torch.utils.data import Dataset
@@ -225,6 +229,16 @@ class SFTTrainer(Trainer):
         if parallel_dims.dp_enabled:
             self.dp_rank = parallel_dims.mesh["dp"].get_local_rank()
             self.dp_world_size = parallel_dims.mesh["dp"].size()
+
+        # Prepare wandb
+        if "wandb" in config.logging.logger and is_wandb_available():
+            init_wandb(config, parallel_dims)
+        else:
+            logger.warning(
+                "Wandb is not available. Please install it to use wandb logging features."
+            )
+
+        # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
             config.train.train_policy,
             tokenizer=self.tokenizer,
