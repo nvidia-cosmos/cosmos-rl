@@ -73,6 +73,8 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
     nccl_send,
+    nccl_group_start,
+    nccl_group_end,
 )
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
 
@@ -728,6 +730,15 @@ class GRPOTrainer(Trainer):
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
                 insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
+
+                import pickle
+
+                jobid = os.environ.get("SLURM_JOB_ID")
+                filename = f"/lustre/fsw/sw_aidot/aazzolini/RL/insts/policy_{jobid}_{self.global_rank}.pkl"
+                logger.info(f"Dumping pickled instructions to {filename}")
+                with open(filename, "wb") as f:
+                    pickle.dump(insts, f)
+
                 self.policy_to_rollout_insts = [
                     WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
                 ]
@@ -742,11 +753,32 @@ class GRPOTrainer(Trainer):
         # There is a local-replica comm in training step
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
+
+        from torch.cuda import cudart
+
+        cudart().cudaProfilerStart()
+
         with torch.cuda.stream(self.train_stream):
             with torch.no_grad():
                 pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
                     self.pre_P2R_collect_parameters()
                 )
+
+                def grouped_send(grouped_send_ops):
+                    nccl_group_start(comm_id)
+                    for view, r_rank in grouped_send_ops:
+                        nccl_send(
+                            view,
+                            self.world_size + r_rank,
+                            comm_id,
+                        )
+                    nccl_group_end(comm_id)
+                    grouped_send_ops.clear()
+
+                grouped_send_ops = []
+                num_groups = 0
+
+                TRANSFER_GROUP_SIZE = 4
                 for insts_group in self.policy_to_rollout_insts:
                     for insts_for_per_param in insts_group.param_instructions:
                         dest_name = insts_for_per_param.param_name
@@ -775,17 +807,23 @@ class GRPOTrainer(Trainer):
                             logger.debug(
                                 f"Sending {dest_name} to rollout rank {r_rank}, {view.shape}"
                             )
-                            nccl_send(
-                                view,
-                                self.world_size + r_rank,
-                                comm_id,
-                            )
+                            grouped_send_ops.append((view, r_rank))
                             total_bytes_sent += view.numel() * view.element_size()
+                    num_groups += 1
+                    if num_groups == TRANSFER_GROUP_SIZE:
+                        grouped_send(grouped_send_ops)
+                        num_groups = 0
+
+                grouped_send(grouped_send_ops)
+
         # make sure all the send operations of all ranks are finished
         time_eclapsed = time.time() - st
         logger.debug(
             f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent."
         )
+
+        cudart().cudaProfilerStop()
+
         return False
 
     @Trainer.register_policy_command_handler(WeightResumeCommand)

@@ -207,6 +207,9 @@ class vLLMRollout(RolloutBase):
                     "image": 32,
                     "video": 0,
                 },  # TODO(aazzolini): pass as config? or figure out V1?
+                # seems like not supported
+                # kv_cache_dtype="fp8",
+                # calculate_kv_scales=True,
             )
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")

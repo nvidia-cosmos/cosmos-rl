@@ -1262,17 +1262,18 @@ class ParallelizedShardMapper:
                                 p_rank, r, p_tensor_split_strategys
                             ).__dict__
                         )
-            if insts_for_param_name:
+            if True:  # insts_for_param_name:
                 insts_for_group.append(
                     WeightSyncInstructionsPerParam(
                         dest_name, insts_for_param_name
                     ).__dict__
                 )
-            if insts_for_group:
+            if True:  # if insts_for_group:
                 policy_to_rollout_insts.append(
                     WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
-            else:
+            # else:
+            if not insts_for_group:
                 logger.warning(
                     f"No send instructions generated for parameter {dest_name} in policy rank {p_rank}."
                 )
@@ -1322,13 +1323,13 @@ class ParallelizedShardMapper:
                                     p_rank, r, p_tensor_split_strategys
                                 ).__dict__
                             )
-                if insts_for_param_name:
+                if True:  # insts_for_param_name:
                     insts_for_group.append(
                         WeightSyncInstructionsPerParam(
                             dest_name, insts_for_param_name
                         ).__dict__
                     )
-            if insts_for_group:
+            if True:  # insts_for_group:
                 policy_to_rollout_insts.append(
                     WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
