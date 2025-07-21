@@ -879,12 +879,12 @@ class Qwen2_5_VLConditionalModel(BaseModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        pixel_values_images: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
         pixel_values_videos: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.Tensor] = None,
-        pixel_values_images_lengths_per_sample: Optional[torch.Tensor] = None,
+        pixel_values_lengths_per_sample: Optional[torch.Tensor] = None,
         pixel_values_videos_lengths_per_sample: Optional[torch.Tensor] = None,
         **kwargs,
     ):
@@ -903,20 +903,18 @@ class Qwen2_5_VLConditionalModel(BaseModel):
                 assert (
                     image_grid_thw is not None
                 ), "image_grid_thw must be provided if there are image tokens"
-                total_image_lengths = (
-                    pixel_values_images_lengths_per_sample.sum().item()
-                )
+                total_image_lengths = pixel_values_lengths_per_sample.sum().item()
                 unpadded_pixels = torch.zeros(
                     total_image_lengths,
-                    pixel_values_images.shape[2],
-                    device=pixel_values_images.device,
-                    dtype=pixel_values_images.dtype,
+                    pixel_values.shape[2],
+                    device=pixel_values.device,
+                    dtype=pixel_values.dtype,
                 )
                 current_index = 0
-                for i in range(pixel_values_images_lengths_per_sample.shape[0]):
-                    image_length = pixel_values_images_lengths_per_sample[i].item()
+                for i in range(pixel_values_lengths_per_sample.shape[0]):
+                    image_length = pixel_values_lengths_per_sample[i].item()
                     unpadded_pixels[current_index : current_index + image_length] = (
-                        pixel_values_images[i, :image_length]
+                        pixel_values[i, :image_length]
                     )
                     current_index += image_length
                 inputs_embeds = self._process_vision_embeddings(

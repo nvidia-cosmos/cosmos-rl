@@ -210,11 +210,11 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                 "pixel_values_videos"
             ].shape[0]
 
-        if "pixel_values_images" in inputs:
-            result_dict["pixel_values_images"] = inputs["pixel_values_images"]
+        if "pixel_values" in inputs:
+            result_dict["pixel_values"] = inputs["pixel_values"]
             result_dict["image_grid_thw"] = inputs["image_grid_thw"]
-            result_dict["pixel_values_images_lengths_per_sample"] = inputs[
-                "pixel_values_images"
+            result_dict["pixel_values_lengths_per_sample"] = inputs[
+                "pixel_values"
             ].shape[0]
 
         return result_dict
@@ -225,13 +225,13 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         pixel_values_videos = [x["pixel_values_videos"] for x in processed_samples]
         video_grid_thw = [x["video_grid_thw"] for x in processed_samples]
         second_per_grid_ts = [x["second_per_grid_ts"] for x in processed_samples]
-        pixel_values_images = [x["pixel_values_images"] for x in processed_samples]
+        pixel_values = [x["pixel_values"] for x in processed_samples]
         image_grid_thw = [x["image_grid_thw"] for x in processed_samples]
         pixel_values_videos_lengths_per_sample = [
             x["pixel_values_videos_lengths_per_sample"] for x in processed_samples
         ]
-        pixel_values_images_lengths_per_sample = [
-            x["pixel_values_images_lengths_per_sample"] for x in processed_samples
+        pixel_values_lengths_per_sample = [
+            x["pixel_values_lengths_per_sample"] for x in processed_samples
         ]
 
         if all([x is not None for x in pixel_values_videos]):
@@ -261,27 +261,25 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             second_per_grid_ts = None
             pixel_values_videos_lengths_per_sample = None
 
-        if all([x is not None for x in pixel_values_images]):
-            max_len = max([x.shape[0] for x in pixel_values_images])
-            for i in range(len(pixel_values_images)):
-                pixel_values_images[i] = pixel_values_images[i].unsqueeze(0)
+        if all([x is not None for x in pixel_values]):
+            max_len = max([x.shape[0] for x in pixel_values])
+            for i in range(len(pixel_values)):
+                pixel_values[i] = pixel_values[i].unsqueeze(0)
                 assert (
-                    pixel_values_images[i].ndim == 3
-                ), f"pixel_values_images[i].ndim: {pixel_values_images[i].ndim}"
-                pixel_values_images[i] = F.pad(
-                    pixel_values_images[i],
-                    (0, 0, 0, max_len - pixel_values_images[i].shape[1]),
+                    pixel_values[i].ndim == 3
+                ), f"pixel_values[i].ndim: {pixel_values[i].ndim}"
+                pixel_values[i] = F.pad(
+                    pixel_values[i],
+                    (0, 0, 0, max_len - pixel_values[i].shape[1]),
                 )
-            pixel_values_images = torch.cat(pixel_values_images, dim=0)
+            pixel_values = torch.cat(pixel_values, dim=0)
             image_grid_thw = torch.cat(image_grid_thw, dim=0)
         else:
             # TODO(jiaxin): handle the case when there is mixed input: some with image, some without image
-            assert all(
-                [x is None for x in pixel_values_images]
-            ), "pixel_values_images should be None"
-            pixel_values_images = None
+            assert all([x is None for x in pixel_values]), "pixel_values should be None"
+            pixel_values = None
             image_grid_thw = None
-            pixel_values_images_lengths_per_sample = None
+            pixel_values_lengths_per_sample = None
 
         # Shape description:
         #
@@ -298,11 +296,11 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                 pixel_values_videos_lengths_per_sample, dtype=torch.long
             ).view(-1, 1)
 
-        if pixel_values_images is not None:
-            batch["pixel_values_images"] = pixel_values_images
+        if pixel_values is not None:
+            batch["pixel_values"] = pixel_values
             batch["image_grid_thw"] = image_grid_thw
-            batch["pixel_values_images_lengths_per_sample"] = torch.tensor(
-                pixel_values_images_lengths_per_sample, dtype=torch.long
+            batch["pixel_values_lengths_per_sample"] = torch.tensor(
+                pixel_values_lengths_per_sample, dtype=torch.long
             ).view(-1, 1)
 
         # Pad the input_ids, logprob_masks
@@ -366,16 +364,16 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             return_dict["second_per_grid_ts"] = None
             return_dict["pixel_values_videos_lengths_per_sample"] = None
 
-        if "pixel_values_images" in x:
-            return_dict["pixel_values_images"] = x["pixel_values_images"]
+        if "pixel_values" in x:
+            return_dict["pixel_values"] = x["pixel_values"]
             return_dict["image_grid_thw"] = x["image_grid_thw"]
-            return_dict["pixel_values_images_lengths_per_sample"] = x[
-                "pixel_values_images_lengths_per_sample"
+            return_dict["pixel_values_lengths_per_sample"] = x[
+                "pixel_values_lengths_per_sample"
             ]
         else:
-            return_dict["pixel_values_images"] = None
+            return_dict["pixel_values"] = None
             return_dict["image_grid_thw"] = None
-            return_dict["pixel_values_images_lengths_per_sample"] = None
+            return_dict["pixel_values_lengths_per_sample"] = None
 
         # Common fields
         input_ids = x["input_ids"]
