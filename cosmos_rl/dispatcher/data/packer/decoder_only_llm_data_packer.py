@@ -102,13 +102,17 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         collated_dict = {}
         collated_dict["input_ids"] = torch.tensor(
             [
-                x + [self.tokenizer.pad_token_id] * (max(0, computed_max_len - len(x)))
+                x[:computed_max_len]
+                + [self.tokenizer.pad_token_id] * (max(0, computed_max_len - len(x)))
                 for x in input_ids
             ],
             dtype=torch.long,
         ).to(device)
         collated_dict["logprob_masks"] = torch.tensor(
-            [x + [0] * (max(0, computed_max_len - len(x))) for x in logprob_masks],
+            [
+                x[:computed_max_len] + [0] * (max(0, computed_max_len - len(x)))
+                for x in logprob_masks
+            ],
             dtype=torch.bool,
         ).to(device)
 
@@ -277,7 +281,8 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         # Then pad the samples to the computed_max_len
         input_ids = torch.tensor(
             [
-                x + [pad_token_id] * (max(0, computed_max_len - len(x)))
+                x[:computed_max_len]
+                + [pad_token_id] * (max(0, computed_max_len - len(x)))
                 for x in list_of_input_ids
             ],
             dtype=torch.long,
@@ -285,7 +290,8 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         # Model accept unshifted label_ids for loss computation
         label_ids = torch.tensor(
             [
-                x + [ignore_label_id] * (max(0, computed_max_len - len(x)))
+                x[:computed_max_len]
+                + [ignore_label_id] * (max(0, computed_max_len - len(x)))
                 for x in list_of_label_ids
             ],
             dtype=torch.long,

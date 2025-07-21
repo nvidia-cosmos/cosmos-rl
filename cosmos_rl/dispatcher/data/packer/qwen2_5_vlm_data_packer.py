@@ -308,7 +308,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         # Pad the input_ids, logprob_masks
         batch["input_ids"] = torch.tensor(
             [
-                x["input_ids"]
+                x["input_ids"][:computed_max_len]
                 + [self.tokenizer.pad_token_id]
                 * (max(0, computed_max_len - len(x["input_ids"])))
                 for x in processed_samples
@@ -318,7 +318,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         if "label_ids" in processed_samples[0]:
             batch["label_ids"] = torch.tensor(
                 [
-                    x["label_ids"]
+                    x["label_ids"][:computed_max_len]
                     + [IGNORE_LABEL_ID]
                     * (max(0, computed_max_len - len(x["label_ids"])))
                     for x in processed_samples
@@ -327,7 +327,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             )
         batch["logprob_masks"] = torch.tensor(
             [
-                x["logprob_masks"]
+                x["logprob_masks"][:computed_max_len]
                 + [0] * (max(0, computed_max_len - len(x["logprob_masks"])))
                 for x in processed_samples
             ],

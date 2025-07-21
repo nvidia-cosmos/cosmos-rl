@@ -26,7 +26,6 @@ from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationCon
 from cosmos_rl.policy.trainer.optm import build_optimizers, build_lr_schedulers
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.wandb_logger import is_wandb_available, init_wandb
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.comm.base import CommMixin
@@ -58,6 +57,17 @@ class Trainer(CommMixin):
             config.policy.model_name_or_path,
             trust_remote_code=True,
         )
+        # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
+        if getattr(self.tokenizer, "pad_token_id", None) is None:
+            try:
+                logger.warning(
+                    f"Tokenizer for {config.policy.model_name_or_path} has no pad_token_id, try to use eos_token_id({self.tokenizer.eos_token_id}) as pad_token_id"
+                )
+                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+            except Exception as e:
+                logger.warning(
+                    f"Failed to set pad_token_id with eos_token_id, error = {e}, ignore if not needed"
+                )
 
         self.hf_config = util.retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path,
@@ -122,12 +132,6 @@ class Trainer(CommMixin):
         )
 
         self.report_data = {}
-        if "wandb" in config.logging.logger and is_wandb_available():
-            init_wandb(config, parallel_dims)
-        else:
-            logger.warning(
-                "Wandb is not available. Please install it to use wandb logging features."
-            )
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(self.model_parts, self.config)
 

@@ -19,6 +19,7 @@ Cosmos-RL provides toolchain to enable large scale RL training workload with fol
     - Qwen-3
     - Qwen-3-MoE
     - Moonlight-MoE
+    - All HF LLMs
 2. **Parallelism**
     - Tensor Parallelism
     - Sequence Parallelism

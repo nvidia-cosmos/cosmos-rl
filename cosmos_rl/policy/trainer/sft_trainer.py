@@ -24,7 +24,11 @@ from cosmos_rl.policy.config import (
 )
 from cosmos_rl.utils.util import compute_mfu
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.wandb_logger import is_wandb_available, log_wandb
+from cosmos_rl.utils.wandb_logger import (
+    init_wandb,
+    is_wandb_available,
+    log_wandb,
+)
 import torch
 import numpy as np
 from torch.utils.data import Dataset
@@ -40,6 +44,21 @@ import os
 from typing import Optional, Dict, Any
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
+
+
+def async_safe_ce(
+    output: torch.Tensor,
+    target: torch.LongTensor,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    loss = torch.nn.functional.cross_entropy(
+        output[:, :-1].flatten(0, 1),
+        target[:, 1:].flatten(0, 1),
+        ignore_index=ignore_index,
+        reduction="mean",
+    )
+    # In case of all labels are ignored, loss will be nan.
+    return torch.nan_to_num(loss, nan=0.0)
 
 
 def collate_fn(
@@ -225,6 +244,16 @@ class SFTTrainer(Trainer):
         if parallel_dims.dp_enabled:
             self.dp_rank = parallel_dims.mesh["dp"].get_local_rank()
             self.dp_world_size = parallel_dims.mesh["dp"].size()
+
+        # Prepare wandb
+        if "wandb" in config.logging.logger and is_wandb_available():
+            init_wandb(config, parallel_dims)
+        else:
+            logger.warning(
+                "Wandb is not available. Please install it to use wandb logging features."
+            )
+
+        # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
             config.train.train_policy,
             tokenizer=self.tokenizer,
@@ -303,9 +332,9 @@ class SFTTrainer(Trainer):
                     )
                 else:
                     self.train_step = ckpt_extra_vars.get("step", 0)
-            except Exception:
+            except Exception as e:
                 logger.error(
-                    f"Cannot resume from {self.config.train.resume}. Trying to load from HuggingFace..."
+                    f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                 )
                 self.model.load_hf_weights(
                     config.policy.model_name_or_path, parallel_dims, self.device
@@ -316,7 +345,7 @@ class SFTTrainer(Trainer):
             )
         self.model.train()
 
-        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.loss_fn = async_safe_ce
 
     def validate(self):
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
@@ -375,15 +404,11 @@ class SFTTrainer(Trainer):
                         )
 
                     if pp_last_stage:
-                        val_logits = pp_out[:, :-1].contiguous()
-                        val_loss = self.loss_fn(
-                            val_logits.view(-1, val_logits.size(-1)),
-                            val_labels[:, 1:].contiguous().view(-1),
-                        )
+                        val_loss = self.loss_fn(pp_out, val_labels)
                     else:
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
-                    val_logits = self.model(**val_batch)[:, :-1].contiguous()
+                    val_logits = self.model(**val_batch)
 
                     # recover from ulysses if cp is enabled
                     if self.parallel_dims.cp_enabled:
@@ -392,10 +417,7 @@ class SFTTrainer(Trainer):
                         if padding_mask_before_cp is not None:
                             val_batch["padding_mask"] = padding_mask_before_cp
 
-                    val_loss = self.loss_fn(
-                        val_logits.view(-1, val_logits.size(-1)),
-                        val_labels[:, 1:].contiguous().view(-1),
-                    )
+                    val_loss = self.loss_fn(val_logits, val_labels)
                 val_total_loss += val_loss.item() * val_inputs.size(0)
             val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
             logger.info(f"Validation loss: {val_avg_loss}")
@@ -430,13 +452,13 @@ class SFTTrainer(Trainer):
                 ):
                     if (
                         self.train_step
-                        == self.profiler.WAIT_STEPS + self.profiler.WARMUP_STEPS
+                        == self.profiler.wait_steps + self.profiler.warmup_steps
                     ):
                         torch.cuda.cudart().cudaProfilerStart()
                     elif (
                         self.train_step
-                        == self.profiler.WAIT_STEPS
-                        + self.profiler.WARMUP_STEPS
+                        == self.profiler.wait_steps
+                        + self.profiler.warmup_steps
                         + self.profiler.active_steps
                     ):
                         torch.cuda.cudart().cudaProfilerStop()
@@ -513,11 +535,7 @@ class SFTTrainer(Trainer):
                         if padding_mask_before_cp is not None:
                             batch["padding_mask"] = padding_mask_before_cp
 
-                    logits = logits[:, :-1].contiguous()
-                    loss = self.loss_fn(
-                        logits.view(-1, logits.size(-1)),
-                        labels[:, 1:].contiguous().view(-1),
-                    )
+                    loss = self.loss_fn(logits, labels)
                     loss.backward()
                 loss = loss.detach()
 
@@ -704,12 +722,4 @@ class SFTTrainer(Trainer):
 
     @property
     def pp_loss_fn(self):
-        def cross_entropy_loss(
-            output: torch.Tensor, target: torch.LongTensor
-        ) -> torch.Tensor:
-            """Common cross-entropy loss function for Transformer models training."""
-            return torch.nn.functional.cross_entropy(
-                output[:, :-1].flatten(0, 1).float(), target[:, 1:].flatten(0, 1)
-            )
-
-        return torch.compile(cross_entropy_loss)
+        return torch.compile(async_safe_ce)

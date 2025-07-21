@@ -28,6 +28,7 @@ from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
+from typing import List
 
 
 def upload_file_to_s3(
@@ -111,7 +112,7 @@ class CheckpointMananger:
     def ckpt_path_check(ckpt_path: str):
         return os.path.exists(os.path.join(ckpt_path, "cosmos_config"))
 
-    def get_ckpt_path(self):
+    def get_ckpt_path(self) -> List[str]:
         # find the latest checkpoint under output_dir
         if self.config.train.resume == True:  # noqa: E712
             root_output_dir = os.path.dirname(os.path.dirname(self.ckpt_output_dir))
@@ -123,12 +124,12 @@ class CheckpointMananger:
                     break
             steps = os.listdir(os.path.join(root_output_dir, timestamp, "checkpoints"))
             steps.sort()
-            base_path = os.path.join(
-                root_output_dir, timestamp, "checkpoints", steps[-1], "policy"
-            )
+            return [
+                os.path.join(root_output_dir, timestamp, "checkpoints", step, "policy")
+                for step in reversed(steps)
+            ]
         else:
-            base_path = self.config.train.resume
-        return base_path
+            return [self.config.train.resume]
 
     @staticmethod
     def get_rng_state():
@@ -303,38 +304,51 @@ class CheckpointMananger:
         scheduler: torch.optim.lr_scheduler._LRScheduler,
     ):
         extra_vars = {}
-        base_path = self.get_ckpt_path()
+        base_paths: List[str] = self.get_ckpt_path()
         # check whether checkpoint existing
-        is_ckpt_path = self.ckpt_path_check(base_path)
-        if is_ckpt_path:
-            logger.info(
-                f"Cosmos checkpoint found at {self.config.train.resume}. Resuming..."
-            )
-            model_path = os.path.join(base_path, f"model_rank_{self.global_rank}.pth")
-            optimizer_path = os.path.join(
-                base_path, f"optimizer_rank_{self.global_rank}.pth"
-            )
-            scheduler_path = os.path.join(
-                base_path, f"scheduler_rank_{self.global_rank}.pth"
-            )
-            extra_info_path = os.path.join(
-                base_path, f"extra_info_rank_{self.global_rank}.pth"
-            )
+        for base_path in base_paths:
+            try:
+                logger.info(f"Trying to load checkpoint from {base_path}...")
+                if self.ckpt_path_check(base_path):
+                    logger.info(
+                        f"Cosmos checkpoint found at {self.config.train.resume}. Resuming..."
+                    )
+                    model_path = os.path.join(
+                        base_path, f"model_rank_{self.global_rank}.pth"
+                    )
+                    optimizer_path = os.path.join(
+                        base_path, f"optimizer_rank_{self.global_rank}.pth"
+                    )
+                    scheduler_path = os.path.join(
+                        base_path, f"scheduler_rank_{self.global_rank}.pth"
+                    )
+                    extra_info_path = os.path.join(
+                        base_path, f"extra_info_rank_{self.global_rank}.pth"
+                    )
 
-            model.load_state_dict(torch.load(model_path, weights_only=False))
-            optimizer.load_state_dict(torch.load(optimizer_path, weights_only=False))
-            scheduler.load_state_dict(torch.load(scheduler_path, weights_only=False))
-            extra_info = self.load_extra_info(extra_info_path)
-            for key in extra_info:
-                if key == "rng_state":
-                    self.set_rng_state(extra_info["rng_state"])
-                else:
-                    extra_vars[key] = extra_info[key]
-            logger.info(f"[Policy] Checkpoint loaded successfully from {base_path}.")
-        else:
-            raise FileNotFoundError(f"No checkpoint found at {base_path}")
+                    model.load_state_dict(torch.load(model_path, weights_only=False))
+                    optimizer.load_state_dict(
+                        torch.load(optimizer_path, weights_only=False)
+                    )
+                    scheduler.load_state_dict(
+                        torch.load(scheduler_path, weights_only=False)
+                    )
+                    extra_info = self.load_extra_info(extra_info_path)
+                    for key in extra_info:
+                        if key == "rng_state":
+                            self.set_rng_state(extra_info["rng_state"])
+                        else:
+                            extra_vars[key] = extra_info[key]
+                    logger.info(
+                        f"[Policy] Checkpoint loaded successfully from {base_path}."
+                    )
+                    return extra_vars
+            except Exception as e:
+                logger.error(
+                    f"Error loading checkpoint from {base_path}: {e}, try next checkpoint..."
+                )
 
-        return extra_vars
+        raise FileNotFoundError(f"No checkpoint found at {base_paths}")
 
     def load_extra_info_from_checkpoint(self):
         extra_vars = {}
