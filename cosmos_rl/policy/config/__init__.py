@@ -360,6 +360,8 @@ class SubProfilerConfig(BaseModel):
         default=False, description="Whether to profile, only used in runtime."
     )
     active_steps: int = Field(default=1, description="Number of active steps")
+    warmup_steps: int = Field(default=1, description="Number of warmup steps")
+    wait_steps: int = Field(default=1, description="Number of wait steps")
     rank_filter: List[int] = Field(default_factory=list, description="Rank filter")
     record_shape: bool = Field(default=False, description="Whether to record shape")
     profile_memory: bool = Field(default=False, description="Whether to profile memory")

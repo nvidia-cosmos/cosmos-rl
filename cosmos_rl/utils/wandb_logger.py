@@ -71,17 +71,21 @@ def init_wandb(config: CosmosConfig, parallel_dims: ParallelDims = None):
         experiment_name = os.path.join(
             config.logging.experiment_name, config.train.timestamp
         )
-    run = wandb.init(
-        project=config.logging.project_name,
-        name=experiment_name,
-        config=config.model_dump(),
-        dir=output_dir,
-        id=config.train.timestamp,  # Use timestamp as the run ID
-        resume="allow",
-    )
-    global wandb_run
-    wandb_run = run
-    return run
+    try:
+        run = wandb.init(
+            project=config.logging.project_name,
+            name=experiment_name,
+            config=config.model_dump(),
+            dir=output_dir,
+            id=config.train.timestamp,  # Use timestamp as the run ID
+            resume="allow",
+        )
+        global wandb_run
+        wandb_run = run
+        return run
+    except Exception as e:
+        logger.error(f"Failed to initialize wandb: {e}")
+        return None
 
 
 def log_wandb(data: dict, step: int):

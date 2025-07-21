@@ -17,6 +17,7 @@ import msgpack
 import torch
 from cosmos_rl.utils.parallelism import ParallelDims
 from typing import Dict, List, Tuple, Callable, Any, Optional, Union
+from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.logging import logger
 from vllm.model_executor.layers.linear import (
@@ -696,6 +697,7 @@ class ParallelTopoMapper:
             dims_rank_info = {}
             if not is_dist_tensor:
                 dims_map = {}
+                global_shape = tuple(param.shape)
             else:
                 dims_map = {}
                 global_shape = tuple(param.shape)
@@ -913,6 +915,11 @@ class ParallelTopoMapperGroup:
         self.mapper_group: List[ParallelTopoMapper] = []
 
         if weight_mapper is None:
+            if model_type not in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY:
+                logger.warning(
+                    f"[ParallelTopoMapperGroup] can not find {model_type} in weight mapper, use {COSMOS_HF_MODEL_TYPES} model type instead."
+                )
+                model_type = COSMOS_HF_MODEL_TYPES
             weight_mapper_fn = WeightMapper.get_weight_mapper(model_type)
             self.weight_mapper = weight_mapper_fn(hf_config)
         else:

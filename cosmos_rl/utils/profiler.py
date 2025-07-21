@@ -30,9 +30,6 @@ from cosmos_rl.utils import constant
 
 
 class CosmosProfiler:
-    WAIT_STEPS = 1
-    WARMUP_STEPS = 1
-
     def __init__(
         self,
         config: CosmosConfig,
@@ -59,6 +56,8 @@ class CosmosProfiler:
         self.thread_pool = None
 
         # static profiler config
+        self.wait_steps = config.profiler.sub_profiler_config.wait_steps
+        self.warmup_steps = config.profiler.sub_profiler_config.warmup_steps
         self.active_steps = config.profiler.sub_profiler_config.active_steps
         if len(config.profiler.sub_profiler_config.rank_filter) == 0:
             self.rank_filter = [0]
@@ -103,8 +102,8 @@ class CosmosProfiler:
                         torch.profiler.ProfilerActivity.CUDA,
                     ],
                     schedule=torch.profiler.schedule(
-                        wait=self.WAIT_STEPS,
-                        warmup=self.WARMUP_STEPS,
+                        wait=self.wait_steps,
+                        warmup=self.warmup_steps,
                         active=self.active_steps,
                         repeat=1,
                     ),
@@ -150,8 +149,8 @@ class CosmosProfiler:
                         torch.profiler.ProfilerActivity.CUDA,
                     ],
                     schedule=torch.profiler.schedule(
-                        wait=self.WAIT_STEPS,
-                        warmup=self.WARMUP_STEPS,
+                        wait=self.wait_steps,
+                        warmup=self.warmup_steps,
                         active=self.active_steps,
                         repeat=1,
                     ),
@@ -186,10 +185,10 @@ class CosmosProfiler:
 
     def get_total_steps_needed(self):
         if self.profiler is not None:
-            warm_up_steps = self.WARMUP_STEPS
-            wait_steps = self.WAIT_STEPS
+            warmup_steps = self.warmup_steps
+            wait_steps = self.wait_steps
             active_steps = self.active_steps
-            num_steps = wait_steps + warm_up_steps + active_steps
+            num_steps = wait_steps + warmup_steps + active_steps
             return num_steps
         return 0
 

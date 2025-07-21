@@ -61,7 +61,7 @@ jobs:
           ${DOCKER_RUN} python tests/test_policy_to_rollout.py
           ${DOCKER_RUN} python tests/test_process_flow.py
           ${DOCKER_RUN} python tests/test_math_verify.py
-          ${LONG_DOCKER_RUN} python tests/test_integration.py
+          ${LONG_DOCKER_RUN} python tests/test_integration.py --stream
 
       - name: Cleanup
         if: always()
