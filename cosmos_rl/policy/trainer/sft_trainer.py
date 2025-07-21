@@ -47,27 +47,14 @@ def async_safe_ce(
     target: torch.LongTensor,
     ignore_index: int = -100,
 ) -> torch.Tensor:
-    # [B, T, C] × [B, T]
-    logits = output[:, :-1]
-    labels = target[:, 1:]
-
-    # flatten to [B*T, C] and [B*T]
-    flat_logits = logits.flatten(0, 1).float()
-    flat_labels = labels.flatten(0, 1)
-
-    # 1) get total loss (summing only non-ignored positions under the hood)
-    total_loss = torch.nn.functional.cross_entropy(
-        flat_logits,
-        flat_labels,
+    loss = torch.nn.functional.cross_entropy(
+        output[:, :-1].flatten(0, 1),
+        target[:, 1:].flatten(0, 1),
         ignore_index=ignore_index,
-        reduction="sum",
+        reduction="mean",
     )
-
-    # 2) count how many valid labels we had, but never go below 1
-    valid_count = flat_labels.ne(ignore_index).sum().clamp_min(1.0)
-
-    # 3) divide on GPU — if count was zero, clamp made it 1, so loss==0/1=0
-    return total_loss / valid_count
+    # In case of all labels are ignored, loss will be nan.
+    return torch.nan_to_num(loss, nan=0.0)
 
 
 def collate_fn(
