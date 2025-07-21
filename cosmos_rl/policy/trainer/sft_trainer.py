@@ -42,6 +42,34 @@ from tqdm import tqdm
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 
 
+def async_safe_ce(
+    output: torch.Tensor,
+    target: torch.LongTensor,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    # [B, T, C] × [B, T]
+    logits = output[:, :-1]
+    labels = target[:, 1:]
+
+    # flatten to [B*T, C] and [B*T]
+    flat_logits = logits.flatten(0, 1).float()
+    flat_labels = labels.flatten(0, 1)
+
+    # 1) get total loss (summing only non-ignored positions under the hood)
+    total_loss = torch.nn.functional.cross_entropy(
+        flat_logits,
+        flat_labels,
+        ignore_index=ignore_index,
+        reduction="sum",
+    )
+
+    # 2) count how many valid labels we had, but never go below 1
+    valid_count = flat_labels.ne(ignore_index).sum().clamp_min(1.0)
+
+    # 3) divide on GPU — if count was zero, clamp made it 1, so loss==0/1=0
+    return total_loss / valid_count
+
+
 def collate_fn(
     batch,
     pad_token_id,
@@ -316,7 +344,7 @@ class SFTTrainer(Trainer):
             )
         self.model.train()
 
-        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.loss_fn = async_safe_ce
 
     def validate(self):
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
@@ -375,15 +403,11 @@ class SFTTrainer(Trainer):
                         )
 
                     if pp_last_stage:
-                        val_logits = pp_out[:, :-1].contiguous()
-                        val_loss = self.loss_fn(
-                            val_logits.view(-1, val_logits.size(-1)),
-                            val_labels[:, 1:].contiguous().view(-1),
-                        )
+                        val_loss = self.loss_fn(pp_out, val_labels)
                     else:
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
-                    val_logits = self.model(**val_batch)[:, :-1].contiguous()
+                    val_logits = self.model(**val_batch)
 
                     # recover from ulysses if cp is enabled
                     if self.parallel_dims.cp_enabled:
@@ -392,10 +416,7 @@ class SFTTrainer(Trainer):
                         if padding_mask_before_cp is not None:
                             val_batch["padding_mask"] = padding_mask_before_cp
 
-                    val_loss = self.loss_fn(
-                        val_logits.view(-1, val_logits.size(-1)),
-                        val_labels[:, 1:].contiguous().view(-1),
-                    )
+                    val_loss = self.loss_fn(val_logits, val_labels)
                 val_total_loss += val_loss.item() * val_inputs.size(0)
             val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
             logger.info(f"Validation loss: {val_avg_loss}")
@@ -513,11 +534,7 @@ class SFTTrainer(Trainer):
                         if padding_mask_before_cp is not None:
                             batch["padding_mask"] = padding_mask_before_cp
 
-                    logits = logits[:, :-1].contiguous()
-                    loss = self.loss_fn(
-                        logits.view(-1, logits.size(-1)),
-                        labels[:, 1:].contiguous().view(-1),
-                    )
+                    loss = self.loss_fn(logits, labels)
                     loss.backward()
                 loss = loss.detach()
 
@@ -704,12 +721,4 @@ class SFTTrainer(Trainer):
 
     @property
     def pp_loss_fn(self):
-        def cross_entropy_loss(
-            output: torch.Tensor, target: torch.LongTensor
-        ) -> torch.Tensor:
-            """Common cross-entropy loss function for Transformer models training."""
-            return torch.nn.functional.cross_entropy(
-                output[:, :-1].flatten(0, 1).float(), target[:, 1:].flatten(0, 1)
-            )
-
-        return torch.compile(cross_entropy_loss)
+        return torch.compile(async_safe_ce)
