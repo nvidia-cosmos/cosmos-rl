@@ -559,7 +559,7 @@ class SFTTrainer(Trainer):
                         loss = self.loss_fn(logits, labels)
                         loss = loss / len(mini_batches)
                         loss.backward()
-                acc_loss += loss.detach()
+                        acc_loss += loss.detach()
 
                 """
                 Compute the global grad norm on all parameters and then apply
