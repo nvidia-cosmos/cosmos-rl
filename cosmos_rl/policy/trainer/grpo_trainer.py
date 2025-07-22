@@ -1081,6 +1081,7 @@ class GRPOTrainer(Trainer):
         self.handle_shutdown()
 
     def dispatch_rollouts(self):
+        logger.info("Dispatching rollouts")
         rollouts = [[]]
         scattered_rollouts = [[] for _ in range(self.world_size)]
         if self.global_rank == 0:
@@ -1159,6 +1160,7 @@ class GRPOTrainer(Trainer):
     def train(
         self, current_step: int, total_steps: int, remain_samples_num: int
     ) -> Dict[str, Any]:
+        logger.info("Starting train step.")
         pp_last_stage = (
             self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
         )

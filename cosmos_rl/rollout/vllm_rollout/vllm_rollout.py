@@ -291,8 +291,8 @@ class vLLMRollout(RolloutBase):
                 repo = [output.outputs[i].text for i in range(len(output.outputs))]
                 response.append(repo)
 
-                for index, quote in enumerate(repo):
-                    logger.info(f"[Rollout] {idx,index}: {quote}")
+                # for index, quote in enumerate(repo):
+                #    logger.info(f"[Rollout] {idx,index}: {quote}")
 
         except Exception as e:
             logger.error(f"[Rollout] Failed in rollout generation: {str(e)}")
