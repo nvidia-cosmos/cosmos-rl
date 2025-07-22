@@ -114,6 +114,9 @@ class ParallelDims:
             self.tp,
             self.pp,
         )
+        logger.info(
+            f"ParallelDims: {dp_replicate}, {dp_shard}, {cp}, {tp}, {pp}, world_size: {self.world_size}, pp_dynamic_shape: {self.pp_dynamic_shape}"
+        )
         for d in (dp_replicate, cp, tp, pp):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
         assert dp_shard == -1 or dp_shard >= 1, " dp_shard must be -1 or >=1."

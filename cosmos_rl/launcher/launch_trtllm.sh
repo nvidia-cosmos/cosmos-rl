@@ -3,28 +3,23 @@
 # Default values
 NGPU=2
 NNODES=1
-LOG_RANKS=""
-TYPE=""
 RDZV_ENDPOINT="localhost:0"
 SCRIPT=""
 CONFIG=""
 
 print_help() {
   echo ""
-  echo "Usage: ./launch_replica.sh [OPTIONS]"
+  echo "Usage: ./launch_trtllm.sh [OPTIONS]"
   echo ""
   echo "Options:"
-  echo "  --type <rollout|policy>            Required. Type of replica to launch."
   echo "  --nnodes <int>                     Number of nodes to launch. Default: 1"
   echo "  --ngpus <int>                      Number of GPUs per node. Default: 2"
-  echo "  --log-rank <comma-separated ints>  Comma-separated list of ranks to enable logging. Default: Empty for all ranks."
   echo "  --rdzv-endpoint <host:port>        Rendezvous endpoint for distributed training. Default: localhost:0"
   echo "  --script <script>                  The user script to run before launch."
   echo "  --config <path>                    The path to the config file."
   echo "  --help                             Show this help message"
   echo "Examples:"
-  echo "  ./launch_replica.sh --type rollout --ngpus 4 --log-rank 0,1"
-  echo "  ./launch_replica.sh --type policy --ngpus 8 --log-rank 0"
+  echo "  ./launch_trtllm.sh --ngpus 4 --log-rank 0,1"
   echo ""
 }
 
@@ -70,24 +65,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [ -z "$TYPE" ]; then
-  echo "Error: --type is required"
-  print_help
-  exit 1
-fi
 
 export TORCH_CPP_LOG_LEVEL="ERROR"
-if [ "$TYPE" == "rollout" ]; then
-  DEFAULT_MODULE="cosmos_rl.rollout.rollout_entrance"
-  export COSMOS_ROLE="Rollout"
-elif [ "$TYPE" == "policy" ]; then
-  DEFAULT_MODULE="cosmos_rl.policy.train"
-  export COSMOS_ROLE="Policy"
-else
-  echo "Error: Invalid --type value '$TYPE'. Must be 'rollout' or 'policy'."
-  print_help
-  exit 1
-fi
+DEFAULT_MODULE="cosmos_rl.rollout.rollout_entrance"
+export COSMOS_ROLE="Rollout"
+export RDZV_ENDPOINT="$RDZV_ENDPOINT"
+
+COSMOS_WORLD_SIZE=$((NNODES * NGPU))
+export COSMOS_WORLD_SIZE
+COSMOS_LOCAL_WORLD_SIZE=$((NGPU))
+export COSMOS_LOCAL_WORLD_SIZE
+export COSMOS_ROLLOUT_BACKEND="trtllm"
 
 if [ -z "$COSMOS_CONTROLLER_HOST" ]; then
   echo "Error: COSMOS_CONTROLLER_HOST is not set. Please pass it in like:"
@@ -95,19 +83,8 @@ if [ -z "$COSMOS_CONTROLLER_HOST" ]; then
   exit 1
 fi
 
-LAUNCH_CMD=(
-  torchrun
-  --nproc-per-node="$NGPU"
-  --nnodes="$NNODES"
-  --role rank
-  --tee 3
-  --rdzv_backend c10d
-  --rdzv_endpoint="$RDZV_ENDPOINT"
-)
+LAUNCH_CMD=python
 
-if [ -n "$LOG_RANKS" ]; then
-  LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
-fi
 
 if [ -n "$SCRIPT" ]; then
   if [[ "$SCRIPT" != *.py ]]; then

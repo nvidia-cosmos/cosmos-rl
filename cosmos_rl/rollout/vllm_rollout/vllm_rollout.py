@@ -19,7 +19,7 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 import vllm
 import torch
 from typing import List, Tuple, Any, Optional
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
 from vllm import SamplingParams
@@ -42,7 +42,7 @@ def vllm_version_check(rollout_config: RolloutConfig):
 
 
 class vLLMRollout(RolloutBase):
-    def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
+    def __init__(self, config: Config, **kwargs):
         """Rollout with vLLM as the backend.
 
         Args:
@@ -51,9 +51,7 @@ class vLLMRollout(RolloutBase):
             hf_config_path: huggingface config file path.
             model_hf_config: the huggingface config to initiallize the generating model in vllm
         """
-        super().__init__()
-
-        self.config = config
+        super().__init__(config)
         policy_config = self.config.policy
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
@@ -63,8 +61,6 @@ class vLLMRollout(RolloutBase):
         model_path = policy_config.model_name_or_path
 
         self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
-
-        self.pad_token_id = tokenizer.pad_token_id
 
         hf_config_path = self.config.policy.model_name_or_path
         try:
@@ -81,7 +77,6 @@ class vLLMRollout(RolloutBase):
             # self.eos_token_ids = [tokenizer.eos_token_id]
             # TODO(lms): remove this
             self.eos_token_ids = [151645, 151643]
-        self.tokenizer = tokenizer
         self._engine_initialized = False
         self.rollout_engine = None
 
