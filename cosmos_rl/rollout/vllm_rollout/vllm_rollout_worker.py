@@ -24,7 +24,7 @@ from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Tuple, Optional, Callable, Any
 from functools import partial
 from transformers import AutoConfig
-from cosmos_rl.rollout import RolloutWorkerBase
+from cosmos_rl.rollout import RolloutWorkerBase, State
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
@@ -118,41 +118,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     vLLMRolloutWorker should support scaling launch.
     """
 
-    class State:
-        UNINITIALIZED = 0
-        WEIGHT_SYNCED = 1
-        PROMPT_FETCH_END = 1 << 1
-        PROMPT_CONSUME_END = 1 << 2
-
-        _state: int = UNINITIALIZED
-
-        def __init__(self):
-            self._state = self.UNINITIALIZED
-
-        def weight_synced(self):
-            return (self._state & self.WEIGHT_SYNCED) != 0
-
-        def set_weight_synced(self):
-            self._state = self._state | self.WEIGHT_SYNCED
-
-        def prompt_fetch_end(self):
-            return (self._state & self.PROMPT_FETCH_END) != 0
-
-        def set_prompt_fetch_end(self):
-            self._state = self._state | self.PROMPT_FETCH_END
-
-        def prompt_consume_end(self):
-            return (self._state & self.PROMPT_CONSUME_END) != 0
-
-        def set_prompt_consume_end(self):
-            assert (
-                not self.prompt_consume_end()
-            ), "Prompt consume end event should not be set twice."
-            self._state = self._state | self.PROMPT_CONSUME_END
-
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
         super(vLLMRolloutWorker, self).__init__(config, parallel_dims)
-        self.state = self.State()
+        self.state = State()
         self.config = config
         if self.config.rollout.parallelism.dp_shard_size == -1:
             self.config.rollout.parallelism.dp_shard_size = parallel_dims.dp_shard
@@ -161,8 +129,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.config.rollout.parallelism.dp_shard_size > 0
         ), "[Rollout] dp_shard_size should be greater than 0."
 
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         # CommandQueue queried from controller.
         self._command_queue: Queue[Command] = Queue()
         self._prompt_queue: Queue[List[List[int, str]]] = Queue()
@@ -196,13 +162,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 IS_TORCH_COMPATIBLE_WITH_FP8
             ), f"[Rollout] FP8 needs PyTorch >= {MIN_TORCH_VERSION_FOR_FP8}"
 
-        self.rollout: vLLMRollout = vLLMRollout(
-            self.config,
-            tokenizer=self.tokenizer,
-            seed=self.config.rollout.seed,
-            load_format="dummy",
-            quantization=self.quantization_type,
-        )
+        self.rollout: vLLMRollout = vLLMRollout(self.config)
 
         # communicator index for the cached communicators in C++ binding.
         self.global_commnicator_idex = -1
@@ -264,6 +224,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
         )
+        self.backend = "vllm"
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         if self.quantization_type == "fp8":

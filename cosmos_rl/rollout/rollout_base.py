@@ -15,10 +15,18 @@
 
 from abc import ABC, abstractmethod
 
+from cosmos_rl.policy.config import Config as CosmosConfig
+import cosmos_rl.utils.network_util as util
+from transformers import AutoTokenizer
+
 
 class RolloutBase(ABC):
-    def __init__(self):
-        pass
+    def __init__(self, config: CosmosConfig):
+        self.config = config
+        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
+            config.policy.model_name_or_path
+        )
+        self.pad_token_id = self.tokenizer.pad_token_id
 
     @abstractmethod
     def rollout_generation(self, prompts, *args, **kwargs):
