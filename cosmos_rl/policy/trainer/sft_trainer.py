@@ -458,7 +458,7 @@ class SFTTrainer(Trainer):
                     )
                 ]
 
-                acc_loss = torch.tensor(0.0, device=self.device)
+                acc_loss = torch.zeros(1, device=self.device)
                 self.optimizers.zero_grad()
                 for batch in mini_batches:
                     # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
@@ -746,6 +746,9 @@ class SFTTrainer(Trainer):
     def pp_loss_fn(self):
         # calculate the loss scaling factor
         mini_batch_size = max(self.config.train.train_policy.mini_batch or 1, 1)
+        mini_batch_size = min(
+            mini_batch_size, self.config.train.train_batch_per_replica
+        )
         loss_scaling_factor = (
             mini_batch_size / self.config.train.train_batch_per_replica
         )
