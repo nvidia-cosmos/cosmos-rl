@@ -154,7 +154,14 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             assistant_content = []
             for message in conversation:
                 if message["role"] == "assistant":
-                    assistant_content.append(message["content"])
+                    content = message["content"]
+                    if isinstance(content, str):
+                        assistant_content.append(content)
+                    elif isinstance(content, dict):
+                        assert "text" in content, f"text not in content: {content}"
+                        assistant_content.append(content["text"])
+                    else:
+                        raise ValueError(f"Unsupported content type: {type(content)}")
                     message["content"] = pad_token * pad_run_length
 
             prompt = self.hf_processor.apply_chat_template(

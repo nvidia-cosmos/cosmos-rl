@@ -44,12 +44,14 @@ import os
 from typing import Optional, Dict, Any
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
+from functools import partial
 
 
 def async_safe_ce(
     output: torch.Tensor,
     target: torch.LongTensor,
     ignore_index: int = -100,
+    loss_scaling_factor: float = 1.0,
 ) -> torch.Tensor:
     loss = torch.nn.functional.cross_entropy(
         output[:, :-1].flatten(0, 1),
@@ -58,7 +60,7 @@ def async_safe_ce(
         reduction="mean",
     )
     # In case of all labels are ignored, loss will be nan.
-    return torch.nan_to_num(loss, nan=0.0)
+    return torch.nan_to_num(loss, nan=0.0) * loss_scaling_factor
 
 
 def collate_fn(
@@ -439,105 +441,125 @@ class SFTTrainer(Trainer):
 
         for cur_epoch in range(start_epoch, self.epoch):
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
-            for batch in self.train_data_loader:
+            for global_batch in self.train_data_loader:
                 if data_loader_bias > 0:
                     data_loader_bias -= 1
                     continue
 
-                # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
-                # settings from [profiler.sub_profiler_config] are reused
-                if (
-                    self.config.profiler.enable_nsys
-                    and self.profiler.global_rank in self.profiler.rank_filter
-                ):
-                    if (
-                        self.train_step
-                        == self.profiler.wait_steps + self.profiler.warmup_steps
-                    ):
-                        torch.cuda.cudart().cudaProfilerStart()
-                    elif (
-                        self.train_step
-                        == self.profiler.wait_steps
-                        + self.profiler.warmup_steps
-                        + self.profiler.active_steps
-                    ):
-                        torch.cuda.cudart().cudaProfilerStop()
-
-                self.model.train()
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
-                start_event.record()
-                for k, v in batch.items():
-                    batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
-
-                labels = batch.pop("label_ids")
-
-                position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
-                    **batch
-                )
-
-                batch["position_ids"] = position_ids
-                padding_mask = batch.get("padding_mask", None)
-
-                if self.parallel_dims.cp_enabled:
-                    input_ids_before_cp = input_ids
-                    position_ids_before_cp = position_ids
-                    padding_mask_before_cp = padding_mask
-
-                    [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
-                        [input_ids, position_ids, padding_mask],
-                        self.parallel_dims.mesh["cp"],
+                global_batch_size = global_batch["input_ids"].shape[0]
+                # split global_batch into mini_batches
+                mini_batches = [
+                    {
+                        k: v[i : i + self.config.train.train_policy.mini_batch]
+                        for k, v in global_batch.items()
+                    }
+                    for i in range(
+                        0, global_batch_size, self.config.train.train_policy.mini_batch
                     )
+                ]
 
-                    batch["input_ids"] = input_ids
-                    batch["position_ids"] = position_ids
-                    if padding_mask is not None:
-                        batch["padding_mask"] = padding_mask
-
+                acc_loss = torch.tensor(0.0, device=self.device)
                 self.optimizers.zero_grad()
+                for batch in mini_batches:
+                    # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
+                    # settings from [profiler.sub_profiler_config] are reused
+                    if (
+                        self.config.profiler.enable_nsys
+                        and self.profiler.global_rank in self.profiler.rank_filter
+                    ):
+                        if (
+                            self.train_step
+                            == self.profiler.wait_steps + self.profiler.warmup_steps
+                        ):
+                            torch.cuda.cudart().cudaProfilerStart()
+                        elif (
+                            self.train_step
+                            == self.profiler.wait_steps
+                            + self.profiler.warmup_steps
+                            + self.profiler.active_steps
+                        ):
+                            torch.cuda.cudart().cudaProfilerStop()
 
-                if self.parallel_dims.pp_enabled:
-                    pp_last_stage = (
-                        self.parallel_dims.pp_coord[0]
-                        == self.parallel_dims.pp_coord[1] - 1
+                    self.model.train()
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
+                    for k, v in batch.items():
+                        batch[k] = (
+                            v.to(self.device) if isinstance(v, torch.Tensor) else v
+                        )
+
+                    labels = batch.pop("label_ids")
+
+                    position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
+                        **batch
                     )
-                    pp_first_stage = self.parallel_dims.pp_coord[0] == 0
 
-                    # Pipeline Parallel forward / backward inside step() call
-                    targets, losses = (labels, []) if pp_last_stage else (None, None)
-                    if pp_first_stage:
-                        self.pp_scheduler.step(
-                            **batch,
-                            pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                            seq_len_multiple=self.seq_len_multiple,
+                    batch["position_ids"] = position_ids
+                    padding_mask = batch.get("padding_mask", None)
+
+                    if self.parallel_dims.cp_enabled:
+                        input_ids_before_cp = input_ids
+                        position_ids_before_cp = position_ids
+                        padding_mask_before_cp = padding_mask
+
+                        [input_ids, position_ids, padding_mask] = (
+                            slice_inputs_for_ulysses(
+                                [input_ids, position_ids, padding_mask],
+                                self.parallel_dims.mesh["cp"],
+                            )
+                        )
+
+                        batch["input_ids"] = input_ids
+                        batch["position_ids"] = position_ids
+                        if padding_mask is not None:
+                            batch["padding_mask"] = padding_mask
+
+                    if self.parallel_dims.pp_enabled:
+                        pp_last_stage = (
+                            self.parallel_dims.pp_coord[0]
+                            == self.parallel_dims.pp_coord[1] - 1
+                        )
+                        pp_first_stage = self.parallel_dims.pp_coord[0] == 0
+
+                        # Pipeline Parallel forward / backward inside step() call
+                        targets, losses = (
+                            (labels, []) if pp_last_stage else (None, None)
+                        )
+                        if pp_first_stage:
+                            self.pp_scheduler.step(
+                                **batch,
+                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                                seq_len_multiple=self.seq_len_multiple,
+                            )
+                        else:
+                            # FWD + BWD if it is 1F1B-like scheduler
+                            self.pp_scheduler.step(
+                                position_ids=batch["position_ids"],
+                                target=targets,
+                                losses=losses,
+                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                                seq_len_multiple=self.seq_len_multiple,
+                            )
+                        loss = (
+                            torch.mean(torch.stack(losses)).to(self.device)
+                            if pp_last_stage
+                            else torch.tensor([-1.0], device=self.device)
                         )
                     else:
-                        # FWD + BWD if it is 1F1B-like scheduler
-                        self.pp_scheduler.step(
-                            position_ids=batch["position_ids"],
-                            target=targets,
-                            losses=losses,
-                            pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                            seq_len_multiple=self.seq_len_multiple,
-                        )
-                    loss = (
-                        torch.mean(torch.stack(losses)).to(self.device)
-                        if pp_last_stage
-                        else torch.tensor([-1.0], device=self.device)
-                    )
-                else:
-                    logits = self.model(**batch)
+                        logits = self.model(**batch)
 
-                    # recover from ulysses if cp is enabled
-                    if self.parallel_dims.cp_enabled:
-                        batch["input_ids"] = input_ids_before_cp
-                        batch["position_ids"] = position_ids_before_cp
-                        if padding_mask_before_cp is not None:
-                            batch["padding_mask"] = padding_mask_before_cp
+                        # recover from ulysses if cp is enabled
+                        if self.parallel_dims.cp_enabled:
+                            batch["input_ids"] = input_ids_before_cp
+                            batch["position_ids"] = position_ids_before_cp
+                            if padding_mask_before_cp is not None:
+                                batch["padding_mask"] = padding_mask_before_cp
 
-                    loss = self.loss_fn(logits, labels)
-                    loss.backward()
-                loss = loss.detach()
+                        loss = self.loss_fn(logits, labels)
+                        loss = loss / len(mini_batches)
+                        loss.backward()
+                acc_loss += loss.detach()
 
                 """
                 Compute the global grad norm on all parameters and then apply
@@ -582,11 +604,11 @@ class SFTTrainer(Trainer):
                     or self.parallel_dims.cp_enabled
                 ):
                     global_avg_loss, global_max_loss = (  # noqa: F841
-                        dist_util.dist_mean(loss, self.parallel_dims.mesh["dp_cp"]),
-                        dist_util.dist_max(loss, self.parallel_dims.mesh["dp_cp"]),
+                        dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                        dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
                     )
                 else:
-                    global_avg_loss = global_max_loss = loss.item()  # noqa: F841
+                    global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
 
                 if self.config.logging.logger:
                     if util.is_master_rank(self.parallel_dims, self.global_rank):
@@ -722,4 +744,11 @@ class SFTTrainer(Trainer):
 
     @property
     def pp_loss_fn(self):
-        return torch.compile(async_safe_ce)
+        # calculate the loss scaling factor
+        mini_batch_size = max(self.config.train.train_policy.mini_batch or 1, 1)
+        loss_scaling_factor = (
+            mini_batch_size / self.config.train.train_batch_per_replica
+        )
+        return torch.compile(
+            partial(async_safe_ce, loss_scaling_factor=loss_scaling_factor)
+        )
