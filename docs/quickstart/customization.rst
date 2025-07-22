@@ -352,6 +352,6 @@ Then register the model into the registry via `ModelRegistry.register_model`.
 User can launch a external model job with: 
 
 >>> cosmos-rl --config ./configs/deepseek-v3/moonlight-moe-13b-tp4-sft.toml 
-    ./tools/model/moonlight_launcher.py
+    cosmos_rl.tools.model.moonlight_launcher
 
 
