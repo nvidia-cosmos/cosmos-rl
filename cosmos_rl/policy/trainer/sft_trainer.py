@@ -39,7 +39,6 @@ import cosmos_rl.utils.cache as cache
 from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
-import functools
 import os
 from typing import Optional, Dict, Any
 from tqdm import tqdm
@@ -65,34 +64,8 @@ def async_safe_ce(
 
 def collate_fn(
     batch,
-    pad_token_id,
-    data_packer: DataPacker,
-    config: CosmosConfig,
-    seq_len_multiple=1,
-    ignore_label_id=-100,
-    fixed_length: Optional[int] = None,
 ):
-    if fixed_length is None:
-        max_len = min(
-            config.policy.model_max_length,
-            data_packer.sft_compute_max_len(batch),
-        )
-    else:
-        max_len = fixed_length
-
-    if seq_len_multiple > 1:
-        max_len = (
-            (max_len + seq_len_multiple - 1) // seq_len_multiple * seq_len_multiple
-        )
-
-    model_input: Dict[str, Any] = data_packer.sft_collate_fn(
-        batch,
-        computed_max_len=max_len,
-        pad_token_id=pad_token_id,
-        ignore_label_id=ignore_label_id,
-    )
-
-    return model_input
+    return batch
 
 
 def construct_dataset(
@@ -279,16 +252,7 @@ class SFTTrainer(Trainer):
             num_workers=config.train.train_policy.dataloader_num_workers,
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=train_sampler,
-            collate_fn=functools.partial(
-                collate_fn,
-                pad_token_id=self.tokenizer.pad_token_id,
-                seq_len_multiple=self.seq_len_multiple,
-                fixed_length=config.policy.model_max_length
-                if parallel_dims.pp_enabled and not parallel_dims.pp_dynamic_shape
-                else None,
-                data_packer=self.data_packer,
-                config=config,
-            ),
+            collate_fn=collate_fn,
         )
         self.val_data_loader = DataLoader(
             val_dataset,
@@ -296,16 +260,7 @@ class SFTTrainer(Trainer):
             num_workers=config.train.train_policy.dataloader_num_workers,
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=val_sampler,
-            collate_fn=functools.partial(
-                collate_fn,
-                pad_token_id=self.tokenizer.pad_token_id,
-                seq_len_multiple=self.seq_len_multiple,
-                fixed_length=config.policy.model_max_length
-                if parallel_dims.pp_enabled and not parallel_dims.pp_dynamic_shape
-                else None,
-                data_packer=self.data_packer,
-                config=config,
-            ),
+            collate_fn=collate_fn,
         )
         # For iteration control
         self.epoch = config.train.epoch
@@ -354,7 +309,26 @@ class SFTTrainer(Trainer):
         self.model.eval()
         with torch.no_grad():
             val_total_loss = 0.0
-            for val_batch in tqdm(self.val_data_loader, desc="Validation"):
+            for val_global_batch in tqdm(self.val_data_loader, desc="Validation"):
+                fixed_length = (
+                    self.config.policy.model_max_length
+                    if self.parallel_dims.pp_enabled
+                    and not self.parallel_dims.pp_dynamic_shape
+                    else None
+                )
+                if fixed_length is None:
+                    max_len = min(
+                        self.config.policy.model_max_length,
+                        self.data_packer.sft_compute_max_len(val_global_batch),
+                    )
+                else:
+                    max_len = fixed_length
+                val_batch = self.data_packer.sft_collate_fn(
+                    val_global_batch,
+                    computed_max_len=max_len,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    ignore_label_id=-100,
+                )
                 for k, v in val_batch.items():
                     val_batch[k] = (
                         v.to(self.device) if isinstance(v, torch.Tensor) else v
@@ -446,21 +420,47 @@ class SFTTrainer(Trainer):
                     data_loader_bias -= 1
                     continue
 
-                global_batch_size = global_batch["input_ids"].shape[0]
-                # split global_batch into mini_batches
-                mini_batches = [
-                    {
-                        k: v[i : i + self.config.train.train_policy.mini_batch]
-                        for k, v in global_batch.items()
-                    }
-                    for i in range(
-                        0, global_batch_size, self.config.train.train_policy.mini_batch
-                    )
-                ]
-
                 acc_loss = torch.zeros(1, device=self.device)
                 self.optimizers.zero_grad()
-                for batch in mini_batches:
+                global_batch_size = len(global_batch)
+                # split global_batch into mini_batches
+                mini_batch_begin_idxs = list(
+                    range(
+                        0, global_batch_size, self.config.train.train_policy.mini_batch
+                    )
+                )
+
+                for i in mini_batch_begin_idxs:
+                    fixed_length = (
+                        self.config.policy.model_max_length
+                        if self.parallel_dims.pp_enabled
+                        and not self.parallel_dims.pp_dynamic_shape
+                        else None
+                    )
+                    raw_batch = global_batch[
+                        i : i + self.config.train.train_policy.mini_batch
+                    ]
+                    if fixed_length is None:
+                        max_len = min(
+                            self.config.policy.model_max_length,
+                            self.data_packer.sft_compute_max_len(raw_batch),
+                        )
+                    else:
+                        max_len = fixed_length
+
+                    if self.seq_len_multiple > 1:
+                        max_len = (
+                            (max_len + self.seq_len_multiple - 1)
+                            // self.seq_len_multiple
+                            * self.seq_len_multiple
+                        )
+                    batch = self.data_packer.sft_collate_fn(
+                        raw_batch,
+                        computed_max_len=max_len,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        ignore_label_id=-100,
+                    )
+
                     # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
                     # settings from [profiler.sub_profiler_config] are reused
                     if (
@@ -547,6 +547,25 @@ class SFTTrainer(Trainer):
                             else torch.tensor([-1.0], device=self.device)
                         )
                     else:
+                        # # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
+                        # last_token_ids = []
+                        # with torch.no_grad():
+                        #     N_NEW_TOKENS = 100
+                        #     for _ in range(N_NEW_TOKENS):
+                        #         if len(last_token_ids) > 0:
+                        #             batch["input_ids"] = torch.cat([batch["input_ids"], last_token_ids[-1]], dim=-1)
+                        #             position_ids, _, _ = self.model.get_position_ids(
+                        #                 **batch
+                        #             )
+                        #             batch["position_ids"] = position_ids
+
+                        #         logits = self.model(**batch)
+                        #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
+                        #         last_token_ids.append(token_ids)
+                        #     print(f"generated tokens: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[0])}")
+                        #     return
+                        # #########################################################################################
+
                         logits = self.model(**batch)
 
                         # recover from ulysses if cp is enabled
@@ -557,7 +576,7 @@ class SFTTrainer(Trainer):
                                 batch["padding_mask"] = padding_mask_before_cp
 
                         loss = self.loss_fn(logits, labels)
-                        loss = loss / len(mini_batches)
+                        loss = loss / len(mini_batch_begin_idxs)
                         loss.backward()
                     acc_loss += loss.detach()
 
