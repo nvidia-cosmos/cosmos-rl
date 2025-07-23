@@ -253,6 +253,7 @@ class SFTTrainer(Trainer):
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=train_sampler,
             collate_fn=collate_fn,
+            drop_last=True,
         )
         self.val_data_loader = DataLoader(
             val_dataset,
@@ -261,6 +262,7 @@ class SFTTrainer(Trainer):
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=val_sampler,
             collate_fn=collate_fn,
+            drop_last=True,
         )
         # For iteration control
         self.epoch = config.train.epoch
