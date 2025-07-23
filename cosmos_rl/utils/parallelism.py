@@ -75,6 +75,12 @@ class ParallelDims:
     cp: int
     tp: int
     pp: int
+    ep: int
+    # When ep is enabled, we can have different dp shard for the MoE module.
+    # For example, suppose we have 64 GPUs, then we can have dp_shard equal
+    # to 64 for the attention module, and have ep = 4, dp_shard_with_ep = 16
+    # for the MoE module.
+    dp_shard_with_ep: int = -1
     world_size: int
     pp_dynamic_shape: bool
 
@@ -86,6 +92,7 @@ class ParallelDims:
             cp=parallesim_config.cp_size,
             tp=parallesim_config.tp_size,
             pp=parallesim_config.pp_size,
+            ep=parallesim_config.ep_size,
             world_size=parallesim_config.world_size,
             pp_dynamic_shape=parallesim_config.pp_dynamic_shape,
         )
@@ -98,6 +105,7 @@ class ParallelDims:
             cp=parallesim_config.cp_size,
             tp=parallesim_config.tp_size,
             pp=parallesim_config.pp_size,
+            ep=parallesim_config.ep_size,
             world_size=world_size,
             pp_dynamic_shape=parallesim_config.pp_dynamic_shape,
         )
@@ -107,14 +115,16 @@ class ParallelDims:
         self.build_mesh_info()
 
     def _validate(self):
-        dp_replicate, dp_shard, cp, tp, pp = (
+        dp_replicate, dp_shard, cp, tp, pp, ep, dp_shard_with_ep = (
             self.dp_replicate,
             self.dp_shard,
             self.cp,
             self.tp,
             self.pp,
+            self.ep,
+            self.dp_shard_with_ep,
         )
-        for d in (dp_replicate, cp, tp, pp):
+        for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
         assert dp_shard == -1 or dp_shard >= 1, " dp_shard must be -1 or >=1."
         if dp_shard < 0:
@@ -127,6 +137,40 @@ class ParallelDims:
             f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
+
+        # Checks for MoE weights. Note that dp_shard is only used for the non-MoE weights.
+        if ep > 1:
+            assert (
+                dp_shard_with_ep == -1 or dp_shard_with_ep >= 1
+            ), " dp_shard_with_ep must -1 or >=1."
+            if dp_shard_with_ep < 0:
+                logger.info(
+                    "dp_shard_with_ep is set to -1, will be automatically determined based "
+                    f"on self.world_size {self.world_size} // {pp * ep * tp}."
+                )
+                self.dp_shard_with_ep = dp_shard_with_ep = self.world_size // (
+                    pp * ep * tp
+                )
+                logger.info(f"dp_shard_with_ep is set to {dp_shard_with_ep}.")
+            assert (
+                dp_shard_with_ep >= 1
+            ), f"WORLD_SIZE({self.world_size}) is not a multiple of pp({pp}) * ep({ep}) * tp({tp})"
+
+            if tp > 1:
+                raise ValueError(
+                    "tp must be 1 when ep > 1, since we only support MoE with pipeline parallelism."
+                )
+
+            if pp > 1 and dp_shard_with_ep > 1:
+                raise ValueError(
+                    "dp_shard_with_ep must be 1 when pp > 1, since we only support EP with pipeline parallelism."
+                )
+
+            if (pp * dp_shard_with_ep * ep * tp) != self.world_size:
+                raise ValueError(
+                    f"Invalid parallel dims: pp({pp}) * dp_shard_with_ep({dp_shard_with_ep}) * "
+                    f"ep({ep}) * tp({tp}) != WORLD_SIZE({self.world_size})"
+                )
 
     def build_mesh(self, device_type: str) -> DeviceMesh:
         dims = []
@@ -246,6 +290,14 @@ class ParallelDims:
     @property
     def pp_enabled(self):
         return self.pp > 1
+
+    @property
+    def ep_enabled(self):
+        return self.ep > 1
+
+    @property
+    def dp_shard_with_ep_enabled(self) -> bool:
+        return self.dp_shard_with_ep > 1
 
     @property
     def pp_dynamic_shape_enabled(self):
