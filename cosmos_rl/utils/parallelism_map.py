@@ -1270,9 +1270,7 @@ class ParallelizedShardMapper:
                             ).__dict__
                         )
             insts_for_group.append(
-                WeightSyncInstructionsPerParam(
-                    dest_name, insts_for_param_name
-                ).__dict__
+                WeightSyncInstructionsPerParam(dest_name, insts_for_param_name).__dict__
             )
             policy_to_rollout_insts.append(
                 WeightSyncInstructionsGroup(insts_for_group).__dict__
