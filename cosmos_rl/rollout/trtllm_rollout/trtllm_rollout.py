@@ -15,10 +15,12 @@
 
 from typing import List, Tuple, Optional
 
-
 from transformers import GenerationConfig
+
 from tensorrt_llm._torch import LLM
 from tensorrt_llm import SamplingParams
+from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
+
 from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
@@ -75,17 +77,21 @@ class TRTLLM_Rollout(RolloutBase):
         pp_size = rollout_parallelism.pp_size
         assert pp_size == 1, "TRTLLM only support pipeline parallelism 1 now."
 
-        logger.info(f"[Rollout] LMS: init rollout engine with model: {model_path}")
+        pytorch_backend_config = PyTorchConfig(disable_overlap_scheduler=True)
         self.rollout_engine = LLM(
             model=model_path,
             tensor_parallel_size=tp_size,
             pipeline_parallel_size=pp_size,
-            seed=seed,
+            backend="pytorch",
+            pytorch_backend_config=pytorch_backend_config,
+            seed=seed or 42,
             load_format=load_format,
             trust_remote_code=True,
+            # For cosmos-rl
+            cosmos_config=self.config,
         )
 
-        logger.info("[Rollout] LMS: init rollout engine done!")
+        logger.info("[Rollout] LMS: init trtllm rollout engine done!")
 
     def rollout_generation(
         self,
@@ -119,7 +125,7 @@ class TRTLLM_Rollout(RolloutBase):
         response: List[List[str]] = []
         try:
             results = self.rollout_engine.generate(
-                prompts=prompts,
+                prompts,
                 sampling_params=sampling_params,
                 use_tqdm=False,
             )

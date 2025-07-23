@@ -17,6 +17,7 @@ import torch
 import requests
 from queue import Queue
 from functools import partial
+from urllib.parse import urljoin
 from typing import List, Tuple
 from cosmos_rl.dispatcher.protocol import RolloutRequest
 from cosmos_rl.rollout import State, RolloutWorkerBase
@@ -28,9 +29,12 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SUFFIX,
 )
 from cosmos_rl.utils import constant
+
 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout import TRTLLM_Rollout
+
+# patch trtllm
+
 from tensorrt_llm import SamplingParams
-from urllib.parse import urljoin
 
 
 class TRTLLMRolloutWrapper(RolloutWorkerBase):
@@ -56,7 +60,8 @@ class TRTLLMRolloutWrapper(RolloutWorkerBase):
         self.rollout.init_engine(seed=self.config.rollout.seed, load_format="auto")
 
         self.sampling_params = SamplingParams(
-            n=self.config.rollout.n_generation,
+            # n=self.config.rollout.n_generation,
+            n=1,  # FIXME: (lms) Fix trtllm error when n > 1
             logprobs=0,
             top_p=self.config.rollout.sampling_config.top_p,
             top_k=self.config.rollout.sampling_config.top_k,
@@ -67,7 +72,6 @@ class TRTLLMRolloutWrapper(RolloutWorkerBase):
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
         )
-
         self.batch_size = self.config.rollout.batch_size
 
         # Use IPCQueue Interactive with trtllm worker.
@@ -190,11 +194,8 @@ class TRTLLMRolloutWrapper(RolloutWorkerBase):
                     continue
                 else:
                     prompts: List[Tuple[int, str]] = self._prompt_queue.get()
-                    logger.debug(f"[Rollout] generate start for prompts: {prompts}")
+                    logger.info(f"[Rollout] generate start for prompts: {prompts}")
 
-                prompts = [
-                    (1, "The president of the United States is")
-                ]  # FIXME: (lms) remvoe this hardcode test string
                 completions: List[List[str]] = self.rollout.rollout_generation(
                     prompt_id_and_payload_list=prompts,
                     data_packer=self.data_packer,
