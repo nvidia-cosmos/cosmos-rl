@@ -266,13 +266,7 @@ class SFTTrainer(Trainer):
         )
         # For iteration control
         self.epoch = config.train.epoch
-        steps_by_dataset = (
-            len(train_dataset)
-            * self.epoch
-            // self.dp_world_size
-            // self.config.train.train_batch_per_replica
-        )
-
+        steps_by_dataset = len(self.train_data_loader) * self.epoch
         if config.train.max_num_steps is not None:
             self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
         else:
