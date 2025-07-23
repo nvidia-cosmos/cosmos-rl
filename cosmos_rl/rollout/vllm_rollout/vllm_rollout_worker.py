@@ -490,6 +490,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         total_bytes_received = 0
 
         all_cloned_target_tensors = []
+        tensors_to_check = []
 
         for insts_for_per_param in insts_group.param_instructions:
             # insts_for_per_param: WeightSyncInstructionsPerParam -> inst collection for a single tensor
@@ -528,17 +529,28 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
 
             if check_inside_group:
-                if not torch.allclose(cloned_target_tensor, target_tensor):
-                    raise ValueError(
-                        f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
-                    )
+                tensors_to_check.append(
+                    (cloned_target_tensor, target_tensor, insts, inst_dest_name)
+                )
 
         def completion_lambda():
             for view, recv_tensor in all_cloned_target_tensors:
                 view.copy_(
                     recv_tensor,
                 )
-                del recv_tensor
+            all_cloned_target_tensors.clear()
+
+            for (
+                cloned_target_tensor,
+                target_tensor,
+                insts,
+                inst_dest_name,
+            ) in tensors_to_check:
+                if not torch.allclose(cloned_target_tensor, target_tensor):
+                    raise ValueError(
+                        f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
+                    )
+            tensors_to_check.clear()
 
             # here we got one full weight tensor sync done, if it is fp8 weight, we should do the quantization and check the numerical error.
             if self.quantization_type == "fp8":
@@ -589,9 +601,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         """
         # lazy initialization of the vllm engine.
         if not self.rollout.is_engine_initialized():
-            # is_for_weight_resume = command.dst_replica_name == self.replica_name
-            # load_format = "auto" if is_for_weight_resume else "dummy"
-            load_format = "dummy"
+            is_for_weight_resume = command.dst_replica_name == self.replica_name
+            load_format = "auto" if is_for_weight_resume else "dummy"
             self.rollout.init_engine(
                 quantization=self.quantization_type,
                 seed=self.config.rollout.seed,
@@ -742,11 +753,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
 
             self.state.set_weight_synced()
-
-            # self.rollout._do_test_rollout("after receiving weights, before generating")
-            # self.rollout.rollout_engine.generate(
-            #    prompts=["What model are you?"], sampling_params=sampling_params
-            # )
 
     @RolloutWorkerBase.register_rollout_command_handler(
         RolloutToRolloutBroadcastCommand
