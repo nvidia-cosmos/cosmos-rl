@@ -16,16 +16,13 @@
 from abc import ABC, abstractmethod
 
 from cosmos_rl.policy.config import Config as CosmosConfig
-import cosmos_rl.utils.network_util as util
 from transformers import AutoTokenizer
 
 
 class RolloutBase(ABC):
-    def __init__(self, config: CosmosConfig):
+    def __init__(self, config: CosmosConfig, tokenizer: AutoTokenizer):
         self.config = config
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            config.policy.model_name_or_path
-        )
+        self.tokenizer = tokenizer
         self.pad_token_id = self.tokenizer.pad_token_id
 
     @abstractmethod

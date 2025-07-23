@@ -30,6 +30,7 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.model import WeightMapper
+from transformers import AutoTokenizer
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -42,7 +43,7 @@ def vllm_version_check(rollout_config: RolloutConfig):
 
 
 class vLLMRollout(RolloutBase):
-    def __init__(self, config: Config, **kwargs):
+    def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
         """Rollout with vLLM as the backend.
 
         Args:

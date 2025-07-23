@@ -20,6 +20,8 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.dispatcher.protocol import Role
+import cosmos_rl.utils.util as util
+from transformers import AutoTokenizer
 
 
 class State:
@@ -65,8 +67,12 @@ class RolloutWorkerBase(CommMixin):
         self.global_rank = int(os.environ.get("RANK", 0))  # rank in replica
         self.world_size = int(os.environ.get("WORLD_SIZE", 1))
         self.device = torch.device(f"cuda:{self.local_rank}")
+        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
+            self.config.policy.model_name_or_path
+        )
         torch.cuda.set_device(self.device)
 
+    def post_init(self):
         # Initialize the communication to controller.
         self.init_comm()
         self.init_redis()

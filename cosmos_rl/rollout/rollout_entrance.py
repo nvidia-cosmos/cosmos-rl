@@ -69,6 +69,7 @@ def run_rollout(*args, **kwargs):
             rollout_worker = TRTLLMRolloutWrapper(cosmos_rollout_config)
         else:
             raise ValueError(f"Invalid rollout backend: {rollout_backend}")
+        logger.info("[Rollout] LMS: rollout_worker begin exec!")
         rollout_worker.work()
     except Exception:
         import traceback
