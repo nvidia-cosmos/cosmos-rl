@@ -1031,7 +1031,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             elif self._prompt_queue.empty():
                 continue
             else:
-                logger.info(f"[Rollout] generate start for rank {self.global_rank}")
+                logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
                 prompts: List[Tuple[int, str]] = self._prompt_queue.get()
                 completions: List[List[str]] = self.rollout.rollout_generation(
                     prompt_id_and_payload_list=prompts,
@@ -1080,7 +1080,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         len(prompts) == len(valid_completions)
                     ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
 
-                logger.info(f"[Rollout] generate end for rank {self.global_rank}")
+                logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
                 should_report = (
                     self.parallel_dims.tp_coord[0] == 0
