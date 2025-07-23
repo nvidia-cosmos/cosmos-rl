@@ -17,7 +17,6 @@ import types
 import os
 import weakref
 from pydantic import Field
-
 from tensorrt_llm._torch import LLM
 from tensorrt_llm.llmapi.llm_utils import CachedModelLoader
 import tensorrt_llm.llmapi.llm_args as tllm_llm_args
@@ -29,9 +28,11 @@ from tensorrt_llm.llmapi.mpi_session import external_mpi_comm_available
 from tensorrt_llm.llmapi.utils import print_colored
 from tensorrt_llm.executor import PostprocWorkerConfig
 from tensorrt_llm import bindings as tllm
+from tensorrt_llm._torch.pyexecutor import _util as tllm_util
+import tensorrt_llm.executor.worker as tllm_worker
 
 from cosmos_rl.policy.config import Config as CosmosConfig
-
+from cosmos_rl.utils.mpi_distributed import init_distributed_with_MPI
 
 """
 Patches for trtllm.
@@ -42,7 +43,7 @@ def add_method(obj, method, method_name):
     setattr(obj, method_name, types.MethodType(method, obj))
 
 
-# 1. Add cosmos config to trtllm ExecutorConfig. patch the _build_model of `LLM` class.
+# 1. Add cosmos config to trtllm ExecutorConfig and `LLMArgs`. patch the _build_model of `LLM` class.
 
 
 def patch_trtllm_llm_args():
@@ -53,6 +54,50 @@ def patch_trtllm_llm_args():
 
 
 patch_trtllm_llm_args()
+
+
+# 2. Patch the `create_py_executor_instance`, let PyExecutor to have a cosmos_config field and do the
+# cosmos-rl specific initialization.
+def patch_trtllm_create_py_executor_instance():
+    original_create_py_executor_instance = tllm_util.create_py_executor_instance
+
+    def cosmos_create_py_executor_instance(*args, **kwargs):
+        py_executor = original_create_py_executor_instance(
+            *args, **kwargs
+        )  # PyExecutor has been replaced by CosmosTRTLLMWorker
+        all_args = locals()
+        executor_config = all_args["executor_config"]
+        cosmos_config = executor_config.cosmos_config
+        assert hasattr(
+            py_executor, "set_cosmos_config"
+        ), "PyExecutor must have a set_cosmos_config method"
+        py_executor.set_cosmos_config(
+            cosmos_config
+        )  # set the cosmos config to the PyExecutor and do the cosmos-rl specific initialization.
+        return py_executor
+
+    tllm_util.create_py_executor_instance = cosmos_create_py_executor_instance
+
+
+patch_trtllm_create_py_executor_instance()
+
+
+# 3. Patch the `worker_main`, let it init the torch distributed environment that cosmos-rl uses.
+def patch_trtllm_worker_main():
+    original_worker_main = tllm_worker.worker_main
+
+    def worker_main(*args, **kwargs):
+        # init the torch distributed environment.
+        rdzv_endpoint = os.environ.get("RDZV_ENDPOINT", "127.0.0.1:12371")
+        rdzv_host, rdzv_port = rdzv_endpoint.split(":")
+        init_distributed_with_MPI(rdzv_host, rdzv_port)
+
+        original_worker_main(*args, **kwargs)
+
+    tllm_worker.worker_main = worker_main
+
+
+patch_trtllm_worker_main()
 
 
 def patch_trtllm_build_model(llm: LLM):

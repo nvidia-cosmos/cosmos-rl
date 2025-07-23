@@ -15,7 +15,6 @@
 
 from typing import List, Tuple, Optional
 
-import torch
 
 from transformers import GenerationConfig
 from tensorrt_llm._torch import LLM
@@ -25,11 +24,23 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.packer import DataPacker
+from transformers import AutoTokenizer
+
+
+class DemoLLM:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def generate(self, *args, **kwargs):
+        logger.info("[Rollout] LMS: generate")
+        return [
+            "Hello, world!",
+        ]
 
 
 class TRTLLM_Rollout(RolloutBase):
-    def __init__(self, config: Config, **kwargs):
-        super().__init__(config)
+    def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
+        super().__init__(config, tokenizer)
         self.rollout_config = self.config.rollout
 
         hf_config_path = self.config.policy.model_name_or_path
@@ -64,6 +75,7 @@ class TRTLLM_Rollout(RolloutBase):
         pp_size = rollout_parallelism.pp_size
         assert pp_size == 1, "TRTLLM only support pipeline parallelism 1 now."
 
+        logger.info(f"[Rollout] LMS: init rollout engine with model: {model_path}")
         self.rollout_engine = LLM(
             model=model_path,
             tensor_parallel_size=tp_size,
@@ -73,10 +85,11 @@ class TRTLLM_Rollout(RolloutBase):
             trust_remote_code=True,
         )
 
+        logger.info("[Rollout] LMS: init rollout engine done!")
+
     def rollout_generation(
         self,
         prompt_id_and_payload_list: List[Tuple[int, str]],
-        stream: bool,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
     ) -> List[List[str]]:
@@ -104,14 +117,12 @@ class TRTLLM_Rollout(RolloutBase):
         #   ...
         # ]
         response: List[List[str]] = []
-        stream = torch.cuda.current_stream() if stream is None else stream
         try:
-            with torch.cuda.stream(stream):
-                results = self.rollout_engine.generate(
-                    prompts=prompts,
-                    sampling_params=sampling_params,
-                    use_tqdm=False,
-                )
+            results = self.rollout_engine.generate(
+                prompts=prompts,
+                sampling_params=sampling_params,
+                use_tqdm=False,
+            )
 
             for output in results:
                 response.append(

@@ -120,8 +120,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
         super(vLLMRolloutWorker, self).__init__(config, parallel_dims)
+        self.post_init()
+
         self.state = State()
-        self.config = config
+
         if self.config.rollout.parallelism.dp_shard_size == -1:
             self.config.rollout.parallelism.dp_shard_size = parallel_dims.dp_shard
         assert self.config.rollout.parallelism.dp_shard_size == parallel_dims.dp_shard
@@ -162,7 +164,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 IS_TORCH_COMPATIBLE_WITH_FP8
             ), f"[Rollout] FP8 needs PyTorch >= {MIN_TORCH_VERSION_FOR_FP8}"
 
-        self.rollout: vLLMRollout = vLLMRollout(self.config)
+        self.rollout: vLLMRollout = vLLMRollout(self.config, self.tokenizer)
 
         # communicator index for the cached communicators in C++ binding.
         self.global_commnicator_idex = -1
