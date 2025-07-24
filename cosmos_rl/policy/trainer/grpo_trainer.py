@@ -753,11 +753,6 @@ class GRPOTrainer(Trainer):
         # There is a local-replica comm in training step
         # Here we use another comm to send weight to rollout
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
-
-        from torch.cuda import cudart
-
-        cudart().cudaProfilerStart()
-
         with torch.cuda.stream(self.train_stream):
             with torch.no_grad():
                 pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
@@ -821,8 +816,6 @@ class GRPOTrainer(Trainer):
         logger.debug(
             f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent."
         )
-
-        cudart().cudaProfilerStop()
 
         return False
 

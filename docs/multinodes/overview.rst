@@ -55,7 +55,7 @@ DGXC-Lepton Job takes care of the number of GPU required by each policy and roll
         --lepton-secret HUGGING_FACE_HUB_TOKEN={your-hugging-face-token} \
         --policy 8 \
         --rollout 4 \
-        /workspace/cosmos_rl/tools/dataset/math_dapo.py
+        cosmos_rl.tools.dataset.math_dapo
 
 Total `8*4 + 4*2 = 40` GPUs are used. (5 `8xH100` nodes will be allocated for this job)
 
@@ -76,7 +76,7 @@ Cosmos slurm Job takes care of the number of GPU required by each policy and rol
         --cosmos-container ${YOUR_COSMOS_SQSQ_PATH} \
         --slurm-partition ${YOUR_SLURM_PARTITION} \
         --slurm-account ${YOUR_SLURM_ACCOUNT} \
-        tools/dataset/gsm8k_grpo.py
+        cosmos_rl.tools.dataset.gsm8k_grpo
 
 Total `8*8 + 4*4 = 64` GPUs are used. (8 `8xH100` nodes will be allocated for this job)
 

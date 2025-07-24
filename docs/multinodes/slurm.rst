@@ -43,7 +43,7 @@ For instance, to run a GRPO job with a custom launcher for the ``gsm8k`` dataset
         --cosmos-container ${COSMOS_SQSQ_PATH} \
         --slurm-partition ${SLURM_PARTITION} \
         --slurm-account ${SLURM_ACCOUNT} \
-        tools/dataset/gsm8k_grpo.py
+        cosmos_rl.tools.dataset.gsm8k_grpo
 
 Full Argument List
 ------------------

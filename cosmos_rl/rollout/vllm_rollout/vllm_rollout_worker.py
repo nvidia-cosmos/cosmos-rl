@@ -497,6 +497,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         total_bytes_received = 0
 
         all_cloned_target_tensors = []
+        tensors_to_check = []
 
         for insts_for_per_param in insts_group.param_instructions:
             # insts_for_per_param: WeightSyncInstructionsPerParam -> inst collection for a single tensor
@@ -531,22 +532,32 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # inplace copy
                 if not vllm_tensor_view.is_contiguous():
                     all_cloned_target_tensors.append((vllm_tensor_view, recv_tensor))
-                    # vllm_tensor_view.copy_(recv_tensor)
 
                 total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
 
             if check_inside_group:
-                if not torch.allclose(cloned_target_tensor, target_tensor):
-                    raise ValueError(
-                        f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
-                    )
+                tensors_to_check.append(
+                    (cloned_target_tensor, target_tensor, insts, inst_dest_name)
+                )
 
         def completion_lambda():
             for view, recv_tensor in all_cloned_target_tensors:
                 view.copy_(
                     recv_tensor,
                 )
-                del recv_tensor
+            all_cloned_target_tensors.clear()
+
+            for (
+                cloned_target_tensor,
+                target_tensor,
+                insts,
+                inst_dest_name,
+            ) in tensors_to_check:
+                if not torch.allclose(cloned_target_tensor, target_tensor):
+                    raise ValueError(
+                        f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
+                    )
+            tensors_to_check.clear()
 
             # here we got one full weight tensor sync done, if it is fp8 weight, we should do the quantization and check the numerical error.
             if self.quantization_type == "fp8":
@@ -719,9 +730,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             logger.info(
                 f"Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
             )
-            from torch.cuda import cudart
-
-            cudart().cudaProfilerStart()
             # recv the weight from policy
             st = time.time()
             total_bytes_received = 0
@@ -760,9 +768,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 total_bytes_received += bytes_received
 
                 pending_groups += 1
-                if (
-                    pending_groups == TRANSFER_GROUP_SIZE
-                ):  # pending_bytes[0] > -1: # 1024*1024*1024:
+                if pending_groups == TRANSFER_GROUP_SIZE:
                     nccl_group_end(communicator_index)
                     flush_completions(pending_bytes, pending_completions)
                     nccl_group_start(communicator_index)
@@ -783,18 +789,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             logger.info(
                 f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
             )
-            cudart().cudaProfilerStop()
-
-            logger.info("Post processing of weights after receiving new weights ...")
-            self.rollout.process_weights_after_loading()
-            logger.info("Post processing of weights finished.")
 
             self.state.set_weight_synced()
-
-            # self.rollout._do_test_rollout("after receiving weights, before generating")
-            # self.rollout.rollout_engine.generate(
-            #    prompts=["What model are you?"], sampling_params=sampling_params
-            # )
 
     @RolloutWorkerBase.register_rollout_command_handler(
         RolloutToRolloutBroadcastCommand
