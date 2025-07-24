@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import torch
+import threading
 import requests
 from queue import Queue
 from functools import partial
@@ -38,6 +39,8 @@ from cosmos_rl.rollout.trtllm_rollout import trtllm_patch
 trtllm_patch.dummy()  # Avoid removed by formatter.
 
 from tensorrt_llm import SamplingParams
+from tensorrt_llm.executor.proxy import ExecutorBindingsProxy
+from tensorrt_llm.executor.ipc import ZeroMqQueue as IpcQueue
 
 
 class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
@@ -51,7 +54,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
     def __init__(self, config: CosmosConfig) -> None:
         super(TRTLLMRolloutWrapper, self).__init__()
         self.post_init(config, None, init_comm=False)
-        self.init_meta()
+        # only init some meta info.
+        self.init_meta()  # This wrapper won't handle commands, it only handle prompt fetching and end signal.
 
         self.state = State()
 
@@ -77,9 +81,12 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         self.batch_size = self.config.rollout.batch_size
 
         # Use IPCQueue Interactive with trtllm worker.
+        self.cosmos_replica_name_queue, self.cosmos_weight_sync_queue = (
+            self.get_ipc_queue()
+        )
 
-        # only init some meta info.
-        self.init_meta()  # This wrapper won't handle commands, it only handle prompt fetching and end signal.
+        # FIXME: (lms) receive shutdown signal from trtllm worker. remove this later.
+        self.shutdown_signal = threading.Event()
 
     def get_alternative_urls(self, suffix: str):
         # Get the alternative URLs for the given suffix
@@ -164,14 +171,17 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
     @torch.no_grad()
     def main_loop(self):
-        # FIXME: (lms) Support query prompt from controller.
-        # while not self.shutdown_signal.is_set():
-        flag = False
-        while not flag:
-            logger.info("[Rollout] LMS: main_loop")
-            # FIXME: (lms) query the weight synced event from trtllm IPCQueue
-            # if not self.state.weight_synced():
-            #     continue
+        # FIXME: (lms) receive shutdown signal from trtllm worker.
+        while not self.shutdown_signal.is_set():
+            while (replica_name := self.cosmos_replica_name_queue.get()) is not None:
+                # So the worker processes has done the registration.
+                logger.info(
+                    f"[Rollout] Got replica name: {replica_name} from trtllm WorkerProcess"
+                )
+                self.replica_name = (
+                    replica_name  # retrieve the replica name from trtllm worker.
+                )
+                break
 
             if not self.state.prompt_fetch_end():
                 no_more_prompts = self.request_new_prompts(
@@ -204,10 +214,97 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     sampling_params=self.sampling_params,
                 )
 
-                logger.info(f"[Rollout] LMS: completions: {completions}")
+                logger.info(f"[Rollout] LMS: completions of trtllm: {completions}")
 
-                # FIXME: (lms) remove this hardcode flag, just for testing
-                flag = True
+                # Remove empty completions
+                valid_completions: List[List[str]] = []
+                prompt_indices_to_remove: List[int] = []
+                if len(completions):
+                    batch_size = len(prompts)
+                    for i in range(batch_size):
+                        completion = completions[i]
+                        skip_output = False
+                        total_generation_count = len(completion)
+                        empty_generation_count = 0
+                        output_texts = []
+                        for j in range(total_generation_count):
+                            output_text = completion[j]
+                            if output_text == "":
+                                logger.warning(
+                                    f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                                )
+                                empty_generation_count += 1
+                            else:
+                                output_texts.append(output_text)
+                        # Skip the output if there is one or zero non-empty completions
+                        skip_output = (
+                            total_generation_count - empty_generation_count
+                        ) <= 1
+                        if not skip_output:
+                            valid_completions.append(output_texts)
+                        else:
+                            prompt_indices_to_remove.append(i)
+                if len(prompt_indices_to_remove):
+                    prompts = [
+                        prompt
+                        for i, prompt in enumerate(prompts)
+                        if i not in prompt_indices_to_remove
+                    ]
+                    assert (
+                        len(prompts) == len(valid_completions)
+                    ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+
+                logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
+
+                should_report = (
+                    self.parallel_dims.tp_coord[0] == 0
+                    and (
+                        self.parallel_dims.pp_coord[0]
+                        == self.parallel_dims.pp_coord[1] - 1
+                    )
+                    and len(valid_completions) > 0
+                )
+
+                if should_report:
+                    url_suffix = COSMOS_API_ROLLOUT_SUFFIX
+                    # only the first tp rank in the rollout replica will post the completion to the controller.
+                    prompt_idxs = [prompt[0] for prompt in prompts]
+                    payloads = [prompt[1] for prompt in prompts]
+
+                    response = RolloutRequest(
+                        src_replica_name=self.replica_name,
+                        prompt_idxs=prompt_idxs,
+                        payloads=payloads,
+                        completions=valid_completions,
+                        is_end=False,
+                    )
+                    try:
+                        make_request_with_retry(
+                            partial(
+                                requests.post,
+                                json=response.model_dump(),
+                            ),
+                            self.get_alternative_urls(url_suffix),
+                            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
+                        )
+
+                if self.state.prompt_fetch_end() and self._prompt_queue.empty():
+                    self.state.set_prompt_consume_end()
+                    if self.global_rank == 0:
+                        self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
 
     def work(self):
         self.main_loop()
+
+    def get_underlying_executor(self) -> ExecutorBindingsProxy:
+        return self.rollout.rollout_engine._executor
+
+    def get_ipc_queue(self) -> Tuple[IpcQueue, IpcQueue]:
+        return (
+            self.rollout.rollout_engine.cosmos_replica_name_queue,
+            self.rollout.rollout_engine.cosmos_weight_sync_queue,
+        )
