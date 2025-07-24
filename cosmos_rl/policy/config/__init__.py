@@ -106,6 +106,11 @@ class SFTDataConfig(BaseModel):
         description="Dataset configuration for SFT training. It includes dataset name, subset, revision, train split, and test split.",
     )
 
+    mini_batch: int = Field(
+        default=2,
+        description="mini-batch size for training.",
+    )
+
     dataloader_shuffle: bool = Field(
         default=False,
         description="Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.",

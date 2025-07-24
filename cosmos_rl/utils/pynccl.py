@@ -202,49 +202,51 @@ _worker_init_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 
+def run_task(task: _Task):
+    logger.debug(f"[Worker] Got task {task} | queue_size={_task_q.qsize()}")
+
+    comm: ncclComm_t | None = None
+    try:
+        logger.debug(f"[Worker] Executing functor for task {task}")
+        comm = task.functor()
+        logger.debug(f"[Worker] Functor for task {task} returned comm={comm}")
+
+        deadline = time.monotonic() + task.timeout_ms / 1000.0
+        # Poll async error status until success or timeout.
+        while time.monotonic() < deadline:
+            err = _nccl.ncclCommGetAsyncError(comm)
+            if err == ncclResultEnum.ncclSuccess:
+                break
+            if err != ncclResultEnum.ncclInProgress:
+                # Immediate error – abort communicator and mark task failed.
+                logger.error(
+                    f"NCCL: async error detected (err={err}), task {task} failed"
+                )
+                _safe_abort(task.comm_idx, comm)
+                task.timed_out.set()
+                break
+            time.sleep(0.001)
+
+        else:
+            # Enqueue timeout hit – abort communicator.
+            logger.error(f"NCCL: non-blocking enqueue timed out for task {task}")
+            _safe_abort(task.comm_idx, comm)
+            task.timed_out.set()
+    except Exception as e:
+        logger.error(f"[Worker] Exception during task {task}: {e}")
+        task.timed_out.set()
+    finally:
+        task.done.set()
+        logger.debug(f"[Worker] Task {task} done | timed_out={task.timed_out.is_set()}")
+
+
 def _worker_loop(device_idx: int):
     """Background thread that executes queued NCCL host calls on *device_idx*."""
     torch.cuda.set_device(device_idx)
 
     while True:
         task: _Task = _task_q.get()
-        logger.debug(f"[Worker] Got task {task} | queue_size={_task_q.qsize()}")
-
-        comm: ncclComm_t | None = None
-        try:
-            logger.debug(f"[Worker] Executing functor for task {task}")
-            comm = task.functor()
-            logger.debug(f"[Worker] Functor for task {task} returned comm={comm}")
-
-            deadline = time.monotonic() + task.timeout_ms / 1000.0
-            # Poll async error status until success or timeout.
-            while time.monotonic() < deadline:
-                err = _nccl.ncclCommGetAsyncError(comm)
-                if err == ncclResultEnum.ncclSuccess:
-                    break
-                if err != ncclResultEnum.ncclInProgress:
-                    # Immediate error – abort communicator and mark task failed.
-                    logger.error(
-                        f"NCCL: async error detected (err={err}), task {task} failed"
-                    )
-                    _safe_abort(task.comm_idx, comm)
-                    task.timed_out.set()
-                    break
-                time.sleep(0.001)
-
-            else:
-                # Enqueue timeout hit – abort communicator.
-                logger.error(f"NCCL: non-blocking enqueue timed out for task {task}")
-                _safe_abort(task.comm_idx, comm)
-                task.timed_out.set()
-        except Exception as e:
-            logger.error(f"[Worker] Exception during task {task}: {e}")
-            task.timed_out.set()
-        finally:
-            task.done.set()
-            logger.debug(
-                f"[Worker] Task {task} done | timed_out={task.timed_out.is_set()}"
-            )
+        run_task(task)
 
 
 def _start_worker(device_idx: int):
@@ -274,6 +276,7 @@ def _submit_nccl(
     functor: Callable[[], ncclComm_t],
     timeout_ms: Optional[int],
     comm_idx: Optional[int] = None,
+    run_inline: bool = True,
 ):
     """Execute *functor* in the NCCL worker thread with watchdog integration."""
     if not _worker_started:
@@ -283,8 +286,11 @@ def _submit_nccl(
 
     resolved_timeout = _get_timeout_ms(timeout_ms)
     task = _Task(functor, resolved_timeout, comm_idx)
-    _task_q.put(task)
-    task.done.wait()
+    if run_inline:
+        run_task(task)
+    else:
+        _task_q.put(task)
+        task.done.wait()
 
     if task.timed_out.is_set():
         cur = _current_ctx()
@@ -550,6 +556,26 @@ def nccl_broadcast(
         return meta.comm
 
     _submit_nccl(_broadcast_call, timeout_ms, comm_idx)
+
+
+def nccl_group_start(comm_idx: int):
+    meta = _COMM_REGISTRY.get(comm_idx)
+
+    def _group_start_call():
+        _nccl.ncclGroupStart()
+        return meta.comm
+
+    _submit_nccl(_group_start_call, None, comm_idx)
+
+
+def nccl_group_end(comm_idx: int):
+    meta = _COMM_REGISTRY.get(comm_idx)
+
+    def _group_end_call():
+        _nccl.ncclGroupEnd()
+        return meta.comm
+
+    _submit_nccl(_group_end_call, None, comm_idx)
 
 
 def nccl_send(

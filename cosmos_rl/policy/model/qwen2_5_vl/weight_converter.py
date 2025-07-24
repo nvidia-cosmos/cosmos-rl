@@ -57,5 +57,11 @@ def convert_weight_from_hf(
     shard = tensor
     # TODO(cjx): Only FSDP sharding is supported for visual part
     shard = shard.contiguous()
-    shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
+    if shard.shape[0] % dp_shard_size == 0:
+        shard = shard.tensor_split(dp_shard_size, dim=0)
+        shard = shard[dp_shard_rank]
+    else:
+        chunk_size = (shard.shape[0] + dp_shard_size - 1) // dp_shard_size
+        shard = shard[dp_shard_rank * chunk_size : (dp_shard_rank + 1) * chunk_size]
+
     return dest_name, shard.contiguous()

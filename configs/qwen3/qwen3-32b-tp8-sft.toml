@@ -18,13 +18,13 @@ param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 8
+train_batch_per_replica = 32
 sync_weight_interval = 1
 
 [policy]
 model_name_or_path = "Qwen/Qwen3-32B"
 model_max_length = 1024
-model_gradient_checkpointing = true
+model_gradient_checkpointig = true
 
 [logging]
 logger = ['console', 'wandb']
@@ -37,6 +37,7 @@ dataset.name = "LNTANOooo/sharegpt52k"
 dataset.subset = ""
 dataset.split = "train"
 conversation_column_name = "conversation"
+mini_batch = 8
 
 
 [train.ckpt]

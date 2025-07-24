@@ -236,6 +236,21 @@ def parallelize(
                 config.train.train_policy.mini_batch
                 // config.policy.parallelism.pp_micro_batch_size
             )
+        else:
+            assert (
+                config.train.train_batch_per_replica
+                % config.train.train_policy.mini_batch
+                == 0
+            ), "train_batch must be divisible by mini_batch"
+            assert (
+                config.train.train_policy.mini_batch
+                % config.policy.parallelism.pp_micro_batch_size
+                == 0
+            ), "mini_batch must be divisible by pp_micro_batch_size"
+            n_microbatches = (
+                config.train.train_policy.mini_batch
+                // config.policy.parallelism.pp_micro_batch_size
+            )
 
         schedule = Schedule1F1B(
             stage=stage,

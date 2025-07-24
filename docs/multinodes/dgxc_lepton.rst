@@ -52,7 +52,7 @@ To launch your job, use the following command as a template. Make sure to **repl
   --lepton-secret HUGGING_FACE_HUB_TOKEN=MY_HF_TOKEN \  # Example usage of a secret. Make sure to setup 'MY_HF_TOKEN' in your workspace under Settings → Secrets.
   --lepton-env <ENVIRONMENT_VARIABLE_NAME>=<VALUE> \
   --lepton-mount /:<mount_path>:local-path-for-local:<local_disc_volume_name> \
-  tools/dataset/gsm8k_grpo.py
+  cosmos_rl.tools.dataset.gsm8k_grpo
 
 .. warning::
    `--mount` currently only works for node groups that have **Local Disk Enabled**.

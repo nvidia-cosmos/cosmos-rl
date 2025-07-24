@@ -288,6 +288,18 @@ class NCCLLibrary:
                 ctypes.POINTER(ncclConfig_t),
             ],
         ),
+        # ncclResult_t ncclGroupStart()
+        Function(
+            "ncclGroupStart",
+            ncclResult_t,
+            [],
+        ),
+        # ncclResult_t ncclGroupEnd()
+        Function(
+            "ncclGroupEnd",
+            ncclResult_t,
+            [],
+        ),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -512,6 +524,12 @@ class NCCLLibrary:
         self.NCCL_CHECK(
             self._funcs["ncclRecv"](recvbuff, count, datatype, src, comm, stream)
         )
+
+    def ncclGroupStart(self) -> None:
+        self.NCCL_CHECK(self._funcs["ncclGroupStart"]())
+
+    def ncclGroupEnd(self) -> None:
+        self.NCCL_CHECK(self._funcs["ncclGroupEnd"]())
 
     def ncclBroadcast(
         self,

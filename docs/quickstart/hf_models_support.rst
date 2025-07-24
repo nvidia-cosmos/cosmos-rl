@@ -30,7 +30,7 @@ Example command:
 
 .. code-block:: bash
 
-    cosmos-rl --config configs/mistral/mistral-7b-fsdp4-sft.toml ./cosmos_rl/tools/dataset/dummy_sft.py
+    cosmos-rl --config configs/mistral/mistral-7b-fsdp4-sft.toml cosmos_rl.tools.dataset.dummy_sft.py
 
 Another example for different configuration:
 
