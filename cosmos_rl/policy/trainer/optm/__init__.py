@@ -219,7 +219,6 @@ def build_optimizers(
     optimizer_kwargs = [
         {
             "lr": lr_i,
-            "eps": config.train.epsilon,
             "betas": config.train.optm_betas,
             "weight_decay": config.train.optm_weight_decay,
             "fused": fused_i,
