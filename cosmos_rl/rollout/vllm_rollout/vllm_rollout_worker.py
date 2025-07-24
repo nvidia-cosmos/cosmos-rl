@@ -46,6 +46,8 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_comm,
     nccl_broadcast,
     nccl_recv,
+    nccl_group_start,
+    nccl_group_end,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
@@ -487,6 +489,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         total_bytes_received = 0
 
+        all_cloned_target_tensors = []
+        tensors_to_check = []
+
         for insts_for_per_param in insts_group.param_instructions:
             # insts_for_per_param: WeightSyncInstructionsPerParam -> inst collection for a single tensor
             insts = insts_for_per_param.instructions
@@ -512,57 +517,79 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     # new a temp tensor
                     recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
 
+                logger.debug(
+                    f"Recving tensor {inst_dest_name} from policy rank {p_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape}."
+                )
+
                 nccl_recv(recv_tensor, p_rank, communicator_index)
                 # inplace copy
                 if not vllm_tensor_view.is_contiguous():
-                    vllm_tensor_view.copy_(recv_tensor)
+                    all_cloned_target_tensors.append((vllm_tensor_view, recv_tensor))
 
                 total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
 
             if check_inside_group:
+                tensors_to_check.append(
+                    (cloned_target_tensor, target_tensor, insts, inst_dest_name)
+                )
+
+        def completion_lambda():
+            for view, recv_tensor in all_cloned_target_tensors:
+                view.copy_(
+                    recv_tensor,
+                )
+            all_cloned_target_tensors.clear()
+
+            for (
+                cloned_target_tensor,
+                target_tensor,
+                insts,
+                inst_dest_name,
+            ) in tensors_to_check:
                 if not torch.allclose(cloned_target_tensor, target_tensor):
                     raise ValueError(
                         f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
                     )
+            tensors_to_check.clear()
 
-        # here we got one full weight tensor sync done, if it is fp8 weight, we should do the quantization and check the numerical error.
-        if self.quantization_type == "fp8":
-            if inst_group_full_weight_name in self.vllm_hp_weight_map:
-                weight_to_quantize = self.vllm_hp_weight_map[
-                    inst_group_full_weight_name
-                ]  # [out_dim, in_dim]
-                quantized_weight, weight_scale = self.rollout.fp8_quantization(
-                    weight_to_quantize
-                )
-                model_param_map = self.rollout.model_param_map(self.weight_mapper)
-                vllm_native_weight = model_param_map[inst_group_full_weight_name]
+            # here we got one full weight tensor sync done, if it is fp8 weight, we should do the quantization and check the numerical error.
+            if self.quantization_type == "fp8":
+                if inst_group_full_weight_name in self.vllm_hp_weight_map:
+                    weight_to_quantize = self.vllm_hp_weight_map[
+                        inst_group_full_weight_name
+                    ]  # [out_dim, in_dim]
+                    quantized_weight, weight_scale = self.rollout.fp8_quantization(
+                        weight_to_quantize
+                    )
+                    model_param_map = self.rollout.model_param_map(self.weight_mapper)
+                    vllm_native_weight = model_param_map[inst_group_full_weight_name]
 
-                # check weight sync
-                if do_weight_sync_check:
-                    # allclose doesn't support fp8, promote it.
-                    bf16_vllm_native_weight = vllm_native_weight.to(torch.bfloat16)
-                    bf16_quantized_weight = quantized_weight.to(torch.bfloat16)
-                    if not torch.allclose(
-                        bf16_vllm_native_weight, bf16_quantized_weight
-                    ):
-                        raise ValueError(
-                            f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
-                        )
-                vllm_native_weight.copy_(quantized_weight)
-                # get the scale key.
-                scale_key = inst_group_full_weight_name.replace(
-                    ".weight", ".weight_scale"
-                )
-                scale_tensor = model_param_map[scale_key]
-                assert (
-                    scale_tensor.shape == weight_scale.shape
-                ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
-                scale_tensor.copy_(weight_scale)
-        else:
-            # For non-fp8 weights and fp8 not enabled cases, we just do nothing
-            pass
+                    # check weight sync
+                    if do_weight_sync_check:
+                        # allclose doesn't support fp8, promote it.
+                        bf16_vllm_native_weight = vllm_native_weight.to(torch.bfloat16)
+                        bf16_quantized_weight = quantized_weight.to(torch.bfloat16)
+                        if not torch.allclose(
+                            bf16_vllm_native_weight, bf16_quantized_weight
+                        ):
+                            raise ValueError(
+                                f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
+                            )
+                    vllm_native_weight.copy_(quantized_weight)
+                    # get the scale key.
+                    scale_key = inst_group_full_weight_name.replace(
+                        ".weight", ".weight_scale"
+                    )
+                    scale_tensor = model_param_map[scale_key]
+                    assert (
+                        scale_tensor.shape == weight_scale.shape
+                    ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
+                    scale_tensor.copy_(weight_scale)
+            else:
+                # For non-fp8 weights and fp8 not enabled cases, we just do nothing
+                pass
 
-        return total_bytes_received
+        return total_bytes_received, completion_lambda
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
@@ -623,6 +650,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
 
         if not hasattr(self, "policy_to_rollout_recv_insts"):
+            logger.info(
+                "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
+            )
             self.policy_to_rollout_recv_insts = []
             try:
                 insts_meta = make_request_with_retry(
@@ -645,24 +675,83 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 raise RuntimeError(
                     f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
                 )
+            logger.info(
+                "[Rollout] Finished policy_to_rollout_recv_insts from controller."
+            )
+
+        total_recvs = 0
+        total_params = 0
+        for insts_group in self.policy_to_rollout_recv_insts:
+            for insts_for_per_param in insts_group.param_instructions:
+                total_params += 1
+                total_recvs += len(insts_for_per_param.instructions)
+
+        copy_stream = torch.cuda.Stream()
 
         with torch.cuda.stream(self.inference_stream):
+            logger.info(
+                f"Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
+            )
             # recv the weight from policy
             st = time.time()
             total_bytes_received = 0
+
+            pending_bytes = [0]
+            pending_completions = []
+            pending_groups = 0
+
+            def flush_completions(pending_bytes, pending_completions):
+                recv_ready = torch.cuda.Event()
+                recv_ready.record()
+                with torch.cuda.stream(copy_stream):
+                    recv_ready.wait()
+                    logger.debug(
+                        f"Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024}"
+                    )
+                    for completion in pending_completions:
+                        completion()
+                    pending_bytes[0] = 0
+                    pending_completions.clear()
+
+            nccl_group_start(communicator_index)
+
+            TRANSFER_GROUP_SIZE = 4
             for insts_group in self.policy_to_rollout_recv_insts:
                 # insts_group: WeightSyncInstructionsGroup -> inst collection for a full weight tensor
                 # handle inst group
-                total_bytes_received += self.recv_weight_shard(
+                bytes_received, completion_fn = self.recv_weight_shard(
                     self.global_rank,
                     insts_group,
                     communicator_index,
                     command.do_weight_sync_check,
                 )
+                pending_bytes[0] += bytes_received
+                pending_completions.append(completion_fn)
+                total_bytes_received += bytes_received
+
+                pending_groups += 1
+                if pending_groups == TRANSFER_GROUP_SIZE:
+                    nccl_group_end(communicator_index)
+                    flush_completions(pending_bytes, pending_completions)
+                    nccl_group_start(communicator_index)
+                    pending_groups = 0
+
+            nccl_group_end(communicator_index)
+            flush_completions(pending_bytes, pending_completions)
+
+            with torch.cuda.stream(copy_stream):
+                copy_finished = torch.cuda.Event()
+                copy_finished.record()
+
+            copy_finished.wait()
+
+            torch.cuda.synchronize()
+
             time_eclapsed = time.time() - st
-            logger.debug(
+            logger.info(
                 f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
             )
+
             self.state.set_weight_synced()
 
     @RolloutWorkerBase.register_rollout_command_handler(
@@ -695,6 +784,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.prepare_shard_infos_for_weight_sync_insts()
 
         if len(dst_replica_names) > 1:
+            logger.info("Starting broadcasting of parameters to all replicas.")
             # Only do broadcast if there are more than one rollout replicas.
             with torch.cuda.stream(self.inference_stream):
                 assert (
@@ -718,6 +808,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
                 if not self.state.weight_synced():
                     self.state.set_weight_synced()
+            logger.info("Finished broadcasting of parameters to all replicas.")
 
         current_step = broadcast_command.weight_step
         if current_step is not None and current_step > 0:
@@ -953,6 +1044,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 prompt_indices_to_remove: List[int] = []
                 if len(completions):
                     batch_size = len(prompts)
+                    assert (
+                        len(completions) == batch_size
+                    ), f"Error: VLLM returned {len(completions)} for {batch_size}"
                     for i in range(batch_size):
                         completion = completions[i]
                         skip_output = False

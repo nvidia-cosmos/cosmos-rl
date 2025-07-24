@@ -41,7 +41,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
-from flash_attn import flash_attn_func
+from flash_attn import flash_attn_func, flash_attn_varlen_func
 
 
 def build_norm(norm_type: str, dim: int, eps: float):
@@ -233,17 +233,17 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb_vision(
-    tensor: torch.Tensor, freqs: torch.Tensor
-) -> torch.Tensor:
-    orig_dtype = tensor.dtype
-    tensor = tensor.float()
-    cos = freqs.cos()
-    sin = freqs.sin()
-    cos = cos.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
-    sin = sin.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
-    output = (tensor * cos) + (rotate_half(tensor) * sin)
-    output = output.to(orig_dtype)
-    return output
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    orig_q_dtype = q.dtype
+    orig_k_dtype = k.dtype
+    q, k = q.float(), k.float()
+    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = q_embed.to(orig_q_dtype)
+    k_embed = k_embed.to(orig_k_dtype)
+    return q_embed, k_embed
 
 
 class Qwen2_5_VLVisionSdpaAttention(nn.Module):
@@ -252,12 +252,12 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         self.num_heads = num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
-        self.attn_func = F.scaled_dot_product_attention
+        self.attention_dropout = 0.0
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
+        cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
@@ -267,20 +267,26 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
             .permute(1, 0, 2, 3)
             .unbind(0)
         )
-        q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
-        k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        v = v.transpose(0, 1)
-        attn_output = self.attn_func(
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        cos = emb.cos()
+        sin = emb.sin()
+        q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
+
+        q = q.squeeze(0)
+        k = k.squeeze(0)
+
+        with torch.no_grad():
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        attn_output = flash_attn_varlen_func(
             q,
             k,
             v,
-            attention_mask,
-            dropout_p=0.0,  # This is fixed to 0.0 according to the original implementation
-        )
-        attn_output = attn_output.transpose(0, 1)
-        attn_output = attn_output.reshape(seq_length, -1)
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            causal=False,
+        ).reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
 
@@ -298,10 +304,10 @@ class Qwen2_5_VLVisionBlock(nn.Module):
             bias=True,  # This is fixed to True according to the original implementation
         )
 
-    def forward(self, hidden_states, attention_mask, rotary_pos_emb) -> torch.Tensor:
+    def forward(self, hidden_states, cu_seqlens, rotary_pos_emb) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
-            attention_mask=attention_mask,
+            cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
@@ -456,39 +462,12 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
-        seq_length = hidden_states.shape[0]
-        attention_masks = [
-            torch.zeros(
-                [1, seq_length, seq_length],
-                device=hidden_states.device,
-                dtype=torch.bool,
-            ),
-            torch.zeros(
-                [1, seq_length, seq_length],
-                device=hidden_states.device,
-                dtype=torch.bool,
-            ),
-        ]
-        for i in range(1, len(cu_seqlens)):
-            attention_masks[0][
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = True
-
-        for i in range(1, len(cu_window_seqlens)):
-            attention_masks[1][
-                ...,
-                cu_window_seqlens[i - 1] : cu_window_seqlens[i],
-                cu_window_seqlens[i - 1] : cu_window_seqlens[i],
-            ] = True
-
         for layer_num, blk in self.blocks.items():
             hidden_states = blk(
                 hidden_states,
-                attention_mask=attention_masks[0]
-                if layer_num in self.fullatt_block_indexes
-                else attention_masks[1],
+                cu_seqlens=cu_seqlens
+                if int(layer_num) in self.fullatt_block_indexes
+                else cu_window_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
             )
 
