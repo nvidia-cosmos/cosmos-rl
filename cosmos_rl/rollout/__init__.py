@@ -72,7 +72,6 @@ class RolloutWorkerBase(CommMixin):
         )
         torch.cuda.set_device(self.device)
 
-    def post_init(self):
         # Initialize the communication to controller.
         self.init_comm()
         self.init_redis()
@@ -86,7 +85,9 @@ class TRTLLMRolloutWorkerBase(CommMixin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def post_init(self, cosmos_config: CosmosConfig, parallel_dims: ParallelDims):
+    def post_init(
+        self, cosmos_config: CosmosConfig, parallel_dims: ParallelDims, init_comm=True
+    ):
         self.config = cosmos_config
         self.role = Role.ROLLOUT
         self.parallel_dims = parallel_dims
@@ -99,7 +100,9 @@ class TRTLLMRolloutWorkerBase(CommMixin):
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
             self.config.policy.model_name_or_path
         )
+        self.backend = "trtllm"
 
-        # Initialize the communication to controller.
-        self.init_comm()
-        self.init_redis()
+        if init_comm:
+            # Initialize the communication to controller.
+            self.init_comm()
+            self.init_redis()

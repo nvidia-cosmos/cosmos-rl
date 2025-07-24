@@ -120,7 +120,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
         super(vLLMRolloutWorker, self).__init__(config, parallel_dims)
-        self.post_init()
+        self.backend = "vllm"
 
         self.state = State()
 
@@ -226,7 +226,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
         )
-        self.backend = "vllm"
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         if self.quantization_type == "fp8":
