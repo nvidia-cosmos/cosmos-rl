@@ -20,7 +20,7 @@ from functools import partial
 from urllib.parse import urljoin
 from typing import List, Tuple
 from cosmos_rl.dispatcher.protocol import RolloutRequest
-from cosmos_rl.rollout import State, RolloutWorkerBase
+from cosmos_rl.rollout import State, TRTLLMRolloutWorkerBase
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.network_util import make_request_with_retry
@@ -40,7 +40,7 @@ trtllm_patch.dummy()  # Avoid removed by formatter.
 from tensorrt_llm import SamplingParams
 
 
-class TRTLLMRolloutWrapper(RolloutWorkerBase):
+class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
     """
     Rollout worker with `trtllm` as the backend. pytorch backend is used for trtllm inference.
     This worker supports MPI Session that trtllm used. TRTLLMRolloutWorker is always in a single process
@@ -49,9 +49,8 @@ class TRTLLMRolloutWrapper(RolloutWorkerBase):
     """
 
     def __init__(self, config: CosmosConfig) -> None:
-        super(TRTLLMRolloutWrapper, self).__init__(
-            config, None
-        )  # Just set parallel_dims to None.
+        super(TRTLLMRolloutWrapper, self).__init__()
+        self.post_init(config, None, init_comm=False)
         self.init_meta()
 
         self.state = State()
