@@ -37,6 +37,7 @@ from tensorrt_llm.builder import EngineConfig
 from tensorrt_llm.llmapi.mpi_session import external_mpi_comm_available
 from tensorrt_llm.llmapi.utils import print_colored
 from tensorrt_llm.executor import PostprocWorkerConfig
+from tensorrt_llm.executor.ipc import ZeroMqQueue as IpcQueue
 from tensorrt_llm.bindings import executor as tllm_executor
 from tensorrt_llm._torch.pyexecutor import _util as tllm_util
 from tensorrt_llm._torch.pyexecutor._util import _try_infer_num_experts
@@ -62,7 +63,10 @@ import tensorrt_llm.executor.worker as tllm_worker
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.rollout.trtllm_rollout.trtllm_worker import CosmosTRTLLMWorker
+from cosmos_rl.rollout.trtllm_rollout.trtllm_worker import (
+    CosmosTRTLLMWorker,
+    CosmosWorkerCommIpcAddrs,
+)
 
 """
 Patches for trtllm.
@@ -252,6 +256,7 @@ def extend_create_py_executor_instance():
             draft_model_engine=draft_model_engine,
             start_worker=start_worker,
             cosmos_config=executor_config.cosmos_config,
+            cosmos_ipc_queues=executor_config.cosmos_ipc_queues_addrs,
         )
 
     tllm_util.create_py_executor_instance = cosmos_create_py_executor_instance
@@ -405,10 +410,25 @@ def patch_trtllm_build_model():
         executor_config.llm_parallel_config = self.args.parallel_config
 
         """
-        Cosmos-RL modification:
+        Cosmos-RL modification start.
         - Add cosmos config to executor_config.
         """
         executor_config.cosmos_config = self.args.cosmos_config
+        # set up IPCQueues that we need.
+        self.cosmos_replica_name_queue = IpcQueue(
+            is_server=True, name="cosmos_replica_name_queue"
+        )
+        self.cosmos_weight_sync_queue = IpcQueue(
+            is_server=True, name="cosmos_weight_sync_queue"
+        )
+        # dynamically set the ipc_queues to the executor_config.
+        executor_config.cosmos_ipc_queues_addrs = CosmosWorkerCommIpcAddrs(
+            replica_name_queue_addr=self.cosmos_replica_name_queue.address,
+            weight_sync_queue_addr=self.cosmos_weight_sync_queue.address,
+        )
+        """
+        Cosmos-RL modification end.
+        """
 
         return_logits = self.args.gather_generation_logits or (
             self.args.build_config and self.args.build_config.gather_context_logits
@@ -437,6 +457,26 @@ def patch_trtllm_build_model():
 
 
 patch_trtllm_build_model()
+
+
+# # 4. Patch ExecutorBindingsProxy to set IPCQueues that we need.
+# def patch_executor_bindings_proxy():
+#     class CosmosWorkerCommIpcAddrs(executor_utils.WorkerCommIpcAddrs):
+#         cosmos_ipc_queue_addr :  tuple[str, Optional[bytes]]
+#     executor_utils.WorkerCommIpcAddrs = CosmosWorkerCommIpcAddrs
+
+#     original_set_ipc_queues = ExecutorBindingsProxy._setup_queues
+#     def cosmos_set_ipc_queues(self):
+#         original_addrs = original_set_ipc_queues(self)
+#         #queues that Cosmos-RL need
+#         cosmos_ipc_queue_addr = (
+#             f"cosmos_ipc_queue_{self.rank}",
+#             None,
+#         )
+#         original_addrs.cosmos_ipc_queue_addr = cosmos_ipc_queue_addr
+#         return original_addrs
+
+#     ExecutorBindingsProxy._setup_queues = cosmos_set_ipc_queues
 
 
 def dummy():

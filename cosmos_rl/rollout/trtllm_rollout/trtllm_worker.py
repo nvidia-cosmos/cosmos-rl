@@ -15,14 +15,18 @@
 
 import torch
 import time
+import threading
 import requests
 import msgpack
 from functools import partial
-from typing import List, Any, Optional, Callable
+from typing import List, Any, Optional, Callable, NamedTuple
 import os
+import torch.distributed as dist
 
-from tensorrt_llm._torch.pyexecutor.py_executor import PyExecutor
-from cosmos_rl.policy.config import Config as CosmosConfig
+from tensorrt_llm._torch.pyexecutor.py_executor import PyExecutor, BatchState
+from tensorrt_llm._torch.pyexecutor.llm_request import LlmRequestState
+from tensorrt_llm._torch.pyexecutor.sampler import SampleState
+from tensorrt_llm.executor.ipc import ZeroMqQueue as IpcQueue
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout import TRTLLMRolloutWorkerBase
 from cosmos_rl.rollout import State
@@ -68,11 +72,31 @@ from queue import Queue
 """
 
 
+class CosmosWorkerCommIpcAddrs(NamedTuple):
+    replica_name_queue_addr: tuple[str, Optional[bytes]]
+    weight_sync_queue_addr: tuple[str, Optional[bytes]]
+
+
 class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
     init_count = 0  # FIXME: (lms) handle this elegantly.
+    ready = False
 
     def __init__(self, *args, **kwargs) -> None:
         cosmos_config = kwargs.pop("cosmos_config")
+        self.cosmos_ipc_queues: CosmosWorkerCommIpcAddrs = kwargs.pop(
+            "cosmos_ipc_queues"
+        )
+        self.cosmos_replica_name_queue = IpcQueue(
+            self.cosmos_ipc_queues.replica_name_queue_addr,
+            is_server=False,
+            name="py_executor_replica_name_queue",
+        )
+        self.cosmos_weight_sync_queue = IpcQueue(
+            self.cosmos_ipc_queues.weight_sync_queue_addr,
+            is_server=False,
+            name="py_executor_weight_sync_queue",
+        )
+
         super().__init__(*args, **kwargs)
 
         # init the torch distributed environment first.
@@ -83,7 +107,8 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
         )
         init_distributed_with_MPI(rdzv_host, rdzv_port)
 
-        if self.init_count > 0:
+        if TrtLLMRolloutWorker.init_count > 0:
+            self.ready = True
             parallel_dims = ParallelDims.from_config(
                 parallesim_config=cosmos_config.rollout.parallelism
             )
@@ -119,12 +144,20 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
                 model_type = constant.COSMOS_HF_MODEL_TYPES
             self.weight_mapper = WeightMapper.get_weight_mapper(model_type)(hf_config)
             self.cosmos_model_config = hf_config
-
+            self.enable_validation = self.config.train.enable_validation
             self.inference_stream = torch.cuda.Stream()
 
             self._engine_initialized = False
 
-        self.init_count += 1
+            # If already registered, notify the main process.
+            if hasattr(self, "replica_name"):
+                # make sure all ranks went to here.
+                dist.barrier()
+                if self.global_rank == 0:
+                    # only the rank 0 could notify the main process.
+                    self.cosmos_replica_name_queue.put(self.replica_name)
+
+        TrtLLMRolloutWorker.init_count += 1
 
 
 class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
@@ -137,8 +170,8 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         # just call the init of PyExecutor
         super().__init__(*args, **kwargs)
 
-    def set_cosmos_config(self, cosmos_config: CosmosConfig):
-        self.cosmos_config = cosmos_config
+    # def set_cosmos_config(self, cosmos_config: CosmosConfig):
+    #     self.cosmos_config = cosmos_config
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         self.vllm_weight_inplace_view_map, grouped_recv_param_key_n_rank_list = (
@@ -554,7 +587,9 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         current_command = dist_util.broadcast_object_cpu(current_command)
 
         if current_command is not None:
-            handler = self.get_rollout_command_handler(type(current_command))
+            handler = self.get_rollout_command_handler(
+                type(current_command), backend=self.backend
+            )
             if handler is None:
                 raise Exception(
                     f"No such command supoorted in rollout {current_command}"
@@ -568,3 +603,145 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 raise RuntimeError(
                     f"[Rollout] Command execution failed for {current_command._serialize()}"
                 ) from e
+
+    """
+    Below are the methods that modified from PyExecutor.
+    """
+
+    def _executor_loop(self):
+        torch.cuda.set_device(self.device_id)
+        got_finish_signal = False
+        num_dummy_request = 0
+        with self._profiler() as profile_step:
+            iter_start_time = time.time()
+            iter_stats = None
+            while not got_finish_signal or len(self.active_requests) > 0:
+                # Cosmos-RL specific code start
+                if self.ready:
+                    self.consume_command(cmd_pred=None)
+                    if not self.cosmos_state.weight_synced():
+                        continue  # if weight is not synced, skip the generation and while-loop until weight is synced.
+                # Cosmos-RL specific code end
+                profile_step()
+
+                if self.enable_iter_perf_stats:
+                    iter_start_time = time.time()
+                new_requests = self._fetch_new_requests()
+                got_finish_signal = (
+                    self._merge_requests(new_requests) or got_finish_signal
+                )
+                if got_finish_signal and len(self.active_requests) == 0:
+                    break
+                if self.enable_iter_perf_stats:
+                    iter_stats = self._get_init_iter_stats(
+                        len(new_requests), self.new_active_requests_queue_latency_ms
+                    )
+
+                if self.kv_cache_transceiver:
+                    self._check_disagg_gen_transfer_status()
+
+                if not got_finish_signal:
+                    num_dummy_request = self._get_num_dummy_request()
+                if num_dummy_request > 0:
+                    self._merge_dummy_request(num_dummy_request)
+
+                if self.draft_model_engine is not None:
+                    self._prepare_draft_requests()
+
+                scheduled_batch, fitting_disagg_gen_init_requests, num_fitting_reqs = (
+                    self._schedule()
+                )
+
+                if self.kv_cache_transceiver:
+                    self._prepare_disagg_gen_init(fitting_disagg_gen_init_requests)
+                    if num_fitting_reqs == 0 and not fitting_disagg_gen_init_requests:
+                        logger.warning(
+                            "num_fitting_reqs=0 and fitting_disagg_gen_init_requests is empty, may not have enough kvCache"
+                        )
+                        self.kv_cache_transceiver.check_context_transfer_status(1)
+                else:
+                    assert scheduled_batch.batch_size > 0, (
+                        "fail to schedule any pending request, "
+                        "probably run out of resource."
+                    )
+
+                self.num_scheduled_requests = scheduled_batch.batch_size
+                logger.debug(
+                    f"has {len(self.active_requests)} active_request, "
+                    f"scheduled {len(scheduled_batch.context_requests)} context requests and "
+                    f"{len(scheduled_batch.generation_requests)} generation requests"
+                )
+
+                self._pause_requests(scheduled_batch.paused_requests)
+
+                finished_requests = []
+
+                if scheduled_batch.batch_size > 0:
+                    if self.kv_cache_transceiver:
+                        # For generation requests which have completed KV cache transfer
+                        self._prepare_disagg_gen_transmission_complete(scheduled_batch)
+
+                    self.resource_manager.prepare_resources(scheduled_batch)
+                    if self.draft_model_engine is not None:
+                        self._prepare_draft_tokens(scheduled_batch)
+
+                    # lms: Pytorch model forward step!!!
+                    batch_outputs = self._forward_step(scheduled_batch)
+
+                    sample_state = self._sample_async(scheduled_batch, batch_outputs)
+
+                    self._update_request_states(scheduled_batch)
+
+                    ctx_transmission_reqs = (
+                        self._send_disagg_ctx_cache(scheduled_batch.context_requests)
+                        if self.kv_cache_transceiver
+                        else []
+                    )
+
+                    self._update_requests(sample_state)
+
+                    if self.kv_cache_transceiver:
+                        # For context only req in transmission, we reset the state since decoder might have changed it
+                        for req in ctx_transmission_reqs:
+                            req.state = LlmRequestState.DISAGG_CONTEXT_TRANS_IN_PROGRESS
+
+                    self._handle_cancelled_requests()
+                    finished_requests = self._handle_responses()
+                    self.resource_manager.update_resources(scheduled_batch)
+                    if self.enable_kv_cache_events:
+                        self._add_kv_cache_events()
+
+                if self.kv_cache_transceiver and self.ctx_in_transmission_requests:
+                    self._terminate_ctx_finished_requests()
+
+                self._gather_dp_requests_num()
+
+                if self.enable_iter_perf_stats:
+                    iter_stats.inflight_batching_stats.num_ctx_tokens = (
+                        self.model_engine.iter_states["num_ctx_tokens"]
+                    )
+                    self._process_iter_stats(
+                        finished_requests,
+                        self.active_requests,
+                        BatchState(
+                            sample_state=SampleState(
+                                scheduled_requests=scheduled_batch
+                            ),
+                            iter_stats=iter_stats,
+                            iter_start_time=iter_start_time,
+                        ),
+                    )
+
+        self._executor_loop_cleanup()
+
+    def start_worker(self):
+        # Start PyExecutor worker thread. The worker thread will call `_executor_loop`
+        super().start_worker()
+
+        # Start query command thread of Cosmos-RL.
+        if self.global_rank == 0 and self.ready:
+            # create a thread to query command as a producer
+            self.background_thread = threading.Thread(
+                target=self.query_command_from_controller, daemon=True
+            )
+            self.background_thread.start()
