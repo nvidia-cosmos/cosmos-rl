@@ -3,6 +3,7 @@ from mpi4py import MPI
 import os
 import torch
 
+
 OMPI_COMM_TYPE_HOST = 9
 
 global_comm = MPI.COMM_WORLD
@@ -53,12 +54,20 @@ def local_mpi_size():
 def init_distributed_with_MPI(rdzv_host: str, rdzv_port: str):
     # FIXME: (lms) Support multi-nodes.
     local_rank = mpi_rank()
+    global_rank = global_mpi_rank()
     world_size = mpi_world_size()
 
-    os.environ["RANK"] = str(local_rank)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    os.environ["RANK"] = str(global_rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["MASTER_ADDR"] = rdzv_host
     os.environ["MASTER_PORT"] = rdzv_port
+
+    if world_size == 1:
+        return
+
+    if dist.is_initialized():
+        return
 
     init_method = f"tcp://{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}"
 
