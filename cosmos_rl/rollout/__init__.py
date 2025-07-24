@@ -76,3 +76,30 @@ class RolloutWorkerBase(CommMixin):
         # Initialize the communication to controller.
         self.init_comm()
         self.init_redis()
+
+
+class TRTLLMRolloutWorkerBase(CommMixin):
+    """
+    This class is special for TRTLLM, which will be compatible with PyExecutor in trtllm.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def post_init(self, cosmos_config: CosmosConfig, parallel_dims: ParallelDims):
+        self.config = cosmos_config
+        self.role = Role.ROLLOUT
+        self.parallel_dims = parallel_dims
+        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))  # rank in the node
+        self.global_rank = int(os.environ.get("RANK", 0))  # rank in replica
+        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+        self.device = torch.device(f"cuda:{self.local_rank}")
+        torch.cuda.set_device(self.device)
+
+        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
+            self.config.policy.model_name_or_path
+        )
+
+        # Initialize the communication to controller.
+        self.init_comm()
+        self.init_redis()

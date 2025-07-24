@@ -449,3 +449,25 @@ class CommandRegistry:
 
     def get_command_handler(self, key: Type[Command]) -> Optional[Callable]:
         return self.registry.get(key, None)
+
+
+class PolicyCommandRegistry(CommandRegistry):
+    pass
+
+
+class RolloutCommandRegistry(CommandRegistry):
+    def __init__(self):
+        super().__init__()
+        self.registry: Dict[str, Dict[Type[Command], Callable]] = {}
+
+    def register(self, key: Type[Command], func: Callable, backend: str = "vllm"):
+        if backend not in self.registry:
+            self.registry[backend] = {}
+        self.registry[backend][key] = func
+
+    def get_command_handler(
+        self,
+        key: Type[Command],
+        backend: str = "vllm",
+    ) -> Optional[Callable]:
+        return self.registry.get(backend, {}).get(key, None)

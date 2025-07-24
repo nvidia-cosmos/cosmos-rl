@@ -3,7 +3,7 @@
 # Default values
 NGPU=2
 NNODES=1
-RDZV_ENDPOINT="localhost:0"
+RDZV_ENDPOINT="localhost:29345"
 SCRIPT=""
 CONFIG=""
 

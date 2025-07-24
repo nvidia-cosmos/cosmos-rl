@@ -33,6 +33,9 @@ from cosmos_rl.utils import constant
 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout import TRTLLM_Rollout
 
 # patch trtllm
+from cosmos_rl.rollout.trtllm_rollout import trtllm_patch
+
+trtllm_patch.dummy()  # Avoid removed by formatter.
 
 from tensorrt_llm import SamplingParams
 

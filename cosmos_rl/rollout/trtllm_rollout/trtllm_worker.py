@@ -19,16 +19,18 @@ import requests
 import msgpack
 from functools import partial
 from typing import List, Any, Optional, Callable
+import os
 
 from tensorrt_llm._torch.pyexecutor.py_executor import PyExecutor
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.rollout import RolloutWorkerBase
+from cosmos_rl.rollout import TRTLLMRolloutWorkerBase
 from cosmos_rl.rollout import State
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
     WeightSyncInstructionsGroup,
 )
+from cosmos_rl.utils.mpi_distributed import init_distributed_with_MPI
 from cosmos_rl.utils.util import list_to_b64, b64_to_list
 from cosmos_rl.dispatcher.command import (
     BuildMeshCommand,
@@ -66,7 +68,66 @@ from queue import Queue
 """
 
 
-class CosmosTRTLLMWorker(PyExecutor, RolloutWorkerBase):
+class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
+    init_count = 0  # FIXME: (lms) handle this elegantly.
+
+    def __init__(self, *args, **kwargs) -> None:
+        cosmos_config = kwargs.pop("cosmos_config")
+        super().__init__(*args, **kwargs)
+
+        # init the torch distributed environment first.
+        rdzv_endpoint = os.environ.get("RDZV_ENDPOINT", "127.0.0.1:12371")
+        rdzv_host, rdzv_port = rdzv_endpoint.split(":")
+        logger.info(
+            f"LMS: init torch distributed environment with rdzv_host: {rdzv_host}, rdzv_port: {rdzv_port}"
+        )
+        init_distributed_with_MPI(rdzv_host, rdzv_port)
+
+        if self.init_count > 0:
+            parallel_dims = ParallelDims.from_config(
+                parallesim_config=cosmos_config.rollout.parallelism
+            )
+            self.parallel_dims = parallel_dims
+
+            # build the mesh
+            self.parallel_dims.build_mesh(device_type="cuda")
+
+            self.post_init(cosmos_config, parallel_dims)
+
+            self.cosmos_state = State()
+
+            # CommandQueue queried from controller.
+            self._command_queue: Queue[Command] = Queue()
+
+            self.global_commnicator_idex = -1
+            self.rank_in_rollout_repicas = -1
+
+            self.policy_to_rollout_nccl_communicators = {}
+
+            self.cosmos_batch_size = self.config.rollout.batch_size
+
+            # For Polocy to Rollout weight mapping
+            hf_config = util.retry(AutoConfig.from_pretrained)(
+                self.config.policy.model_name_or_path,
+                trust_remote_code=True,
+            )
+            model_type = hf_config.model_type
+            if not ModelRegistry.check_model_type_supported(model_type):
+                logger.warning(
+                    f"[Rollout] Replica can not find {model_type} in weight mapper, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
+                )
+                model_type = constant.COSMOS_HF_MODEL_TYPES
+            self.weight_mapper = WeightMapper.get_weight_mapper(model_type)(hf_config)
+            self.cosmos_model_config = hf_config
+
+            self.inference_stream = torch.cuda.Stream()
+
+            self._engine_initialized = False
+
+        self.init_count += 1
+
+
+class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
     """
     CosmosTRTLLMExecutor is a wrapper of PyExecutor to support Cosmos-specific features.
     P2R and R2R of cosmos-rl are implemented in this class.
@@ -76,51 +137,8 @@ class CosmosTRTLLMWorker(PyExecutor, RolloutWorkerBase):
         # just call the init of PyExecutor
         super().__init__(*args, **kwargs)
 
-    def set_cosmos_config(self, config: CosmosConfig):
-        parallel_dims = ParallelDims.from_config(
-            parallesim_config=config.rollout.parallelism
-        )
-        self.parallel_dims = parallel_dims
-
-        # build the mesh
-        self.parallel_dims.build_mesh(device_type="cuda")
-
-        # init the RolloutWorkerBase
-        RolloutWorkerBase.__init__(self, config, parallel_dims)
-        self.post_init()
-
-        self.cosmos_state = State()
-
-        # CommandQueue queried from controller.
-        self.cosmos_command_queue: Queue[Command] = Queue()
-        self.cosmos_prompt_queue: Queue[List[List[int, str]]] = Queue()
-
-        self.cosmos_global_commnicator_idex = -1
-        self.cosmos_rank_in_rollout_repicas = -1
-
-        self.cosmos_policy_to_rollout_nccl_communicators = {}
-
-        self.cosmos_batch_size = self.config.rollout.batch_size
-
-        # For Polocy to Rollout weight mapping
-        hf_config = util.retry(AutoConfig.from_pretrained)(
-            self.config.policy.model_name_or_path,
-            trust_remote_code=True,
-        )
-        model_type = hf_config.model_type
-        if not ModelRegistry.check_model_type_supported(model_type):
-            logger.warning(
-                f"[Rollout] Replica can not find {model_type} in weight mapper, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
-            )
-            model_type = constant.COSMOS_HF_MODEL_TYPES
-        self.cosmos_weight_mapper = WeightMapper.get_weight_mapper(model_type)(
-            hf_config
-        )
-        self.cosmos_model_config = hf_config
-
-        self.inference_stream = torch.cuda.Stream()
-
-        self.prepare_shard_infos_for_weight_sync_insts()
+    def set_cosmos_config(self, cosmos_config: CosmosConfig):
+        self.cosmos_config = cosmos_config
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         self.vllm_weight_inplace_view_map, grouped_recv_param_key_n_rank_list = (
@@ -193,7 +211,9 @@ class CosmosTRTLLMWorker(PyExecutor, RolloutWorkerBase):
         """
         return self.model_engine.model.model
 
-    @RolloutWorkerBase.register_rollout_command_handler(BuildMeshCommand)
+    @TRTLLMRolloutWorkerBase.register_rollout_command_handler(
+        BuildMeshCommand, backend="trtllm"
+    )
     def build_global_mesh(self, build_mesh_command: BuildMeshCommand):
         logger.info(f"[Rollout] Building global mesh for {self.replica_name}")
 
@@ -287,18 +307,6 @@ class CosmosTRTLLMWorker(PyExecutor, RolloutWorkerBase):
         do_weight_sync_check: bool = False,
     ):
         check_inside_group = do_weight_sync_check
-        if self.quantization_type == "fp8":
-            inst_group_weight_name = (
-                insts_group.param_instructions[0].param_name
-            )  # take a name from the inst group to determine the full weight name
-            # the full weight name that this inst group handles.
-            inst_group_full_weight_name = self.weight_mapper.get_unsplited_weight_name(
-                inst_group_weight_name
-            )
-            is_fp8_quantized_module = (
-                inst_group_full_weight_name in self.vllm_quantized_weight_map
-            )
-            check_inside_group = do_weight_sync_check and (not is_fp8_quantized_module)
 
         total_bytes_received = 0
 
@@ -340,46 +348,11 @@ class CosmosTRTLLMWorker(PyExecutor, RolloutWorkerBase):
                         f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
                     )
 
-        # here we got one full weight tensor sync done, if it is fp8 weight, we should do the quantization and check the numerical error.
-        if self.quantization_type == "fp8":
-            if inst_group_full_weight_name in self.vllm_hp_weight_map:
-                weight_to_quantize = self.vllm_hp_weight_map[
-                    inst_group_full_weight_name
-                ]  # [out_dim, in_dim]
-                quantized_weight, weight_scale = self.rollout.fp8_quantization(
-                    weight_to_quantize
-                )
-                model_param_map = self.rollout.model_param_map(self.weight_mapper)
-                vllm_native_weight = model_param_map[inst_group_full_weight_name]
-
-                # check weight sync
-                if do_weight_sync_check:
-                    # allclose doesn't support fp8, promote it.
-                    bf16_vllm_native_weight = vllm_native_weight.to(torch.bfloat16)
-                    bf16_quantized_weight = quantized_weight.to(torch.bfloat16)
-                    if not torch.allclose(
-                        bf16_vllm_native_weight, bf16_quantized_weight
-                    ):
-                        raise ValueError(
-                            f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
-                        )
-                vllm_native_weight.copy_(quantized_weight)
-                # get the scale key.
-                scale_key = inst_group_full_weight_name.replace(
-                    ".weight", ".weight_scale"
-                )
-                scale_tensor = model_param_map[scale_key]
-                assert (
-                    scale_tensor.shape == weight_scale.shape
-                ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
-                scale_tensor.copy_(weight_scale)
-        else:
-            # For non-fp8 weights and fp8 not enabled cases, we just do nothing
-            pass
-
         return total_bytes_received
 
-    @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
+    @TRTLLMRolloutWorkerBase.register_rollout_command_handler(
+        PolicyToRolloutUnicastCommand, backend="trtllm"
+    )
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         """
@@ -387,8 +360,13 @@ class CosmosTRTLLMWorker(PyExecutor, RolloutWorkerBase):
         This is Policy -> Rollout replica. Will only happen between
         a pair of policy and rollout replica.
         """
+        if not self._engine_initialized:
+            self.prepare_shard_infos_for_weight_sync_insts()
+            self._engine_initialized = True
+
         if command.dst_replica_name != self.replica_name:
             return
+
         # get the nccl_unique_id from the controller
         communicator_index = {}
         nccl_unique_id_key = command.src_replica_name + "_" + command.dst_replica_name
@@ -462,10 +440,10 @@ class CosmosTRTLLMWorker(PyExecutor, RolloutWorkerBase):
             logger.debug(
                 f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
             )
-            self.state.set_weight_synced()
+            self.cosmos_state.set_weight_synced()
 
-    @RolloutWorkerBase.register_rollout_command_handler(
-        RolloutToRolloutBroadcastCommand
+    @TRTLLMRolloutWorkerBase.register_rollout_command_handler(
+        RolloutToRolloutBroadcastCommand, backend="trtllm"
     )
     def broadcast_to_all_rollout_replica(
         self, broadcast_command: RolloutToRolloutBroadcastCommand
@@ -476,6 +454,10 @@ class CosmosTRTLLMWorker(PyExecutor, RolloutWorkerBase):
         """
         src_replica_name: str = broadcast_command.src_replica_name
         dst_replica_names: List[str] = broadcast_command.dst_replica_names
+
+        if not self._engine_initialized:
+            self.prepare_shard_infos_for_weight_sync_insts()
+            self._engine_initialized = True
 
         if len(dst_replica_names) > 1:
             # Only do broadcast if there are more than one rollout replicas.
@@ -499,8 +481,8 @@ class CosmosTRTLLMWorker(PyExecutor, RolloutWorkerBase):
                     if not parameter.is_contiguous():
                         parameter.copy_(recv_tensor)
 
-                if not self.state.weight_synced():
-                    self.state.set_weight_synced()
+                if not self.cosmos_state.weight_synced():
+                    self.cosmos_state.set_weight_synced()
 
         current_step = broadcast_command.weight_step
         if current_step is not None and current_step > 0:

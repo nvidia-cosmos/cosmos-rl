@@ -93,7 +93,7 @@ patch_trtllm_llm_args()
 
 
 def extend_create_py_executor_instance():
-    def create_py_executor_instance(
+    def cosmos_create_py_executor_instance(
         dist,
         resources,
         mapping,
@@ -240,9 +240,9 @@ def extend_create_py_executor_instance():
         return CosmosTRTLLMWorker(
             resource_manager,
             scheduler,
-            model_engine=model_engine,
-            sampler=sampler,
-            dist=dist,
+            model_engine,
+            sampler,
+            dist,
             disable_overlap_scheduler=pytorch_backend_config.disable_overlap_scheduler,
             max_batch_size=executor_config.max_batch_size,
             max_draft_tokens=spec_config.max_draft_tokens
@@ -251,41 +251,13 @@ def extend_create_py_executor_instance():
             kv_cache_transceiver=kv_cache_transceiver,
             draft_model_engine=draft_model_engine,
             start_worker=start_worker,
+            cosmos_config=executor_config.cosmos_config,
         )
-
-    tllm_util.create_py_executor_instance = create_py_executor_instance
-
-
-extend_create_py_executor_instance()
-
-
-def patch_trtllm_create_py_executor_instance():
-    original_create_py_executor_instance = tllm_util.create_py_executor_instance
-
-    def cosmos_create_py_executor_instance(*args, **kwargs):
-        executor_config = None
-        for arg in args:
-            if isinstance(arg, tllm_executor.ExecutorConfig):
-                executor_config = arg
-                break
-        assert executor_config is not None, "Executor config not found in args."
-        cosmos_config = executor_config.cosmos_config
-        py_executor = original_create_py_executor_instance(
-            *args, **kwargs
-        )  # PyExecutor has been replaced by CosmosTRTLLMWorker
-        logger.info(f"LMS: cosmos_config: {cosmos_config}")
-        assert hasattr(
-            py_executor, "set_cosmos_config"
-        ), "PyExecutor must have a set_cosmos_config method"
-        py_executor.set_cosmos_config(
-            cosmos_config
-        )  # set the cosmos config to the PyExecutor and do the cosmos-rl specific initialization.
-        return py_executor
 
     tllm_util.create_py_executor_instance = cosmos_create_py_executor_instance
 
 
-patch_trtllm_create_py_executor_instance()
+extend_create_py_executor_instance()
 
 
 # 3. Patch the `worker_main`, let it init the torch distributed environment that cosmos-rl uses.
@@ -436,7 +408,6 @@ def patch_trtllm_build_model():
         Cosmos-RL modification:
         - Add cosmos config to executor_config.
         """
-        logger.info(f"LMS: self.args.cosmos_config: {self.args}")
         executor_config.cosmos_config = self.args.cosmos_config
 
         return_logits = self.args.gather_generation_logits or (
@@ -466,3 +437,7 @@ def patch_trtllm_build_model():
 
 
 patch_trtllm_build_model()
+
+
+def dummy():
+    pass
