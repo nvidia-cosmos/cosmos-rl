@@ -268,31 +268,31 @@ class ParallelDims:
             return 1
 
     @property
-    def dp_enabled(self):
+    def dp_enabled(self) -> bool:
         return self.dp_replicate > 1 or self.dp_shard > 1
 
     @property
-    def dp_replicate_enabled(self):
+    def dp_replicate_enabled(self) -> bool:
         return self.dp_replicate > 1
 
     @property
-    def dp_shard_enabled(self):
+    def dp_shard_enabled(self) -> bool:
         return self.dp_shard > 1
 
     @property
-    def cp_enabled(self):
+    def cp_enabled(self) -> bool:
         return self.cp > 1
 
     @property
-    def tp_enabled(self):
+    def tp_enabled(self) -> bool:
         return self.tp > 1
 
     @property
-    def pp_enabled(self):
+    def pp_enabled(self) -> bool:
         return self.pp > 1
 
     @property
-    def ep_enabled(self):
+    def ep_enabled(self) -> bool:
         return self.ep > 1
 
     @property
@@ -300,7 +300,7 @@ class ParallelDims:
         return self.dp_shard_with_ep > 1
 
     @property
-    def pp_dynamic_shape_enabled(self):
+    def pp_dynamic_shape_enabled(self) -> bool:
         return self.pp > 1 and self.pp_dynamic_shape
 
     def non_data_parallel_size(self):
