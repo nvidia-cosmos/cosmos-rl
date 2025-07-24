@@ -53,7 +53,7 @@ def async_safe_ce(
     loss_scaling_factor: float = 1.0,
 ) -> torch.Tensor:
     loss = torch.nn.functional.cross_entropy(
-        output[:, :-1].flatten(0, 1),
+        output[:, :-1].flatten(0, 1).float(),
         target[:, 1:].flatten(0, 1),
         ignore_index=ignore_index,
         reduction="mean",
@@ -514,70 +514,73 @@ class SFTTrainer(Trainer):
                         if padding_mask is not None:
                             batch["padding_mask"] = padding_mask
 
-                    if self.parallel_dims.pp_enabled:
-                        pp_last_stage = (
-                            self.parallel_dims.pp_coord[0]
-                            == self.parallel_dims.pp_coord[1] - 1
-                        )
-                        pp_first_stage = self.parallel_dims.pp_coord[0] == 0
+                    with torch.autocast(
+                        device_type=self.device.type, dtype=torch.bfloat16
+                    ):
+                        if self.parallel_dims.pp_enabled:
+                            pp_last_stage = (
+                                self.parallel_dims.pp_coord[0]
+                                == self.parallel_dims.pp_coord[1] - 1
+                            )
+                            pp_first_stage = self.parallel_dims.pp_coord[0] == 0
 
-                        # Pipeline Parallel forward / backward inside step() call
-                        targets, losses = (
-                            (labels, []) if pp_last_stage else (None, None)
-                        )
-                        if pp_first_stage:
-                            self.pp_scheduler.step(
-                                **batch,
-                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                seq_len_multiple=self.seq_len_multiple,
+                            # Pipeline Parallel forward / backward inside step() call
+                            targets, losses = (
+                                (labels, []) if pp_last_stage else (None, None)
+                            )
+                            if pp_first_stage:
+                                self.pp_scheduler.step(
+                                    **batch,
+                                    pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                                    seq_len_multiple=self.seq_len_multiple,
+                                )
+                            else:
+                                # FWD + BWD if it is 1F1B-like scheduler
+                                self.pp_scheduler.step(
+                                    position_ids=batch["position_ids"],
+                                    target=targets,
+                                    losses=losses,
+                                    pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                                    seq_len_multiple=self.seq_len_multiple,
+                                )
+                            loss = (
+                                torch.mean(torch.stack(losses)).to(self.device)
+                                if pp_last_stage
+                                else torch.tensor([-1.0], device=self.device)
                             )
                         else:
-                            # FWD + BWD if it is 1F1B-like scheduler
-                            self.pp_scheduler.step(
-                                position_ids=batch["position_ids"],
-                                target=targets,
-                                losses=losses,
-                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                seq_len_multiple=self.seq_len_multiple,
-                            )
-                        loss = (
-                            torch.mean(torch.stack(losses)).to(self.device)
-                            if pp_last_stage
-                            else torch.tensor([-1.0], device=self.device)
-                        )
-                    else:
-                        # # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
-                        # last_token_ids = []
-                        # with torch.no_grad():
-                        #     N_NEW_TOKENS = 100
-                        #     for _ in range(N_NEW_TOKENS):
-                        #         if len(last_token_ids) > 0:
-                        #             batch["input_ids"] = torch.cat([batch["input_ids"], last_token_ids[-1]], dim=-1)
-                        #             position_ids, _, _ = self.model.get_position_ids(
-                        #                 **batch
-                        #             )
-                        #             batch["position_ids"] = position_ids
+                            # # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
+                            # last_token_ids = []
+                            # with torch.no_grad():
+                            #     N_NEW_TOKENS = 100
+                            #     for _ in range(N_NEW_TOKENS):
+                            #         if len(last_token_ids) > 0:
+                            #             batch["input_ids"] = torch.cat([batch["input_ids"], last_token_ids[-1]], dim=-1)
+                            #             position_ids, _, _ = self.model.get_position_ids(
+                            #                 **batch
+                            #             )
+                            #             batch["position_ids"] = position_ids
 
-                        #         logits = self.model(**batch)
-                        #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
-                        #         last_token_ids.append(token_ids)
-                        #     print(f"generated tokens: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[0])}")
-                        #     return
-                        # #########################################################################################
+                            #         logits = self.model(**batch)
+                            #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
+                            #         last_token_ids.append(token_ids)
+                            #     print(f"generated tokens: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[0])}")
+                            #     return
+                            # #########################################################################################
 
-                        logits = self.model(**batch)
+                            logits = self.model(**batch)
 
-                        # recover from ulysses if cp is enabled
-                        if self.parallel_dims.cp_enabled:
-                            batch["input_ids"] = input_ids_before_cp
-                            batch["position_ids"] = position_ids_before_cp
-                            if padding_mask_before_cp is not None:
-                                batch["padding_mask"] = padding_mask_before_cp
+                            # recover from ulysses if cp is enabled
+                            if self.parallel_dims.cp_enabled:
+                                batch["input_ids"] = input_ids_before_cp
+                                batch["position_ids"] = position_ids_before_cp
+                                if padding_mask_before_cp is not None:
+                                    batch["padding_mask"] = padding_mask_before_cp
 
-                        loss = self.loss_fn(logits, labels)
-                        loss = loss / len(mini_batch_begin_idxs)
-                        loss.backward()
-                    acc_loss += loss.detach()
+                            loss = self.loss_fn(logits, labels)
+                            loss = loss / len(mini_batch_begin_idxs)
+                            loss.backward()
+                        acc_loss += loss.detach()
 
                 """
                 Compute the global grad norm on all parameters and then apply
