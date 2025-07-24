@@ -76,13 +76,13 @@ class ParallelDims:
     tp: int
     pp: int
     ep: int
+    world_size: int
+    pp_dynamic_shape: bool
     # When ep is enabled, we can have different dp shard for the MoE module.
     # For example, suppose we have 64 GPUs, then we can have dp_shard equal
     # to 64 for the attention module, and have ep = 4, dp_shard_with_ep = 16
     # for the MoE module.
     dp_shard_with_ep: int = -1
-    world_size: int
-    pp_dynamic_shape: bool
 
     @staticmethod
     def from_config(parallesim_config: ParallelismConfig):
