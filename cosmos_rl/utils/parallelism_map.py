@@ -606,6 +606,7 @@ class ParallelTopoMapper:
                 else dims_rank_info
             )
         # Return a dictionary containing the local shard info for each parameter
+        logger.info("LMS: done for local_shard_info_all_params")
         return local_shard_info_all_params
 
     def parallelism_info_for_param(
@@ -894,7 +895,7 @@ class ParallelTopoMapper:
             self.insert_to_parallelism_info(
                 param_name,
                 dims_map,
-                self.weight_mapper._rollout_vllm_name_to_hf,
+                self.weight_mapper._rollout_weight_name_to_hf,
                 self.weight_mapper.packed_modules_mapping,
             )
 

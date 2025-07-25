@@ -35,7 +35,6 @@ from tensorrt_llm.llmapi.llm_args import PybindMirror
 from tensorrt_llm.llmapi.tokenizer import _xgrammar_tokenizer_info
 from tensorrt_llm.builder import EngineConfig
 from tensorrt_llm.llmapi.mpi_session import external_mpi_comm_available
-from tensorrt_llm.llmapi.utils import print_colored
 from tensorrt_llm.executor import PostprocWorkerConfig
 from tensorrt_llm.executor.ipc import ZeroMqQueue as IpcQueue
 from tensorrt_llm.bindings import executor as tllm_executor
@@ -59,7 +58,6 @@ from tensorrt_llm._torch.pyexecutor.config_utils import (
     is_mla,
 )
 
-import tensorrt_llm.executor.worker as tllm_worker
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
@@ -265,26 +263,6 @@ def extend_create_py_executor_instance():
 extend_create_py_executor_instance()
 
 
-# 3. Patch the `worker_main`, let it init the torch distributed environment that cosmos-rl uses.
-def patch_trtllm_worker_main():
-    original_worker_main = tllm_worker.worker_main
-
-    def worker_main(*args, **kwargs):
-        # init the torch distributed environment.
-        # logger.info(f"LMS: init torch distributed environment")
-        # rdzv_endpoint = os.environ.get("RDZV_ENDPOINT", "127.0.0.1:12371")
-        # rdzv_host, rdzv_port = rdzv_endpoint.split(":")
-        # init_distributed_with_MPI(rdzv_host, rdzv_port)
-        # logger.info(f"LMS: init torch distributed environment done")
-
-        original_worker_main(*args, **kwargs)
-
-    tllm_worker.worker_main = worker_main
-
-
-# patch_trtllm_worker_main()
-
-
 def patch_trtllm_build_model():
     def cosmos_build_model(self, *args, **kwargs):
         model_loader = CachedModelLoader(
@@ -451,7 +429,6 @@ def patch_trtllm_build_model():
             is_llm_executor=True,
             lora_config=self.args.lora_config,
         )
-        print_colored(f"LMS: create executor of {self._executor}\n", "yellow")
 
     LLM._build_model = cosmos_build_model
 
