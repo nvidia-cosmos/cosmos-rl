@@ -586,6 +586,7 @@ class SFTTrainer(Trainer):
                 Compute the global grad norm on all parameters and then apply
                 gradient clipping using the global grad norm.
                 """
+                grad_norm = None
                 if self.config.train.optm_grad_norm_clip > 0:
                     # Must pass empty list even if model_part is None,
                     # GradNorm across pp stages will fail if some rank does not join the barrier
@@ -596,7 +597,7 @@ class SFTTrainer(Trainer):
                         ]
                         for p in m.parameters()
                     ]
-                    dist_util.gradient_norm_clipping(
+                    grad_norm = dist_util.gradient_norm_clipping(
                         all_params,
                         self.config.train.optm_grad_norm_clip,
                         foreach=True,
@@ -604,6 +605,7 @@ class SFTTrainer(Trainer):
                         if self.parallel_dims.pp_enabled
                         else None,
                     )
+                    print(f"grad_norm: {grad_norm}")
 
                 self.optimizers.step()
                 self.lr_schedulers.step()
@@ -644,6 +646,9 @@ class SFTTrainer(Trainer):
                             "train/loss_avg": global_avg_loss,
                             "train/loss_max": global_max_loss,
                             "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
+                            "train/grad_norm": grad_norm
+                            if grad_norm is not None
+                            else -1,
                         }
 
                         # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
