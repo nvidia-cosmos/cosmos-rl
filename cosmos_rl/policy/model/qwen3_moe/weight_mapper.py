@@ -23,7 +23,11 @@ from cosmos_rl.utils.parallelism_registry import (
 )
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
+from vllm.model_executor.models.qwen3_moe import (
+    Qwen3MoeForCausalLM as VllmQwen3MoeForCausalLM,
+)
+# FIXME: (lms) I don't know why this import will cause process down when backend == vllm.
+# from tensorrt_llm._torch.models.modeling_qwen3_moe import Qwen3MoeForCausalLM as TrtLLMQwen3MoeForCausalLM
 
 
 class Qwen3MoeWeightMapper(WeightMapper):
@@ -34,7 +38,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         )
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def _rollout_weight_name_to_hf(self, rollout_weight_name: str) -> str:
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
@@ -44,6 +48,20 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 return rollout_weight_name.replace(
                     "experts.w2_weight", "down_proj.weight"
                 )
+            # below are for trtllm.
+            elif "experts.w3_w1_weight" in rollout_weight_name:
+                return rollout_weight_name.replace(
+                    "experts.w3_w1_weight", "gate_up_proj.weight"
+                )
+            elif "next_layer_layernorm" in rollout_weight_name:
+                # For trtllm, next_layer_layernorm is:
+                #   `model.norm` when layer_id == self.config.num_hidden_layers - 1
+                #   `model.layers.${layer_id + 1}.input_layernorm` when layer_id < self.config.num_hidden_layers - 1
+                layer_id = int(rollout_weight_name.split(".")[2])
+                if layer_id == self.config.num_hidden_layers - 1:
+                    return "model.norm.weight"
+                else:
+                    return f"model.layers.{layer_id + 1}.input_layernorm.weight"
         return rollout_weight_name
 
     def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
@@ -68,17 +86,17 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def rollout_prepare_recv(
         self,
-        vllm_model: Qwen3MoeForCausalLM,
+        vllm_model: VllmQwen3MoeForCausalLM,
     ) -> Tuple[
         Dict[str, torch.Tensor],
         List[List[Tuple[str, torch.Size]]],
     ]:
-        assert isinstance(vllm_model, Qwen3MoeForCausalLM)
+        # assert isinstance(vllm_model, VllmQwen3MoeForCausalLM), f"vllm_model must be a Qwen3MoeForCausalLM instance, but got {type(vllm_model)}"
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
-            param_name_hf = self._rollout_vllm_name_to_hf(param_name)
+            param_name_hf = self._rollout_weight_name_to_hf(param_name)
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:
                 # must be inplace slicing.

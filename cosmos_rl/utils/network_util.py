@@ -116,7 +116,7 @@ def make_request_with_retry(
                         request_idx = 0
                         total_retries_cur_delay += 1
                         total_attempts += 1
-                logger.debug(
+                logger.info(
                     f"Request failed: {e}. Attempt {total_attempts} of {max_retries} for {request} on {url}."
                 )
                 if total_attempts >= max_retries:
