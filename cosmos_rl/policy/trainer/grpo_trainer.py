@@ -211,10 +211,6 @@ class GRPOTrainer(Trainer):
                 "Please use elastic scaling feature instead."
             )
 
-        torch.distributed.barrier()
-        torch.cuda.synchronize()
-        self.prepare_shard_infos_for_weight_sync_insts()
-
         self.grpo_config = self.config.train.train_policy
         # For model load
         self.model_ready = False
@@ -269,6 +265,7 @@ class GRPOTrainer(Trainer):
         # The master replica needs to:
         # - Save the checkpoint/safetensors
         self.is_master_replica = True
+        self.prepare_shard_infos_for_weight_sync_insts()
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
@@ -606,6 +603,7 @@ class GRPOTrainer(Trainer):
 
     @Trainer.register_policy_command_handler(PolicyToPolicyUnicastCommand)
     def execute_policy_to_policy_unicast(self, command: PolicyToPolicyUnicastCommand):
+        logger.info("[Policy] Executing policy-to-policy unicast ...")
         send = self.replica_name == command.src_replica_name
         recv = self.replica_name == command.dst_replica_name
         if not send and not recv:
@@ -629,6 +627,7 @@ class GRPOTrainer(Trainer):
         logger.debug(
             f"[Policy] Policy2Policy Unicast {len_params} parameters from {command.src_replica_name} (rank {self.inter_policy_nccl.get_replica_rank(command.src_replica_name)}) to {command.dst_replica_name} (rank {self.inter_policy_nccl.get_replica_rank(command.dst_replica_name)}) as sender {send} took {time_eclapsed:.3f} seconds."
         )
+        logger.info("[Policy] Executed policy-to-policy unicast.")
         return False
 
     @cached_property
@@ -649,9 +648,7 @@ class GRPOTrainer(Trainer):
 
     @Trainer.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        # logger.info("Bypassing execute_policy_to_rollout_unicast")
-        # return False
-
+        logger.info("[Policy] Starting policy_to_rollout_unicast ...")
         assert command.src_replica_size == self.world_size
         if not command.src_replica_name == self.replica_name:
             logger.error(
@@ -731,14 +728,6 @@ class GRPOTrainer(Trainer):
                 )
                 insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
 
-                import pickle
-
-                jobid = os.environ.get("SLURM_JOB_ID")
-                filename = f"/lustre/fsw/sw_aidot/aazzolini/RL/insts/policy_{jobid}_{self.global_rank}.pkl"
-                logger.info(f"Dumping pickled instructions to {filename}")
-                with open(filename, "wb") as f:
-                    pickle.dump(insts, f)
-
                 self.policy_to_rollout_insts = [
                     WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
                 ]
@@ -816,7 +805,7 @@ class GRPOTrainer(Trainer):
         logger.debug(
             f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent."
         )
-
+        logger.info("[Policy] Finished policy_to_rollout_unicast execution.")
         return False
 
     @Trainer.register_policy_command_handler(WeightResumeCommand)
@@ -863,6 +852,7 @@ class GRPOTrainer(Trainer):
 
     @Trainer.register_policy_command_handler(DataFetchCommand)
     def execute_data_fetch(self, command: DataFetchCommand):
+        logger.info("[Policy] Executing data fetch.")
         if command.do_profile:
             self.profiler.start_dynamic(
                 active_steps=command.active_steps,
@@ -911,7 +901,7 @@ class GRPOTrainer(Trainer):
                     f"[Policy] Failed in in send train ack to controller after retries {e}."
                 )
 
-        logger.debug(f"[Policy] Train ack sent for global step {command.global_step}.")
+        logger.info(f"[Policy] Train ack sent for global step {command.global_step}.")
         return command.replica_should_stop()
 
     def execute_all_reduce(self):

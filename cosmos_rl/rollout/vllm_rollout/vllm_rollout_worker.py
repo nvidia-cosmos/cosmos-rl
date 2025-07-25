@@ -188,11 +188,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             else:
                 os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "1"
 
-        # FIXME(aazzolini): this is needed for correctnes, try new version
-        logger.info(
-            "Forcing VLLM_ATTENTION_BACKEND to CUTLASS_MLA_VLLM_V1 for correctness."
-        )
-        os.environ["VLLM_ATTENTION_BACKEND"] = "CUTLASS_MLA_VLLM_V1"
         os.environ["VLLM_LOGGING_LEVEL"] = "INFO"
 
         # determine the quantization type
@@ -601,18 +596,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        # if not hasattr(self, "loaded"):
-        #    self.rollout.reload_weight()
-        #    self.loaded = True
-        # logger.info("Weights loaded.")
-        # self.state.set_weight_synced()
-        # return
-
         """
         Sync the weight from policy to rollout.
         This is Policy -> Rollout replica. Will only happen between
         a pair of policy and rollout replica.
         """
+        logger.info("[Rollout] Starting policy_to_rollout_unicast ...")
         # lazy initialization of the vllm engine.
         if not self.rollout.is_engine_initialized():
             # is_for_weight_resume = command.dst_replica_name == self.replica_name
@@ -634,11 +623,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             return
         # get the nccl_unique_id from the controller
         communicator_index = {}
-
-        logger.info("Testing post processing of weights.")
-        self.rollout.process_weights_after_loading()
-        logger.info("Post processing of weights works.")
-
         nccl_unique_id_key = command.src_replica_name + "_" + command.dst_replica_name
         if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
             logger.debug(
@@ -669,15 +653,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 communicator_index
             )
 
-        # sampling_params = SamplingParams(temperature=0.0)
-
-        if command.do_weight_sync_check:
-            self.rollout._do_test_rollout("before loading weights")
-            self.rollout.reload_weight()
-            self.rollout._do_test_rollout(
-                "after loading weights, before receiving weights"
-            )
-
         if not hasattr(self, "policy_to_rollout_recv_insts"):
             logger.info(
                 "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
@@ -697,15 +672,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
                 insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
-
-                import pickle
-
-                jobid = os.environ.get("SLURM_JOB_ID")
-                filename = f"/lustre/fsw/sw_aidot/aazzolini/RL/insts/rolloug_{jobid}_{self.global_rank}.pkl"
-                logger.info(f"Dumping pickled instructions to {filename}")
-                with open(filename, "wb") as f:
-                    pickle.dump(insts, f)
-
                 self.policy_to_rollout_recv_insts = [
                     WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
                 ]
@@ -713,9 +679,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 raise RuntimeError(
                     f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
                 )
-            logger.info(
-                "[Rollout] Finished policy_to_rollout_recv_insts from controller."
-            )
+            logger.info("[Rollout] Finished policy_to_rollout_unicast execution.")
 
         total_recvs = 0
         total_params = 0
@@ -789,7 +753,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             logger.info(
                 f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
             )
-
+            self.rollout.process_weights_after_loading()
             self.state.set_weight_synced()
 
     @RolloutWorkerBase.register_rollout_command_handler(

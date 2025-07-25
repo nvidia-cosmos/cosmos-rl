@@ -600,6 +600,7 @@ class PolicyStatusManager:
         Dispatch the rollout to the policy replicas in a round-robin manner.
         It is that replica's responsibility to dispatch the rollout to further (DP_SHARD) atoms.
         """
+        logger.info("Starting put_rollout.")
         if self.config.rollout.include_stop_str_in_output:
             if self.tokenizer.eos_token is not None and rollout.completion is not None:
                 if not rollout.completion.endswith(self.tokenizer.eos_token):
@@ -616,6 +617,7 @@ class PolicyStatusManager:
         report_data: Dict[str, Any],
         rollout_status_manager: "RolloutStatusManager",
     ):
+        logger.info("Got train_ack.")
         if replica_name not in self:
             raise Exception(f"Replica {replica_name} not found")
 
@@ -694,11 +696,13 @@ class PolicyStatusManager:
                 self.set_status(replica.name, PolicyStatus.READY)
 
             # P->R & R->R
+            logger.info("Triggering weight sync.")
             if need_sync_weight:
                 self.trigger_weight_sync(
                     any_loaded_replica, rollout_status_manager, step, total_steps
                 )
             # Trigger next step training if data is available
+            logger.info("Trying to trigger next training step.")
             self.try_trigger_data_fetch_and_training()
 
     def trigger_weight_sync(
@@ -720,6 +724,7 @@ class PolicyStatusManager:
             valid_rollout_replicas.append(rollout_replica)
         if any_loaded_rollout_replica is None:
             return
+        logger.info("Triggering policy_to_rollout_unicast.")
         command.PolicyToRolloutUnicastCommand.trigger(
             src_replica=policy_replica,
             dst_replica=any_loaded_rollout_replica,
@@ -730,6 +735,7 @@ class PolicyStatusManager:
             redis_handler=self.redis_handler,
         )
 
+        logger.info("Triggering rollout_to_rollout_broadcast.")
         command.RolloutToRolloutBroadcastCommand.trigger(
             src_replica=any_loaded_rollout_replica,
             dst_replicas=valid_rollout_replicas,
@@ -737,8 +743,10 @@ class PolicyStatusManager:
             total_steps=total_steps,
             redis_handler=self.redis_handler,
         )
+        logger.info("Weight sync commands sent.")
 
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
+        logger.info("Trying trigger data fetch and training.")
         # If the validation dataloader is activated, do not trigger data fetch and training
         if self.activated_val_iter is not None:
             return
@@ -782,6 +790,7 @@ class PolicyStatusManager:
 
             for replica in arrived_replicas:
                 # Dispatch rollouts to policy replicas
+                logger.info("Triggering DataFetchCommand for one replica")
                 for _ in range(items_count):
                     rollout = self.rollout_buffer.get()
                     replica.put_rollout(rollout, self.redis_handler)
