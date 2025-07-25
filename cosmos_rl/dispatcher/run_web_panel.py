@@ -291,7 +291,7 @@ async def rollout_shard_recv_insts(request: GetShardSendRecvInstsRequest):
     Get the receive instructions for rollout.
     :return: A list of receive instructions for rollout.
     """
-    logger.debug(
+    logger.info(
         f"[Dispatcher] Get rollout shard receive instructions for rank {request.rank}"
     )
     # Wait for the scheme generation to be done
@@ -528,7 +528,7 @@ async def put_rollout_group(rollout: RolloutRequest):
         ]
 
         if len(valid_rollouts) > 0:
-            logger.debug(
+            logger.info(
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.completions)} samples:"
                 f"example: rollouts[0]\n{valid_rollouts[0]}"
             )

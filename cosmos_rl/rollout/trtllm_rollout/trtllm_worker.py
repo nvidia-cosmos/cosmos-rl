@@ -169,10 +169,11 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
     def __init__(self, *args, **kwargs) -> None:
         # just call the init of PyExecutor
         super().__init__(*args, **kwargs)
-
         self.backend = "trtllm"
 
     def prepare_shard_infos_for_weight_sync_insts(self):
+        for param_name, param in self.get_underlying_model().named_parameters():
+            logger.info(f"[Rollout] LMS trtllm: {param_name}, param: {param.shape}")
         self.vllm_weight_inplace_view_map, grouped_recv_param_key_n_rank_list = (
             self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
         )
@@ -188,12 +189,12 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
-            self.model_config,
+            self.cosmos_model_config,
             is_policy=False,
             underlying_model=self.get_underlying_model(),
             backend=self.backend,
             weight_mapper=self.weight_mapper,
-        )(self.recv_param_key_n_rank_list, self.global_rank)
+        ).prepare_local_shard_infos(self.recv_param_key_n_rank_list, self.global_rank)
 
         self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
             local_shard_infos
@@ -217,6 +218,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
         ]
         if self.global_rank == 0:
+            logger.info("[Rollout] LMS trtllm: post shard infos to controller")
             body = {
                 "shard_infos": self.all_rank_local_shard_infos,
                 "param_groups": list(merged_groups.values()),
@@ -237,12 +239,13 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 raise RuntimeError(
                     f"[Rollout] Failed in post shard infos to controller after retries {e}."
                 )
+            logger.info("[Rollout] LMS trtllm: post shard infos done.")
 
     def get_underlying_model(self):
         """
         Get the underlying parallelized model in vLLM internal.
         """
-        return self.model_engine.model.model
+        return self.model_engine.model
 
     @TRTLLMRolloutWorkerBase.register_rollout_command_handler(
         BuildMeshCommand, backend="trtllm"
@@ -399,6 +402,12 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
         if command.dst_replica_name != self.replica_name:
             return
+        logger.info(
+            f"LMS: src_replica_name: {command.src_replica_name}, dst_replica_name: {command.dst_replica_name}"
+        )
+        logger.info(
+            f"[Rollout] LMS trtllm: policy_to_rollout_unicast: self.replica_name: {self.replica_name}, self.global_rank: {self.global_rank}, self.device_id: {self.device_id}"
+        )
 
         # get the nccl_unique_id from the controller
         communicator_index = {}
@@ -411,10 +420,13 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 nccl_unique_id_key
             ]
         else:
-            logger.debug(f"[Rollout] Querying nccl group id for {nccl_unique_id_key}")
+            logger.info(f"[Rollout] Querying nccl group id for {nccl_unique_id_key}")
             # query the nccl group id from controller
             nccl_group_id = self.query_nccl_unique_id_from_controller(
                 nccl_unique_id_key
+            )
+            logger.info(
+                f"[Rollout] LMS trtllm: query nccl group id done: {nccl_group_id}"
             )
             if nccl_group_id is None:
                 raise RuntimeError(
@@ -422,16 +434,21 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 )
             # create the communicator index
             # p_rank is the rank in policy, r_rank is the rank in rollout
+            logger.info(
+                f"[Rollout] LMS trtllm:, self.global_rank: {self.global_rank}, self.world_size: {self.world_size}, command.src_replica_size: {command.src_replica_size}"
+            )
             communicator_index = create_nccl_comm(
                 nccl_group_id,
                 self.global_rank + command.src_replica_size,
                 self.world_size + command.src_replica_size,
             )
+            logger.info(
+                f"[Rollout] LMS trtllm: create communicator index done: {communicator_index}"
+            )
             # cache the communicator index
             self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (
                 communicator_index
             )
-
         if not hasattr(self, "policy_to_rollout_recv_insts"):
             self.policy_to_rollout_recv_insts = []
             try:
@@ -455,7 +472,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 raise RuntimeError(
                     f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
                 )
-
+        logger.info("[Rollout] LMS trtllm: recv insts from policy done.")
         with torch.cuda.stream(self.inference_stream):
             # recv the weight from policy
             st = time.time()

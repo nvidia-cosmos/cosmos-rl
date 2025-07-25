@@ -29,17 +29,6 @@ from cosmos_rl.dispatcher.data.packer import DataPacker
 from transformers import AutoTokenizer
 
 
-class DemoLLM:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def generate(self, *args, **kwargs):
-        logger.info("[Rollout] LMS: generate")
-        return [
-            "Hello, world!",
-        ]
-
-
 class TRTLLM_Rollout(RolloutBase):
     def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
         super().__init__(config, tokenizer)

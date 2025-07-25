@@ -172,6 +172,8 @@ def map_weight_parallel_dims(
     pp_size = parallel_dims.pp
     n_layers = model_config.num_hidden_layers
 
+    # logger.info(f"[WeightConverter] LMS: dest_name: {dest_name}, tp_ep_size: {tp_ep_size}, dp_shard_size: {dp_shard_size}, pp_size: {pp_size}, n_layers: {n_layers}")
+
     assert dest_name.startswith("model.") or dest_name.startswith("lm_head.")
     if tp_ep_size > 1:
         if "lm_head.weight" == dest_name:

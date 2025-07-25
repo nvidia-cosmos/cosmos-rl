@@ -129,7 +129,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             logger.error(f"[Rollout] Failed in query prompts from controller: {str(e)}")
             prompt_id_and_payload_list = None
         prompts_and_is_end = (prompt_id_and_payload_list, is_end)
-        logger.info(f"[Rollout] LMS: prompts_and_is_end: {prompts_and_is_end}")
         del prompt_id_and_payload_list, is_end
 
         prompts, is_end = prompts_and_is_end

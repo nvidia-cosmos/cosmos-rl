@@ -29,7 +29,7 @@ class HFLLMWeightMapper(WeightMapper):
         )
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def _rollout_weight_name_to_hf(self, rollout_weight_name: str) -> str:
         # Happen to be the same as policy name mapping.
         return self.policy_map_local_key_to_hf_key(rollout_weight_name)
 
@@ -60,7 +60,7 @@ class HFLLMWeightMapper(WeightMapper):
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
-            compatible_key = self._rollout_vllm_name_to_hf(param_name)
+            compatible_key = self._rollout_weight_name_to_hf(param_name)
             # print(f"[Rollout] compatible_key: {param_name=} {compatible_key=}")
             if "qkv_proj" in compatible_key:
                 # must be inplace slicing.

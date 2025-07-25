@@ -656,6 +656,9 @@ class GRPOTrainer(Trainer):
         comm_id = {}
         # Create nccl id for one policy replica to another rollout replica
         mesh_key = command.src_replica_name + "_" + command.dst_replica_name
+        logger.info(
+            f"[Policy] LMS: src_replica_name: {command.src_replica_name}, dst_replica_name: {command.dst_replica_name}"
+        )
         if mesh_key not in self.p2r_nccl_uuids:
             nccl_uuid = None
             if self.global_rank == 0:
@@ -664,6 +667,7 @@ class GRPOTrainer(Trainer):
                 base64_nccl_group_id = list_to_b64(nccl_uuid)
                 logger.debug(f"[Policy] mesh_key: {mesh_key}")
                 try:
+                    logger.info("[Policy] LMS: post nccl group_id to controller")
                     make_request_with_retry(
                         partial(
                             requests.post,
@@ -681,6 +685,9 @@ class GRPOTrainer(Trainer):
                     raise RuntimeError(
                         f"[Policy] Failed in post nccl group_id to controller after retries {e}."
                     )
+                logger.info(
+                    f"[Policy] LMS: post nccl group_id to controller done: {nccl_uuid}"
+                )
             # broadcast the nccl group id to all ranks
             nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
             self.p2r_nccl_uuids[mesh_key] = nccl_uuid
@@ -978,7 +985,7 @@ class GRPOTrainer(Trainer):
                     raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
 
     def execute_command(self, command: Command):
-        logger.debug(f"[Policy] Process command {command._serialize()}")
+        logger.info(f"[Policy] Process command {command._serialize()}")
 
         handler = self.get_policy_command_handler(type(command))
         if handler is None:
