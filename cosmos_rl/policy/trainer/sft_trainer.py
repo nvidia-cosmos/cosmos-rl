@@ -429,6 +429,10 @@ class SFTTrainer(Trainer):
                     )
                 )
 
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
+
                 for i in mini_batch_begin_idxs:
                     fixed_length = (
                         self.config.policy.model_max_length
@@ -480,9 +484,6 @@ class SFTTrainer(Trainer):
                             torch.cuda.cudart().cudaProfilerStop()
 
                     self.model.train()
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    start_event.record()
                     for k, v in batch.items():
                         batch[k] = (
                             v.to(self.device) if isinstance(v, torch.Tensor) else v
