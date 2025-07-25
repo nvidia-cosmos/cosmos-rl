@@ -466,8 +466,8 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 rotary_pos_emb.dtype == torch.float32
             ), "rotary_pos_emb must be float32"
             emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
+            cos = emb.cos().detach().float()
+            sin = emb.sin().detach().float()
 
         for layer_num, blk in self.blocks.items():
             hidden_states = blk(
