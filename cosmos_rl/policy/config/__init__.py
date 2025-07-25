@@ -728,6 +728,7 @@ class LoggingConfig(BaseModel):
 
 
 class Config(BaseModel):
+    custom: Dict[str, Any] = Field(default_factory=dict, description="Custom script configuration.")
     train: TrainingConfig = Field(default_factory=TrainingConfig)
     rollout: RolloutConfig = Field(default_factory=RolloutConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
