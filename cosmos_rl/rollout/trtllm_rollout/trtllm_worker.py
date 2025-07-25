@@ -170,8 +170,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         # just call the init of PyExecutor
         super().__init__(*args, **kwargs)
 
-    # def set_cosmos_config(self, cosmos_config: CosmosConfig):
-    #     self.cosmos_config = cosmos_config
+        self.backend = "trtllm"
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         self.vllm_weight_inplace_view_map, grouped_recv_param_key_n_rank_list = (
@@ -192,6 +191,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             self.model_config,
             is_policy=False,
             underlying_model=self.get_underlying_model(),
+            backend=self.backend,
             weight_mapper=self.weight_mapper,
         )(self.recv_param_key_n_rank_list, self.global_rank)
 

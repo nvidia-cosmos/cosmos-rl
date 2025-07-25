@@ -52,7 +52,7 @@ class vLLMRollout(RolloutBase):
             hf_config_path: huggingface config file path.
             model_hf_config: the huggingface config to initiallize the generating model in vllm
         """
-        super().__init__(config)
+        super().__init__(config, tokenizer)
         policy_config = self.config.policy
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
