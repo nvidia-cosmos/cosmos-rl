@@ -887,7 +887,9 @@ class ParallelTopoMapper:
             if should_skip:
                 continue
             dims_map = {}
-            dims_map["tp"] = self.determine_tp_dim(part, param, param_name, is_bias)
+            tp_dim = self.determine_tp_dim(part, param, param_name, is_bias)
+            if tp_dim is not None:
+                dims_map["tp"] = tp_dim
 
             self.insert_to_parallelism_info(
                 param_name,
