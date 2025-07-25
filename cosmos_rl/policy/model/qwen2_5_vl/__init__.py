@@ -246,7 +246,7 @@ def apply_rotary_pos_emb_vision(
     return q_embed, k_embed
 
 
-class Qwen2_5_VLVisionSdpaAttention(nn.Module):
+class Qwen2_5_VLVisionAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -258,7 +258,8 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: torch.Tensor = None,
+        sin: torch.Tensor,
+        cos: torch.Tensor,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -267,9 +268,6 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
             .permute(1, 0, 2, 3)
             .unbind(0)
         )
-        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        cos = emb.cos()
-        sin = emb.sin()
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
         q = q.squeeze(0)
@@ -296,7 +294,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         super().__init__()
         self.norm1 = build_norm(config.norm_type, config.hidden_size, config.norm_eps)
         self.norm2 = build_norm(config.norm_type, config.hidden_size, config.norm_eps)
-        self.attn = Qwen2_5_VLVisionSdpaAttention(
+        self.attn = Qwen2_5_VLVisionAttention(
             config.hidden_size, num_heads=config.n_heads
         )
         self.mlp = Qwen2_5_VLMLP(
@@ -304,11 +302,12 @@ class Qwen2_5_VLVisionBlock(nn.Module):
             bias=True,  # This is fixed to True according to the original implementation
         )
 
-    def forward(self, hidden_states, cu_seqlens, rotary_pos_emb) -> torch.Tensor:
+    def forward(self, hidden_states, cu_seqlens, sin, cos) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
-            rotary_pos_emb=rotary_pos_emb,
+            sin=sin,
+            cos=cos,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -462,13 +461,22 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+            assert (
+                rotary_pos_emb.dtype == torch.float32
+            ), "rotary_pos_emb must be float32"
+            emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+            cos = emb.cos()
+            sin = emb.sin()
+
         for layer_num, blk in self.blocks.items():
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens
                 if int(layer_num) in self.fullatt_block_indexes
                 else cu_window_seqlens,
-                rotary_pos_emb=rotary_pos_emb,
+                sin=sin,
+                cos=cos,
             )
 
         hidden_states = self.merger(hidden_states)
