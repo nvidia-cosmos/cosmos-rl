@@ -600,7 +600,6 @@ class PolicyStatusManager:
         Dispatch the rollout to the policy replicas in a round-robin manner.
         It is that replica's responsibility to dispatch the rollout to further (DP_SHARD) atoms.
         """
-        logger.info("Starting put_rollout.")
         if self.config.rollout.include_stop_str_in_output:
             if self.tokenizer.eos_token is not None and rollout.completion is not None:
                 if not rollout.completion.endswith(self.tokenizer.eos_token):
@@ -746,7 +745,6 @@ class PolicyStatusManager:
         logger.info("Weight sync commands sent.")
 
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
-        logger.info("Trying trigger data fetch and training.")
         # If the validation dataloader is activated, do not trigger data fetch and training
         if self.activated_val_iter is not None:
             return
