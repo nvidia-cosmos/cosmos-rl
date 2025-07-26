@@ -117,22 +117,12 @@ class OptimizersContainer(Optimizer, Generic[T]):
 
     def step(self, *args, **kwargs) -> None:
         for optimizer in itertools.chain(*self.optimizers):
-            for p in optimizer.param_groups:
-                for param in p["params"]:
-                    if hasattr(param, "cosmos_grad"):
-                        param.grad = param.cosmos_grad.to(param.dtype)
-                        param.cosmos_grad = None
             # Check those grad is None:
             optimizer.step(*args, **kwargs)
 
     def zero_grad(self, *args, **kwargs) -> None:
         for optimizer in itertools.chain(*self.optimizers):
             optimizer.zero_grad(*args, **kwargs)
-            # Also clear grad for customized `cosmos_grad`
-            for p in optimizer.param_groups:
-                for param in p["params"]:
-                    if hasattr(param, "cosmos_grad"):
-                        param.cosmos_grad = None
 
     def state_dict(self) -> Dict[str, Any]:
         state_dict = {}
