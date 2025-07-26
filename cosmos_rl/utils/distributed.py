@@ -118,12 +118,11 @@ def destroy_distributed():
         torch.distributed.destroy_process_group()
 
 
-def get_tensor_grad(tensor: torch.Tensor) -> Optional[torch.Tensor]:
-    if hasattr(tensor, "cosmos_grad"):
+def convert_custom_grad_to_grad(tensor: torch.Tensor) -> Optional[torch.Tensor]:
+    if hasattr(tensor, "cosmos_grad") and tensor.cosmos_grad is not None:
         assert tensor.grad is None, "tensor.grad should be None if custom grad is used"
-        return tensor.cosmos_grad
-    else:
-        return tensor.grad
+        tensor.grad = tensor.cosmos_grad.to(tensor.dtype)
+        tensor.cosmos_grad = None
 
 
 @torch.no_grad()
@@ -140,7 +139,7 @@ def gradient_reduce_across_dp_replicas_(
         comm_idx (int): The nccl communicator id for the reduction.
     """
 
-    grads = [get_tensor_grad(p) for p in parameters if get_tensor_grad(p) is not None]
+    grads = [p.grad for p in parameters if p.grad is not None]
 
     # We only need to reduce DTensor's local grad, this is to avoid tensor.grad == nullptr
     for i, g in enumerate(grads):
@@ -249,7 +248,7 @@ def gradient_norm_clipping(
     # Group the parameters by their device meshes.
     parameters_by_mesh = defaultdict(list)
     for param in parameters:
-        if get_tensor_grad(param) is not None:
+        if param.grad is not None:
             # If one parameter belongs to multiple meshes, use a flattened mesh name
             # by concatenating all the mesh names together.
             if hasattr(param, "device_mesh"):
@@ -261,7 +260,7 @@ def gradient_norm_clipping(
     # Compute the norm for each mesh group
     per_mesh_norm_list = []
     for mesh, params in parameters_by_mesh.items():
-        grads = [get_tensor_grad(p) for p in params if get_tensor_grad(p) is not None]
+        grads = [p.grad for p in params if p.grad is not None]
         mesh_norm = (
             torch.nn.utils.get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
             if len(grads) > 0

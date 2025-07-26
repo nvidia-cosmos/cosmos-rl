@@ -597,6 +597,9 @@ class SFTTrainer(Trainer):
                     Compute the global grad norm on all parameters and then apply
                     gradient clipping using the global grad norm.
                     """
+                    for p in self.model.parameters():
+                        dist_util.convert_custom_grad_to_grad(p)
+
                     grad_norm = None
                     if self.config.train.optm_grad_norm_clip > 0:
                         # Must pass empty list even if model_part is None,
