@@ -23,9 +23,12 @@ from cosmos_rl.utils.distributed import (
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.config import Config as CosmosConfig
+import torch
 
 
 def main(*args, **kwargs):
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+
     ctrl_ip, ctrl_port, metadata = get_controller_metadata()
 
     if metadata["config"] is None:
