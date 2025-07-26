@@ -552,32 +552,32 @@ class SFTTrainer(Trainer):
                                 else torch.tensor([-1.0], device=self.device)
                             )
                         else:
-                            # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
-                            last_token_ids = []
-                            with torch.no_grad():
-                                N_NEW_TOKENS = 100
-                                for _ in range(N_NEW_TOKENS):
-                                    if len(last_token_ids) > 0:
-                                        batch["input_ids"] = torch.cat(
-                                            [batch["input_ids"], last_token_ids[-1]],
-                                            dim=-1,
-                                        )
-                                        position_ids, _, _ = (
-                                            self.model.get_position_ids(**batch)
-                                        )
-                                        batch["position_ids"] = position_ids
+                            # # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
+                            # last_token_ids = []
+                            # with torch.no_grad():
+                            #     N_NEW_TOKENS = 100
+                            #     for _ in range(N_NEW_TOKENS):
+                            #         if len(last_token_ids) > 0:
+                            #             batch["input_ids"] = torch.cat(
+                            #                 [batch["input_ids"], last_token_ids[-1]],
+                            #                 dim=-1,
+                            #             )
+                            #             position_ids, _, _ = (
+                            #                 self.model.get_position_ids(**batch)
+                            #             )
+                            #             batch["position_ids"] = position_ids
 
-                                    logits = self.model(**batch)
-                                    token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
-                                    last_token_ids.append(token_ids)
-                                if self.global_rank == 0:
-                                    for i in range(len(last_token_ids)):
-                                        print(
-                                            f"generated tokens at sample {i}: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[i])}"
-                                        )
+                            #         logits = self.model(**batch)
+                            #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
+                            #         last_token_ids.append(token_ids)
+                            #     if self.global_rank == 0:
+                            #         for i in range(len(last_token_ids)):
+                            #             print(
+                            #                 f"generated tokens at sample {i}: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[i])}"
+                            #             )
 
-                                return
-                            #########################################################################################
+                            #     return
+                            # #########################################################################################
 
                             logits = self.model(**batch)
 
