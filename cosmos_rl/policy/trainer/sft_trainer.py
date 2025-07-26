@@ -411,341 +411,331 @@ class SFTTrainer(Trainer):
             start_epoch = self.train_step // len(self.train_data_loader)
             data_loader_bias = self.train_step % len(self.train_data_loader)
 
-        with torch.autocast(
-            device_type="cuda",
-            dtype=util.str2torch_dtype(self.config.train.param_dtype),
-        ):
-            for cur_epoch in range(start_epoch, self.epoch):
-                logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
-                for global_batch in self.train_data_loader:
-                    if data_loader_bias > 0:
-                        data_loader_bias -= 1
-                        continue
+        for cur_epoch in range(start_epoch, self.epoch):
+            logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
+            for global_batch in self.train_data_loader:
+                if data_loader_bias > 0:
+                    data_loader_bias -= 1
+                    continue
 
-                    acc_loss = torch.zeros(1, device=self.device)
-                    self.optimizers.zero_grad()
-                    global_batch_size = len(global_batch)
-                    # split global_batch into mini_batches
-                    mini_batch_begin_idxs = list(
-                        range(
-                            0,
-                            global_batch_size,
-                            self.config.train.train_policy.mini_batch,
-                        )
+                acc_loss = torch.zeros(1, device=self.device)
+                self.optimizers.zero_grad()
+                global_batch_size = len(global_batch)
+                # split global_batch into mini_batches
+                mini_batch_begin_idxs = list(
+                    range(
+                        0,
+                        global_batch_size,
+                        self.config.train.train_policy.mini_batch,
                     )
+                )
 
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    start_event.record()
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
 
-                    for i in mini_batch_begin_idxs:
-                        fixed_length = (
-                            self.config.policy.model_max_length
-                            if self.parallel_dims.pp_enabled
-                            and not self.parallel_dims.pp_dynamic_shape
-                            else None
-                        )
-                        raw_batch = global_batch[
-                            i : i + self.config.train.train_policy.mini_batch
-                        ]
-                        if fixed_length is None:
-                            max_len = min(
-                                self.config.policy.model_max_length,
-                                self.data_packer.sft_compute_max_len(raw_batch),
-                            )
-                        else:
-                            max_len = fixed_length
-
-                        if self.seq_len_multiple > 1:
-                            max_len = (
-                                (max_len + self.seq_len_multiple - 1)
-                                // self.seq_len_multiple
-                                * self.seq_len_multiple
-                            )
-                        batch = self.data_packer.sft_collate_fn(
-                            raw_batch,
-                            computed_max_len=max_len,
-                            pad_token_id=self.tokenizer.pad_token_id,
-                            ignore_label_id=-100,
-                        )
-
-                        # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
-                        # settings from [profiler.sub_profiler_config] are reused
-                        if (
-                            self.config.profiler.enable_nsys
-                            and self.profiler.global_rank in self.profiler.rank_filter
-                        ):
-                            if (
-                                self.train_step
-                                == self.profiler.wait_steps + self.profiler.warmup_steps
-                            ):
-                                torch.cuda.cudart().cudaProfilerStart()
-                            elif (
-                                self.train_step
-                                == self.profiler.wait_steps
-                                + self.profiler.warmup_steps
-                                + self.profiler.active_steps
-                            ):
-                                torch.cuda.cudart().cudaProfilerStop()
-
-                        self.model.train()
-                        for k, v in batch.items():
-                            batch[k] = (
-                                v.to(self.device) if isinstance(v, torch.Tensor) else v
-                            )
-
-                        labels = batch.pop("label_ids")
-
-                        position_ids, input_ids, pos_seq_dim = (
-                            self.model.get_position_ids(**batch)
-                        )
-
-                        batch["position_ids"] = position_ids
-                        padding_mask = batch.get("padding_mask", None)
-
-                        if self.parallel_dims.cp_enabled:
-                            input_ids_before_cp = input_ids
-                            position_ids_before_cp = position_ids
-                            padding_mask_before_cp = padding_mask
-
-                            [input_ids, position_ids, padding_mask] = (
-                                slice_inputs_for_ulysses(
-                                    [input_ids, position_ids, padding_mask],
-                                    self.parallel_dims.mesh["cp"],
-                                )
-                            )
-
-                            batch["input_ids"] = input_ids
-                            batch["position_ids"] = position_ids
-                            if padding_mask is not None:
-                                batch["padding_mask"] = padding_mask
-
-                        if self.parallel_dims.pp_enabled:
-                            pp_last_stage = (
-                                self.parallel_dims.pp_coord[0]
-                                == self.parallel_dims.pp_coord[1] - 1
-                            )
-                            pp_first_stage = self.parallel_dims.pp_coord[0] == 0
-
-                            # Pipeline Parallel forward / backward inside step() call
-                            targets, losses = (
-                                (labels, []) if pp_last_stage else (None, None)
-                            )
-                            if pp_first_stage:
-                                self.pp_scheduler.step(
-                                    **batch,
-                                    pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                    seq_len_multiple=self.seq_len_multiple,
-                                )
-                            else:
-                                # FWD + BWD if it is 1F1B-like scheduler
-                                self.pp_scheduler.step(
-                                    position_ids=batch["position_ids"],
-                                    target=targets,
-                                    losses=losses,
-                                    pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
-                                    seq_len_multiple=self.seq_len_multiple,
-                                )
-                            loss = (
-                                torch.mean(torch.stack(losses)).to(self.device)
-                                if pp_last_stage
-                                else torch.tensor([-1.0], device=self.device)
-                            )
-                        else:
-                            # # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
-                            # last_token_ids = []
-                            # with torch.no_grad():
-                            #     N_NEW_TOKENS = 100
-                            #     for _ in range(N_NEW_TOKENS):
-                            #         if len(last_token_ids) > 0:
-                            #             batch["input_ids"] = torch.cat(
-                            #                 [batch["input_ids"], last_token_ids[-1]],
-                            #                 dim=-1,
-                            #             )
-                            #             position_ids, _, _ = (
-                            #                 self.model.get_position_ids(**batch)
-                            #             )
-                            #             batch["position_ids"] = position_ids
-
-                            #         logits = self.model(**batch)
-                            #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
-                            #         last_token_ids.append(token_ids)
-                            #     if self.global_rank == 0:
-                            #         for i in range(len(last_token_ids)):
-                            #             print(
-                            #                 f"generated tokens at sample {i}: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[i])}"
-                            #             )
-
-                            #     return
-                            # #########################################################################################
-
-                            logits = self.model(**batch)
-
-                            # recover from ulysses if cp is enabled
-                            if self.parallel_dims.cp_enabled:
-                                batch["input_ids"] = input_ids_before_cp
-                                batch["position_ids"] = position_ids_before_cp
-                                if padding_mask_before_cp is not None:
-                                    batch["padding_mask"] = padding_mask_before_cp
-
-                            loss = self.loss_fn(logits, labels)
-                            loss = loss / len(mini_batch_begin_idxs)
-                            loss.backward()
-                        acc_loss += loss.detach()
-
-                    """
-                    Compute the global grad norm on all parameters and then apply
-                    gradient clipping using the global grad norm.
-                    """
-                    grad_norm = None
-                    if self.config.train.optm_grad_norm_clip > 0:
-                        # Must pass empty list even if model_part is None,
-                        # GradNorm across pp stages will fail if some rank does not join the barrier
-                        all_params = [
-                            p
-                            for m in [
-                                model for model in self.model_parts if model is not None
-                            ]
-                            for p in m.parameters()
-                        ]
-                        grad_norm = dist_util.gradient_norm_clipping(
-                            all_params,
-                            self.config.train.optm_grad_norm_clip,
-                            foreach=True,
-                            pp_mesh=self.parallel_dims.mesh["pp"]
-                            if self.parallel_dims.pp_enabled
-                            else None,
-                        )
-                        print(f"grad_norm: {grad_norm}")
-
-                    self.optimizers.step()
-                    self.lr_schedulers.step()
-
-                    self.train_step += 1
-
-                    # Early stop only when max_num_steps is specified
-                    if (
-                        self.config.train.max_num_steps is not None
-                        and self.train_step >= self.total_steps
-                    ):
-                        break
-
-                    end_event.record()
-
-                    if (
-                        self.parallel_dims.dp_replicate_enabled
-                        or self.parallel_dims.dp_shard_enabled
-                        or self.parallel_dims.cp_enabled
-                    ):
-                        global_avg_loss, global_max_loss = (  # noqa: F841
-                            dist_util.dist_mean(
-                                acc_loss, self.parallel_dims.mesh["dp_cp"]
-                            ),
-                            dist_util.dist_max(
-                                acc_loss, self.parallel_dims.mesh["dp_cp"]
-                            ),
+                for i in mini_batch_begin_idxs:
+                    fixed_length = (
+                        self.config.policy.model_max_length
+                        if self.parallel_dims.pp_enabled
+                        and not self.parallel_dims.pp_dynamic_shape
+                        else None
+                    )
+                    raw_batch = global_batch[
+                        i : i + self.config.train.train_policy.mini_batch
+                    ]
+                    if fixed_length is None:
+                        max_len = min(
+                            self.config.policy.model_max_length,
+                            self.data_packer.sft_compute_max_len(raw_batch),
                         )
                     else:
-                        global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
+                        max_len = fixed_length
 
-                    if self.config.logging.logger:
-                        if util.is_master_rank(self.parallel_dims, self.global_rank):
-                            # Calculate last iteration time
-                            assert end_event.query()
-                            iter_time = (
-                                start_event.elapsed_time(end_event) / 1000.0
-                            )  # in seconds
+                    if self.seq_len_multiple > 1:
+                        max_len = (
+                            (max_len + self.seq_len_multiple - 1)
+                            // self.seq_len_multiple
+                            * self.seq_len_multiple
+                        )
+                    batch = self.data_packer.sft_collate_fn(
+                        raw_batch,
+                        computed_max_len=max_len,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        ignore_label_id=-100,
+                    )
 
-                            report_data = {
-                                "train/iteration_time": iter_time,
-                                "train/loss_avg": global_avg_loss,
-                                "train/loss_max": global_max_loss,
-                                "train/learning_rate": self.lr_schedulers.get_last_lr()[
-                                    0
-                                ],
-                                "train/grad_norm": grad_norm
-                                if grad_norm is not None
-                                else -1,
-                            }
-
-                            # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
-                            # it will be inaccurate. Need a reduce for all the metrics.
-                            if self.config.logging.report_mfu:
-                                mfu = util.compute_mfu(
-                                    model=self.model,
-                                    n_tokens=np.prod(input_ids.shape),
-                                    iter_time=iter_time,
-                                    num_gpus=self.world_size,
-                                    dtype=self.config.train.param_dtype,
-                                )
-                                for k, v in mfu.items():
-                                    report_data[f"train/{k}"] = v
-                            if (
-                                "wandb" in self.config.logging.logger
-                                and is_wandb_available()
-                            ):
-                                log_wandb(
-                                    data=report_data,
-                                    step=self.train_step,
-                                )
-                            if "console" in self.config.logging.logger:
-                                logger.info(
-                                    f"Step: {self.train_step}/{self.total_steps}, Loss: {global_avg_loss:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}, Iteration time: {iter_time:.2f}s."
-                                )
-
-                    # For profiling
-                    self.profiler.step()
-
-                    val_score = None
-                    # validation
+                    # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
+                    # settings from [profiler.sub_profiler_config] are reused
                     if (
-                        self.config.train.enable_validation
-                        and self.train_step % self.config.train.validation_step == 0
+                        self.config.profiler.enable_nsys
+                        and self.profiler.global_rank in self.profiler.rank_filter
                     ):
-                        val_score = self.validate()
+                        if (
+                            self.train_step
+                            == self.profiler.wait_steps + self.profiler.warmup_steps
+                        ):
+                            torch.cuda.cudart().cudaProfilerStart()
+                        elif (
+                            self.train_step
+                            == self.profiler.wait_steps
+                            + self.profiler.warmup_steps
+                            + self.profiler.active_steps
+                        ):
+                            torch.cuda.cudart().cudaProfilerStop()
 
-                    # save checkpoint
-                    if (
-                        self.config.train.ckpt.enable_checkpoint
-                        and self.train_step % self.config.train.ckpt.save_freq == 0
-                        and self.train_step > 0
-                    ):
-                        # TODO(dinghaoy): support export safetensors asynchronously.
-                        if self.config.train.ckpt.export_safetensors:
-                            logger.info(
-                                f"Saving huggingface checkpoint at step {self.train_step} to {self.config.train.output_dir}..."
+                    self.model.train()
+                    for k, v in batch.items():
+                        batch[k] = (
+                            v.to(self.device) if isinstance(v, torch.Tensor) else v
+                        )
+
+                    labels = batch.pop("label_ids")
+
+                    position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
+                        **batch
+                    )
+
+                    batch["position_ids"] = position_ids
+                    padding_mask = batch.get("padding_mask", None)
+
+                    if self.parallel_dims.cp_enabled:
+                        input_ids_before_cp = input_ids
+                        position_ids_before_cp = position_ids
+                        padding_mask_before_cp = padding_mask
+
+                        [input_ids, position_ids, padding_mask] = (
+                            slice_inputs_for_ulysses(
+                                [input_ids, position_ids, padding_mask],
+                                self.parallel_dims.mesh["cp"],
                             )
-                            self.export_safetensors(
-                                output_dir=self.config.train.output_dir,
-                                rel_path=os.path.join(
-                                    "safetensors",
-                                    f"step_{self.train_step}",
-                                ),
-                                trainable_only=False,
+                        )
+
+                        batch["input_ids"] = input_ids
+                        batch["position_ids"] = position_ids
+                        if padding_mask is not None:
+                            batch["padding_mask"] = padding_mask
+
+                    if self.parallel_dims.pp_enabled:
+                        pp_last_stage = (
+                            self.parallel_dims.pp_coord[0]
+                            == self.parallel_dims.pp_coord[1] - 1
+                        )
+                        pp_first_stage = self.parallel_dims.pp_coord[0] == 0
+
+                        # Pipeline Parallel forward / backward inside step() call
+                        targets, losses = (
+                            (labels, []) if pp_last_stage else (None, None)
+                        )
+                        if pp_first_stage:
+                            self.pp_scheduler.step(
+                                **batch,
+                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                                seq_len_multiple=self.seq_len_multiple,
                             )
-                        logger.info(
-                            f"Saving cosmos checkpoint at step {self.train_step}..."
+                        else:
+                            # FWD + BWD if it is 1F1B-like scheduler
+                            self.pp_scheduler.step(
+                                position_ids=batch["position_ids"],
+                                target=targets,
+                                losses=losses,
+                                pp_dynamic_shape_enabled=self.parallel_dims.pp_dynamic_shape_enabled,
+                                seq_len_multiple=self.seq_len_multiple,
+                            )
+                        loss = (
+                            torch.mean(torch.stack(losses)).to(self.device)
+                            if pp_last_stage
+                            else torch.tensor([-1.0], device=self.device)
                         )
-                        self.ckpt_manager.save_checkpoint(
-                            model=self.model,
-                            optimizer=self.optimizers,
-                            scheduler=self.lr_schedulers,
-                            step=self.train_step,
-                            total_steps=self.total_steps,
-                        )
-                        self.ckpt_manager.save_check(
-                            step=self.train_step,
-                            val_score=val_score,
-                            pp_enabled=self.parallel_dims.pp_enabled,
-                            pp_last_stage=pp_last_stage,
-                            pp_master_rank=self.parallel_dims.world_size
-                            - self.parallel_dims.world_size / self.parallel_dims.pp,
-                        )
+                    else:
+                        # # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
+                        # last_token_ids = []
+                        # with torch.no_grad():
+                        #     N_NEW_TOKENS = 100
+                        #     for _ in range(N_NEW_TOKENS):
+                        #         if len(last_token_ids) > 0:
+                        #             batch["input_ids"] = torch.cat(
+                        #                 [batch["input_ids"], last_token_ids[-1]],
+                        #                 dim=-1,
+                        #             )
+                        #             position_ids, _, _ = (
+                        #                 self.model.get_position_ids(**batch)
+                        #             )
+                        #             batch["position_ids"] = position_ids
+
+                        #         logits = self.model(**batch)
+                        #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
+                        #         last_token_ids.append(token_ids)
+                        #     if self.global_rank == 0:
+                        #         for i in range(len(last_token_ids)):
+                        #             print(
+                        #                 f"generated tokens at sample {i}: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[i])}"
+                        #             )
+
+                        #     return
+                        # #########################################################################################
+
+                        logits = self.model(**batch)
+
+                        # recover from ulysses if cp is enabled
+                        if self.parallel_dims.cp_enabled:
+                            batch["input_ids"] = input_ids_before_cp
+                            batch["position_ids"] = position_ids_before_cp
+                            if padding_mask_before_cp is not None:
+                                batch["padding_mask"] = padding_mask_before_cp
+
+                        loss = self.loss_fn(logits, labels)
+                        loss = loss / len(mini_batch_begin_idxs)
+                        loss.backward()
+                    acc_loss += loss.detach()
+
+                """
+                Compute the global grad norm on all parameters and then apply
+                gradient clipping using the global grad norm.
+                """
+                grad_norm = None
+                if self.config.train.optm_grad_norm_clip > 0:
+                    # Must pass empty list even if model_part is None,
+                    # GradNorm across pp stages will fail if some rank does not join the barrier
+                    all_params = [
+                        p
+                        for m in [
+                            model for model in self.model_parts if model is not None
+                        ]
+                        for p in m.parameters()
+                    ]
+                    grad_norm = dist_util.gradient_norm_clipping(
+                        all_params,
+                        self.config.train.optm_grad_norm_clip,
+                        foreach=True,
+                        pp_mesh=self.parallel_dims.mesh["pp"]
+                        if self.parallel_dims.pp_enabled
+                        else None,
+                    )
+                    print(f"grad_norm: {grad_norm}")
+
+                self.optimizers.step()
+                self.lr_schedulers.step()
+
+                self.train_step += 1
+
+                # Early stop only when max_num_steps is specified
                 if (
                     self.config.train.max_num_steps is not None
                     and self.train_step >= self.total_steps
                 ):
-                    break  # break outer epoch loop
+                    break
+
+                end_event.record()
+
+                if (
+                    self.parallel_dims.dp_replicate_enabled
+                    or self.parallel_dims.dp_shard_enabled
+                    or self.parallel_dims.cp_enabled
+                ):
+                    global_avg_loss, global_max_loss = (  # noqa: F841
+                        dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                        dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                    )
+                else:
+                    global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
+
+                if self.config.logging.logger:
+                    if util.is_master_rank(self.parallel_dims, self.global_rank):
+                        # Calculate last iteration time
+                        assert end_event.query()
+                        iter_time = (
+                            start_event.elapsed_time(end_event) / 1000.0
+                        )  # in seconds
+
+                        report_data = {
+                            "train/iteration_time": iter_time,
+                            "train/loss_avg": global_avg_loss,
+                            "train/loss_max": global_max_loss,
+                            "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
+                            "train/grad_norm": grad_norm
+                            if grad_norm is not None
+                            else -1,
+                        }
+
+                        # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
+                        # it will be inaccurate. Need a reduce for all the metrics.
+                        if self.config.logging.report_mfu:
+                            mfu = util.compute_mfu(
+                                model=self.model,
+                                n_tokens=np.prod(input_ids.shape),
+                                iter_time=iter_time,
+                                num_gpus=self.world_size,
+                                dtype=self.config.train.param_dtype,
+                            )
+                            for k, v in mfu.items():
+                                report_data[f"train/{k}"] = v
+                        if (
+                            "wandb" in self.config.logging.logger
+                            and is_wandb_available()
+                        ):
+                            log_wandb(
+                                data=report_data,
+                                step=self.train_step,
+                            )
+                        if "console" in self.config.logging.logger:
+                            logger.info(
+                                f"Step: {self.train_step}/{self.total_steps}, Loss: {global_avg_loss:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}, Iteration time: {iter_time:.2f}s."
+                            )
+
+                # For profiling
+                self.profiler.step()
+
+                val_score = None
+                # validation
+                if (
+                    self.config.train.enable_validation
+                    and self.train_step % self.config.train.validation_step == 0
+                ):
+                    val_score = self.validate()
+
+                # save checkpoint
+                if (
+                    self.config.train.ckpt.enable_checkpoint
+                    and self.train_step % self.config.train.ckpt.save_freq == 0
+                    and self.train_step > 0
+                ):
+                    # TODO(dinghaoy): support export safetensors asynchronously.
+                    if self.config.train.ckpt.export_safetensors:
+                        logger.info(
+                            f"Saving huggingface checkpoint at step {self.train_step} to {self.config.train.output_dir}..."
+                        )
+                        self.export_safetensors(
+                            output_dir=self.config.train.output_dir,
+                            rel_path=os.path.join(
+                                "safetensors",
+                                f"step_{self.train_step}",
+                            ),
+                            trainable_only=False,
+                        )
+                    logger.info(
+                        f"Saving cosmos checkpoint at step {self.train_step}..."
+                    )
+                    self.ckpt_manager.save_checkpoint(
+                        model=self.model,
+                        optimizer=self.optimizers,
+                        scheduler=self.lr_schedulers,
+                        step=self.train_step,
+                        total_steps=self.total_steps,
+                    )
+                    self.ckpt_manager.save_check(
+                        step=self.train_step,
+                        val_score=val_score,
+                        pp_enabled=self.parallel_dims.pp_enabled,
+                        pp_last_stage=pp_last_stage,
+                        pp_master_rank=self.parallel_dims.world_size
+                        - self.parallel_dims.world_size / self.parallel_dims.pp,
+                    )
+            if (
+                self.config.train.max_num_steps is not None
+                and self.train_step >= self.total_steps
+            ):
+                break  # break outer epoch loop
 
         # process the final step
         if self.config.train.enable_validation:
