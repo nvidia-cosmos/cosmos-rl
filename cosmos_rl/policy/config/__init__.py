@@ -130,6 +130,14 @@ class SFTDataConfig(BaseModel):
         default="conversations",  # "conversation",
         description="Column name for formated conversation json",
     )
+    image_column_name: str = Field(
+        default="",
+        description="Column name for image",
+    )
+    video_column_name: str = Field(
+        default="",
+        description="Column name for video",
+    )
     system_prompt: str = Field(
         default="",
         description="System prompt for the model, which will be prepended to the prompt",

@@ -25,7 +25,7 @@ sync_weight_interval = 1
 gpu_memory_utilization = 0.7
 enable_chunked_prefill = false
 n_generation = 16
-batch_size = 1
+batch_size = 8
 quantization = "none"
 max_response_length = 1024
 

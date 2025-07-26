@@ -48,11 +48,11 @@ def parallelize(
 
     assert (
         not parallel_dims.tp_enabled
-    ), "Tensor parallelism is not supported for HFLLMModel"
+    ), "Tensor parallelism is not supported for HFModel"
     assert (
         not parallel_dims.cp_enabled
-    ), "Context parallelism is not supported for HFLLMModel"
-    assert pp_size == 1, "Pipeline parallelism is not supported for HFLLMModel"
+    ), "Context parallelism is not supported for HFModel"
+    assert pp_size == 1, "Pipeline parallelism is not supported for HFModel"
 
     if config.policy.model_gradient_checkpointing:
         apply_ac(model)
@@ -61,9 +61,8 @@ def parallelize(
     if config.train.compile:
         apply_compile(model)
 
-    if (
-        parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled
-    ):  # apply FSDP or HSDP, potentially with Context Parallel
+    # apply FSDP or HSDP
+    if parallel_dims.dp_shard_enabled:
         if parallel_dims.dp_replicate_enabled:
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
@@ -74,7 +73,7 @@ def parallelize(
             world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=str2torch_dtype(config.train.param_dtype),
             reduce_dtype=str2torch_dtype(config.train.fsdp_reduce_dtype),
-            pp_enabled=parallel_dims.pp_enabled,
+            pp_enabled=False,
             cpu_offload=config.train.fsdp_offload,
             reshard_after_forward_policy=config.train.fsdp_reshard_after_forward,
         )
@@ -148,9 +147,14 @@ def _apply_ac_to_transformer_block(module: nn.Module):
 
 def apply_ac(model: nn.Module):
     """Apply activation checkpointing to the model."""
-    for layer_id, transformer_block in model.layers.named_children():
+    for layer_id, transformer_block in model.lm_layers.named_children():
         transformer_block = _apply_ac_to_transformer_block(transformer_block)
-        model.layers.register_module(layer_id, transformer_block)
+        model.lm_layers.register_module(layer_id, transformer_block)
+
+    if model.vision_model is not None:
+        for layer_id, transformer_block in model.vision_layers.named_children():
+            transformer_block = _apply_ac_to_transformer_block(transformer_block)
+            model.vision_layers.register_module(layer_id, transformer_block)
 
     logger.info("Applied activation checkpointing to the model")
 
@@ -198,21 +202,48 @@ def apply_fsdp(
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
+    # Shard the vision model
+    if model.vision_model is not None:
+        logger.info("Applying FSDP to the visual model")
+        for layer_id, transformer_block in enumerate(model.vision_layers):
+            if reshard_after_forward_policy == "always":
+                reshard_after_forward = True
+            elif reshard_after_forward_policy == "never":
+                reshard_after_forward = False
+            elif reshard_after_forward_policy == "default":
+                reshard_after_forward = int(layer_id) < model.n_vision_layers - 1
+            else:
+                raise ValueError(
+                    f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
+                )
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
 
-    for layer_id, transformer_block in enumerate(model.layers):
+        fully_shard(
+            model.vision_model,
+            **fsdp_config,
+            reshard_after_forward=True,
+        )
+
+    # Shard the multi-modal projector
+    if model.multi_modal_projector is not None:
+        fully_shard(
+            model.multi_modal_projector,
+            **fsdp_config,
+            reshard_after_forward=True,
+        )
+
+    # Shard the language model
+    for layer_id, transformer_block in enumerate(model.lm_layers):
         if reshard_after_forward_policy == "always":
             reshard_after_forward = True
         elif reshard_after_forward_policy == "never":
             reshard_after_forward = False
         elif reshard_after_forward_policy == "default":
-            if pp_enabled:
-                # For PP, do not reshard after forward to avoid per-microbatch
-                # all-gathers, which can be expensive and non-overlapped
-                reshard_after_forward = False
-            else:
-                # As an optimization, do not reshard after forward for the last
-                # transformer block since FSDP would prefetch it immediately
-                reshard_after_forward = int(layer_id) < len(model.layers) - 1
+            reshard_after_forward = int(layer_id) < model.n_lm_layers - 1
         else:
             raise ValueError(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
@@ -222,7 +253,11 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-    fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
+    if model.embed_tokens is not None:
+        logger.info("Applying FSDP to the language model embed_tokens")
+        fully_shard(model.embed_tokens, **fsdp_config, reshard_after_forward=True)
+    fully_shard(model.language_model, **fsdp_config, reshard_after_forward=True)
+    fully_shard(model, **fsdp_config, reshard_after_forward=True)
 
 
 def apply_ddp(

@@ -658,21 +658,23 @@ def sync_model_vocab(
         # Check if the weight map file exists
         if has_weight_map:
             weight_map = read_json_file(weight_map_path)["weight_map"]
-            if lm_head_key in weight_map:
-                lm_head = weight_map[lm_head_key]
-                lm_head_path = resolve_model_path(f"{model_name_or_path}:{lm_head}")
-                with safe_open(lm_head_path, framework="pt", device="cpu") as f:
-                    tensor_slice = f.get_slice(lm_head_key)
+            possible_prefix = ["", "model.", "language_model."]
+            possible_keys = [prefix + lm_head_key for prefix in possible_prefix] + [
+                prefix + embed_tokens_key for prefix in possible_prefix
+            ]
+            for key in possible_keys:
+                if key in weight_map:
+                    head_or_embed_tokens = weight_map[key]
+                    head_or_embed_tokens_path = resolve_model_path(
+                        f"{model_name_or_path}:{head_or_embed_tokens}"
+                    )
+                    with safe_open(
+                        head_or_embed_tokens_path, framework="pt", device="cpu"
+                    ) as f:
+                        tensor_slice = f.get_slice(key)
                     vocab_size, _ = tensor_slice.get_shape()
-            elif embed_tokens_key in weight_map:
-                embed_tokens = weight_map[embed_tokens_key]
-                embed_tokens_path = resolve_model_path(
-                    f"{model_name_or_path}:{embed_tokens}"
-                )
-                with safe_open(embed_tokens_path, framework="pt", device="cpu") as f:
-                    tensor_slice = f.get_slice(embed_tokens_key)
-                    vocab_size, _ = tensor_slice.get_shape()
-            else:
+                    break
+            if vocab_size is None:
                 raise ValueError(
                     "Could not find `lm_head` or `model.embed_tokens.weight` in the model."
                 )
@@ -1051,3 +1053,28 @@ def sanitize(obj):
         return [sanitize(v) for v in obj]
     else:
         return obj
+
+
+def safe_deep_getattr(obj, attr_path, default=None):
+    try:
+        for attr in attr_path.split("."):
+            obj = getattr(obj, attr)
+        return obj
+    except AttributeError:
+        return default
+
+
+def load_model_class_by_config(hf_config):
+    architectures = hf_config.architectures
+    assert (
+        len(architectures) == 1
+    ), f"zero or multiple architectures in config.json is not supported, {architectures=}"
+
+    class_name = architectures[0]
+    model_class = None
+    try:
+        model_class = getattr(importlib.import_module("transformers"), class_name)
+    except Exception as e:
+        logger.error(f"Can not load {class_name} from transformers")
+        raise e
+    return model_class
