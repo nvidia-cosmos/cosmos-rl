@@ -901,6 +901,11 @@ class GRPOTrainer(Trainer):
         """
         with torch.cuda.stream(self.train_stream):
             for model_part in self.model_parts:
+                if model_part is not None:
+                    for p in model_part.parameters():
+                        dist_util.convert_custom_grad_to_grad(p)
+
+            for model_part in self.model_parts:
                 # Model part may use same physical mesh for different logical mesh,
                 # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
                 # So we need to do allreduce for each model part

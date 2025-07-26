@@ -479,7 +479,6 @@ def patch_fsdp_foreach_reduce():
     from torch.distributed.fsdp._fully_shard._fsdp_common import (
         _get_dim0_padded_size,
         _raise_assert_with_print,
-        _to_dtype_if_needed,
         compiled_autograd_enabled,
     )
 
@@ -630,7 +629,7 @@ def patch_fsdp_foreach_reduce():
 
         with device_handle.stream(post_reduce_stream):
             _div_if_needed(reduce_output, postdivide_factor)
-            reduce_output = _to_dtype_if_needed(reduce_output, orig_dtype)
+            # reduce_output = _to_dtype_if_needed(reduce_output, orig_dtype)
             # View out and accumulate sharded gradients
             flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
             for padded_unsharded_size, fsdp_param in zip(
