@@ -118,13 +118,6 @@ def destroy_distributed():
         torch.distributed.destroy_process_group()
 
 
-def convert_custom_grad_to_grad(tensor: torch.Tensor) -> Optional[torch.Tensor]:
-    if hasattr(tensor, "cosmos_grad") and tensor.cosmos_grad is not None:
-        assert tensor.grad is None, "tensor.grad should be None if custom grad is used"
-        tensor.grad = tensor.cosmos_grad.to(tensor.dtype)
-        tensor.cosmos_grad = None
-
-
 @torch.no_grad()
 def gradient_reduce_across_dp_replicas_(
     parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
@@ -256,7 +249,6 @@ def gradient_norm_clipping(
             else:
                 device_mesh_str = "default"
             parameters_by_mesh[device_mesh_str].append(param)
-
     # Compute the norm for each mesh group
     per_mesh_norm_list = []
     for mesh, params in parameters_by_mesh.items():
