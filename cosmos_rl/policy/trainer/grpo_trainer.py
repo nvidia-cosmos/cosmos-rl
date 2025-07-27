@@ -269,6 +269,8 @@ class GRPOTrainer(Trainer):
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
+        for param_name, param in self.model.named_parameters():
+            logger.info(f"[Policy] LMS cosmos: {param_name}, param: {param.shape}")
         keys_n_ranks = []
         for name, tensor_or_callable in self.model.weight_sync_transforms:
             if isinstance(tensor_or_callable, torch.Tensor):

@@ -170,18 +170,18 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
     @torch.no_grad()
     def main_loop(self):
-        # FIXME: (lms) receive shutdown signal from trtllm worker.
-        while not self.shutdown_signal.is_set():
-            while (replica_name := self.cosmos_replica_name_queue.get()) is not None:
-                # So the worker processes has done the registration.
-                logger.info(
-                    f"[Rollout] Got replica name: {replica_name} from trtllm WorkerProcess"
-                )
-                self.replica_name = (
-                    replica_name  # retrieve the replica name from trtllm worker.
-                )
-                break
+        while (replica_name := self.cosmos_replica_name_queue.get()) is not None:
+            # Main process will be blocked here until the trtllm worker has all done the registration.
+            # So the worker processes has done the registration.
+            logger.info(
+                f"[Rollout] Got replica name: {replica_name} from trtllm WorkerProcess"
+            )
+            self.replica_name = (
+                replica_name  # retrieve the replica name from trtllm worker.
+            )
+            break
 
+        while not self.shutdown_signal.is_set():
             if not self.state.prompt_fetch_end():
                 no_more_prompts = self.request_new_prompts(
                     self.batch_size, self._prompt_queue
@@ -213,7 +213,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     sampling_params=self.sampling_params,
                 )
 
-                logger.info(f"[Rollout] LMS: completions of trtllm: {completions}")
+                logger.debug(f"[Rollout] completions of trtllm: {completions}")
 
                 # Remove empty completions
                 valid_completions: List[List[str]] = []
@@ -255,14 +255,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
                 logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
-                should_report = (
-                    self.parallel_dims.tp_coord[0] == 0
-                    and (
-                        self.parallel_dims.pp_coord[0]
-                        == self.parallel_dims.pp_coord[1] - 1
-                    )
-                    and len(valid_completions) > 0
-                )
+                should_report =  len(valid_completions) > 0
 
                 if should_report:
                     url_suffix = COSMOS_API_ROLLOUT_SUFFIX

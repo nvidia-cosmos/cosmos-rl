@@ -48,7 +48,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 return rollout_weight_name.replace(
                     "experts.w2_weight", "down_proj.weight"
                 )
-            # below are for trtllm.
+            # below are for trtllm weight for gate_up_proj and input_layernorm.
             elif "experts.w3_w1_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
                     "experts.w3_w1_weight", "gate_up_proj.weight"
@@ -78,10 +78,16 @@ class Qwen3MoeWeightMapper(WeightMapper):
         return q_weight, k_weight, v_weight
 
     def _split_gate_proj_weight(self, name, weight: torch.Tensor):
-        # weight has shape [num_experts, 2 * x, hidden_dim]
+        # weight has shape [num_experts, 2 * x, hidden_dim], first gate_proj, then up_proj
+        # if backend is trtllm,  [num_experts, 2 * x, hidden_dim], first up_proj, then gate_proj
+        if "gate_up" in name:
+            from cosmos_rl.utils.logging import logger
+            logger.info(f"[WeightMapper] gate_up_proj weight: {weight.shape}")
         dim_1 = weight.shape[1]
         gate_proj_weight = weight[:, : dim_1 // 2]
         up_proj_weight = weight[:, dim_1 // 2 :]
+        if self.backend == "trtllm":
+            gate_proj_weight, up_proj_weight = up_proj_weight, gate_proj_weight
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(

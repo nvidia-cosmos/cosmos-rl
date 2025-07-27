@@ -27,6 +27,7 @@ from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from transformers import AutoTokenizer
+from transformers import AutoConfig
 
 
 class TRTLLM_Rollout(RolloutBase):
@@ -49,7 +50,8 @@ class TRTLLM_Rollout(RolloutBase):
             # self.eos_token_ids = [tokenizer.eos_token_id]
             # TODO(lms): remove this
             self.eos_token_ids = [151645, 151643]
-
+        
+        self.model_config = util.retry(AutoConfig.from_pretrained)(self.config.policy.model_name_or_path)
         self._engine_initialized = True
 
     def init_engine(
@@ -66,6 +68,16 @@ class TRTLLM_Rollout(RolloutBase):
         pp_size = rollout_parallelism.pp_size
         assert pp_size == 1, "TRTLLM only support pipeline parallelism 1 now."
 
+        moe_tensor_parallel_size = -1 # by default, trtllm uses tp for MoE.
+
+        # Check if the model has MoE
+        moe_model_type = {"qwen3_moe"}
+        multimodal_type = {"qwen2_5_vl"}
+
+        model_type = self.model_config.model_type
+        if model_type in moe_model_type:
+            moe_tensor_parallel_size = tp_size
+
         pytorch_backend_config = PyTorchConfig(disable_overlap_scheduler=True)
         self.rollout_engine = LLM(
             model=model_path,
@@ -78,9 +90,8 @@ class TRTLLM_Rollout(RolloutBase):
             trust_remote_code=True,
             # For cosmos-rl
             cosmos_config=self.config,
+            moe_expert_parallel_size=moe_tensor_parallel_size,
         )
-
-        logger.info("[Rollout] LMS: init trtllm rollout engine done!")
 
     def rollout_generation(
         self,
