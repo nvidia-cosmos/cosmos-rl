@@ -44,32 +44,29 @@ from functools import cached_property
 from flash_attn import flash_attn_func, flash_attn_varlen_func
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        """
+        RMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
+
 def build_norm(norm_type: str, dim: int, eps: float):
-    """
-    Builds the specified normalization layer based on the norm_type.
-
-    Args:
-        norm_type (str): The type of normalization layer to build.
-            Supported types: layernorm, np_layernorm, rmsnorm
-        dim (int): The dimension of the normalization layer.
-        eps (float, optional): The epsilon value for numerical stability. Defaults to 1e-6.
-
-    Returns:
-        The built normalization layer.
-
-    Raises:
-        NotImplementedError: If an unknown norm_type is provided.
-    """
-    norm_type = norm_type.lower()  # Normalize to lowercase
-
-    if norm_type == "layernorm":
-        return nn.LayerNorm(dim, eps=eps, bias=False)
-    elif norm_type == "np_layernorm":
-        return nn.LayerNorm(dim, eps=eps, elementwise_affine=False, bias=False)
-    elif norm_type == "rmsnorm":
-        return nn.RMSNorm(dim, eps=eps)
-    else:
-        raise NotImplementedError(f"Unknown norm_type: '{norm_type}'")
+    assert norm_type == "rmsnorm", f"Unknown norm_type: '{norm_type}'"
+    return RMSNorm(dim, eps)
 
 
 @dataclass
