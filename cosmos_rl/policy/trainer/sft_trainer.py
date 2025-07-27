@@ -235,11 +235,22 @@ class SFTTrainer(Trainer):
             user_provided_dataset=self.sft_user_dataset,
         )
         train_sampler = DistributedSampler(
-            train_dataset, num_replicas=self.dp_world_size, rank=self.dp_rank
+            train_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=True,
+            drop_last=False,
         )
+
         val_sampler = DistributedSampler(
-            val_dataset, num_replicas=self.dp_world_size, rank=self.dp_rank
+            val_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=False,
+            drop_last=False,
         )
+        self.epoch = config.train.epoch
+        train_sampler.set_epoch(self.epoch)
 
         assert (
             self.tokenizer.pad_token_id is not None
@@ -247,12 +258,12 @@ class SFTTrainer(Trainer):
         self.train_data_loader = DataLoader(
             train_dataset,
             batch_size=config.train.train_batch_per_replica,
-            shuffle=config.train.train_policy.dataloader_shuffle,
+            shuffle=False,
             num_workers=config.train.train_policy.dataloader_num_workers,
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=train_sampler,
             collate_fn=collate_fn,
-            drop_last=True,
+            drop_last=False,
         )
         self.val_data_loader = DataLoader(
             val_dataset,
@@ -261,10 +272,8 @@ class SFTTrainer(Trainer):
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=val_sampler,
             collate_fn=collate_fn,
-            drop_last=True,
+            drop_last=False,
         )
-        # For iteration control
-        self.epoch = config.train.epoch
         steps_by_dataset = len(self.train_data_loader) * self.epoch
         if config.train.max_num_steps is not None:
             self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
