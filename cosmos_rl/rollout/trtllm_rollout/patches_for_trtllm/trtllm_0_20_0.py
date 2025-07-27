@@ -456,5 +456,4 @@ patch_trtllm_build_model()
 #     ExecutorBindingsProxy._setup_queues = cosmos_set_ipc_queues
 
 
-def dummy():
-    pass
+
