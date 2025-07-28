@@ -77,6 +77,7 @@ from cosmos_rl.utils.pynccl import (
     nccl_group_end,
 )
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
+from cosmos_rl.utils.util import log_gpu_memory, clear_gpu_memory
 
 
 def compute_loss(
@@ -853,20 +854,34 @@ class GRPOTrainer(Trainer):
     @Trainer.register_policy_command_handler(DataFetchCommand)
     def execute_data_fetch(self, command: DataFetchCommand):
         logger.info("[Policy] Executing data fetch.")
-        if command.do_profile:
+        # if command.do_profile:
+        #     self.profiler.start_dynamic(
+        #         active_steps=command.active_steps,
+        #         rank_filter=command.rank_filter,
+        #         record_shape=command.record_shape,
+        #         profile_memory=command.profile_memory,
+        #         with_stack=command.with_stack,
+        #         with_modules=command.with_modules,
+        #     )
+        if True:
+            if self.profiler.enable_profile is False:
+                logger.info("[Profiler] enable_profile is False!!")
+                self.profiler.enable_profile = True
             self.profiler.start_dynamic(
-                active_steps=command.active_steps,
-                rank_filter=command.rank_filter,
-                record_shape=command.record_shape,
-                profile_memory=command.profile_memory,
-                with_stack=command.with_stack,
-                with_modules=command.with_modules,
+                active_steps=2,
+                rank_filter=[i for i in range(256)],
+                record_shape=True,
+                profile_memory=False,
+                with_stack=True,
+                with_modules=True,
             )
+            logger.info(f"Profilter step = {self.profiler.profiler.step_num}, output_dir = {self.profiler.output_dir}")
 
         assert self.replica_name == command.replica_name
         self.replica_batch_for_this_step = command.items_count
 
         is_fake_step = self.replica_batch_for_this_step == 0
+        logger.info(f"Do profile = {command.do_profile}, {is_fake_step=}")
         if not is_fake_step:
             report_data = self.train(
                 current_step=command.global_step,
@@ -1144,6 +1159,7 @@ class GRPOTrainer(Trainer):
         self, current_step: int, total_steps: int, remain_samples_num: int
     ) -> Dict[str, Any]:
         logger.info("Starting train step.")
+        log_gpu_memory("Begin of train")
         pp_last_stage = (
             self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
         )
@@ -1213,12 +1229,15 @@ class GRPOTrainer(Trainer):
                 n_microbatches % self.parallel_dims.pp == 0
             ), f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
 
+        log_gpu_memory("Before swap")
         need_compute_ref, kl_beta = self._swap_model_state_dict()
+        log_gpu_memory("After swap")
 
         loss_sum = torch.tensor(0.0, device=self.device)
         kl_loss_sum = torch.tensor(0.0, device=self.device)
         loss_count = 0
         is_computing_refs = [True, False] if need_compute_ref else [False]
+        logger.info(f"Training metadata: {self.mu_iterations=}, {is_computing_refs=}, {batch_size=}, {mini_batch_size=}")
         for is_computing_ref in is_computing_refs:
             # Set model to eval mode if reference model is being used
             if is_computing_ref:
@@ -1404,7 +1423,9 @@ class GRPOTrainer(Trainer):
                                         else torch.tensor([-1.0], device=self.device)
                                     )
                             else:
+                                log_gpu_memory(f"Before forward {is_computing_ref=}, {i_mu=}, {i=}")
                                 raw_logits = self.model(**user_mini_batch)
+                                log_gpu_memory(f"After forward {is_computing_ref=}, {i_mu=}, {i=}")
 
                                 if self.parallel_dims.cp_enabled:
                                     # reset the position ids and input ids
@@ -1431,6 +1452,7 @@ class GRPOTrainer(Trainer):
                                         full_logits=raw_logits,
                                     )
                                 )
+                                log_gpu_memory(f"After logprobs {is_computing_ref=}, {i_mu=}, {i=}")
                                 logprob_masks = user_mini_batch["logprob_masks"]
                                 current_advantages = (
                                     logprob_masks * minibatched_advantages
@@ -1472,16 +1494,21 @@ class GRPOTrainer(Trainer):
                                         self.config,
                                         logprob_masks,
                                     )
+                                    log_gpu_memory(f"After loss {is_computing_ref=}, {i_mu=}, {i=}")
                                     if num_mini_batch > 1:
                                         loss /= num_mini_batch
                                         kl_loss /= num_mini_batch
                                     loss.backward()
+                                    log_gpu_memory(f"After backward {is_computing_ref=}, {i_mu=}, {i=}")
                                     loss_sum += loss.item()
                                     loss_count += 1
                                     kl_loss_sum += kl_loss.item()
                             self.mini_step += 1
                             local_mini_step += 1
                         self.execute_all_reduce()
+                        log_gpu_memory("Before clear gpu memory")
+                        clear_gpu_memory()
+                        log_gpu_memory("After clear gpu memory")
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()

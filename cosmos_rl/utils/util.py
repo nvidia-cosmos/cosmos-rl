@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import gc
 import re
 import ast
 import multiprocessing
@@ -54,6 +55,18 @@ from safetensors import safe_open
 from cosmos_rl.utils.constant import CACHE_DIR
 import math
 
+def log_gpu_memory(prefix):
+    torch.cuda.synchronize()
+    pyt = torch.cuda.memory_allocated() / (1024 ** 3)
+    el = (torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]) / (1024 ** 3)
+    allocated_large = torch.cuda.memory_stats()['allocated_bytes.large_pool.current'] / (1024 ** 3)
+    allocated_small = torch.cuda.memory_stats()['allocated_bytes.small_pool.current'] / (1024 ** 3)
+    logger.info(f"Mem Usage (GB) | {prefix} | pytorch:{pyt} total_occupied:{el} | memory_other_than_pyt:{el-pyt} | pytorch small/large: {allocated_small}/{allocated_large}")
+
+
+def clear_gpu_memory():
+    gc.collect()
+    torch.cuda.empty_cache()
 
 def create_cached_dir_if_needed():
     """
