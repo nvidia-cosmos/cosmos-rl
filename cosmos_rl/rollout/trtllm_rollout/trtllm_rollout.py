@@ -88,9 +88,9 @@ class TRTLLM_Rollout(RolloutBase):
             seed=seed or 42,
             load_format=load_format,
             trust_remote_code=True,
+            moe_expert_parallel_size=moe_tensor_parallel_size,
             # For cosmos-rl
             cosmos_config=self.config,
-            moe_expert_parallel_size=moe_tensor_parallel_size,
         )
 
     def rollout_generation(

@@ -434,26 +434,3 @@ def patch_trtllm_build_model():
 
 
 patch_trtllm_build_model()
-
-
-# # 4. Patch ExecutorBindingsProxy to set IPCQueues that we need.
-# def patch_executor_bindings_proxy():
-#     class CosmosWorkerCommIpcAddrs(executor_utils.WorkerCommIpcAddrs):
-#         cosmos_ipc_queue_addr :  tuple[str, Optional[bytes]]
-#     executor_utils.WorkerCommIpcAddrs = CosmosWorkerCommIpcAddrs
-
-#     original_set_ipc_queues = ExecutorBindingsProxy._setup_queues
-#     def cosmos_set_ipc_queues(self):
-#         original_addrs = original_set_ipc_queues(self)
-#         #queues that Cosmos-RL need
-#         cosmos_ipc_queue_addr = (
-#             f"cosmos_ipc_queue_{self.rank}",
-#             None,
-#         )
-#         original_addrs.cosmos_ipc_queue_addr = cosmos_ipc_queue_addr
-#         return original_addrs
-
-#     ExecutorBindingsProxy._setup_queues = cosmos_set_ipc_queues
-
-
-

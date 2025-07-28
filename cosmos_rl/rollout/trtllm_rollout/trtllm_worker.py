@@ -61,6 +61,7 @@ from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
+from cosmos_rl.rollout.trtllm_rollout.trtllm_common import ValidationInstruction, ShutdownInstruction
 
 from transformers import AutoConfig
 
@@ -519,35 +520,12 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 current_step % self.config.train.validation_step == 0
                 or current_step == broadcast_command.total_steps
             )
-            validation_queue = Queue()
-            validation_results = []
-            prompt_idxs: List[int] = []
-            payloads: List[Any] = []
             if should_do_validation:
-                # Do inline validation here
-                while True:
-                    is_end = self.request_new_prompts(
-                        self.val_batch_size,
-                        validation_queue,
-                        validation_step=current_step,
-                    )
-                    if not validation_queue.empty():
-                        prompts = validation_queue.get()
-                        completions: List[List[str]] = self.rollout.rollout_generation(
-                            prompt_id_and_payload_list=prompts,
-                            stream=self.inference_stream,
-                            data_packer=self.val_data_packer,
-                            sampling_params=self.val_sampling_params,
-                        )
-                        if completions:
-                            prompt_idxs.extend([prompt[0] for prompt in prompts])
-                            payloads.extend([prompt[1] for prompt in prompts])
-                            validation_results.extend(completions)
-
-                    if is_end:
-                        break
+                self.cosmos_weight_sync_queue.put(ValidationInstruction(current_step, broadcast_command.total_steps))
 
         if broadcast_command.replica_should_stop():
+            # trigger the shutdown signal to main process too.
+            self.cosmos_weight_sync_queue.put(ShutdownInstruction())
             self.shutdown_signal.set()
 
     def query_command_from_controller(self):
@@ -741,3 +719,25 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 target=self.query_command_from_controller, daemon=True
             )
             self.background_thread.start()
+
+    
+    def handle_shutdown(self):
+        if not hasattr(self, "_shutdown_handled"):
+            self._shutdown_handled = True
+            if not self.shutdown_signal.is_set():
+                self.shutdown_signal.set()
+
+        if self.background_thread is not None:
+            self.background_thread.join()
+            self.background_thread = None
+        
+        if self.heartbeat_thread is not None:
+                self.heartbeat_thread.join()
+                self.heartbeat_thread = None
+        self.unregister_from_controller()
+        
+
+    def shutdown(self):
+        # override pyexecutor's shutdown
+        super().shutdown()
+        self.handle_shutdown()
