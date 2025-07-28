@@ -59,7 +59,7 @@ from functools import partial
 import msgpack
 from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
-from cosmos_rl.utils.util import is_master_rank
+from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.dispatcher.replica import Rollout
@@ -774,7 +774,9 @@ class GRPOTrainer(Trainer):
                                 local_view = local_view()
                             else:
                                 pass
-
+                            local_view = local_view.to(
+                                str2torch_dtype(self.config.train.param_dtype)
+                            )
                             view = (
                                 local_view.cosmos_slice(tensor_split_strategys)
                                 .contiguous()
@@ -1546,6 +1548,7 @@ class GRPOTrainer(Trainer):
                     ),
                     trainable_only=False,
                     is_final=current_step == total_steps,
+                    dtype=str2torch_dtype(self.config.train.param_dtype),
                 )
             logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
             self.ckpt_manager.save_checkpoint(

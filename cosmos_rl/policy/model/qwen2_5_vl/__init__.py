@@ -42,7 +42,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
 from flash_attn import flash_attn_func, flash_attn_varlen_func
-from transformers.modeling_flash_attention_utils import apply_rotary_emb
+from flash_attn.layers.rotary import apply_rotary_emb
 
 
 class Qwen2RMSNorm(nn.Module):

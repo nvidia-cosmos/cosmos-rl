@@ -721,6 +721,7 @@ class SFTTrainer(Trainer):
                                 f"step_{self.train_step}",
                             ),
                             trainable_only=False,
+                            dtype=util.str2torch_dtype(self.config.train.param_dtype),
                         )
                     logger.info(
                         f"Saving cosmos checkpoint at step {self.train_step}..."
@@ -761,6 +762,7 @@ class SFTTrainer(Trainer):
                 ),
                 trainable_only=False,
                 is_final=True,
+                dtype=util.str2torch_dtype(self.config.train.param_dtype),
             )
         if self.config.train.ckpt.enable_checkpoint:
             logger.info(

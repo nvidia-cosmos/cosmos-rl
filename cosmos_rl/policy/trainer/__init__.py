@@ -32,7 +32,7 @@ from cosmos_rl.comm.base import CommMixin
 from safetensors.torch import save_file
 from huggingface_hub import create_repo, upload_folder, whoami
 from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
-from typing import Dict
+from typing import Dict, Optional
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.api_suffix import COSMOS_API_SET_TRACE_PATH_SUFFIX
@@ -190,6 +190,7 @@ class Trainer(CommMixin):
         rel_path: str,
         trainable_only: bool = False,
         is_final=False,
+        dtype: Optional[torch.dtype] = None,
     ):
         path = os.path.join(output_dir, rel_path)
         if self.parallel_dims.dp_replicate_coord[0] > 0:
@@ -262,6 +263,7 @@ class Trainer(CommMixin):
                         f"[Policy] Skipping None parameter for {name} in safetensors export."
                     )
                     continue
+                _param = _param.to(dtype=dtype) if dtype is not None else _param
                 tensor_size = get_tensor_size(_param)
                 # If adding the current tensor exceeds the size limit, save the current chunk
                 if current_chunk_size + tensor_size > max_size_bytes:

@@ -456,9 +456,14 @@ class TrainingConfig(BaseModel):
 
     compile: bool = Field(default=True, description="Whether to use torch.compile")
 
+    master_dtype: Optional[str] = Field(
+        default=None,
+        description="The master data type for parameters and activations.",
+        choices=["bfloat16", "float16", "float32"],
+    )
     param_dtype: str = Field(
         default="bfloat16",
-        description="The data type for parameters and activations",
+        description="The data type for parameters and activations calculation in FSDP.",
         choices=["bfloat16", "float16", "float32"],
     )
 
