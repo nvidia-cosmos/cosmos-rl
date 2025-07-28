@@ -50,15 +50,46 @@ def async_safe_ce(
     target: torch.LongTensor,
     ignore_index: int = -100,
     loss_scaling_factor: float = 1.0,
+    dp_group: Optional[torch.distributed.ProcessGroup] = None,
+    cp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> torch.Tensor:
-    loss = torch.nn.functional.cross_entropy(
-        output[:, :-1].flatten(0, 1).float(),
-        target[:, 1:].flatten(0, 1),
-        ignore_index=ignore_index,
-        reduction="mean",
-    )
-    # In case of all labels are ignored, loss will be nan.
-    return torch.nan_to_num(loss, nan=0.0) * loss_scaling_factor
+    target = target[:, 1:].contiguous().view(-1)
+    output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+
+    if cp_group is not None and cp_group.size() > 1:
+        # Fallback to unbalance loss
+        loss = (
+            torch.nn.functional.cross_entropy(
+                output,
+                target,
+                ignore_index=ignore_index,
+                reduction="mean",
+            )
+            * loss_scaling_factor
+        )
+        # In case of all labels are ignored, loss will be nan.
+        loss = torch.nan_to_num(loss, nan=0.0)
+    else:
+        loss = torch.nn.functional.cross_entropy(
+            output,
+            target,
+            ignore_index=ignore_index,
+            reduction="none",
+        )
+
+        # Compute all token numbers across dp-world
+        n_valid_tokens = (target != ignore_index).sum()
+        num_dp_workers = 1
+        if dp_group is not None:
+            torch.distributed.all_reduce(n_valid_tokens, group=dp_group)
+            num_dp_workers = torch.distributed.get_world_size(group=dp_group)
+
+        loss = (
+            loss.sum()
+            / (n_valid_tokens + 1e-8)
+            * (num_dp_workers * loss_scaling_factor)
+        )
+        return loss
 
 
 def collate_fn(
@@ -250,7 +281,6 @@ class SFTTrainer(Trainer):
             drop_last=False,
         )
         self.epoch = config.train.epoch
-        train_sampler.set_epoch(self.epoch)
 
         assert (
             self.tokenizer.pad_token_id is not None
@@ -309,7 +339,17 @@ class SFTTrainer(Trainer):
             )
         self.model.train()
 
-        self.loss_fn = async_safe_ce
+        if self.parallel_dims.dp_enabled:
+            dp_group = self.parallel_dims.mesh["dp"].get_group()
+        else:
+            dp_group = None
+
+        if self.parallel_dims.cp_enabled:
+            cp_group = self.parallel_dims.mesh["cp"].get_group()
+        else:
+            cp_group = None
+
+        self.loss_fn = partial(async_safe_ce, dp_group=dp_group, cp_group=cp_group)
 
     def validate(self):
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
@@ -593,8 +633,16 @@ class SFTTrainer(Trainer):
                             if padding_mask_before_cp is not None:
                                 batch["padding_mask"] = padding_mask_before_cp
 
-                        loss = self.loss_fn(logits, labels)
-                        loss = loss / len(mini_batch_begin_idxs)
+                        loss = self.loss_fn(
+                            logits,
+                            labels,
+                            loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
+                        )
+
+                        # # Hint FSDP to do all-reduce on the last backward pass
+                        # if hasattr(self.model, "set_is_last_backward"):
+                        #     print(f"set_is_last_backward: {i == mini_batch_begin_idxs[-1]}")
+                        #     self.model.set_is_last_backward(i == mini_batch_begin_idxs[-1])
                         loss.backward()
                     acc_loss += loss.detach()
 
@@ -796,6 +844,21 @@ class SFTTrainer(Trainer):
         loss_scaling_factor = (
             mini_batch_size / self.config.train.train_batch_per_replica
         )
+        if self.parallel_dims.dp_enabled:
+            dp_group = self.parallel_dims.mesh["dp"].get_group()
+        else:
+            dp_group = None
+
+        if self.parallel_dims.cp_enabled:
+            cp_group = self.parallel_dims.mesh["cp"].get_group()
+        else:
+            cp_group = None
+
         return torch.compile(
-            partial(async_safe_ce, loss_scaling_factor=loss_scaling_factor)
+            partial(
+                async_safe_ce,
+                loss_scaling_factor=loss_scaling_factor,
+                dp_group=dp_group,
+                cp_group=cp_group,
+            )
         )
