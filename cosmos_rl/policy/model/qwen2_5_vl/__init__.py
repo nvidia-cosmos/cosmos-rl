@@ -42,12 +42,13 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
 from flash_attn import flash_attn_func, flash_attn_varlen_func
+from transformers.modeling_flash_attention_utils import apply_rotary_emb
 
 
-class RMSNorm(nn.Module):
+class Qwen2RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
-        RMSNorm is equivalent to T5LayerNorm
+        Qwen2RMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -66,7 +67,7 @@ class RMSNorm(nn.Module):
 
 def build_norm(norm_type: str, dim: int, eps: float):
     assert norm_type == "rmsnorm", f"Unknown norm_type: '{norm_type}'"
-    return RMSNorm(dim, eps)
+    return Qwen2RMSNorm(dim, eps)
 
 
 @dataclass
@@ -210,7 +211,7 @@ class Qwen2_5_VLPatchMerger(nn.Module):
     def __init__(self, config: Qwen2_5_VL_Encoder_Args) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size * (config.spatial_merge_size**2)
-        self.ln_q = build_norm(config.norm_type, config.hidden_size, config.norm_eps)
+        self.ln_q = Qwen2RMSNorm(config.hidden_size, config.norm_eps)
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.GELU(),  # This is fixed to GELU according to the original implementation
@@ -229,17 +230,16 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb_vision(
+def apply_rotary_pos_emb_flashatt(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    orig_q_dtype = q.dtype
-    orig_k_dtype = k.dtype
-    q, k = q.float(), k.float()
-    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    q_embed = q_embed.to(orig_q_dtype)
-    k_embed = k_embed.to(orig_k_dtype)
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply rotary position embedding to the query and key tensors.
+    """
+    cos = cos.chunk(2, dim=-1)[0].contiguous()
+    sin = sin.chunk(2, dim=-1)[0].contiguous()
+    q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
+    k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
     return q_embed, k_embed
 
 
@@ -255,8 +255,7 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        sin: torch.Tensor,
-        cos: torch.Tensor,
+        position_embeddings: torch.Tensor,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -265,8 +264,9 @@ class Qwen2_5_VLVisionAttention(nn.Module):
             .permute(1, 0, 2, 3)
             .unbind(0)
         )
-        q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
+        cos, sin = position_embeddings
 
+        q, k = apply_rotary_pos_emb_flashatt(q.unsqueeze(0), k.unsqueeze(0), cos, sin)
         q = q.squeeze(0)
         k = k.squeeze(0)
 
@@ -299,12 +299,11 @@ class Qwen2_5_VLVisionBlock(nn.Module):
             bias=True,  # This is fixed to True according to the original implementation
         )
 
-    def forward(self, hidden_states, cu_seqlens, sin, cos) -> torch.Tensor:
+    def forward(self, hidden_states, cu_seqlens, position_embeddings) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
-            sin=sin,
-            cos=cos,
+            position_embeddings=position_embeddings,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -335,7 +334,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
             self.blocks[str(layer_id)] = Qwen2_5_VLVisionBlock(config)
         self.merger = Qwen2_5_VLPatchMerger(config=config)
 
-    def rot_pos_emb(self, grid_thw, device: torch.device = None):
+    def rot_pos_emb(self, grid_thw):
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -360,7 +359,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size, device=device)
+        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
@@ -416,7 +415,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            hidden_states (`torch.Tensor` of shape `(batch_size, seq_len, hidden_size)`):
+            hidden_states (`torch.Tensor` of shape `(seq_len, hidden_size)`):
                 The final hidden states of the model.
             grid_thw (`torch.Tensor` of shape `(num_images_or_videos, 3)`):
                 The temporal, height and width of feature shape of each image in LLM.
@@ -425,7 +424,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
             `torch.Tensor`: hidden_states.
         """
         hidden_states = self.patch_embed(hidden_states)
-        rotary_pos_emb = self.rot_pos_emb(grid_thw, device=hidden_states.device)
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)
         window_index, cu_window_seqlens = self.get_window_index(grid_thw)
         cu_window_seqlens = torch.tensor(
             cu_window_seqlens,
@@ -445,6 +444,8 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         )
         rotary_pos_emb = rotary_pos_emb[window_index, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        position_embeddings = (emb.cos(), emb.sin())
 
         cu_seqlens = torch.repeat_interleave(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
@@ -458,22 +459,15 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
-        with torch.autocast(device_type=hidden_states.device.type, enabled=False):
-            assert (
-                rotary_pos_emb.dtype == torch.float32
-            ), "rotary_pos_emb must be float32"
-            emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-            cos = emb.cos().detach().float()
-            sin = emb.sin().detach().float()
-
         for layer_num, blk in self.blocks.items():
+            if int(layer_num) in self.fullatt_block_indexes:
+                cu_seqlens_now = cu_seqlens
+            else:
+                cu_seqlens_now = cu_window_seqlens
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=cu_seqlens
-                if int(layer_num) in self.fullatt_block_indexes
-                else cu_window_seqlens,
-                sin=sin,
-                cos=cos,
+                cu_seqlens=cu_seqlens_now,
+                position_embeddings=position_embeddings,
             )
 
         hidden_states = self.merger(hidden_states)
