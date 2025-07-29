@@ -20,7 +20,6 @@ import requests
 import msgpack
 from functools import partial
 from typing import List, Optional, Callable, NamedTuple
-import os
 import torch.distributed as dist
 
 from tensorrt_llm._torch.pyexecutor.py_executor import PyExecutor, BatchState
@@ -103,13 +102,7 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
 
         super().__init__(*args, **kwargs)
 
-        # init the torch distributed environment first.
-        rdzv_endpoint = os.environ.get("RDZV_ENDPOINT", "127.0.0.1:12371")
-        rdzv_host, rdzv_port = rdzv_endpoint.split(":")
-        logger.debug(
-            "[Rollout] init torch distributed environment inside trtllm worker."
-        )
-        init_distributed_with_MPI(rdzv_host, rdzv_port)
+        init_distributed_with_MPI()
 
         if TrtLLMRolloutWorker.init_count > 0:
             self.ready = True
@@ -730,7 +723,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
     def handle_shutdown(self):
         if not hasattr(self, "_shutdown_handled"):
             self._shutdown_handled = True
-            if not self.shutdown_signal.is_set():
+            if hasattr(self, "shutdown_signal") and not self.shutdown_signal.is_set():
                 self.shutdown_signal.set()
 
         if self.background_thread is not None:

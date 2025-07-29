@@ -8,6 +8,7 @@ TYPE=""
 RDZV_ENDPOINT="localhost:0"
 SCRIPT=""
 CONFIG=""
+BACKEND="vllm"
 
 print_help() {
   echo ""
@@ -21,6 +22,7 @@ print_help() {
   echo "  --rdzv-endpoint <host:port>        Rendezvous endpoint for distributed training. Default: localhost:0"
   echo "  --script <script>                  The user script to run before launch."
   echo "  --config <path>                    The path to the config file."
+  echo "  --backend <vllm|trtllm>            The backend to use for the job. Default: vllm"
   echo "  --help                             Show this help message"
   echo "Examples:"
   echo "  ./launch_replica.sh --type rollout --ngpus 4 --log-rank 0,1"
@@ -58,6 +60,10 @@ while [[ $# -gt 0 ]]; do
     CONFIG="$2"
     shift 2
     ;;
+  --backend)
+    BACKEND="$2"
+    shift 2
+    ;;
   --help)
     print_help
     exit 0
@@ -77,9 +83,15 @@ if [ -z "$TYPE" ]; then
 fi
 
 export TORCH_CPP_LOG_LEVEL="ERROR"
+
+LAUNCH_BINARY="torchrun"
+
 if [ "$TYPE" == "rollout" ]; then
   DEFAULT_MODULE="cosmos_rl.rollout.rollout_entrance"
   export COSMOS_ROLE="Rollout"
+  if [ "$BACKEND" == "trtllm" ]; then
+    LAUNCH_BINARY="python"
+  fi
 elif [ "$TYPE" == "policy" ]; then
   DEFAULT_MODULE="cosmos_rl.policy.train"
   export COSMOS_ROLE="Policy"
@@ -95,18 +107,35 @@ if [ -z "$COSMOS_CONTROLLER_HOST" ]; then
   exit 1
 fi
 
-LAUNCH_CMD=(
-  torchrun
-  --nproc-per-node="$NGPU"
-  --nnodes="$NNODES"
-  --role rank
-  --tee 3
-  --rdzv_backend c10d
-  --rdzv_endpoint="$RDZV_ENDPOINT"
-)
+LAUNCH_CMD=("$LAUNCH_BINARY")
 
-if [ -n "$LOG_RANKS" ]; then
-  LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
+if [ "$BACKEND" == "vllm" ]; then
+  LAUNCH_CMD+=(
+    --nproc-per-node="$NGPU"
+    --nnodes="$NNODES"
+    --role rank
+    --tee 3
+    --rdzv_backend c10d
+    --rdzv_endpoint="$RDZV_ENDPOINT"
+  )
+
+  if [ -n "$LOG_RANKS" ]; then
+    LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
+  fi
+elif [ "$BACKEND" == "trtllm" ]; then
+  export COSMO_USING_TRTLLM=1
+  COSMOS_WORLD_SIZE=$((NNODES * NGPU))
+  export COSMOS_WORLD_SIZE
+  COSMOS_LOCAL_WORLD_SIZE=$((NGPU))
+  export COSMOS_LOCAL_WORLD_SIZE
+  export COSMOS_RDZV_ENDPOINT="$RDZV_ENDPOINT"
+
+  echo "Launching trtllm as the backend, ignoring:
+          --log-rank flags."
+else
+  echo "Error: Invalid --backend value '$BACKEND'. Must be 'vllm' or 'trtllm'."
+  print_help
+  exit 1
 fi
 
 if [ -n "$SCRIPT" ]; then

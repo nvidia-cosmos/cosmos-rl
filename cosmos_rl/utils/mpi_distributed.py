@@ -3,6 +3,7 @@ from mpi4py import MPI
 import os
 import torch
 
+from cosmos_rl.utils.logging import logger
 
 OMPI_COMM_TYPE_HOST = 9
 
@@ -51,11 +52,38 @@ def local_mpi_size():
     return local_comm.Get_size()
 
 
-def init_distributed_with_MPI(rdzv_host: str, rdzv_port: str):
+def init_distributed_with_MPI():
     # FIXME: (lms) Support multi-nodes.
     local_rank = mpi_rank()
     global_rank = global_mpi_rank()
-    world_size = mpi_world_size()
+    world_size = global_mpi_size()
+
+    # get dirtribution info.
+    cosmos_world_size = os.environ.get("COSMOS_WORLD_SIZE", None)
+    cosmos_local_world_size = os.environ.get("COSMOS_LOCAL_WORLD_SIZE", None)
+
+    assert cosmos_world_size is not None, "COSMOS_WORLD_SIZE is not set."
+    assert cosmos_local_world_size is not None, "COSMOS_LOCAL_WORLD_SIZE is not set."
+
+    # init the torch distributed environment first.
+    rdzv_endpoint = os.environ.get("COSMOS_RDZV_ENDPOINT", "127.0.0.1:12371")
+    rdzv_host, rdzv_port = rdzv_endpoint.split(":")
+    if int(rdzv_port) == 0:
+        raise ValueError(
+            "[Rollout] got wrong rdzv_port, please check the COSMOS_RDZV_ENDPOINT."
+        )
+    logger.info(
+        f"[Rollout] init torch distributed environment inside trtllm worker with tcp://{rdzv_host}:{rdzv_port}."
+    )
+
+    if cosmos_world_size is not None:
+        assert world_size == int(
+            cosmos_world_size
+        ), "COSMOS_WORLD_SIZE is not consistent with the world size of MPI."
+    if cosmos_local_world_size is not None:
+        assert mpi_world_size() == int(
+            cosmos_local_world_size
+        ), "COSMOS_LOCAL_WORLD_SIZE is not consistent with the local world size of MPI."
 
     os.environ["LOCAL_RANK"] = str(local_rank)
     os.environ["RANK"] = str(global_rank)

@@ -145,10 +145,6 @@ class TRTLLM_Rollout(RolloutBase):
 
         return response
 
-    def get_underlying_model(self):
-        # we can't get the underlying model from trtllm
-        return None
-
     def is_engine_initialized(self):
         return self._engine_initialized
 

@@ -19,7 +19,7 @@ print_help() {
   echo "  --config <path>                    The path to the config file."
   echo "  --help                             Show this help message"
   echo "Examples:"
-  echo "  ./launch_trtllm.sh --ngpus 4 --log-rank 0,1"
+  echo "  ./launch_trtllm.sh --ngpus 4"
   echo ""
 }
 

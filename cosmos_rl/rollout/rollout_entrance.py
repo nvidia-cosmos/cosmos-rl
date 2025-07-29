@@ -16,8 +16,9 @@
 from cosmos_rl.utils.distributed import prevent_vllm_from_setting_nccl_env
 import os
 
-if "COSMOS_ROLLOUT_BACKEND" not in os.environ:
+if "COSMO_USING_TRTLLM" not in os.environ:
     prevent_vllm_from_setting_nccl_env()
+
 import sys
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -65,6 +66,9 @@ def run_rollout(*args, **kwargs):
             rollout_worker = vLLMRolloutWorker(cosmos_rollout_config, parallel_dims)
 
         elif rollout_backend == "trtllm":
+            assert (
+                "COSMO_USING_TRTLLM" in os.environ
+            ), "[Rollout] COSMO_USING_TRTLLM is not set when using trtllm as the rollout backend."
             # if backend is trtllm, we leave distribution initialization to trtllm executor.
             rollout_worker = TRTLLMRolloutWrapper(cosmos_rollout_config)
         else:
