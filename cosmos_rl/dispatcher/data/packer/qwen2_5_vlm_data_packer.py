@@ -6,6 +6,7 @@ from cosmos_rl.policy.config import Config
 from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info
 import logging
+import copy
 
 IGNORE_LABEL_ID = -100
 
@@ -377,6 +378,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             eos_token_id = self.tokenizer.eos_token_id
             pad_run_length = 10
             assistant_content = []
+            conversation = copy.deepcopy(conversation)
             for message in conversation:
                 if message["role"] == "assistant":
                     content = message["content"]
@@ -399,7 +401,6 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                 text=[prompt],
                 images=image_inputs,
                 videos=video_inputs,
-                padding=True,
                 return_tensors="pt",
             )
 
@@ -419,6 +420,9 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                     pad_run_length=pad_run_length,
                 )
                 if not replaced:
+                    print(
+                        f"No assistant content to replace, input_ids: {input_ids}, label_ids: {label_ids}, assistant_content: {assistant_content}, text: {self.tokenizer.decode(input_ids)}"
+                    )
                     raise ValueError("No assistant content to replace")
                 if len(input_ids) != len(label_ids):
                     raise ValueError(
@@ -429,8 +433,8 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             raise e
 
         result_dict = {
-            "input_ids": input_ids,
-            "label_ids": label_ids,
+            "input_ids": copy.deepcopy(input_ids),
+            "label_ids": copy.deepcopy(label_ids),
         }
         if "pixel_values_videos" in inputs:
             result_dict["pixel_values_videos"] = inputs["pixel_values_videos"]
@@ -445,7 +449,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
 
         # position_ids: (3, 1, seq_len)
         position_ids, _ = self._get_rope_index(
-            input_ids=torch.tensor(input_ids).unsqueeze(0),
+            input_ids=torch.tensor(input_ids).unsqueeze(0).clone(),
             image_grid_thw=torch.tensor(result_dict.get("image_grid_thw"))
             if "image_grid_thw" in result_dict
             else None,
@@ -457,7 +461,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             else None,
             attention_mask=None,
         )
-        result_dict["position_ids"] = position_ids
+        result_dict["position_ids"] = position_ids.clone()
         return result_dict
 
     def _collate_fn(
@@ -541,12 +545,9 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             batch["logprob_masks"]
         ), "The length of input_ids, logprob_masks should be the same"
 
-        max_length = max(
-            sample["position_ids"].shape[2] for sample in processed_samples
-        )
         padded_tensors = []
         for sample in processed_samples:
-            pad_length = max_length - sample["position_ids"].shape[2]
+            pad_length = computed_max_len - sample["position_ids"].shape[2]
             padded_tensor = torch.nn.functional.pad(
                 sample["position_ids"], (0, pad_length), "constant", 1
             )

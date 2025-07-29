@@ -272,6 +272,17 @@ class Qwen2_5_VLVisionAttention(nn.Module):
 
         with torch.no_grad():
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+
+        input_dtype = q.dtype
+        if input_dtype == torch.float32:
+            if torch.is_autocast_enabled():
+                target_dtype = torch.get_autocast_gpu_dtype()
+            else:
+                raise ValueError("Flash attention only supports float32 input")
+            q = q.to(target_dtype)
+            k = k.to(target_dtype)
+            v = v.to(target_dtype)
+
         attn_output = flash_attn_varlen_func(
             q,
             k,
@@ -711,6 +722,16 @@ class Qwen2_5_VLAttention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = apply_multimodal_rotary_pos_emb(xq, xk, cos, sin, self.mrope_section)
 
+        input_dtype = xq.dtype
+        if input_dtype == torch.float32:
+            if torch.is_autocast_enabled():
+                target_dtype = torch.get_autocast_gpu_dtype()
+            else:
+                raise ValueError("Flash attention only supports float32 input")
+            xq = xq.to(target_dtype)
+            xk = xk.to(target_dtype)
+            xv = xv.to(target_dtype)
+
         output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
@@ -862,8 +883,6 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.Tensor] = None,
-        pixel_values_lengths_per_sample: Optional[torch.Tensor] = None,
-        pixel_values_videos_lengths_per_sample: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         if self.model.embed_tokens is not None:

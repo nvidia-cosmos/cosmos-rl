@@ -262,6 +262,16 @@ class Attention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
 
+        input_dtype = xq.dtype
+        if input_dtype == torch.float32:
+            if torch.is_autocast_enabled():
+                target_dtype = torch.get_autocast_gpu_dtype()
+            else:
+                raise ValueError("Flash attention only supports float32 input")
+            xq = xq.to(target_dtype)
+            xk = xk.to(target_dtype)
+            xv = xv.to(target_dtype)
+
         output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
