@@ -458,12 +458,12 @@ class TrainingConfig(BaseModel):
 
     master_dtype: Optional[str] = Field(
         default=None,
-        description="The master data type for parameters and activations.",
+        description="The master weight data type for optimizers, is orthognal to `param_dtype`.",
         choices=["bfloat16", "float16", "float32"],
     )
     param_dtype: str = Field(
         default="bfloat16",
-        description="The data type for parameters and activations calculation in FSDP.",
+        description="The data type for forward/backward. Outside forward/backward, params are in `master_dtype`",
         choices=["bfloat16", "float16", "float32"],
     )
 
