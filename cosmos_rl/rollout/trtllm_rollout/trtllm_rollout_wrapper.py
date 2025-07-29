@@ -42,7 +42,6 @@ from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
 )
 
 from tensorrt_llm import SamplingParams
-from tensorrt_llm.executor.proxy import ExecutorBindingsProxy
 from tensorrt_llm.executor.ipc import ZeroMqQueue as IpcQueue
 
 
@@ -85,9 +84,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         if self.config.train.enable_validation:
             self.val_batch_size = self.config.rollout.val_batch_size or self.batch_size
-            assert self.val_batch_size > 0, (
-                "[Rollout] val_batch_size should be greater than 0."
-            )
+            assert (
+                self.val_batch_size > 0
+            ), "[Rollout] val_batch_size should be greater than 0."
         else:
             self.val_batch_size = None
 
@@ -270,9 +269,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     if self.state.prompt_consume_end():
                         assert (
                             self._prompt_queue.empty() and self.state.prompt_fetch_end()
-                        ), (
-                            "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
-                        )
+                        ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
                         continue
                     elif self._prompt_queue.empty():
                         continue
@@ -322,9 +319,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                             for i, prompt in enumerate(prompts)
                             if i not in prompt_indices_to_remove
                         ]
-                        assert len(prompts) == len(valid_completions), (
-                            "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
-                        )
+                        assert (
+                            len(prompts) == len(valid_completions)
+                        ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
 
                     logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 

@@ -22,6 +22,7 @@ from typing import Optional
 Customized for trtllm backend interaction with main process.
 """
 
+
 class InternalInstruction(abc.ABC):
     pass
 
@@ -31,6 +32,8 @@ class ShutdownInstruction(InternalInstruction):
 
 
 class ValidationInstruction(InternalInstruction):
-    def __init__(self, validation_step: Optional[int] = None, total_steps: Optional[int] = None):
+    def __init__(
+        self, validation_step: Optional[int] = None, total_steps: Optional[int] = None
+    ):
         self.validation_step = validation_step
         self.total_steps = total_steps

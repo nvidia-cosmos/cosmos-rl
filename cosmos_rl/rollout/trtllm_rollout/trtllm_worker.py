@@ -19,7 +19,7 @@ import threading
 import requests
 import msgpack
 from functools import partial
-from typing import List, Any, Optional, Callable, NamedTuple
+from typing import List, Optional, Callable, NamedTuple
 import os
 import torch.distributed as dist
 
@@ -61,7 +61,10 @@ from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
-from cosmos_rl.rollout.trtllm_rollout.trtllm_common import ValidationInstruction, ShutdownInstruction
+from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
+    ValidationInstruction,
+    ShutdownInstruction,
+)
 
 from transformers import AutoConfig
 
@@ -103,7 +106,9 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
         # init the torch distributed environment first.
         rdzv_endpoint = os.environ.get("RDZV_ENDPOINT", "127.0.0.1:12371")
         rdzv_host, rdzv_port = rdzv_endpoint.split(":")
-        logger.debug("[Rollout] init torch distributed environment inside trtllm worker.")
+        logger.debug(
+            "[Rollout] init torch distributed environment inside trtllm worker."
+        )
         init_distributed_with_MPI(rdzv_host, rdzv_port)
 
         if TrtLLMRolloutWorker.init_count > 0:
@@ -521,7 +526,9 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 or current_step == broadcast_command.total_steps
             )
             if should_do_validation:
-                self.cosmos_weight_sync_queue.put(ValidationInstruction(current_step, broadcast_command.total_steps))
+                self.cosmos_weight_sync_queue.put(
+                    ValidationInstruction(current_step, broadcast_command.total_steps)
+                )
 
         if broadcast_command.replica_should_stop():
             # trigger the shutdown signal to main process too.
@@ -720,7 +727,6 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             )
             self.background_thread.start()
 
-    
     def handle_shutdown(self):
         if not hasattr(self, "_shutdown_handled"):
             self._shutdown_handled = True
@@ -730,12 +736,11 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if self.background_thread is not None:
             self.background_thread.join()
             self.background_thread = None
-        
+
         if self.heartbeat_thread is not None:
-                self.heartbeat_thread.join()
-                self.heartbeat_thread = None
+            self.heartbeat_thread.join()
+            self.heartbeat_thread = None
         self.unregister_from_controller()
-        
 
     def shutdown(self):
         # override pyexecutor's shutdown
