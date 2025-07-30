@@ -1,8 +1,7 @@
 fastapi
 uvicorn
 # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
-# 4.54.* error: https://github.com/vllm-project/vllm-ascend/issues/2046
-transformers>=4.51.1,!=4.52.*,!=4.53.*,<4.54.0
+transformers>=4.51.1,!=4.52.*,!=4.53.*
 datasets
 pydantic
 math_verify
