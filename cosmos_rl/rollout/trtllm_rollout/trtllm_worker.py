@@ -141,7 +141,7 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
 
             self.cosmos_model_config = hf_config
             self.enable_validation = self.config.train.enable_validation
-            self.inference_stream = torch.cuda.Stream()
+            self.inference_stream = torch.cuda.current_stream()
 
             self._engine_initialized = False
 
@@ -243,8 +243,6 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         BuildMeshCommand, backend="trtllm"
     )
     def build_global_mesh(self, build_mesh_command: BuildMeshCommand):
-        logger.info(f"[Rollout] Building global mesh for {self.replica_name}")
-
         replica_name_to_rank = build_mesh_command.replica_name_to_rank
         if self.replica_name not in replica_name_to_rank:
             raise RuntimeError(
@@ -261,6 +259,10 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         # ...
         # group_m-1: [rank m-1 in replica 0, rank m-1 in replica 1, ..., rank m-1 in replica n-1]
         unique_rollout_group_key = self.get_group_unique_key(replica_name_to_rank)
+        logger.debug(
+            f"[Rollout] Building global mesh for {self.replica_name} with unique_rollout_group_key: {unique_rollout_group_key}"
+        )
+
         nccl_group_id = None
         if self.rank_in_rollout_repicas == 0:
             # only replica_rank == 0 have the right to generate nccl id.
@@ -282,7 +284,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 raise RuntimeError(
                     f"[Rollout] Failed in post nccl group_id to controller after retries {e}."
                 )
-
+            logger.debug(f"[Rollout] post nccl group_id to controller: {nccl_group_id}")
         if self.rank_in_rollout_repicas != 0:
             # other replicas should query the nccl group id from controller
             # all ranks need to wait for the rollout replica 0 finished the group_id post
@@ -295,6 +297,9 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 raise RuntimeError(
                     "[Rollout] Failed to query nccl group_id from controller!"
                 )
+            logger.debug(
+                f"[Rollout] query nccl group_id from controller: {nccl_group_id} for global_rank: {self.global_rank}"
+            )
 
         # update the cached communicator index
         logger.debug(
@@ -567,7 +572,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 )
             try:
                 handler(self, current_command)
-                logger.debug(
+                logger.info(
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
                 )
             except Exception as e:

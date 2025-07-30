@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import torch
 import atexit
 import threading
@@ -22,20 +23,26 @@ from functools import partial
 from urllib.parse import urljoin
 from typing import List, Tuple, Optional, Any
 
-# Note: this must be before import tensorrt_llm and calls of MPI.init
-# Otherwise, environment will not be inherited by MPI.
-import os
-from cosmos_rl.utils.network_util import find_available_port
+
 from cosmos_rl.utils.logging import logger
 
-rdzv_endpoint = os.environ.get("COSMOS_RDZV_ENDPOINT", None)
-assert rdzv_endpoint is not None, "COSMOS_RDZV_ENDPOINT is not set."
-rdzv_host, rdzv_port = rdzv_endpoint.split(":")
-if int(rdzv_port) == 0:
-    rdzv_port = find_available_port(start_port=12371)
-    logger.warning(f"Got wrong rdzv_port, change it to {rdzv_port}.")
-    rdzv_endpoint = f"{rdzv_host}:{rdzv_port}"
-    os.environ["COSMOS_RDZV_ENDPOINT"] = rdzv_endpoint
+# Note: this must be before import tensorrt_llm and calls of MPI.init
+# Otherwise, environment will not be inherited by MPI.
+
+#####
+
+if "COSMO_USING_TRTLLM" in os.environ:
+    from cosmos_rl.utils.network_util import find_available_port
+
+    rdzv_endpoint = os.environ.get("COSMOS_RDZV_ENDPOINT", None)
+    assert rdzv_endpoint is not None, "COSMOS_RDZV_ENDPOINT is not set."
+    rdzv_host, rdzv_port = rdzv_endpoint.split(":")
+    if int(rdzv_port) == 0:
+        rdzv_port = find_available_port(start_port=12371)
+        logger.warning(f"Got wrong rdzv_port, change it to {rdzv_port}.")
+        rdzv_endpoint = f"{rdzv_host}:{rdzv_port}"
+        os.environ["COSMOS_RDZV_ENDPOINT"] = rdzv_endpoint
+####
 
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.rollout import State, TRTLLMRolloutWorkerBase
