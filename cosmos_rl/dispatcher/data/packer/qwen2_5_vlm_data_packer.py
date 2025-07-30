@@ -420,9 +420,6 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                     pad_run_length=pad_run_length,
                 )
                 if not replaced:
-                    print(
-                        f"No assistant content to replace, input_ids: {input_ids}, label_ids: {label_ids}, assistant_content: {assistant_content}, text: {self.tokenizer.decode(input_ids)}"
-                    )
                     raise ValueError("No assistant content to replace")
                 if len(input_ids) != len(label_ids):
                     raise ValueError(
