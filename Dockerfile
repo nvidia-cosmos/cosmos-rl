@@ -70,10 +70,13 @@ RUN pip install -U pip setuptools wheel packaging
 RUN pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
+
+# Let's temply pin flash_attn to 2.7.4.post1 due to `https://github.com/pytorch-labs/attention-gym/issues/70`
+# After fixing this, we can switch to latest
 RUN pip install \
     torchao==0.11.0 \
     vllm==0.10.0 \
-    flash-attn==2.8.0.post2 \
+    flash-attn==2.7.4.post1 \
     https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl \
     -r /workspace/cosmos_rl/requirements.txt
 
