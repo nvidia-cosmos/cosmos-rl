@@ -33,7 +33,6 @@ from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
     WeightSyncInstructionsGroup,
 )
-from cosmos_rl.utils.mpi_distributed import init_distributed_with_MPI
 from cosmos_rl.utils.util import list_to_b64, b64_to_list
 from cosmos_rl.dispatcher.command import (
     BuildMeshCommand,
@@ -101,8 +100,6 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
         )
 
         super().__init__(*args, **kwargs)
-
-        init_distributed_with_MPI()
 
         if TrtLLMRolloutWorker.init_count > 0:
             self.ready = True
@@ -726,11 +723,11 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             if hasattr(self, "shutdown_signal") and not self.shutdown_signal.is_set():
                 self.shutdown_signal.set()
 
-        if self.background_thread is not None:
+        if hasattr(self, "background_thread") and self.background_thread is not None:
             self.background_thread.join()
             self.background_thread = None
 
-        if self.heartbeat_thread is not None:
+        if hasattr(self, "heartbeat_thread") and self.heartbeat_thread is not None:
             self.heartbeat_thread.join()
             self.heartbeat_thread = None
         self.unregister_from_controller()

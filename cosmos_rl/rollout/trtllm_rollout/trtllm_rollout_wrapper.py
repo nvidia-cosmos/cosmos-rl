@@ -21,10 +21,26 @@ from queue import Queue
 from functools import partial
 from urllib.parse import urljoin
 from typing import List, Tuple, Optional, Any
+# Note: this must be before import tensorrt_llm and calls of MPI.init
+# Otherwise, environment will not be inherited by MPI.
+import os
+from cosmos_rl.utils.network_util import find_available_port
+from cosmos_rl.utils.logging import logger
+
+rdzv_endpoint = os.environ.get("COSMOS_RDZV_ENDPOINT", None)
+assert rdzv_endpoint is not None, "COSMOS_RDZV_ENDPOINT is not set."
+rdzv_host, rdzv_port = rdzv_endpoint.split(":")
+if int(rdzv_port) == 0:
+    rdzv_port = find_available_port(start_port=12371)
+    logger.warning(
+    f"Got wrong rdzv_port, change it to {rdzv_port}."
+    )
+    rdzv_endpoint = f"{rdzv_host}:{rdzv_port}"
+    os.environ["COSMOS_RDZV_ENDPOINT"] = rdzv_endpoint
+
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.rollout import State, TRTLLMRolloutWorkerBase
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NEXT_PROMPT_SUFFIX,
@@ -283,7 +299,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         sampling_params=self.sampling_params,
                     )
 
-                    logger.debug(f"[Rollout] completions of trtllm: {completions}")
+                    logger.debug(f"[Rollout] completions[0] of trtllm: {completions[0]}")
 
                     # Remove empty completions
                     valid_completions: List[List[str]] = []
@@ -323,7 +339,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                             len(prompts) == len(valid_completions)
                         ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
 
-                    logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
+                    logger.debug(f"[Rollout] generate end!")
 
                     should_report = len(valid_completions) > 0
 

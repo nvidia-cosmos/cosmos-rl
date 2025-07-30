@@ -65,16 +65,10 @@ def init_distributed_with_MPI():
     assert cosmos_world_size is not None, "COSMOS_WORLD_SIZE is not set."
     assert cosmos_local_world_size is not None, "COSMOS_LOCAL_WORLD_SIZE is not set."
 
-    # init the torch distributed environment first.
-    rdzv_endpoint = os.environ.get("COSMOS_RDZV_ENDPOINT", "127.0.0.1:12371")
+    rdzv_endpoint = os.environ.get("COSMOS_RDZV_ENDPOINT", None)
+    assert rdzv_endpoint is not None, "COSMOS_RDZV_ENDPOINT is not set."
+
     rdzv_host, rdzv_port = rdzv_endpoint.split(":")
-    if int(rdzv_port) == 0:
-        raise ValueError(
-            "[Rollout] got wrong rdzv_port, please check the COSMOS_RDZV_ENDPOINT."
-        )
-    logger.info(
-        f"[Rollout] init torch distributed environment inside trtllm worker with tcp://{rdzv_host}:{rdzv_port}."
-    )
 
     if cosmos_world_size is not None:
         assert world_size == int(
@@ -108,3 +102,8 @@ def init_distributed_with_MPI():
         rank=local_rank,
         init_method=init_method,
     )
+
+    logger.info(
+        f"[Rollout] init torch distributed environment inside trtllm worker with tcp://{rdzv_host}:{rdzv_port}."
+    )
+

@@ -28,7 +28,7 @@ from tensorrt_llm.lora_manager import (
     get_default_trtllm_modules_to_hf_modules,
     load_torch_hf_lora,
 )
-from tensorrt_llm.llmapi.llm_utils import CachedModelLoader
+from tensorrt_llm.llmapi.llm_utils import CachedModelLoader, print_traceback_on_error
 import tensorrt_llm.llmapi.llm_args as tllm_llm_args
 from tensorrt_llm.inputs import create_input_processor
 from tensorrt_llm.llmapi.llm_args import PybindMirror
@@ -58,13 +58,14 @@ from tensorrt_llm._torch.pyexecutor.config_utils import (
     is_mla,
 )
 
-
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.rollout.trtllm_rollout.trtllm_worker import (
     CosmosTRTLLMWorker,
     CosmosWorkerCommIpcAddrs,
 )
+from cosmos_rl.utils.mpi_distributed import init_distributed_with_MPI
+
 
 """
 Patches for trtllm.
@@ -434,3 +435,76 @@ def patch_trtllm_build_model():
 
 
 patch_trtllm_build_model()
+
+# Patch worker_main
+from tensorrt_llm.executor import worker
+from tensorrt_llm.executor.utils import WorkerCommIpcAddrs
+from pathlib import Path
+from tensorrt_llm.builder import Engine
+from tensorrt_llm.executor.worker import ExecutorBindingsWorker
+from tensorrt_llm.sampling_params import BatchedLogitsProcessor
+
+
+from tensorrt_llm.llmapi.utils import print_colored, print_colored_debug
+
+@print_traceback_on_error
+def cosmos_worker_main(*args, **kwargs) -> None:
+    origin_worker_main = worker.worker_main
+    # init torch distributed environment
+    init_distributed_with_MPI()
+
+    return origin_worker_main(*args, **kwargs)
+
+def patch_worker_main():
+    import torch
+    from tensorrt_llm.executor.proxy import ExecutorBindingsProxy
+    import concurrent.futures
+    from tensorrt_llm.llmapi.utils import print_colored, print_colored_debug
+    from tensorrt_llm._utils import mpi_rank
+    from tensorrt_llm.llmapi.tracer import enable_llm_tracer, get_tracer
+
+    def cosmos_start_executor_workers(self, worker_kwargs):
+        self_ref = weakref.ref(self)
+        def mpi_done_callback(future: concurrent.futures.Future):
+            # This is called when the MPI worker is done, so future.exception()
+            # will not block.
+            if future.exception() is not None:
+                if self_ := self_ref():
+                    print_colored(f"rank {mpi_rank()} error: {future.exception()}\n", "red")
+                    self_._error_queue.put_nowait(future.exception())
+
+        tracer_init_kwargs = get_tracer().init_kwargs if enable_llm_tracer(
+        ) else None
+        from tensorrt_llm._torch.models.modeling_auto import MODEL_CLASS_MAPPING
+        torch.cuda.Stream()
+        self.mpi_futures = self.mpi_session.submit(
+            cosmos_worker_main,
+            **worker_kwargs,
+            worker_cls=self.worker_cls,
+            tracer_init_kwargs=tracer_init_kwargs,
+            _torch_model_class_mapping=MODEL_CLASS_MAPPING,
+            ready_signal=ExecutorBindingsProxy.READY_SIGNAL,
+        )
+        for fut in self.mpi_futures:
+            fut.add_done_callback(mpi_done_callback)
+
+        self.workers_started = True
+
+        while True:
+            if self.request_error_queue.poll(1):
+                ready_signal = self.request_error_queue.get()
+                break
+            if any(fut.done() for fut in self.mpi_futures):
+                logger.error("Executor worker died during initialization.")
+                ready_signal = RuntimeError(
+                    "Executor worker died during initialization")
+                break
+            self._handle_background_error()
+
+        if ready_signal != ExecutorBindingsProxy.READY_SIGNAL:
+            self.mpi_session.shutdown_abort(reason=ready_signal)
+            raise ready_signal
+
+    ExecutorBindingsProxy._start_executor_workers = cosmos_start_executor_workers
+
+patch_worker_main()
