@@ -167,6 +167,8 @@ class TestPolicy:
         self.model.sorted_hf_key_n_rank = self.model.sorted_sharded_params
         self.p2r_nccl_uuids = rollouts_comm
         self.train_stream = torch.cuda.Stream()
+        self.config = CosmosConfig()
+        self.config.train.param_dtype = "float32"
 
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
