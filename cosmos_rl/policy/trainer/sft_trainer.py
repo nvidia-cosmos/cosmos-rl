@@ -69,6 +69,7 @@ def async_safe_ce(
         )
         # In case of all labels are ignored, loss will be nan.
         loss = torch.nan_to_num(loss, nan=0.0)
+        return loss
     else:
         loss = torch.nn.functional.cross_entropy(
             output,
@@ -669,7 +670,6 @@ class SFTTrainer(Trainer):
                         if self.parallel_dims.pp_enabled
                         else None,
                     )
-                    print(f"grad_norm: {grad_norm}")
 
                 self.optimizers.step()
                 self.lr_schedulers.step()
@@ -737,7 +737,7 @@ class SFTTrainer(Trainer):
                             )
                         if "console" in self.config.logging.logger:
                             logger.info(
-                                f"Step: {self.train_step}/{self.total_steps}, Loss: {global_avg_loss:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}, Iteration time: {iter_time:.2f}s."
+                                f"Step: {self.train_step}/{self.total_steps}, Loss: {global_avg_loss:.5f}, Grad norm: {grad_norm:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}, Iteration time: {iter_time:.2f}s."
                             )
 
                 # For profiling
