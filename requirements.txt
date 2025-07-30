@@ -26,3 +26,5 @@ rich
 pyyaml
 blobfile
 nvidia-nccl-cu12>=2.26.2
+tensorrt_llm==0.20.0
+
