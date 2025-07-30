@@ -1115,6 +1115,7 @@ class GRPOTrainer(Trainer):
             minibatch["input_ids"], minibatch["logprob_masks"], full_logits
         )
 
+    @torch.no_grad()
     def _swap_model_state_dict(self):
         kl_beta = self.config.train.train_policy.kl_beta
         if kl_beta != 0.0:
@@ -1472,7 +1473,9 @@ class GRPOTrainer(Trainer):
                                     kl_loss_sum += kl_loss.item()
                             self.mini_step += 1
                             local_mini_step += 1
-                        self.execute_all_reduce()
+
+                        if not is_computing_ref:
+                            self.execute_all_reduce()
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()
