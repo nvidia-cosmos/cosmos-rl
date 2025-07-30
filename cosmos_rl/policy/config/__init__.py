@@ -457,7 +457,7 @@ class TrainingConfig(BaseModel):
     compile: bool = Field(default=True, description="Whether to use torch.compile")
 
     master_dtype: Optional[str] = Field(
-        default=None,
+        default="float32",
         description="The master weight data type for optimizers, is orthognal to `param_dtype`.",
         choices=["bfloat16", "float16", "float32"],
     )

@@ -15,7 +15,7 @@ StrEnum
 redis
 msgpack
 qwen_vl_utils
-flash-attn>=2.7.4.post1
+flash-attn==2.7.4.post1
 pynvml
 boto3
 modelscope
