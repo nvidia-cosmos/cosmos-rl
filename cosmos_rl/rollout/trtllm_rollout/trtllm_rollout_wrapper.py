@@ -42,6 +42,9 @@ if "COSMO_USING_TRTLLM" in os.environ:
         logger.warning(f"Got wrong rdzv_port, change it to {rdzv_port}.")
         rdzv_endpoint = f"{rdzv_host}:{rdzv_port}"
         os.environ["COSMOS_RDZV_ENDPOINT"] = rdzv_endpoint
+
+from cosmos_rl.rollout.trtllm_rollout import patch_trtllm  # noqa: F401
+
 ####
 
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
@@ -55,7 +58,6 @@ from cosmos_rl.utils.api_suffix import (
 )
 from cosmos_rl.utils import constant
 
-from cosmos_rl.rollout.trtllm_rollout import patches_for_trtllm  # noqa: F401
 
 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout import TRTLLM_Rollout
 from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (

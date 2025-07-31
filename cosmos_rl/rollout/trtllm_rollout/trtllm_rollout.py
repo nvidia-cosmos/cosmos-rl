@@ -15,19 +15,30 @@
 
 from typing import List, Tuple, Optional
 
-from transformers import GenerationConfig
+from cosmos_rl.utils.logging import logger
 
-from tensorrt_llm._torch import LLM
+import tensorrt_llm
+
+trtllm_version = tensorrt_llm.__version__
+
+if trtllm_version == "0.20.0":
+    from tensorrt_llm._torch import LLM
+elif trtllm_version == "1.0.0rc4":
+    from tensorrt_llm import LLM
+else:
+    raise NotImplementedError(f"Unsupported trtllm version: {trtllm_version}")
+
 from tensorrt_llm import SamplingParams
 from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 
 from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
-from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.packer import DataPacker
+
 from transformers import AutoTokenizer
 from transformers import AutoConfig
+from transformers import GenerationConfig
 
 
 class TRTLLM_Rollout(RolloutBase):
@@ -80,19 +91,31 @@ class TRTLLM_Rollout(RolloutBase):
         if model_type in moe_model_type:
             moe_tensor_parallel_size = tp_size
 
-        pytorch_backend_config = PyTorchConfig(disable_overlap_scheduler=True)
+        kwargs = {}
+        if trtllm_version == "0.20.0":
+            kwargs["pytorch_backend_config"] = PyTorchConfig(
+                disable_overlap_scheduler=True
+            )
+        elif trtllm_version == "1.0.0rc4":
+            kwargs["disable_overlap_scheduler"] = True
+
+        from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
+        from tensorrt_llm import LlmArgs
+
+        logger.info(f"[Rollout]1  LlmArgs: {TorchLlmArgs.model_fields.keys()}")
+        logger.info(f"[Rollout]1 LlmArgs: {LlmArgs.model_fields.keys()}")
+
         self.rollout_engine = LLM(
             model=model_path,
             tensor_parallel_size=tp_size,
             pipeline_parallel_size=pp_size,
             backend="pytorch",
-            pytorch_backend_config=pytorch_backend_config,
-            seed=seed or 42,
             load_format=load_format,
             trust_remote_code=True,
             moe_expert_parallel_size=moe_tensor_parallel_size,
             # For cosmos-rl
             cosmos_config=self.config,
+            **kwargs,
         )
 
     def rollout_generation(
