@@ -65,6 +65,10 @@ RUN apt-get update -qq && \
     python3.10 python3.10-dev python3.10-venv python3-pip python-is-python3
 
 RUN pip install -U pip setuptools wheel packaging
+
+# To solve tensorrt-llm version conflict, we pre-install it here inside image.
+RUN pip install tensorrt-llm==1.0.0rc4
+
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
 RUN pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
