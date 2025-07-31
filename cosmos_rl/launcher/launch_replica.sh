@@ -75,6 +75,7 @@ if [ -z "$TYPE" ]; then
   exit 1
 fi
 
+export NCCL_CUMEM_ENABLE="1"
 export TORCH_CPP_LOG_LEVEL="ERROR"
 if [ "$TYPE" == "rollout" ]; then
   DEFAULT_MODULE="cosmos_rl.rollout.rollout_entrance"
