@@ -126,7 +126,7 @@ RUN curl -OL https://github.com/aws/aws-ofi-nccl/releases/download/${AWS_OFI_NCC
     && rm -rf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} \
     && rm aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz
 
-ENV LD_LIBRARY_PATH=/usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.8/compat:/usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
 ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
 
 
