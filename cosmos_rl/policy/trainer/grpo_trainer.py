@@ -1165,6 +1165,17 @@ class GRPOTrainer(Trainer):
         payloads_list = [rollout.payload for rollout in rollouts]
         completions_list = [rollout.completion for rollout in rollouts]
         advantages_list = [rollout.advantage for rollout in rollouts]
+        # Optional Positive-NLL support: only compute flags when coefficient > 0
+        pos_coef_global = self.config.train.train_policy.positive_nll_coef
+        if pos_coef_global > 0.0:
+            rewards_list = [rollout.reward for rollout in rollouts]
+            self._positive_flags_t = torch.tensor(
+                [1 if r > 0 else 0 for r in rewards_list],
+                device=self.device,
+                dtype=torch.bool,
+            )
+        else:
+            self._positive_flags_t = None
         n_ignore_prefix_tokens_list = [
             rollout.n_ignore_prefix_tokens for rollout in rollouts
         ]
@@ -1342,6 +1353,15 @@ class GRPOTrainer(Trainer):
                                     [is_computing_ref] * mini_batch_size,
                                     dtype=torch.bool,
                                 )
+                                # Positive flags for Positive-NLL loss (only if coef >0)
+                                if self._positive_flags_t is not None:
+                                    is_pos_cpu = (
+                                        self._positive_flags_t[i:end]
+                                        .unsqueeze(1)
+                                        .expand(-1, 1)
+                                        .int()
+                                    )
+                                    user_mini_batch["positive_flags"] = is_pos_cpu
 
                                 pp_first_stage = self.parallel_dims.pp_coord[0] == 0
                                 # Pipeline Parallel forward / backward inside step() call
@@ -1358,6 +1378,8 @@ class GRPOTrainer(Trainer):
                                     user_mini_batch["is_computing_ref"] = (
                                         is_computing_ref_cpu
                                     )
+                                    if self._positive_flags_t is not None:
+                                        user_mini_batch["positive_flags"] = is_pos_cpu
                                 if pp_first_stage or pp_last_stage:
                                     # First/Last stage: pass all inputs
                                     kwargs = {}
@@ -1461,6 +1483,19 @@ class GRPOTrainer(Trainer):
                                         self.config,
                                         logprob_masks,
                                     )
+                                    # Positive Example LM Loss
+                                    if pos_coef_global > 0.0:
+                                        pos_flag_batch = self._positive_flags_t[i:end]
+                                        pos_mask = pos_flag_batch.unsqueeze(
+                                            1
+                                        ).expand_as(logprob_masks)
+                                        pos_token_mask = pos_mask & logprob_masks
+                                        if pos_token_mask.any():
+                                            l_nll = -torch.masked_select(
+                                                current_per_token_logprobs,
+                                                pos_token_mask,
+                                            ).mean()
+                                            loss = loss + pos_coef_global * l_nll
                                     if num_mini_batch > 1:
                                         loss /= num_mini_batch
                                         kl_loss /= num_mini_batch
@@ -1595,6 +1630,7 @@ def _swizzle_pp_grpo_forward(
     loss_scaling = kwargs.pop("loss_scaling")
     is_computing_ref = kwargs.pop("is_computing_ref")
     advantages = kwargs.pop("advantages")
+    positive_flags = kwargs.pop("positive_flags", None)
 
     micro_batch_id = micro_batch_ids[0].item()
     mini_batch_id = mini_batch_ids[0].item()
@@ -1639,6 +1675,12 @@ def _swizzle_pp_grpo_forward(
     )
     logprob_masks = user_input["logprob_masks"]
     current_advantages = logprob_masks * advantages
+
+    if positive_flags is not None:
+        pos_mask = positive_flags.bool().expand_as(logprob_masks)
+        pos_token_mask = pos_mask & logprob_masks
+    else:
+        pos_token_mask = None
 
     if is_computing_ref:
         if trainer.ref_per_token_logps[mini_batch_id] is not None:
@@ -1699,5 +1741,11 @@ def _swizzle_pp_grpo_forward(
         config,
         logprob_masks,
     )
+
+    # Add Positive NLL if enabled and mask available
+    pos_coef = config.train.train_policy.positive_nll_coef
+    if pos_coef > 0.0 and pos_token_mask is not None and pos_token_mask.any():
+        l_nll = -torch.masked_select(current_per_token_logprobs, pos_token_mask).mean()
+        loss = loss + pos_coef * l_nll
 
     return loss.unsqueeze(0) * loss_scaling
