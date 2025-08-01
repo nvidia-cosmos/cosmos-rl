@@ -98,7 +98,7 @@ def compute_loss(
     ), "current_token_logps and current_advantages should have the same shape"
     assert (
         old_per_token_logps.shape == current_token_logps.shape
-    ), "old_per_token_logps and ref_per_token_logps should have the same shape"
+    ), "old_per_token_logps and current_token_logps should have the same shape"
     if ref_per_token_logps is not None:
         assert (
             ref_per_token_logps.shape == current_token_logps.shape
@@ -114,11 +114,10 @@ def compute_loss(
         """
             With reference model used for KL. The logic should be further reviewed to verify.
         """
-        per_token_kl = (
-            torch.exp(ref_per_token_logps - current_token_logps)
-            - (ref_per_token_logps - current_token_logps)
-            - 1
-        )
+        kl_ratio = ref_per_token_logps - current_token_logps
+        # For numerical stability
+        kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
+        per_token_kl = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
 
     # Same processing as `verl`
     # Clamp coef_1 for stability
@@ -1333,7 +1332,7 @@ class GRPOTrainer(Trainer):
                                 loss_scaling_cpu = torch.tensor(
                                     [
                                         [
-                                            1
+                                            self.config.rollout.n_generation
                                             / num_mini_batch
                                             / self.config.policy.parallelism.pp_micro_batch_size
                                         ]
@@ -1464,9 +1463,14 @@ class GRPOTrainer(Trainer):
                                         self.config,
                                         logprob_masks,
                                     )
-                                    if num_mini_batch > 1:
-                                        loss /= num_mini_batch
-                                        kl_loss /= num_mini_batch
+                                    loss = loss * (
+                                        self.config.rollout.n_generation
+                                        / num_mini_batch
+                                    )
+                                    kl_loss = kl_loss * (
+                                        self.config.rollout.n_generation
+                                        / num_mini_batch
+                                    )
                                     loss.backward()
                                     loss_sum += loss.item()
                                     loss_count += 1
