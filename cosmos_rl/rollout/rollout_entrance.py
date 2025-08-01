@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.utils.distributed import prevent_vllm_from_setting_nccl_env
-
-prevent_vllm_from_setting_nccl_env()
 import sys
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims

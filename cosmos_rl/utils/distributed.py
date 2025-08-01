@@ -770,35 +770,6 @@ class HighAvailabilitylNccl:
         )
 
 
-def prevent_vllm_from_setting_nccl_env():
-    init_distributed()
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    if local_rank == 0:
-        try:
-            # ../vllm/env_override.py
-            vllm_env_override_path = os.path.join(
-                os.path.dirname(os.path.dirname(torch.__file__)), "vllm/env_override.py"
-            )
-            if os.path.exists(vllm_env_override_path):
-                # Replace `os.environ['NCCL_CUMEM_ENABLE'] = '0' with `pass`
-                with open(vllm_env_override_path, "r") as f:
-                    lines = f.readlines()
-                    lines = [
-                        line.replace("os.environ['NCCL_CUMEM_ENABLE'] = '0'", "pass")
-                        for line in lines
-                    ]
-                with open(vllm_env_override_path, "w") as f:
-                    f.writelines(lines)
-                logger.info(
-                    f"Modified {vllm_env_override_path} to disable NCCL env override"
-                )
-        except Exception as e:
-            logger.error(f"Failed to prevent vllm from setting NCCL env: {e}")
-    if world_size > 1:
-        torch.distributed.barrier()
-
-
 class DistKVStore:
     def __init__(
         self,
