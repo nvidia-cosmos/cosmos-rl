@@ -192,9 +192,11 @@ def compute_loss(
         return per_token_loss.mean(), kl_loss.mean()
     elif config.train.train_policy.loss_type == "token-mean":
         # token-mean
-        per_token_loss = per_token_loss_seq_sum / shifted_length
-        kl_loss = kl_loss_seq_sum / shifted_length
-        return per_token_loss.mean(), kl_loss.mean()
+        length_sum = shifted_length.sum()
+        return (
+            per_token_loss_seq_sum.sum() / length_sum,
+            kl_loss_seq_sum.sum() / length_sum,
+        )
     else:
         raise ValueError(f"Invalid loss type: {config.train.train_policy.loss_type}")
 
@@ -1332,7 +1334,7 @@ class GRPOTrainer(Trainer):
                                 loss_scaling_cpu = torch.tensor(
                                     [
                                         [
-                                            self.config.rollout.n_generation
+                                            1.0
                                             / num_mini_batch
                                             / self.config.policy.parallelism.pp_micro_batch_size
                                         ]
@@ -1463,14 +1465,8 @@ class GRPOTrainer(Trainer):
                                         self.config,
                                         logprob_masks,
                                     )
-                                    loss = loss * (
-                                        self.config.rollout.n_generation
-                                        / num_mini_batch
-                                    )
-                                    kl_loss = kl_loss * (
-                                        self.config.rollout.n_generation
-                                        / num_mini_batch
-                                    )
+                                    loss = loss / num_mini_batch
+                                    kl_loss = kl_loss / num_mini_batch
                                     loss.backward()
                                     loss_sum += loss.item()
                                     loss_count += 1
