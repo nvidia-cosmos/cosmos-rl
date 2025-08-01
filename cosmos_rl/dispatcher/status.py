@@ -537,7 +537,7 @@ class PolicyStatusManager:
             logger.error("[Controller] Validation tqdm is not activated")
 
         # Check if all rollout replicas have reported validation results
-        if validation_finished:
+        if validation_finished and self.activated_val_iter is not None:
             # Validation is finished, trigger next step training
             self.activated_val_iter = None
             self.activated_val_tqdm.clear()

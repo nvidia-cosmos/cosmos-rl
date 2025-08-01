@@ -1474,6 +1474,12 @@ class GRPOTrainer(Trainer):
                             self.mini_step += 1
                             local_mini_step += 1
 
+                            if (
+                                local_mini_step
+                                % int(os.environ.get("COSMOS_GRPO_STEP_INTERVAL", 10))
+                                == 0
+                            ):
+                                self.execute_all_reduce()
                         if not is_computing_ref:
                             self.execute_all_reduce()
         self.old_per_token_logps = []
