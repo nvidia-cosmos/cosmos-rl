@@ -17,11 +17,16 @@ ARG NCCL_VERSION=2.26.2-1+cuda12.8
 
 ENV TZ=Etc/UTC
 
+# Do not upgrade cuda-compat-12-8 because the repos latest debian package is empty
+# See: https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
+# We could remove this when upgrading to CUDA 12.9
+RUN apt-mark hold cuda-compat-12-8
+
 RUN apt-get update -y && apt-get upgrade -y
+
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
     curl git gpg lsb-release tzdata wget
-RUN apt-get purge -y cuda-compat-*
 
 #################################################
 ## Install NVIDIA GDRCopy
