@@ -243,11 +243,21 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.val_sampling_params = SamplingParams(
             n=self.config.validation.n_generation,
             logprobs=0,
-            top_p=self.config.validation.top_p,
-            top_k=self.config.validation.top_k,
-            temperature=self.config.validation.temperature,
-            repetition_penalty=self.config.validation.repetition_penalty,
-            max_tokens=self.config.validation.max_response_length,
+            top_p=self.config.validation.top_p
+            if self.config.validation.top_p is not None
+            else self.config.rollout.sampling_config.top_p,
+            top_k=self.config.validation.top_k
+            if self.config.validation.top_k is not None
+            else self.config.rollout.sampling_config.top_k,
+            temperature=self.config.validation.temperature
+            if self.config.validation.temperature is not None
+            else self.config.rollout.sampling_config.temperature,
+            repetition_penalty=self.config.validation.repetition_penalty
+            if self.config.validation.repetition_penalty is not None
+            else self.config.rollout.sampling_config.repetition_penalty,
+            max_tokens=self.config.validation.max_response_length
+            if self.config.validation.max_response_length is not None
+            else self.config.rollout.max_response_length,
             stop_token_ids=self.rollout.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
