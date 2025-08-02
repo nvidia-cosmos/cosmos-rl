@@ -518,23 +518,11 @@ class PolicyStatusManager:
             self.val_report_data[validation_step] = []
 
         self.val_report_data[validation_step].extend(validation_results)
-        num_rollout_replicas = len(
-            rollout_status_manager.get_all_atoms_arrived_replicas()
-        )
         n_items_of_this_step = sum(
             len(x) for x in self.val_report_data[validation_step]
         )
 
-        validation_finished = (
-            len(self.val_report_data[validation_step]) == num_rollout_replicas
-        )
-        validation_finished = validation_finished or n_items_of_this_step == len(
-            self.val_dataloader
-        )
-
-        logger.info(
-            f"CJX:alidation_finished: {validation_finished}, len(self.val_report_data[validation_step]): {len(self.val_report_data[validation_step])}, n_items_of_this_step: {n_items_of_this_step}, len(self.val_dataloader): {len(self.val_dataloader)}"
-        )
+        validation_finished = n_items_of_this_step == len(self.val_dataloader)
 
         if self.activated_val_tqdm:
             self.activated_val_tqdm.update(n_items_of_this_step)
