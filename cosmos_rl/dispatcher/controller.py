@@ -183,7 +183,7 @@ class Controller:
                 val_dataloader = DataLoader(
                     self.val_dataset.val_set,
                     batch_size=1,  # batch size is 1 is mandatory
-                    shuffle=config.train.train_policy.dataloader_shuffle,
+                    shuffle=False,
                     num_workers=config.train.train_policy.dataloader_num_workers,
                     prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=RLPayload.collate_fn,

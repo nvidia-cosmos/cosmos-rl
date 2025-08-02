@@ -527,9 +527,9 @@ class PolicyStatusManager:
         validation_finished = (
             len(self.val_report_data[validation_step]) == num_rollout_replicas
         )
-        validation_finished = validation_finished or n_items_of_this_step == len(
-            self.val_dataloader
-        )
+        validation_finished = validation_finished or len(
+            self.val_report_data[validation_step]
+        ) == len(self.val_dataloader)
 
         if self.activated_val_tqdm:
             self.activated_val_tqdm.update(n_items_of_this_step)

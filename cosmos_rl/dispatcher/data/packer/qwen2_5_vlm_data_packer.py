@@ -591,7 +591,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         input_ids = x["input_ids"]
         completion_ids = []
         if rollout_output:
-            completion_ids = self.tokenizer(rollout_output).input_ids  # Don't pad yet
+            completion_ids = self.tokenizer(rollout_output).input_ids
 
         return_dict["input_ids"] = input_ids + completion_ids
 
