@@ -106,21 +106,6 @@ def compute_loss(
             ref_per_token_logps.shape, current_token_logps.shape
         )
 
-    # Compute the KL divergence between the model and the reference model
-    if config.train.train_policy.kl_beta != 0.0:
-        assert (
-            not ref_per_token_logps.requires_grad
-        ), "ref_per_token_logps should not require gradient"
-        """
-            With reference model used for KL. The logic should be further reviewed to verify.
-        """
-        kl_ratio = ref_per_token_logps - current_token_logps
-        # For numerical stability
-        kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
-        per_token_kl = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
-
-    # Same processing as `verl`
-    # Clamp coef_1 for stability
     coef_1 = torch.clamp(current_token_logps - old_per_token_logps, min=-20.0, max=20.0)
     coef_1 = torch.exp(coef_1)
 
@@ -148,12 +133,18 @@ def compute_loss(
         clip_losses2 = torch.min(per_token_loss3, clip_losses1)
         per_token_loss = torch.where(current_advantages < 0, clip_losses2, clip_losses1)
 
+    # Compute the KL divergence between the model and the reference model
     if config.train.train_policy.kl_beta != 0.0:
+        assert (
+            not ref_per_token_logps.requires_grad
+        ), "ref_per_token_logps should not require gradient"
         """
             With reference model used for KL. The logic should be further reviewed to verify.
         """
-        kl_loss = config.train.train_policy.kl_beta * per_token_kl
-        per_token_loss += kl_loss
+        kl_ratio = ref_per_token_logps - current_token_logps
+        # For numerical stability
+        kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
+        kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
     else:
         kl_loss = torch.zeros_like(per_token_loss)
 
@@ -184,21 +175,22 @@ def compute_loss(
 
         per_token_loss = (per_token_loss_seq_sum / norm_factor).mean()
         kl_loss = (kl_loss_seq_sum / norm_factor).mean()
-        return per_token_loss, kl_loss
     elif config.train.train_policy.loss_type == "seq-mean-token-sum":
         # seq-mean-token-sum
-        per_token_loss = per_token_loss_seq_sum / max_len
-        kl_loss = kl_loss_seq_sum / max_len
-        return per_token_loss.mean(), kl_loss.mean()
+        per_token_loss = per_token_loss_seq_sum.mean() / max_len
+        kl_loss = kl_loss_seq_sum.mean() / max_len
     elif config.train.train_policy.loss_type == "token-mean":
         # token-mean
         length_sum = shifted_length.sum()
-        return (
-            per_token_loss_seq_sum.sum() / length_sum,
-            kl_loss_seq_sum.sum() / length_sum,
-        )
+        per_token_loss = per_token_loss_seq_sum.sum() / length_sum
+        kl_loss = kl_loss_seq_sum.sum() / length_sum
     else:
         raise ValueError(f"Invalid loss type: {config.train.train_policy.loss_type}")
+    return (
+        per_token_loss + kl_loss * config.train.train_policy.kl_beta,
+        per_token_loss,
+        kl_loss,
+    )
 
 
 class GRPOTrainer(Trainer):
@@ -1456,7 +1448,7 @@ class GRPOTrainer(Trainer):
                                             i_mu > 0
                                         ), "Only inner iteration should reuse `old_per_token_logps`"
 
-                                    loss, kl_loss = compute_loss(
+                                    loss, per_token_loss, kl_loss = compute_loss(
                                         current_per_token_logprobs,
                                         self.old_per_token_logps[local_mini_step],
                                         self.ref_per_token_logps[local_mini_step],
@@ -1466,11 +1458,12 @@ class GRPOTrainer(Trainer):
                                         logprob_masks,
                                     )
                                     loss = loss / num_mini_batch
+                                    per_token_loss = per_token_loss / num_mini_batch
                                     kl_loss = kl_loss / num_mini_batch
                                     loss.backward()
-                                    loss_sum += loss.item()
-                                    loss_count += 1
+                                    loss_sum += per_token_loss.item()
                                     kl_loss_sum += kl_loss.item()
+                                    loss_count += 1
                             self.mini_step += 1
                             local_mini_step += 1
 
@@ -1702,7 +1695,7 @@ def _swizzle_pp_grpo_forward(
             ref_per_token_logprobs.shape == current_per_token_logprobs.shape
         ), f"ref_per_token_logprobs.shape: {ref_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
 
-    loss, _ = compute_loss(
+    loss, _, _ = compute_loss(
         current_per_token_logprobs,
         old_per_token_logprobs,
         ref_per_token_logprobs,

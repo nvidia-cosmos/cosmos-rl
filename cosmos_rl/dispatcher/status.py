@@ -655,6 +655,19 @@ class PolicyStatusManager:
                     total_iter_time_avg = np.mean(
                         [data["train/iteration_time"] for data in self.report_data_list]
                     )
+                    # KL loss
+                    total_kl_loss_avg = np.mean(
+                        [
+                            data.get("train/kl_loss_avg", 0)
+                            for data in self.report_data_list
+                        ]
+                    )
+                    total_kl_loss_max = np.max(
+                        [
+                            data.get("train/kl_loss_max", 0)
+                            for data in self.report_data_list
+                        ]
+                    )
                     train_step = self.report_data_list[0]["train_step"]
                     self.report_data_list = []
 
@@ -663,6 +676,8 @@ class PolicyStatusManager:
                         "train/loss_max": total_loss_max,
                         "train/learning_rate": total_learning_rate,
                         "train/iteration_time": total_iter_time_avg,
+                        "train/kl_loss_avg": total_kl_loss_avg,
+                        "train/kl_loss_max": total_kl_loss_max,
                     }
 
                     self.train_report_data.setdefault(train_step, {}).update(
