@@ -733,6 +733,18 @@ class SamplingConfig(BaseModel):
     )
 
 
+class MultiTurnRolloutConfig(BaseModel):
+    enable: bool = Field(
+        default=False, description="Whether to enable multi-turn rollout."
+    )
+    enable_tools: bool = Field(
+        default=False, description="Whether to enable tools in multi-turn rollout."
+    )
+    enable_thinking: bool = Field(
+        default=False, description="Whether to enable thinking in multi-turn rollout."
+    )
+
+
 class ValidationConfig(BaseModel):
     enable: bool = Field(
         default=False,
@@ -832,6 +844,11 @@ class RolloutConfig(BaseModel):
         default="vllm",
         description="Backend for rollout. Currently support `vllm` and `trtllm`.",
         choices=["vllm", "trtllm"],
+    )
+
+    multi_turn_config: MultiTurnRolloutConfig = Field(
+        default=MultiTurnRolloutConfig,
+        description="Configuration for multi-turn rollout.",
     )
 
     @model_validator(mode="after")
