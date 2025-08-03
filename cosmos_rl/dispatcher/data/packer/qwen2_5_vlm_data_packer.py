@@ -372,7 +372,9 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             return position_ids, mrope_position_deltas
 
     def _process_single_sample(
-        self, conversation: "Qwen2_5_VLM_DataPacker.Payload"
+        self,
+        conversation: "Qwen2_5_VLM_DataPacker.Payload",
+        add_generation_prompt: bool,
     ) -> Dict[str, Any]:
         try:
             # Replace all the assistant content with consecutive `pad_token` * 10
@@ -397,7 +399,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             prompt = self.hf_processor.apply_chat_template(
                 conversation,
                 tokenize=False,
-                add_generation_prompt=False,
+                add_generation_prompt=add_generation_prompt,
             )
             image_inputs, video_inputs = process_vision_info(conversation)
             inputs = self.hf_processor(
@@ -561,12 +563,15 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         sample: "Qwen2_5_VLM_DataPacker.Payload",
         rollout_output: Optional[str] = None,
         n_ignore_prefix_tokens: int = 0,
+        add_generation_prompt: bool = True,
     ) -> Any:
         assert all(
             isinstance(x, dict) and "role" in x and "content" in x for x in sample
         ), "All samples should be in conversation format, but got: {}".format(sample)
 
-        x = self._process_single_sample(sample)
+        x = self._process_single_sample(
+            sample, add_generation_prompt=add_generation_prompt
+        )
 
         return_dict = {
             "position_ids": x["position_ids"],
@@ -622,7 +627,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         """
         Accepts either raw text or conversation format.
         """
-        return self.get_policy_input(sample)
+        return self.get_policy_input(sample, add_generation_prompt=False)
 
     def sft_compute_max_len(self, processed_samples: List[Dict[str, Any]]) -> int:
         """

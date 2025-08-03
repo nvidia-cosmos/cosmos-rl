@@ -89,7 +89,7 @@ def compute_loss(
     cu_seqlens: torch.Tensor,  # of shape `[batch_size + 1]`
     config: CosmosConfig,
     logprob_masks: torch.Tensor,  # of shape `[batch_size, max_len]`
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
     current_advantages = torch.masked_select(current_advantages, logprob_masks)
 
@@ -171,14 +171,14 @@ def compute_loss(
         ):
             norm_factor = config.train.train_policy.unbiased_loss_max_tokens
         else:
-            norm_factor = max_len
+            norm_factor = shifted_length
 
         per_token_loss = (per_token_loss_seq_sum / norm_factor).mean()
         kl_loss = (kl_loss_seq_sum / norm_factor).mean()
     elif config.train.train_policy.loss_type == "seq-mean-token-sum":
         # seq-mean-token-sum
-        per_token_loss = per_token_loss_seq_sum.mean() / max_len
-        kl_loss = kl_loss_seq_sum.mean() / max_len
+        per_token_loss = per_token_loss_seq_sum.mean()
+        kl_loss = kl_loss_seq_sum.mean()
     elif config.train.train_policy.loss_type == "token-mean":
         # token-mean
         length_sum = shifted_length.sum()
@@ -916,7 +916,7 @@ class GRPOTrainer(Trainer):
                     for m in [model for model in self.model_parts if model is not None]
                     for p in m.parameters()
                 ]
-                dist_util.gradient_norm_clipping(
+                grad_norm = dist_util.gradient_norm_clipping(
                     all_params,
                     self.config.train.optm_grad_norm_clip,
                     foreach=True,
@@ -924,6 +924,7 @@ class GRPOTrainer(Trainer):
                     if self.parallel_dims.pp_enabled
                     else None,
                 )
+                logger.info(f"[Policy] Global grad norm: {grad_norm}")
             self.optimizers.step()
             self.lr_schedulers.step()
             self.optimizers.zero_grad()
@@ -1104,6 +1105,13 @@ class GRPOTrainer(Trainer):
         assert (
             "logprob_masks" in minibatch
         ), "logprob_masks is required for computing logprobs"
+
+        shifted_input_ids = torch.empty_like(minibatch["input_ids"])
+        shifted_input_ids[:, :-1] = minibatch["input_ids"][:, 1:]
+        shifted_input_ids[:, -1] = 0
+        print(
+            f"[Policy] shifted_input_ids: {self.tokenizer.decode(shifted_input_ids[0][minibatch['logprob_masks'][0]])}"
+        )
         return logprobs_computing(
             minibatch["input_ids"], minibatch["logprob_masks"], full_logits
         )
