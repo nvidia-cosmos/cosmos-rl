@@ -1491,10 +1491,10 @@ class GRPOTrainer(Trainer):
                                         ).expand_as(logprob_masks)
                                         pos_token_mask = pos_mask & logprob_masks
                                         if pos_token_mask.any():
-                                            l_nll = -torch.masked_select(
-                                                current_per_token_logprobs,
-                                                pos_token_mask,
-                                            ).mean()
+                                            flat_mask = pos_token_mask[logprob_masks]
+                                            l_nll = -current_per_token_logprobs[
+                                                flat_mask
+                                            ].mean()
                                             loss = loss + pos_coef_global * l_nll
                                     if num_mini_batch > 1:
                                         loss /= num_mini_batch
@@ -1745,7 +1745,8 @@ def _swizzle_pp_grpo_forward(
     # Add Positive NLL if enabled and mask available
     pos_coef = config.train.train_policy.positive_nll_coef
     if pos_coef > 0.0 and pos_token_mask is not None and pos_token_mask.any():
-        l_nll = -torch.masked_select(current_per_token_logprobs, pos_token_mask).mean()
+        flat_mask = pos_token_mask[logprob_masks]
+        l_nll = -current_per_token_logprobs[flat_mask].mean()
         loss = loss + pos_coef * l_nll
 
     return loss.unsqueeze(0) * loss_scaling
