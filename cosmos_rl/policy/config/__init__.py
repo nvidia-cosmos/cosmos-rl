@@ -635,6 +635,18 @@ class SamplingConfig(BaseModel):
     )
 
 
+class MultiTurnRolloutConfig(BaseModel):
+    enable: bool = Field(
+        default=False, description="Whether to enable multi-turn rollout."
+    )
+    enable_tools: bool = Field(
+        default=False, description="Whether to enable tools in multi-turn rollout."
+    )
+    enable_thinking: bool = Field(
+        default=False, description="Whether to enable thinking in multi-turn rollout."
+    )
+
+
 class ValidationConfig(BaseModel):
     dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
@@ -720,6 +732,11 @@ class RolloutConfig(BaseModel):
 
     vllm_use_flashinfer: bool = Field(
         default=False, description="Use flashinfer for vllm rollout."
+    )
+
+    multi_turn_config: MultiTurnRolloutConfig = Field(
+        default=MultiTurnRolloutConfig,
+        description="Configuration for multi-turn rollout.",
     )
 
     @model_validator(mode="after")
