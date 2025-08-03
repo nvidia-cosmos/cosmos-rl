@@ -122,7 +122,7 @@ def destroy_distributed():
 def gradient_reduce_across_dp_replicas_(
     parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
     comm: "HighAvailabilitylNccl",
-) -> torch.Tensor:
+):
     """
     Reduce a tensor across data parallel replicas.
     TODO, we need make sure this function is atomic.
@@ -148,7 +148,7 @@ def gradient_reduce_across_dp_replicas_(
     for g in grads:
         if g.dtype not in buckets:
             buckets[g.dtype] = []
-        buckets[g.dtype].append(g.flatten())
+        buckets[g.dtype].append(g.view(-1))
 
     # move all grad into one bucket
     comm.wait_comm_ready()
