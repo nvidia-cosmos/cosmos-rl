@@ -916,7 +916,7 @@ class GRPOTrainer(Trainer):
                     for m in [model for model in self.model_parts if model is not None]
                     for p in m.parameters()
                 ]
-                grad_norm = dist_util.gradient_norm_clipping(
+                dist_util.gradient_norm_clipping(
                     all_params,
                     self.config.train.optm_grad_norm_clip,
                     foreach=True,
@@ -924,7 +924,6 @@ class GRPOTrainer(Trainer):
                     if self.parallel_dims.pp_enabled
                     else None,
                 )
-                logger.info(f"[Policy] Global grad norm: {grad_norm}")
             self.optimizers.step()
             self.lr_schedulers.step()
             self.optimizers.zero_grad()
@@ -1105,13 +1104,6 @@ class GRPOTrainer(Trainer):
         assert (
             "logprob_masks" in minibatch
         ), "logprob_masks is required for computing logprobs"
-
-        shifted_input_ids = torch.empty_like(minibatch["input_ids"])
-        shifted_input_ids[:, :-1] = minibatch["input_ids"][:, 1:]
-        shifted_input_ids[:, -1] = 0
-        print(
-            f"[Policy] shifted_input_ids: {self.tokenizer.decode(shifted_input_ids[0][minibatch['logprob_masks'][0]])}"
-        )
         return logprobs_computing(
             minibatch["input_ids"], minibatch["logprob_masks"], full_logits
         )
