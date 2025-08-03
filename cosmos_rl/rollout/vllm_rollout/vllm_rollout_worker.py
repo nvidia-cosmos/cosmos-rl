@@ -543,7 +543,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     (cloned_target_tensor, target_tensor, insts, inst_dest_name)
                 )
 
-        def completion_lambda():
+        def completion_lambda(all_cloned_target_tensors, tensors_to_check):
             for view, recv_tensor in all_cloned_target_tensors:
                 view.copy_(
                     recv_tensor,
@@ -599,7 +599,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # For non-fp8 weights and fp8 not enabled cases, we just do nothing
                 pass
 
-        return total_bytes_received, completion_lambda
+        return total_bytes_received, partial(
+            completion_lambda, all_cloned_target_tensors, tensors_to_check
+        )
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
