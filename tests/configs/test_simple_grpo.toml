@@ -37,7 +37,7 @@ model_gradient_checkpointing = true
 
 [train.train_policy]
 type = "grpo"
-dataset.name = "test_dataset"
+dataset.name = "data_fixtures/test_dataset"
 prompt_column_name = "prompt"
 response_column_name = "result"
 dataset.split = "train"

@@ -644,6 +644,135 @@ def run_policy_broadcast_to_policy(shm_names, shm_size, rank, total_rep, self_re
     )
 
 
+def run_overfitting_policy():
+    from cosmos_rl.policy.train import main as policy_main
+    from cosmos_rl.utils.logging import logger
+    from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
+
+    N_STEPS = 30
+    training_loss = []
+
+    def train(self):
+        def _log_in_master(msg):
+            if (
+                self.config.logging.logger
+                and util.is_master_rank(self.parallel_dims, self.global_rank)
+                and "console" in self.config.logging.logger
+            ):
+                logger.info(msg)
+
+        global_batch = next(iter(self.train_data_loader))
+        raw_batch = global_batch[0 : self.config.train.train_policy.mini_batch]
+
+        max_len = min(
+            self.config.policy.model_max_length,
+            self.data_packer.sft_compute_max_len(raw_batch),
+        )
+
+        if self.seq_len_multiple > 1:
+            max_len = (
+                (max_len + self.seq_len_multiple - 1)
+                // self.seq_len_multiple
+                * self.seq_len_multiple
+            )
+        batch = self.data_packer.sft_collate_fn(
+            raw_batch,
+            computed_max_len=max_len,
+            pad_token_id=self.tokenizer.pad_token_id,
+            ignore_label_id=-100,
+        )
+
+        for k, v in batch.items():
+            batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
+
+        labels = batch.pop("label_ids")
+
+        position_ids, input_ids, _ = self.model.get_position_ids(**batch)
+
+        batch["position_ids"] = position_ids
+        padding_mask = batch.get("padding_mask", None)
+
+        if self.parallel_dims.cp_enabled:
+            [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
+                [input_ids, position_ids, padding_mask],
+                self.parallel_dims.mesh["cp"],
+            )
+
+            batch["input_ids"] = input_ids
+            batch["position_ids"] = position_ids
+            if padding_mask is not None:
+                batch["padding_mask"] = padding_mask
+
+        assert not self.parallel_dims.pp_enabled
+
+        for step in range(N_STEPS):
+            _log_in_master(f"Training step {step + 1}/{N_STEPS}")
+
+            self.optimizers.zero_grad()
+            self.model.train()
+            logits = self.model(**batch)
+            loss = self.loss_fn(
+                logits,
+                labels,
+            )
+            loss.backward()
+            acc_loss = loss.detach()
+
+            """
+            Compute the global grad norm on all parameters and then apply
+            gradient clipping using the global grad norm.
+            """
+            grad_norm = None
+            if self.config.train.optm_grad_norm_clip > 0:
+                # Must pass empty list even if model_part is None,
+                # GradNorm across pp stages will fail if some rank does not join the barrier
+                all_params = [
+                    p
+                    for m in [model for model in self.model_parts if model is not None]
+                    for p in m.parameters()
+                ]
+                grad_norm = dist_util.gradient_norm_clipping(
+                    all_params,
+                    self.config.train.optm_grad_norm_clip,
+                    foreach=True,
+                    pp_mesh=self.parallel_dims.mesh["pp"]
+                    if self.parallel_dims.pp_enabled
+                    else None,
+                )
+
+            self.optimizers.step()
+            self.lr_schedulers.step()
+
+            if (
+                self.parallel_dims.dp_replicate_enabled
+                or self.parallel_dims.dp_shard_enabled
+                or self.parallel_dims.cp_enabled
+            ):
+                global_avg_loss, _ = (
+                    dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                    dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                )
+            else:
+                global_avg_loss = acc_loss.item()
+
+            _log_in_master(
+                f"Step: {step}/{N_STEPS}, Loss: {global_avg_loss:.5f}, Grad norm: {grad_norm:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}"
+            )
+            training_loss.append(global_avg_loss)
+
+        self.unregister_from_controller()
+
+    SFTTrainer.train = train
+
+    policy_main()
+
+    # check the loss has been decreasing over time
+    x = np.arange(len(training_loss))
+    m, _ = np.polyfit(x, training_loss, 1)
+    print(f"slope is {m}")
+    assert m < 0
+
+
 def run_dummy_policy():
     """Run as a dummy policy process for testing"""
     from cosmos_rl.policy.train import main as policy_main
@@ -1052,6 +1181,9 @@ async def main():
         os.environ["COSMOS_ROLE"] = "Rollout"
         # Dummy rollout process for testing
         run_dummy_rollout()
+        exit(0)
+    elif mode == "test_overfit":
+        run_overfitting_policy()
         exit(0)
 
     # Initialize distributed environment

@@ -1,0 +1,40 @@
+{
+    "builder_name": "parquet",
+    "citation": "",
+    "config_name": "default",
+    "dataset_name": "sharegpt52k",
+    "dataset_size": 732673053,
+    "description": "",
+    "download_checksums": {
+        "hf://datasets/LNTANOooo/sharegpt52k@9676af8961e4554627235adf95138fd661894d2b/data/train-00000-of-00002.parquet": {
+            "num_bytes": 152166183,
+            "checksum": null
+        },
+        "hf://datasets/LNTANOooo/sharegpt52k@9676af8961e4554627235adf95138fd661894d2b/data/train-00001-of-00002.parquet": {
+            "num_bytes": 151721573,
+            "checksum": null
+        }
+    },
+    "download_size": 303887756,
+    "features": {
+        "conversation": [
+            {
+                "role": {"dtype": "string", "_type": "Value"},
+                "content": {"dtype": "string", "_type": "Value"}
+            }
+        ]
+    },
+    "homepage": "",
+    "license": "",
+    "size_in_bytes": 1036560809,
+    "splits": {
+        "train": {
+            "name": "train",
+            "num_bytes": 732673053,
+            "num_examples": 58390,
+            "shard_lengths": [40195, 18195],
+            "dataset_name": "sharegpt52k"
+        }
+    },
+    "version": {"version_str": "0.0.0", "major": 0, "minor": 0, "patch": 0}
+}
