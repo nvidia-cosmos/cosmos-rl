@@ -72,8 +72,8 @@ dp_replicate_size = 1
 
 [policy.parallelism]
 n_init_replicas = 1
-tp_size = 4
+tp_size = 1
 cp_size = 1
-dp_shard_size = 1
+dp_shard_size = 4
 pp_size = 1
 dp_replicate_size = 1

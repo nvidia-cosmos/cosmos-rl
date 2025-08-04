@@ -23,9 +23,12 @@ from cosmos_rl.utils.distributed import (
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.config import Config as CosmosConfig
+import torch
+from cosmos_rl.utils import util
 
 
 def main(*args, **kwargs):
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     ctrl_ip, ctrl_port, metadata = get_controller_metadata()
 
     if metadata["config"] is None:
@@ -45,16 +48,20 @@ def main(*args, **kwargs):
     policy_type = cosmos_config.train.train_policy.type
 
     try:
-        if policy_type == "grpo":
-            logger.info("Starting GRPO training...")
-            trainer = GRPOTrainer(config=cosmos_config, parallel_dims=parallel_dims)
-            trainer.main_loop()
-        elif policy_type == "sft":
-            logger.info("Starting SFT training...")
-            trainer = SFTTrainer(config=cosmos_config, parallel_dims=parallel_dims)
-            trainer.train()
-        else:
-            raise ValueError(f"Unknown policy type: {policy_type}")
+        with torch.autocast(
+            device_type="cuda",
+            dtype=util.str2torch_dtype(cosmos_config.train.param_dtype),
+        ):
+            if policy_type == "grpo":
+                logger.info("Starting GRPO training...")
+                trainer = GRPOTrainer(config=cosmos_config, parallel_dims=parallel_dims)
+                trainer.main_loop()
+            elif policy_type == "sft":
+                logger.info("Starting SFT training...")
+                trainer = SFTTrainer(config=cosmos_config, parallel_dims=parallel_dims)
+                trainer.train()
+            else:
+                raise ValueError(f"Unknown policy type: {policy_type}")
     except Exception as e:
         import traceback
 

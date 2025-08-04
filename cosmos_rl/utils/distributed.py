@@ -122,7 +122,7 @@ def destroy_distributed():
 def gradient_reduce_across_dp_replicas_(
     parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
     comm: "HighAvailabilitylNccl",
-) -> torch.Tensor:
+):
     """
     Reduce a tensor across data parallel replicas.
     TODO, we need make sure this function is atomic.
@@ -148,7 +148,7 @@ def gradient_reduce_across_dp_replicas_(
     for g in grads:
         if g.dtype not in buckets:
             buckets[g.dtype] = []
-        buckets[g.dtype].append(g.flatten())
+        buckets[g.dtype].append(g.view(-1))
 
     # move all grad into one bucket
     comm.wait_comm_ready()
@@ -186,7 +186,9 @@ def gradient_reduce_across_dp_replicas_(
                 timeout_ms = 30 * 60 * 1000
                 gradient_reduce_across_dp_replicas_.first_invoke = False
 
-            comm.allreduce(tmp_buffer, tmp_buffer, "avg", timeout_ms=timeout_ms)
+            comm.allreduce(
+                tmp_buffer, tmp_buffer, dist.ReduceOp.AVG, timeout_ms=timeout_ms
+            )
             tmp_buffer = tmp_buffer.to(original_dtype)
 
             # copy the result back to original grad
@@ -249,7 +251,6 @@ def gradient_norm_clipping(
             else:
                 device_mesh_str = "default"
             parameters_by_mesh[device_mesh_str].append(param)
-
     # Compute the norm for each mesh group
     per_mesh_norm_list = []
     for mesh, params in parameters_by_mesh.items():
@@ -403,14 +404,6 @@ def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
 
 
 class HighAvailabilitylNccl:
-    NCCL_REDUCE_OPS = {
-        "sum": 0,
-        "prod": 1,
-        "max": 2,
-        "min": 3,
-        "avg": 4,
-    }
-
     DESTROY_CMD = "destroy"
 
     def __init__(
@@ -740,10 +733,9 @@ class HighAvailabilitylNccl:
         self,
         sendbuff: torch.Tensor,
         recvbuff: torch.Tensor,
-        op: str,
+        op: dist.ReduceOp,
         timeout_ms: int = None,
     ):
-        op = self.NCCL_REDUCE_OPS[op]
         self.__do_nccl_op_with_retry(
             func=nccl_allreduce,
             sendbuff=sendbuff,
@@ -769,35 +761,6 @@ class HighAvailabilitylNccl:
             peer=src_rank,
             timeout_ms=timeout_ms,
         )
-
-
-def prevent_vllm_from_setting_nccl_env():
-    init_distributed()
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    if local_rank == 0:
-        try:
-            # ../vllm/env_override.py
-            vllm_env_override_path = os.path.join(
-                os.path.dirname(os.path.dirname(torch.__file__)), "vllm/env_override.py"
-            )
-            if os.path.exists(vllm_env_override_path):
-                # Replace `os.environ['NCCL_CUMEM_ENABLE'] = '0' with `pass`
-                with open(vllm_env_override_path, "r") as f:
-                    lines = f.readlines()
-                    lines = [
-                        line.replace("os.environ['NCCL_CUMEM_ENABLE'] = '0'", "pass")
-                        for line in lines
-                    ]
-                with open(vllm_env_override_path, "w") as f:
-                    f.writelines(lines)
-                logger.info(
-                    f"Modified {vllm_env_override_path} to disable NCCL env override"
-                )
-        except Exception as e:
-            logger.error(f"Failed to prevent vllm from setting NCCL env: {e}")
-    if world_size > 1:
-        torch.distributed.barrier()
 
 
 class DistKVStore:

@@ -13,13 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.utils.distributed import prevent_vllm_from_setting_nccl_env
-import os
-
-if "COSMO_USING_TRTLLM" not in os.environ:
-    prevent_vllm_from_setting_nccl_env()
-
 import sys
+import os
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as RolloutConfig

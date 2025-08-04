@@ -456,9 +456,14 @@ class TrainingConfig(BaseModel):
 
     compile: bool = Field(default=True, description="Whether to use torch.compile")
 
+    master_dtype: Optional[str] = Field(
+        default="float32",
+        description="The master weight data type for optimizers, is orthognal to `param_dtype`.",
+        choices=["bfloat16", "float16", "float32"],
+    )
     param_dtype: str = Field(
         default="bfloat16",
-        description="The data type for parameters and activations",
+        description="The data type for forward/backward. Outside forward/backward, params are in `master_dtype`",
         choices=["bfloat16", "float16", "float32"],
     )
 
@@ -618,10 +623,12 @@ class ValidationConfig(BaseModel):
     temperature: float = Field(
         default=0.9, description="Temperature for sampling during validation."
     )
-    top_p: float = Field(
-        default=1.0, description="Top-p for sampling during validation."
+    top_p: Optional[float] = Field(
+        default=None, description="Top-p for sampling during validation."
     )
-    top_k: int = Field(default=10, description="Top-k for sampling during validation.")
+    top_k: Optional[int] = Field(
+        default=None, description="Top-k for sampling during validation."
+    )
     repetition_penalty: float = Field(
         default=1.0, description="Repetition penalty for sampling during validation."
     )
@@ -629,8 +636,8 @@ class ValidationConfig(BaseModel):
         default=1,
         description="n parameter same like what in OpenAI chat API for validation.",
     )
-    max_response_length: int = Field(
-        default=2048,
+    max_response_length: Optional[int] = Field(
+        default=None,
         description="Max output length of rollout generation during validation.",
     )
     reward_function: Union[str, List[str], Dict[str, float]] = Field(

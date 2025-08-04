@@ -396,7 +396,7 @@ def if_use_modelscope(path: str) -> bool:
     return path.startswith(modelscope_cache_dir)
 
 
-def prepare_cosmos_data(dataset, fps=1, max_pixels=81920):
+def prepare_cosmos_data(dataset, *args, **kwargs):
     cache_dir = os.environ.get(
         "COSMOS_CACHE", os.path.join(os.path.expanduser("~"), ".cache/cosmos/")
     )

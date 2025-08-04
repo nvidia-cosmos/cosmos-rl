@@ -22,7 +22,6 @@ from cosmos_rl.policy.config import (
     SFTDataConfig,
     config_hash,
 )
-from cosmos_rl.utils.util import compute_mfu
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.wandb_logger import (
     init_wandb,
@@ -51,15 +50,47 @@ def async_safe_ce(
     target: torch.LongTensor,
     ignore_index: int = -100,
     loss_scaling_factor: float = 1.0,
+    dp_group: Optional[torch.distributed.ProcessGroup] = None,
+    cp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> torch.Tensor:
-    loss = torch.nn.functional.cross_entropy(
-        output[:, :-1].flatten(0, 1),
-        target[:, 1:].flatten(0, 1),
-        ignore_index=ignore_index,
-        reduction="mean",
-    )
-    # In case of all labels are ignored, loss will be nan.
-    return torch.nan_to_num(loss, nan=0.0) * loss_scaling_factor
+    target = target[:, 1:].contiguous().view(-1)
+    output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+
+    if cp_group is not None and cp_group.size() > 1:
+        # Fallback to unbalance loss
+        loss = (
+            torch.nn.functional.cross_entropy(
+                output,
+                target,
+                ignore_index=ignore_index,
+                reduction="mean",
+            )
+            * loss_scaling_factor
+        )
+        # In case of all labels are ignored, loss will be nan.
+        loss = torch.nan_to_num(loss, nan=0.0)
+        return loss
+    else:
+        loss = torch.nn.functional.cross_entropy(
+            output,
+            target,
+            ignore_index=ignore_index,
+            reduction="none",
+        )
+
+        # Compute all token numbers across dp-world
+        n_valid_tokens = (target != ignore_index).sum()
+        num_dp_workers = 1
+        if dp_group is not None:
+            torch.distributed.all_reduce(n_valid_tokens, group=dp_group)
+            num_dp_workers = torch.distributed.get_world_size(group=dp_group)
+
+        loss = (
+            loss.sum()
+            / (n_valid_tokens + 1e-8)
+            * (num_dp_workers * loss_scaling_factor)
+        )
+        return loss
 
 
 def collate_fn(
@@ -236,11 +267,21 @@ class SFTTrainer(Trainer):
             user_provided_dataset=self.sft_user_dataset,
         )
         train_sampler = DistributedSampler(
-            train_dataset, num_replicas=self.dp_world_size, rank=self.dp_rank
+            train_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=True,
+            drop_last=False,
         )
+
         val_sampler = DistributedSampler(
-            val_dataset, num_replicas=self.dp_world_size, rank=self.dp_rank
+            val_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=False,
+            drop_last=False,
         )
+        self.epoch = config.train.epoch
 
         assert (
             self.tokenizer.pad_token_id is not None
@@ -248,12 +289,12 @@ class SFTTrainer(Trainer):
         self.train_data_loader = DataLoader(
             train_dataset,
             batch_size=config.train.train_batch_per_replica,
-            shuffle=config.train.train_policy.dataloader_shuffle,
+            shuffle=False,
             num_workers=config.train.train_policy.dataloader_num_workers,
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=train_sampler,
             collate_fn=collate_fn,
-            drop_last=True,
+            drop_last=False,
         )
         self.val_data_loader = DataLoader(
             val_dataset,
@@ -262,10 +303,8 @@ class SFTTrainer(Trainer):
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=val_sampler,
             collate_fn=collate_fn,
-            drop_last=True,
+            drop_last=False,
         )
-        # For iteration control
-        self.epoch = config.train.epoch
         steps_by_dataset = len(self.train_data_loader) * self.epoch
         if config.train.max_num_steps is not None:
             self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
@@ -301,7 +340,17 @@ class SFTTrainer(Trainer):
             )
         self.model.train()
 
-        self.loss_fn = async_safe_ce
+        if self.parallel_dims.dp_enabled:
+            dp_group = self.parallel_dims.mesh["dp"].get_group()
+        else:
+            dp_group = None
+
+        if self.parallel_dims.cp_enabled:
+            cp_group = self.parallel_dims.mesh["cp"].get_group()
+        else:
+            cp_group = None
+
+        self.loss_fn = partial(async_safe_ce, dp_group=dp_group, cp_group=cp_group)
 
     def validate(self):
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
@@ -425,9 +474,15 @@ class SFTTrainer(Trainer):
                 # split global_batch into mini_batches
                 mini_batch_begin_idxs = list(
                     range(
-                        0, global_batch_size, self.config.train.train_policy.mini_batch
+                        0,
+                        global_batch_size,
+                        self.config.train.train_policy.mini_batch,
                     )
                 )
+
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
 
                 for i in mini_batch_begin_idxs:
                     fixed_length = (
@@ -480,9 +535,6 @@ class SFTTrainer(Trainer):
                             torch.cuda.cudart().cudaProfilerStop()
 
                     self.model.train()
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    start_event.record()
                     for k, v in batch.items():
                         batch[k] = (
                             v.to(self.device) if isinstance(v, torch.Tensor) else v
@@ -552,16 +604,24 @@ class SFTTrainer(Trainer):
                         #     N_NEW_TOKENS = 100
                         #     for _ in range(N_NEW_TOKENS):
                         #         if len(last_token_ids) > 0:
-                        #             batch["input_ids"] = torch.cat([batch["input_ids"], last_token_ids[-1]], dim=-1)
-                        #             position_ids, _, _ = self.model.get_position_ids(
-                        #                 **batch
+                        #             batch["input_ids"] = torch.cat(
+                        #                 [batch["input_ids"], last_token_ids[-1]],
+                        #                 dim=-1,
+                        #             )
+                        #             position_ids, _, _ = (
+                        #                 self.model.get_position_ids(**batch)
                         #             )
                         #             batch["position_ids"] = position_ids
 
                         #         logits = self.model(**batch)
                         #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
                         #         last_token_ids.append(token_ids)
-                        #     print(f"generated tokens: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[0])}")
+                        #     if self.global_rank == 0:
+                        #         for i in range(len(last_token_ids)):
+                        #             print(
+                        #                 f"generated tokens at sample {i}: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[i])}"
+                        #             )
+
                         #     return
                         # #########################################################################################
 
@@ -574,8 +634,16 @@ class SFTTrainer(Trainer):
                             if padding_mask_before_cp is not None:
                                 batch["padding_mask"] = padding_mask_before_cp
 
-                        loss = self.loss_fn(logits, labels)
-                        loss = loss / len(mini_batch_begin_idxs)
+                        loss = self.loss_fn(
+                            logits,
+                            labels,
+                            loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
+                        )
+
+                        # # Hint FSDP to do all-reduce on the last backward pass
+                        # if hasattr(self.model, "set_is_last_backward"):
+                        #     print(f"set_is_last_backward: {i == mini_batch_begin_idxs[-1]}")
+                        #     self.model.set_is_last_backward(i == mini_batch_begin_idxs[-1])
                         loss.backward()
                     acc_loss += loss.detach()
 
@@ -583,6 +651,7 @@ class SFTTrainer(Trainer):
                 Compute the global grad norm on all parameters and then apply
                 gradient clipping using the global grad norm.
                 """
+                grad_norm = None
                 if self.config.train.optm_grad_norm_clip > 0:
                     # Must pass empty list even if model_part is None,
                     # GradNorm across pp stages will fail if some rank does not join the barrier
@@ -593,7 +662,7 @@ class SFTTrainer(Trainer):
                         ]
                         for p in m.parameters()
                     ]
-                    dist_util.gradient_norm_clipping(
+                    grad_norm = dist_util.gradient_norm_clipping(
                         all_params,
                         self.config.train.optm_grad_norm_clip,
                         foreach=True,
@@ -641,12 +710,15 @@ class SFTTrainer(Trainer):
                             "train/loss_avg": global_avg_loss,
                             "train/loss_max": global_max_loss,
                             "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
+                            "train/grad_norm": grad_norm
+                            if grad_norm is not None
+                            else -1,
                         }
 
                         # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                         # it will be inaccurate. Need a reduce for all the metrics.
                         if self.config.logging.report_mfu:
-                            mfu = compute_mfu(
+                            mfu = util.compute_mfu(
                                 model=self.model,
                                 n_tokens=np.prod(input_ids.shape),
                                 iter_time=iter_time,
@@ -665,7 +737,7 @@ class SFTTrainer(Trainer):
                             )
                         if "console" in self.config.logging.logger:
                             logger.info(
-                                f"Step: {self.train_step}/{self.total_steps}, Loss: {global_avg_loss:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}, Iteration time: {iter_time:.2f}s."
+                                f"Step: {self.train_step}/{self.total_steps}, Loss: {global_avg_loss:.5f}, Grad norm: {grad_norm:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}, Iteration time: {iter_time:.2f}s."
                             )
 
                 # For profiling
@@ -697,6 +769,7 @@ class SFTTrainer(Trainer):
                                 f"step_{self.train_step}",
                             ),
                             trainable_only=False,
+                            dtype=util.str2torch_dtype(self.config.train.param_dtype),
                         )
                     logger.info(
                         f"Saving cosmos checkpoint at step {self.train_step}..."
@@ -737,6 +810,7 @@ class SFTTrainer(Trainer):
                 ),
                 trainable_only=False,
                 is_final=True,
+                dtype=util.str2torch_dtype(self.config.train.param_dtype),
             )
         if self.config.train.ckpt.enable_checkpoint:
             logger.info(
@@ -770,6 +844,21 @@ class SFTTrainer(Trainer):
         loss_scaling_factor = (
             mini_batch_size / self.config.train.train_batch_per_replica
         )
+        if self.parallel_dims.dp_enabled:
+            dp_group = self.parallel_dims.mesh["dp"].get_group()
+        else:
+            dp_group = None
+
+        if self.parallel_dims.cp_enabled:
+            cp_group = self.parallel_dims.mesh["cp"].get_group()
+        else:
+            cp_group = None
+
         return torch.compile(
-            partial(async_safe_ce, loss_scaling_factor=loss_scaling_factor)
+            partial(
+                async_safe_ce,
+                loss_scaling_factor=loss_scaling_factor,
+                dp_group=dp_group,
+                cp_group=cp_group,
+            )
         )

@@ -518,18 +518,11 @@ class PolicyStatusManager:
             self.val_report_data[validation_step] = []
 
         self.val_report_data[validation_step].extend(validation_results)
-        num_rollout_replicas = len(
-            rollout_status_manager.get_all_atoms_arrived_replicas()
-        )
         n_items_of_this_step = sum(
             len(x) for x in self.val_report_data[validation_step]
         )
-        validation_finished = (
-            len(self.val_report_data[validation_step]) == num_rollout_replicas
-        )
-        validation_finished = validation_finished or n_items_of_this_step == len(
-            self.val_dataloader
-        )
+
+        validation_finished = n_items_of_this_step == len(self.val_dataloader)
 
         if self.activated_val_tqdm:
             self.activated_val_tqdm.update(n_items_of_this_step)
@@ -537,7 +530,7 @@ class PolicyStatusManager:
             logger.error("[Controller] Validation tqdm is not activated")
 
         # Check if all rollout replicas have reported validation results
-        if validation_finished:
+        if validation_finished and self.activated_val_iter is not None:
             # Validation is finished, trigger next step training
             self.activated_val_iter = None
             self.activated_val_tqdm.clear()
@@ -655,6 +648,19 @@ class PolicyStatusManager:
                     total_iter_time_avg = np.mean(
                         [data["train/iteration_time"] for data in self.report_data_list]
                     )
+                    # KL loss
+                    total_kl_loss_avg = np.mean(
+                        [
+                            data.get("train/kl_loss_avg", 0)
+                            for data in self.report_data_list
+                        ]
+                    )
+                    total_kl_loss_max = np.max(
+                        [
+                            data.get("train/kl_loss_max", 0)
+                            for data in self.report_data_list
+                        ]
+                    )
                     train_step = self.report_data_list[0]["train_step"]
                     self.report_data_list = []
 
@@ -663,6 +669,8 @@ class PolicyStatusManager:
                         "train/loss_max": total_loss_max,
                         "train/learning_rate": total_learning_rate,
                         "train/iteration_time": total_iter_time_avg,
+                        "train/kl_loss_avg": total_kl_loss_avg,
+                        "train/kl_loss_max": total_kl_loss_max,
                     }
 
                     self.train_report_data.setdefault(train_step, {}).update(

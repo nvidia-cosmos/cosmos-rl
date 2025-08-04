@@ -59,7 +59,7 @@ from functools import partial
 import msgpack
 from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
-from cosmos_rl.utils.util import is_master_rank
+from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.dispatcher.replica import Rollout
@@ -89,7 +89,7 @@ def compute_loss(
     cu_seqlens: torch.Tensor,  # of shape `[batch_size + 1]`
     config: CosmosConfig,
     logprob_masks: torch.Tensor,  # of shape `[batch_size, max_len]`
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
     current_advantages = torch.masked_select(current_advantages, logprob_masks)
 
@@ -98,7 +98,7 @@ def compute_loss(
     ), "current_token_logps and current_advantages should have the same shape"
     assert (
         old_per_token_logps.shape == current_token_logps.shape
-    ), "old_per_token_logps and ref_per_token_logps should have the same shape"
+    ), "old_per_token_logps and current_token_logps should have the same shape"
     if ref_per_token_logps is not None:
         assert (
             ref_per_token_logps.shape == current_token_logps.shape
@@ -106,22 +106,6 @@ def compute_loss(
             ref_per_token_logps.shape, current_token_logps.shape
         )
 
-    # Compute the KL divergence between the model and the reference model
-    if config.train.train_policy.kl_beta != 0.0:
-        assert (
-            not ref_per_token_logps.requires_grad
-        ), "ref_per_token_logps should not require gradient"
-        """
-            With reference model used for KL. The logic should be further reviewed to verify.
-        """
-        per_token_kl = (
-            torch.exp(ref_per_token_logps - current_token_logps)
-            - (ref_per_token_logps - current_token_logps)
-            - 1
-        )
-
-    # Same processing as `verl`
-    # Clamp coef_1 for stability
     coef_1 = torch.clamp(current_token_logps - old_per_token_logps, min=-20.0, max=20.0)
     coef_1 = torch.exp(coef_1)
 
@@ -149,12 +133,18 @@ def compute_loss(
         clip_losses2 = torch.min(per_token_loss3, clip_losses1)
         per_token_loss = torch.where(current_advantages < 0, clip_losses2, clip_losses1)
 
+    # Compute the KL divergence between the model and the reference model
     if config.train.train_policy.kl_beta != 0.0:
+        assert (
+            not ref_per_token_logps.requires_grad
+        ), "ref_per_token_logps should not require gradient"
         """
             With reference model used for KL. The logic should be further reviewed to verify.
         """
-        kl_loss = config.train.train_policy.kl_beta * per_token_kl
-        per_token_loss += kl_loss
+        kl_ratio = ref_per_token_logps - current_token_logps
+        # For numerical stability
+        kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
+        kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
     else:
         kl_loss = torch.zeros_like(per_token_loss)
 
@@ -181,23 +171,26 @@ def compute_loss(
         ):
             norm_factor = config.train.train_policy.unbiased_loss_max_tokens
         else:
-            norm_factor = max_len
+            norm_factor = shifted_length
 
         per_token_loss = (per_token_loss_seq_sum / norm_factor).mean()
         kl_loss = (kl_loss_seq_sum / norm_factor).mean()
-        return per_token_loss, kl_loss
     elif config.train.train_policy.loss_type == "seq-mean-token-sum":
         # seq-mean-token-sum
-        per_token_loss = per_token_loss_seq_sum / max_len
-        kl_loss = kl_loss_seq_sum / max_len
-        return per_token_loss.mean(), kl_loss.mean()
+        per_token_loss = per_token_loss_seq_sum.mean()
+        kl_loss = kl_loss_seq_sum.mean()
     elif config.train.train_policy.loss_type == "token-mean":
         # token-mean
-        per_token_loss = per_token_loss_seq_sum / shifted_length
-        kl_loss = kl_loss_seq_sum / shifted_length
-        return per_token_loss.mean(), kl_loss.mean()
+        length_sum = shifted_length.sum()
+        per_token_loss = per_token_loss_seq_sum.sum() / length_sum
+        kl_loss = kl_loss_seq_sum.sum() / length_sum
     else:
         raise ValueError(f"Invalid loss type: {config.train.train_policy.loss_type}")
+    return (
+        per_token_loss + kl_loss * config.train.train_policy.kl_beta,
+        per_token_loss,
+        kl_loss,
+    )
 
 
 class GRPOTrainer(Trainer):
@@ -774,7 +767,9 @@ class GRPOTrainer(Trainer):
                                 local_view = local_view()
                             else:
                                 pass
-
+                            local_view = local_view.to(
+                                str2torch_dtype(self.config.train.param_dtype)
+                            )
                             view = (
                                 local_view.cosmos_slice(tensor_split_strategys)
                                 .contiguous()
@@ -899,39 +894,39 @@ class GRPOTrainer(Trainer):
         """
         # Add nccl allreduce operations for all parameters and necessary states.
         """
-        for model_part in self.model_parts:
-            # Model part may use same physical mesh for different logical mesh,
-            # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
-            # So we need to do allreduce for each model part
-            if model_part is not None:
-                dist_util.gradient_reduce_across_dp_replicas_(
-                    [p for p in model_part.parameters()], self.inter_policy_nccl
+        with torch.cuda.stream(self.train_stream):
+            for model_part in self.model_parts:
+                # Model part may use same physical mesh for different logical mesh,
+                # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
+                # So we need to do allreduce for each model part
+                if model_part is not None:
+                    dist_util.gradient_reduce_across_dp_replicas_(
+                        [p for p in model_part.parameters()], self.inter_policy_nccl
+                    )
+
+            """
+            Compute the global grad norm on all parameters and then apply
+            gradient clipping using the global grad norm.
+            """
+            if self.config.train.optm_grad_norm_clip > 0:
+                # Must pass empty list even if model_part is None,
+                # GradNorm across pp stages will fail if some rank does not join the barrier
+                all_params = [
+                    p
+                    for m in [model for model in self.model_parts if model is not None]
+                    for p in m.parameters()
+                ]
+                dist_util.gradient_norm_clipping(
+                    all_params,
+                    self.config.train.optm_grad_norm_clip,
+                    foreach=True,
+                    pp_mesh=self.parallel_dims.mesh["pp"]
+                    if self.parallel_dims.pp_enabled
+                    else None,
                 )
-
-        """
-        Compute the global grad norm on all parameters and then apply
-        gradient clipping using the global grad norm.
-        """
-        if self.config.train.optm_grad_norm_clip > 0:
-            # Must pass empty list even if model_part is None,
-            # GradNorm across pp stages will fail if some rank does not join the barrier
-            all_params = [
-                p
-                for m in [model for model in self.model_parts if model is not None]
-                for p in m.parameters()
-            ]
-            dist_util.gradient_norm_clipping(
-                all_params,
-                self.config.train.optm_grad_norm_clip,
-                foreach=True,
-                pp_mesh=self.parallel_dims.mesh["pp"]
-                if self.parallel_dims.pp_enabled
-                else None,
-            )
-
-        self.optimizers.step()
-        self.lr_schedulers.step()
-        self.optimizers.zero_grad()
+            self.optimizers.step()
+            self.lr_schedulers.step()
+            self.optimizers.zero_grad()
         return True
 
     async def fetch_command(self):
@@ -1113,6 +1108,7 @@ class GRPOTrainer(Trainer):
             minibatch["input_ids"], minibatch["logprob_masks"], full_logits
         )
 
+    @torch.no_grad()
     def _swap_model_state_dict(self):
         kl_beta = self.config.train.train_policy.kl_beta
         if kl_beta != 0.0:
@@ -1330,7 +1326,7 @@ class GRPOTrainer(Trainer):
                                 loss_scaling_cpu = torch.tensor(
                                     [
                                         [
-                                            1
+                                            1.0
                                             / num_mini_batch
                                             / self.config.policy.parallelism.pp_micro_batch_size
                                         ]
@@ -1452,7 +1448,7 @@ class GRPOTrainer(Trainer):
                                             i_mu > 0
                                         ), "Only inner iteration should reuse `old_per_token_logps`"
 
-                                    loss, kl_loss = compute_loss(
+                                    loss, per_token_loss, kl_loss = compute_loss(
                                         current_per_token_logprobs,
                                         self.old_per_token_logps[local_mini_step],
                                         self.ref_per_token_logps[local_mini_step],
@@ -1461,16 +1457,28 @@ class GRPOTrainer(Trainer):
                                         self.config,
                                         logprob_masks,
                                     )
-                                    if num_mini_batch > 1:
-                                        loss /= num_mini_batch
-                                        kl_loss /= num_mini_batch
+                                    loss = loss / num_mini_batch
+                                    per_token_loss = per_token_loss / num_mini_batch
+                                    kl_loss = kl_loss / num_mini_batch
                                     loss.backward()
-                                    loss_sum += loss.item()
-                                    loss_count += 1
+                                    loss_sum += per_token_loss.item()
                                     kl_loss_sum += kl_loss.item()
+                                    loss_count += 1
                             self.mini_step += 1
                             local_mini_step += 1
-                        self.execute_all_reduce()
+
+                            if (
+                                local_mini_step
+                                % int(os.environ.get("COSMOS_GRPO_STEP_INTERVAL", 10))
+                                == 0
+                            ):
+                                self.execute_all_reduce()
+                        if not is_computing_ref and (
+                            local_mini_step
+                            % int(os.environ.get("COSMOS_GRPO_STEP_INTERVAL", 10))
+                            != 0
+                        ):
+                            self.execute_all_reduce()
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()
@@ -1546,6 +1554,7 @@ class GRPOTrainer(Trainer):
                     ),
                     trainable_only=False,
                     is_final=current_step == total_steps,
+                    dtype=str2torch_dtype(self.config.train.param_dtype),
                 )
             logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
             self.ckpt_manager.save_checkpoint(
@@ -1690,7 +1699,7 @@ def _swizzle_pp_grpo_forward(
             ref_per_token_logprobs.shape == current_per_token_logprobs.shape
         ), f"ref_per_token_logprobs.shape: {ref_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
 
-    loss, _ = compute_loss(
+    loss, _, _ = compute_loss(
         current_per_token_logprobs,
         old_per_token_logprobs,
         ref_per_token_logprobs,
