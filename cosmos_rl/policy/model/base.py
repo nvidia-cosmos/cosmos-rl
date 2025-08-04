@@ -384,6 +384,7 @@ class ModelRegistry:
         model_type = hf_config.model_type
         is_supported_model_type = model_type in ModelRegistry._MODEL_REGISTRY
         if not is_supported_model_type:
+            raise ValueError("MODEL NOT SUPPORTED - TEST ONLY")
             logger.info(
                 f"Model type {hf_config.model_type} not registered, using {COSMOS_HF_MODEL_TYPES} instead."
             )

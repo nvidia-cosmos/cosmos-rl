@@ -83,6 +83,7 @@ class ParallelDims:
     # to 64 for the attention module, and have ep = 4, dp_shard_with_ep = 16
     # for the MoE module.
     dp_shard_with_ep: int = -1
+    enable_loss_parallel: bool = False
 
     @staticmethod
     def from_config(parallesim_config: ParallelismConfig):
@@ -115,7 +116,7 @@ class ParallelDims:
         self.build_mesh_info()
 
     def _validate(self):
-        dp_replicate, dp_shard, cp, tp, pp, ep, dp_shard_with_ep = (
+        dp_replicate, dp_shard, cp, tp, pp, ep, dp_shard_with_ep, world_size = (
             self.dp_replicate,
             self.dp_shard,
             self.cp,
@@ -123,11 +124,17 @@ class ParallelDims:
             self.pp,
             self.ep,
             self.dp_shard_with_ep,
+            self.world_size,
         )
         for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
         assert dp_shard == -1 or dp_shard >= 1, " dp_shard must be -1 or >=1."
         if dp_shard < 0:
+            logger.info(
+                "dp_shard is set to -1, will be automatically determined based on "
+                f"world_size {world_size} // {pp * dp_replicate * cp * tp}."
+            )
+
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
         assert (
             dp_shard >= 1
@@ -137,6 +144,11 @@ class ParallelDims:
             f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
+
+        if pp > 1 and dp_replicate > 1:
+            raise ValueError(
+                "dp_replicate must be 1 when pp > 1, since we only support FSDP with pipeline parallelism."
+            )
 
         # Checks for MoE weights. Note that dp_shard is only used for the non-MoE weights.
         if ep > 1:
@@ -298,6 +310,10 @@ class ParallelDims:
     @property
     def dp_shard_with_ep_enabled(self) -> bool:
         return self.dp_shard_with_ep > 1
+
+    @property
+    def loss_parallel_enabled(self) -> bool:
+        return self.tp > 1 and self.enable_loss_parallel
 
     @property
     def pp_dynamic_shape_enabled(self) -> bool:
