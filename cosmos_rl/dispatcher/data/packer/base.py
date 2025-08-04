@@ -14,9 +14,10 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict, Type, Union
+from typing import Any, List, Dict, Type, Union, Optional
 from transformers import AutoTokenizer
 from cosmos_rl.policy.config import Config
+from cosmos_rl.tools.tools_use import OpenAIFunctionToolSchema
 
 
 class DataPacker(ABC):
@@ -63,7 +64,14 @@ class DataPacker(ABC):
             raise ValueError(f"DataPacker for {model_type} is not registered")
         return DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]()
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(
+        self,
+        config: Config,
+        tokenizer: AutoTokenizer,
+        *args,
+        tools: Optional[list[OpenAIFunctionToolSchema]] = None,
+        **kwargs,
+    ):
         """
         Called by launcher after being mounted
         """
@@ -71,6 +79,7 @@ class DataPacker(ABC):
         assert tokenizer is not None, "tokenizer should be set"
         self.config = config
         self.tokenizer = tokenizer
+        self.tools = tools
 
     @abstractmethod
     def get_rollout_input(self, item: Any) -> Any:
