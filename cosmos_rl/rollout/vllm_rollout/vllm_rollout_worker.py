@@ -238,8 +238,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
 
     def prepare_shard_infos_for_weight_sync_insts(self):
-        for param_name, param in self.get_underlying_model().named_parameters():
-            logger.info(f"[Rollout] LMS vllm: {param_name}, param: {param.shape}")
         if self.quantization_type == "fp8":
             promotion_dtype = util.str2torch_dtype(self.config.train.param_dtype)
             self.vllm_hp_weight_map, self.vllm_quantized_weight_map = (
@@ -928,10 +926,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         current_command = None
 
         current_command = dist_utils.broadcast_object_cpu(current_command)
-
-        logger.info(
-            f"[Rollout] global_rank: {self.global_rank}, LMS: current_command: {current_command}"
-        )
 
         if current_command is not None:
             handler = self.get_rollout_command_handler(type(current_command))
