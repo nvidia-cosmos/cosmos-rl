@@ -621,13 +621,13 @@ class ValidationConfig(BaseModel):
     )
 
     temperature: float = Field(
-        default=0.9, description="Temperature for sampling during validation."
+        default=0.0, description="Temperature for sampling during validation."
     )
     top_p: Optional[float] = Field(
         default=None, description="Top-p for sampling during validation."
     )
     top_k: Optional[int] = Field(
-        default=None, description="Top-k for sampling during validation."
+        default=1, description="Top-k for sampling during validation."
     )
     repetition_penalty: float = Field(
         default=1.0, description="Repetition penalty for sampling during validation."

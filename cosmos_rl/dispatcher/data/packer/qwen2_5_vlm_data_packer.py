@@ -597,8 +597,25 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         completion_ids = []
         if rollout_output:
             completion_ids = self.tokenizer(rollout_output).input_ids
-
-        return_dict["input_ids"] = input_ids + completion_ids
+            # recompute position_ids
+            # position_ids: (3, 1, seq_len)
+            position_ids, _ = self._get_rope_index(
+                input_ids=torch.tensor(input_ids + completion_ids).unsqueeze(0).clone(),
+                image_grid_thw=torch.tensor(x.get("image_grid_thw"))
+                if "image_grid_thw" in x
+                else None,
+                video_grid_thw=torch.tensor(x.get("video_grid_thw"))
+                if "video_grid_thw" in x
+                else None,
+                second_per_grid_ts=torch.tensor(x.get("second_per_grid_ts"))
+                if "second_per_grid_ts" in x
+                else None,
+                attention_mask=None,
+            )
+            return_dict["position_ids"] = position_ids.clone()
+            return_dict["input_ids"] = input_ids + completion_ids
+        else:
+            return_dict["input_ids"] = input_ids
 
         return_dict["logprob_masks"] = (
             [0] * (len(input_ids) - 1 + n_ignore_prefix_tokens)

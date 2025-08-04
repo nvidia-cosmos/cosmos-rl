@@ -1105,7 +1105,10 @@ class GRPOTrainer(Trainer):
             "logprob_masks" in minibatch
         ), "logprob_masks is required for computing logprobs"
         return logprobs_computing(
-            minibatch["input_ids"], minibatch["logprob_masks"], full_logits
+            minibatch["input_ids"],
+            minibatch["logprob_masks"],
+            full_logits,
+            self.tokenizer,
         )
 
     @torch.no_grad()
@@ -1471,13 +1474,12 @@ class GRPOTrainer(Trainer):
                                 local_mini_step
                                 % int(os.environ.get("COSMOS_GRPO_STEP_INTERVAL", 10))
                                 == 0
-                            ):
+                            ) and local_mini_step > 1:
+                                all_reduced = True
                                 self.execute_all_reduce()
-                        if not is_computing_ref and (
-                            local_mini_step
-                            % int(os.environ.get("COSMOS_GRPO_STEP_INTERVAL", 10))
-                            != 0
-                        ):
+                            else:
+                                all_reduced = False
+                        if not is_computing_ref and not all_reduced:
                             self.execute_all_reduce()
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
