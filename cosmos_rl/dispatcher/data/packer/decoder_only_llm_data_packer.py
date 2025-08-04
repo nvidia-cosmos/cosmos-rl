@@ -3,6 +3,11 @@ from typing import List, Any, Dict, Union
 import torch
 import copy
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.dispatcher.data.packer.multi_turn import (
+    ConversationType,
+    check_chat_template_schema,
+    process_conversation_with_chat_template,
+)
 
 IGNORE_LABEL_ID = -100
 
@@ -12,8 +17,6 @@ class DecoderOnlyLLMDataPacker(DataPacker):
     Data protocol & processing logic for the decoder only LLM for SFT and RL training.
     """
 
-    ConversationType = List[Dict[str, str]]
-
     class RLPolicyInput:
         input_ids: List[int]
         logprob_masks: List[int]
@@ -21,112 +24,6 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         def __init__(self, input_ids: List[int], logprob_masks: List[int]):
             self.input_ids = input_ids
             self.logprob_masks = logprob_masks
-
-    def _check_conversation_format(self, conversation: ConversationType):
-        """
-        Check if the sample is in conversation format.
-        Assume the conversation format is:
-        ```
-        [
-            {
-                "role": "user",
-                "content": "..."
-            },
-            {
-                "role": "assistant",
-                "content": "..."
-            }
-        ]
-        ```
-        """
-        assert isinstance(
-            conversation, list
-        ), "All items should be list, got: {}".format(conversation)
-        # Check `role` and `content` in each item
-        for x in conversation:
-            assert isinstance(x, dict), "Each item should be a dict"
-            assert "role" in x, "Each item should have 'role'"
-            assert "content" in x, "Each item should have 'content'"
-
-    def _process_multiturn_sample(
-        self, sample: ConversationType, enable_thinking: bool = False
-    ) -> List[int]:
-        """
-        Process the multi-turn sample into valid training input.
-        """
-        concat_tokens = []
-        concat_loss_mask = []
-
-        st = 0
-        for i, msg in enumerate(sample):
-            assert msg["role"] in [
-                "user",
-                "assistant",
-                "system",
-                "tool",
-            ], "Unknown role: {}".format(msg["role"])
-            if msg["role"] == "system":
-                assert i == 0, "System message should be the first message"
-
-            # wait for the next assistant message, or process the full sample
-            if msg["role"] != "assistant" and i < len(sample) - 1:
-                continue
-
-            if i == 0:
-                prev_applied_text = ""
-            else:
-                prev_applied_text = self.tokenizer.apply_chat_template(
-                    sample[:st],
-                    tokenize=False,
-                    add_generation_prompt=False,
-                    enable_thinking=enable_thinking,
-                    # tools=tools, # TODO(zjx): add tools support
-                )
-
-            cur_applied_text = self.tokenizer.apply_chat_template(
-                sample[:i],
-                tokenize=False,
-                add_generation_prompt=False,
-                enable_thinking=enable_thinking,
-                # tools=tools, # TODO(zjx): add tools support
-            )
-
-            # Get tokens for the current message only
-            if msg["role"] == "assistant":
-                prev_applied_text_with_generation_prompt = (
-                    self.tokenizer.apply_chat_template(
-                        sample[:st],
-                        tokenize=False,
-                        add_generation_prompt=True,
-                        enable_thinking=enable_thinking,
-                        # tools=tools, # TODO(zjx): add tools support
-                    )
-                )
-                generation_prompt_text = prev_applied_text_with_generation_prompt[
-                    len(prev_applied_text) :
-                ]
-                generation_prompt_tokens = self.tokenizer.encode(
-                    generation_prompt_text,
-                    add_special_tokens=False,
-                )
-                _message_tokens = self.tokenizer.encode(
-                    cur_applied_text[len(prev_applied_text) :],
-                    add_special_tokens=False,
-                )
-                concat_tokens += generation_prompt_tokens + _message_tokens
-                concat_loss_mask += [0] * (len(generation_prompt_tokens)) + [1] * (
-                    len(_message_tokens)
-                )
-            else:
-                concat_tokens += self.tokenizer.encode(
-                    cur_applied_text[len(prev_applied_text) :],
-                    add_special_tokens=False,
-                )
-                concat_loss_mask += [0] * len(concat_tokens)
-            # move the start index to this processed assistant message
-            st = i
-
-        return concat_tokens, concat_loss_mask
 
     def get_rollout_input(self, sample: Union[str, ConversationType]) -> str:
         """
@@ -138,7 +35,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             return sample
 
         # 2. if item is a list, check the conversation format
-        self._check_conversation_format(sample)
+        check_chat_template_schema(sample)
         if not self.config.rollout.multi_turn_config.enable:
             # Apply template to each item
             prompt = self.tokenizer.apply_chat_template(
@@ -150,7 +47,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         else:
             prompt = self.tokenizer.apply_chat_template(
                 sample,
-                # tools=tools, # TODO(zjx): add tools support
+                tools=self.tools,
                 tokenize=False,
                 add_generation_prompt=False,
                 enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
@@ -190,13 +87,15 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             )
         else:
             # TODO(zjx): here we just simple add the completion to the sample
+            # later, we need 1. add_function_call_message, 2. add_assistant_message
             sample += [{"role": "assistant", "content": completion}]
-            input_ids, loss_mask = self._process_multiturn_sample(
+            input_ids, loss_mask = process_conversation_with_chat_template(
+                self.tokenizer,
                 sample,
                 enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
+                tools=self.tools,
             )
 
-            # TODO(zjx): validate the input is correct
             full_prompt = self.get_rollout_input(sample)
             full_prompt_ids = self.tokenizer(
                 full_prompt, add_special_tokens=False
@@ -303,7 +202,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             label_ids = token_ids.copy()
         # 2. if item is a list, then assume it is in conversation format:
         else:
-            self._check_conversation_format(sample)
+            check_chat_template_schema(sample)
 
             original_sample = copy.deepcopy(sample)
 
