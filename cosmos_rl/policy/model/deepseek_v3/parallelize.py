@@ -181,15 +181,8 @@ def apply_ep(model: nn.Module, ep_mesh: DeviceMesh):
                 )
 
 
-def apply_ac(model: nn.Module, uses_internvit: bool):
+def apply_ac(model: nn.Module):
     """Apply activation checkpointing to the model."""
-    if model.vision_encoder is not None:
-        _model = model.vision_encoder
-        if uses_internvit:
-            for layer_id, block in _model.encoder.layers.named_children():
-                block = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
-                _model.encoder.layers.register_module(layer_id, block)
-
     if model.model is not None:
         _model = model.model
         for layer_id, block in _model.model.layers.named_children():
@@ -201,7 +194,6 @@ def apply_fsdp(
     model: nn.Module,
     meshes: dict[str, DeviceMesh],
     parallel_dims: ParallelDims,
-    uses_internvit: bool,
 ):
     """Apply FSDP sharding to model layers using data parallel mesh."""
     default_dp_mesh = get_dp_mesh(meshes["default"], parallel_dims)
@@ -215,17 +207,6 @@ def apply_fsdp(
         mesh=default_dp_mesh,
         reshard_after_forward=not pp_enabled,
     )
-
-    if model.vision_encoder is not None:
-        _model = model.vision_encoder
-        if uses_internvit:
-            for _, block in _model.encoder.layers.named_children():
-                fully_shard_default(block)
-        fully_shard_default(_model)
-
-    if model.mm_projector is not None:
-        _model = model.mm_projector
-        fully_shard_default(_model)
 
     if model.model is not None:
         _model = model.model
@@ -273,7 +254,7 @@ def parallelize_model(
     Parallelizes the DeepSeek model based on the provided meshes and parallel dimensions.
 
     Args:
-        model (nn.Module): The VLM DeepSeek model to parallelize. Note that this maybe
+        model (nn.Module): The DeepSeek model to parallelize. Note that this maybe
             a model part due to pipelining. We must check for the presence of an
             nn.Module before executing the relevant parallelization functions.
         meshes (dict[str, DeviceMesh]): A mapping of mesh names to DeviceMesh objects.
@@ -289,11 +270,6 @@ def parallelize_model(
     del pp_loss_fn
     del parallel_dims_img4
 
-    uses_internvit = model.config.vision_encoder in [
-        "internvit-6b-448px-v2.5",
-        "internvit-300m-448px-v2.5",
-    ]
-
     parallelism_config = model.config.training
     assert (
         model.config.n_routed_experts % parallelism_config.expert_parallel_degree == 0
@@ -303,7 +279,7 @@ def parallelize_model(
     )
     assert (
         parallelism_config.tensor_parallel_degree == 1
-    ), "Tensor parallelism not support for VLM DeepSeek model"
+    ), "Tensor parallelism not support for DeepSeek model"
 
     if parallel_dims.cp_enabled:
         apply_cp(model, meshes["default"]["cp"], parallel_dims)
@@ -312,8 +288,8 @@ def parallelize_model(
         assert "moe" in meshes
         apply_ep(model, meshes["moe"]["ep"])
 
-    apply_ac(model, uses_internvit)
+    apply_ac(model)
 
-    apply_fsdp(model, meshes, parallel_dims, uses_internvit)
+    apply_fsdp(model, meshes, parallel_dims)
 
     return None, None

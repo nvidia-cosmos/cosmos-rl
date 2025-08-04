@@ -66,6 +66,5 @@ def init_meshes(
     local_rank = int(os.getenv("LOCAL_RANK", 0))
     device = torch.device(f"{device_type}:{local_rank}")
     device_module.set_device(device)
-    # TODO: this does not work yet!
-    meshes = parallel_dims.build_meshes(device_type=device_type)
+    meshes = parallel_dims.build_meshes_with_ep(device_type=device_type)
     return meshes, parallel_dims, device

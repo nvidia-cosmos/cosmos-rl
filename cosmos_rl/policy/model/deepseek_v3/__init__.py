@@ -341,7 +341,7 @@ class DeepseekV3MoEModel(BaseModel):
                 dcp_checkpoint_path
             )
             torch.distributed.checkpoint.save(
-                state_dict=self.state_dict(),
+                state_dict=self_state_dict,
                 storage_writer=fs_storage_writer,
             )
         else:

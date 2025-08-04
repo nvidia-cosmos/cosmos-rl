@@ -20,6 +20,7 @@ from cosmos_rl.policy.config import ParallelismConfig
 import contextlib
 from typing import Generator, Optional, List
 import torch
+import math
 import numpy
 import os
 
@@ -184,34 +185,26 @@ class ParallelDims:
                     f"ep({ep}) * tp({tp}) != WORLD_SIZE({self.world_size})"
                 )
 
+    def _build_mesh(self, device_type: str, dims: list[int], names: list[str]) -> DeviceMesh:
+        valid_dims = []
+        valid_names = []
+        for dim, name in zip(dims, names):
+            if dim > 1:
+                valid_dims.append(dim)
+                valid_names.append(name)
+
+        assert math.prod(valid_dims) == self.world_size, f"Invalid parallel dims: prod({valid_dims}) != WORLD_SIZE({self.world_size})"
+
+        logger.info(f"Building {len(valid_dims)}-D device mesh with {valid_names}, {valid_dims}")
+        return init_device_mesh(device_type, valid_dims, mesh_dim_names=valid_names)
+
     def build_mesh(self, device_type: str) -> DeviceMesh:
-        dims = []
-        names = []
-        for d, name in zip(
+        mesh = self._build_mesh(
+            device_type, 
             [self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp],
-            [
-                "pp",
-                "dp_replicate",
-                "dp_shard",
-                "cp",
-                "tp",
-            ],  # reverse order to apply N-dim prallel.
-        ):
-            if d > 1:
-                dims.append(d)
-                names.append(name)
-        return self._build_mesh(device_type, dims, names)
-
-    def _build_mesh(
-        self,
-        device_type: str,
-        dims: list[int],
-        names: list[str],
-    ) -> DeviceMesh:
-        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        names = tuple(names)
-        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
-
+            ["pp", "dp_replicate", "dp_shard", "cp", "tp"], # reverse order to apply N-dim prallel.
+        )
+        
         # Create all the submesh here to ensure all required process groups are
         # initialized:
         # Mesh for data loading (no communication on this mesh)
@@ -252,6 +245,19 @@ class ParallelDims:
 
         self.mesh = mesh
         return mesh
+
+    def build_meshes_with_ep(self, device_type: str) -> dict[str, DeviceMesh]:
+        meshes = {}
+        meshes["default"] = self.build_mesh(device_type)
+
+        if self.ep > 1:
+            meshes["moe"] = self._build_mesh(
+                device_type,
+                [self.pp, self.dp_shard_with_ep, self.ep],
+                ["pp", "dp_shard_with_ep", "ep"],
+            )
+
+        return meshes
 
     def get_rank_in_dim(self, mesh_dim_name: str, global_rank: int) -> int:
         if hasattr(self, "full_rank_info"):
