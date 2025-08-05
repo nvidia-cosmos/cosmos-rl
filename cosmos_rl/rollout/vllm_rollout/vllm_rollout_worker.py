@@ -1063,6 +1063,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 if not is_valid_prompt_for_current_weight_version:
                     # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
                     continue
+
+                # TODO(zjx): fix the completions type declare here.
                 prompts: List[Tuple[int, str, int]] = self._prompt_queue.get()
 
                 # Remove the weight version from the prompts
@@ -1137,11 +1139,19 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     and len(valid_completions) > 0
                 )
 
+                if self.rollout.rollout_config.multi_turn_config.enable:
+                    # always report the multi-turn completions to the controller
+                    should_report = True
+
                 if should_report:
                     url_suffix = COSMOS_API_ROLLOUT_SUFFIX
                     # only the first tp rank in the rollout replica will post the completion to the controller.
                     prompt_idxs = [prompt[0] for prompt in prompts]
-                    payloads = [prompt[1] for prompt in prompts]
+                    if self.rollout.rollout_config.multi_turn_config.enable:
+                        # because we set generated message in the payload, so we need to return the completions here.
+                        payloads = completions
+                    else:
+                        payloads = [prompt[1] for prompt in prompts]
 
                     response = RolloutRequest(
                         src_replica_name=self.replica_name,
