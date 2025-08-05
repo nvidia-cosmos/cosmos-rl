@@ -59,6 +59,7 @@ RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y redis-server
 
 ###################################################
+RUN add-apt-repository ppa:deadsnakes/ppa
 ## Install python
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
