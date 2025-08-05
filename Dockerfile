@@ -41,10 +41,7 @@ ENV PATH=/opt/gdrcopy/bin:$PATH
 RUN apt-get remove -y --purge --allow-change-held-packages \
     libnccl2 \
     libnccl-dev
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
-    && dpkg -i cuda-keyring_1.1-1_all.deb \
-    && rm cuda-keyring_1.1-1_all.deb \
-    && apt-get update -y \
+RUN apt-get update -y \
     && apt-get install -y libnccl2=${NCCL_VERSION} libnccl-dev=${NCCL_VERSION}
 
 ###################################################
