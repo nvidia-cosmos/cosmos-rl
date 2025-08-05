@@ -335,6 +335,11 @@ class GrpoConfig(BaseModel):
         "then rollout engine traffic will be throttled. ",
     )
 
+    fully_on_policy: bool = Field(
+        default=False,
+        description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
+    )
+
     min_filter_prefix_tokens: Optional[int] = Field(
         default=None,
         description="Minimum number of tokens to filter the prefix tokens for the rollouts inside the same group. "
@@ -514,6 +519,13 @@ class TrainingConfig(BaseModel):
             )
         if self.max_num_steps is not None and self.max_num_steps <= 0:
             raise ValueError("max_num_steps must be positive if specified")
+
+        if isinstance(self.train_policy, GrpoConfig):
+            if self.train_policy.fully_on_policy:
+                assert (
+                    self.sync_weight_interval == 1
+                ), "sync_weight_interval must be 1 when fully_on_policy is enabled"
+
         return self
 
 

@@ -166,6 +166,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         # CommandQueue queried from controller.
         self._command_queue: Queue[Command] = Queue()
         self._prompt_queue: Queue[List[List[int, str]]] = Queue()
+        self.current_weight_version = 0
 
         # if flashinfer config is not enabled, avoid importing flashinfer
         if self.config.rollout.vllm_use_flashinfer:
@@ -823,6 +824,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             logger.info("Finished broadcasting of parameters to all replicas.")
 
         current_step = broadcast_command.weight_step
+        if current_step is not None:
+            assert (
+                current_step >= self.current_weight_version
+            ), f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
+            self.current_weight_version = current_step
+
         if current_step is not None and current_step > 0:
             should_do_validation = self.config.train.enable_validation and (
                 current_step % self.config.train.validation_step == 0
@@ -842,6 +849,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     )
                     if not validation_queue.empty():
                         prompts = validation_queue.get()
+                        # For validation, we don't need to check the weight version
+                        # Remove the weight version from the prompts
+                        # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
+                        prompts = [(prompt[0], prompt[1]) for prompt in prompts]
                         completions: List[List[str]] = self.rollout.rollout_generation(
                             prompt_id_and_payload_list=prompts,
                             stream=self.inference_stream,
@@ -1044,7 +1055,20 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 continue
             else:
                 logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
-                prompts: List[Tuple[int, str]] = self._prompt_queue.get()
+
+                # Check if the prompt is valid for the current weight version
+                is_valid_prompt_for_current_weight_version = (
+                    self._prompt_queue.queue[0][0][2] <= self.current_weight_version
+                )
+                if not is_valid_prompt_for_current_weight_version:
+                    # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
+                    continue
+                prompts: List[Tuple[int, str, int]] = self._prompt_queue.get()
+
+                # Remove the weight version from the prompts
+                # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
+                prompts = [(prompt[0], prompt[1]) for prompt in prompts]
+
                 completions: List[List[str]] = self.rollout.rollout_generation(
                     prompt_id_and_payload_list=prompts,
                     stream=self.inference_stream,
@@ -1067,13 +1091,23 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         output_texts = []
                         for j in range(total_generation_count):
                             output_text = completion[j]
-                            if output_text == "":
-                                logger.warning(
-                                    f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
-                                )
-                                empty_generation_count += 1
-                            else:
-                                output_texts.append(output_text)
+                            # if output_text == "":
+                            #     logger.warning(
+                            #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                            #     )
+                            #     empty_generation_count += 1
+                            # else:
+                            #     output_texts.append(output_text)
+
+                            # Note: (jiaxinc)
+                            # We still need to upload the output text, even if it is empty. (replace empty with eos_token)
+                            # Because if fully synchronized mode is enabled, we need to make sure the expected
+                            # number of global_batch_size is reached at exact time.
+                            output_texts.append(
+                                output_text
+                                if output_text != ""
+                                else self.tokenizer.eos_token
+                            )
                         # Skip the output if there is one or zero non-empty completions
                         skip_output = (
                             total_generation_count - empty_generation_count

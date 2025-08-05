@@ -87,7 +87,7 @@ class OptimizersContainer(Optimizer, Generic[T]):
                 continue
             optimizer_kwargs_copy = deepcopy(optimizer_kwargs_i)
 
-            if optimizer_kwargs_copy["fused"]:
+            if optimizer_kwargs_copy.get("fused", False):
                 # Group the parameters by device mesh to do optimizer fusion.
                 parameters_by_mesh = collections.defaultdict(list)
                 for p in model.parameters():

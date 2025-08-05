@@ -36,6 +36,36 @@ import numpy as np
 from tqdm import tqdm
 
 
+class ReplicaScalingEnum(StrEnum):
+    """
+    Enum for replica scaling event.
+    """
+
+    REPLICA_SCALING_UP = "replica_scaling_up"
+    REPLICA_SCALING_DOWN = "replica_scaling_down"
+
+
+class ReplicaScalingLog:
+    event: ReplicaScalingEnum
+    replica_name: str
+    timestamp: int
+
+    def __init__(
+        self, event: ReplicaScalingEnum, replica_name: str, timestamp: int = None
+    ):
+        self.event = event
+        self.replica_name = replica_name
+        self.timestamp = timestamp if timestamp is not None else int(time.time())
+
+    @staticmethod
+    def up(replica: Replica):
+        return ReplicaScalingLog(ReplicaScalingEnum.REPLICA_SCALING_UP, replica.name)
+
+    @staticmethod
+    def down(replica: Replica):
+        return ReplicaScalingLog(ReplicaScalingEnum.REPLICA_SCALING_DOWN, replica.name)
+
+
 class PolicyStatus(StrEnum):
     """
     Enum for policy status.
@@ -61,6 +91,7 @@ class PolicyStatusManager:
 
     policy_replicas: Dict[str, Replica]
     policy_init_done: bool = False
+    replica_scaling_log: List[ReplicaScalingLog]
 
     # Global status
     remain_samples_num: int
@@ -78,6 +109,7 @@ class PolicyStatusManager:
         self.remain_samples_num = 0
         self.status = {}
         self.train_report_data = RollingDict(maxlen=20)
+        self.replica_scaling_log = []
 
         # Validation
         self.val_iters: Dict[int, Iterator] = {}
@@ -277,6 +309,7 @@ class PolicyStatusManager:
 
         replica = self.policy_replicas.pop(replica_name)
         self.status.pop(replica_name)
+        self.replica_scaling_log.append(ReplicaScalingLog.down(replica))
 
         if self.training_finished():
             # This policy replica is normally finished
@@ -840,10 +873,12 @@ class RolloutStatusManager:
 
     rollout_replicas: Dict[str, Replica]
     rollout_init_done: bool
+    replica_scaling_log: List[ReplicaScalingLog]
 
     def __init__(self):
         self.rollout_replicas = {}
         self.rollout_init_done = False
+        self.replica_scaling_log = []
 
     def setup(
         self,
@@ -936,6 +971,7 @@ class RolloutStatusManager:
         ), f"Replica {replica_name} not found in policy status manager"
 
         replica = self.rollout_replicas.pop(replica_name)
+        self.replica_scaling_log.append(ReplicaScalingLog.down(replica))
         if policy_status_manager.training_finished():
             # This policy replica is normally finished
             # Do not trigger rebuild mesh since everything is gonna be finished shortly
