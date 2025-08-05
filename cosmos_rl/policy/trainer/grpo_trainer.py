@@ -890,7 +890,7 @@ class GRPOTrainer(Trainer):
         logger.debug(f"[Policy] Train ack sent for global step {command.global_step}.")
         return command.replica_should_stop()
 
-    def execute_all_reduce(self):
+    def execute_all_reduce(self) -> float:
         """
         # Add nccl allreduce operations for all parameters and necessary states.
         """
@@ -908,26 +908,26 @@ class GRPOTrainer(Trainer):
             Compute the global grad norm on all parameters and then apply
             gradient clipping using the global grad norm.
             """
-            if self.config.train.optm_grad_norm_clip > 0:
-                # Must pass empty list even if model_part is None,
-                # GradNorm across pp stages will fail if some rank does not join the barrier
-                all_params = [
-                    p
-                    for m in [model for model in self.model_parts if model is not None]
-                    for p in m.parameters()
-                ]
-                dist_util.gradient_norm_clipping(
-                    all_params,
-                    self.config.train.optm_grad_norm_clip,
-                    foreach=True,
-                    pp_mesh=self.parallel_dims.mesh["pp"]
-                    if self.parallel_dims.pp_enabled
-                    else None,
-                )
+            # Must pass empty list even if model_part is None,
+            # GradNorm across pp stages will fail if some rank does not join the barrier
+            all_params = [
+                p
+                for m in [model for model in self.model_parts if model is not None]
+                for p in m.parameters()
+            ]
+            grad_norm = dist_util.gradient_norm_clipping(
+                all_params,
+                self.config.train.optm_grad_norm_clip,
+                foreach=True,
+                pp_mesh=self.parallel_dims.mesh["pp"]
+                if self.parallel_dims.pp_enabled
+                else None,
+                return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+            )
             self.optimizers.step()
             self.lr_schedulers.step()
             self.optimizers.zero_grad()
-        return True
+        return grad_norm
 
     async def fetch_command(self):
         # assert self.global_rank == 0, "Only rank 0 can fetch command"
@@ -1205,6 +1205,7 @@ class GRPOTrainer(Trainer):
 
         loss_sum = torch.tensor(0.0, device=self.device)
         kl_loss_sum = torch.tensor(0.0, device=self.device)
+        grad_norm_sum = torch.tensor(0.0, device=self.device)
         loss_count = 0
         is_computing_refs = [True, False] if need_compute_ref else [False]
         for is_computing_ref in is_computing_refs:
@@ -1476,11 +1477,11 @@ class GRPOTrainer(Trainer):
                                 == 0
                             ) and local_mini_step > 1:
                                 all_reduced = True
-                                self.execute_all_reduce()
+                                grad_norm_sum += self.execute_all_reduce()
                             else:
                                 all_reduced = False
                         if not is_computing_ref and not all_reduced:
-                            self.execute_all_reduce()
+                            grad_norm_sum += self.execute_all_reduce()
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()
@@ -1520,6 +1521,7 @@ class GRPOTrainer(Trainer):
                 if self.config.train.train_policy.kl_beta != 0.0:
                     report_data["train/kl_loss_avg"] = global_avg_kl_loss
                     report_data["train/kl_loss_max"] = global_max_kl_loss
+                report_data["train/grad_norm"] = grad_norm_sum.item()
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.

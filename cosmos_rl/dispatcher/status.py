@@ -661,6 +661,12 @@ class PolicyStatusManager:
                             for data in self.report_data_list
                         ]
                     )
+                    total_grad_norm = np.mean(
+                        [
+                            data.get("train/grad_norm", 0)
+                            for data in self.report_data_list
+                        ]
+                    )
                     train_step = self.report_data_list[0]["train_step"]
                     self.report_data_list = []
 
@@ -671,6 +677,7 @@ class PolicyStatusManager:
                         "train/iteration_time": total_iter_time_avg,
                         "train/kl_loss_avg": total_kl_loss_avg,
                         "train/kl_loss_max": total_kl_loss_max,
+                        "train/grad_norm": total_grad_norm,
                     }
 
                     self.train_report_data.setdefault(train_step, {}).update(
