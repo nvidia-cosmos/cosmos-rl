@@ -393,7 +393,11 @@ class ModelRegistry:
 
         with torch.device("meta"):
             with util.cosmos_default_dtype(
-                util.str2torch_dtype(config.train.param_dtype)
+                util.str2torch_dtype(
+                    config.train.master_dtype
+                    if config.train.master_dtype is not None
+                    else config.train.param_dtype
+                )
             ):
                 try:
                     model = model_cls.from_pretrained(

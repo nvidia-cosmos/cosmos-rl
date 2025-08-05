@@ -70,13 +70,13 @@ RUN pip install -U pip setuptools wheel packaging
 RUN pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
+
 RUN pip install \
     torchao==0.12.0 \
     vllm==0.10.0 \
     flash-attn==2.8.2 \
     https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl \
     -r /workspace/cosmos_rl/requirements.txt
-
 
 ###################################################
 FROM no-efa-base AS efa-base

@@ -17,7 +17,6 @@ import unittest
 
 import torch
 import torch.multiprocessing as mp
-from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
@@ -26,6 +25,7 @@ from cosmos_rl.utils.pynccl import (
     nccl_broadcast,
     nccl_allreduce,
 )
+from cosmos_rl.utils.pynccl_wrapper import ncclRedOpTypeEnum
 
 
 def setup_nccl_comm(rank, world_size, nccl_uid):
@@ -169,7 +169,7 @@ class TestNCCLAllreduce(unittest.TestCase):
             tensor = torch.ones(tensor_size, dtype=dtype, device=f"cuda:{rank}") * (
                 rank + 1
             )
-            op = HighAvailabilitylNccl.NCCL_REDUCE_OPS.get("sum")
+            op = ncclRedOpTypeEnum.from_torch(torch.distributed.ReduceOp.SUM)
             # Perform allreduce (sum)
             nccl_allreduce(tensor, tensor, op, comm_idx)
 
