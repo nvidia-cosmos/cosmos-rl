@@ -62,7 +62,7 @@ RUN apt-get update -qq && \
 ## Install python
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
-    python3.10 python3.10-dev python3.10-venv python3-pip python-is-python3
+    python3.12 python3.12-dev python3.12-venv python3-pip python-is-python3
 
 RUN pip install -U pip setuptools wheel packaging
 # even though we don't depend on torchaudio, vllm does. in order to
