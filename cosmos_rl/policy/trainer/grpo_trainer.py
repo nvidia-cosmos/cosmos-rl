@@ -1501,7 +1501,7 @@ class GRPOTrainer(Trainer):
                                     loss = loss / num_mini_batch
                                     per_token_loss = per_token_loss / num_mini_batch
                                     kl_loss = kl_loss / num_mini_batch
-                            
+
                                     loss.backward()
                                     loss_sum += per_token_loss.item()
                                     kl_loss_sum += kl_loss.item()
