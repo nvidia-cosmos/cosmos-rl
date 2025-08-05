@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import copy
 
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
 
@@ -30,6 +31,13 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.model import WeightMapper
+from cosmos_rl.tools.tools_use import ToolParser
+from cosmos_rl.dispatcher.data.packer.multi_turn import (
+    ConversationType,
+    add_tool_response_messages,
+    add_assistant_message,
+)
+from cosmos_rl.tools.tools_use import OpenAIFunctionToolSchema
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -39,6 +47,28 @@ def vllm_version_check(rollout_config: RolloutConfig):
             "Pipeline parallelism is not supported for vLLM < 0.9.0, current version is %s"
             % vllm_version
         )
+
+
+def update_conversation_wth_rollout_result(
+    conversation: ConversationType,
+    rollout_result: str,
+    tool_parser: ToolParser,
+    tools: list[OpenAIFunctionToolSchema],
+) -> ConversationType:
+    """
+    Update the conversation with the rollout result.
+
+    1. if the rollout result contains tool calls, add the tool response messages to the conversation
+    2. otherwise, add the assistant message to the conversation
+    """
+    content, function_calls = tool_parser.extract_tool_calls(rollout_result)
+
+    if function_calls:
+        conversation = add_tool_response_messages(conversation, function_calls)
+    else:
+        conversation = add_assistant_message(conversation, content)
+
+    return conversation
 
 
 class vLLMRollout(RolloutBase):
@@ -166,7 +196,7 @@ class vLLMRollout(RolloutBase):
                     apply_fp8_linear_patch(self.get_underlying_model())
 
     @torch.no_grad()
-    def rollout_generation(
+    def rollout_generation_single_turn(
         self,
         prompt_id_and_payload_list: List[Tuple[int, Any]],
         stream: torch.cuda.Stream,
@@ -222,6 +252,86 @@ class vLLMRollout(RolloutBase):
             traceback.print_exc()
             return []
         return response
+
+    @torch.no_grad()
+    def rollout_generation_multi_turn(
+        self,
+        prompt_id_and_payload_list: List[Tuple[int, Any]],
+        stream: torch.cuda.Stream,
+        data_packer: DataPacker,
+        sampling_params: SamplingParams,
+    ) -> List[Any]:
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+        stream = torch.cuda.current_stream() if stream is None else stream
+
+        def generation_multi_turn_for_one_payload(payload: Any) -> Any:
+            assistant_turn_count = 0
+            while (
+                assistant_turn_count
+                < self.rollout_config.multi_turn_config.max_assistant_turns
+            ):
+                # Pack the payloads into prompts for vllm.
+                prompts = [data_packer.get_rollout_input(payload)]
+                prompts = data_packer.rollout_collate_fn(prompts)
+
+                with torch.cuda.stream(stream):
+                    results = self.rollout_engine.generate(
+                        prompts=prompts,
+                        sampling_params=sampling_params,
+                        use_tqdm=False,
+                    )
+
+                # TODO(zjx): how to choose the assistant message?
+                # TODO(zjx): add tool_call support here.
+                payload = add_assistant_message(payload, results[0].outputs[0].text)
+
+                # check if the sequence length is reached the max_sequence_length
+                if (
+                    len(results[0].prompt_token_ids)
+                    + len(results[0].outputs[0].token_ids)
+                    > self.rollout_config.max_response_length
+                ):
+                    logger.warning(
+                        "[Rollout] The sequence length is reached the max_response_length, stop the multi-turn generation."
+                    )
+                    break
+
+                assistant_turn_count += 1
+
+            return payload
+
+        # List of completions per prompt.
+        # [
+        #   [completion_str, completion_str, ...],
+        #   [completion_str, completion_str, ...],
+        #   ...
+        # ]
+        response: List[Any] = []
+        for payload_list in prompt_id_and_payload_list:
+            response.append(
+                generation_multi_turn_for_one_payload(copy.deepcopy(payload_list[0]))
+            )
+
+        return response
+
+    def rollout_generation(
+        self,
+        prompt_id_and_payload_list: List[Tuple[int, Any]],
+        stream: torch.cuda.Stream,
+        data_packer: DataPacker,
+        sampling_params: SamplingParams,
+    ) -> List[List[str]]:
+        if self.rollout_config.multi_turn_config.enable:
+            return self.rollout_generation_multi_turn(
+                prompt_id_and_payload_list, stream, data_packer, sampling_params
+            )
+        else:
+            return self.rollout_generation_single_turn(
+                prompt_id_and_payload_list, stream, data_packer, sampling_params
+            )
 
     def get_underlying_model(self):
         """

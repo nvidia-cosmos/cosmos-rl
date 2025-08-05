@@ -743,6 +743,9 @@ class MultiTurnRolloutConfig(BaseModel):
     enable_thinking: bool = Field(
         default=False, description="Whether to enable thinking in multi-turn rollout."
     )
+    max_assistant_turns: int = Field(
+        default=100, description="Max assistant turn count for multi-turn rollout."
+    )
 
 
 class ValidationConfig(BaseModel):
