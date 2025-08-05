@@ -86,9 +86,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
                 + [0],
             )
         else:
-            # TODO(zjx): here we just simple add the completion to the sample
-            # later, we need 1. add_function_call_message, 2. add_assistant_message
-            sample += [{"role": "assistant", "content": completion}]
+            # ignore completion for multi-turn rollout, it already in the conversation
             input_ids, loss_mask = process_conversation_with_chat_template(
                 self.tokenizer,
                 sample,
