@@ -279,9 +279,9 @@ class GrpoConfig(BaseModel):
         "lower-bound specified in argument `epsilon`. Paper DAPO recommends `0.28`.",
     )
 
-    positive_nll_coef: float = Field(
-        default=0.0,
-        description="Coefficient for Positive Example LM Loss. Set to 0 to disable.",
+    positive_nll_coef: Optional[float] = Field(
+        default=None,
+        description="Coefficient for Positive Example LM Loss. Set a positive value to enable; None disables the feature.",
     )
 
     lower_bound_ratio: float = Field(

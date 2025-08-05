@@ -1166,7 +1166,7 @@ class GRPOTrainer(Trainer):
         advantages_list = [rollout.advantage for rollout in rollouts]
         # Optional Positive-NLL support: only compute flags when coefficient > 0
         pos_coef_global = self.config.train.train_policy.positive_nll_coef
-        if pos_coef_global > 0.0:
+        if pos_coef_global is not None and pos_coef_global > 0.0:
             rewards_list = [rollout.reward for rollout in rollouts]
             self._positive_flags_t = torch.tensor(
                 [1 if r > 0 else 0 for r in rewards_list],
@@ -1485,7 +1485,10 @@ class GRPOTrainer(Trainer):
                                     )
 
                                     # Positive Example LM Loss
-                                    if pos_coef_global > 0.0:
+                                    if (
+                                        pos_coef_global is not None
+                                        and pos_coef_global > 0.0
+                                    ):
                                         pos_flag_batch = self._positive_flags_t[i:end]
                                         pos_mask = pos_flag_batch.unsqueeze(
                                             1
@@ -1760,7 +1763,12 @@ def _swizzle_pp_grpo_forward(
 
     # Add Positive NLL if enabled and mask available
     pos_coef = config.train.train_policy.positive_nll_coef
-    if pos_coef > 0.0 and pos_token_mask is not None and pos_token_mask.any():
+    if (
+        pos_coef is not None
+        and pos_coef > 0.0
+        and pos_token_mask is not None
+        and pos_token_mask.any()
+    ):
         flat_mask = pos_token_mask[logprob_masks]
         l_nll = -current_per_token_logprobs[flat_mask].mean()
         loss = loss + pos_coef * l_nll
