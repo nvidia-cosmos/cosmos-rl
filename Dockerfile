@@ -7,12 +7,12 @@
 ARG COSMOS_RL_BUILD_MODE=efa
 
 ARG CUDA_VERSION=12.8.1
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS no-efa-base
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS no-efa-base
 
 ARG GDRCOPY_VERSION=v2.4.4
 ARG EFA_INSTALLER_VERSION=1.42.0
 ARG AWS_OFI_NCCL_VERSION=v1.16.0
-# NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2404/x86_64/
+# NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
 ARG NCCL_VERSION=2.26.2-1+cuda12.8
 
 ENV TZ=Etc/UTC
@@ -41,7 +41,10 @@ ENV PATH=/opt/gdrcopy/bin:$PATH
 RUN apt-get remove -y --purge --allow-change-held-packages \
     libnccl2 \
     libnccl-dev
-RUN apt-get update -y \
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb \
+    && rm cuda-keyring_1.1-1_all.deb \
+    && apt-get update -y \
     && apt-get install -y libnccl2=${NCCL_VERSION} libnccl-dev=${NCCL_VERSION}
 
 ###################################################
@@ -56,10 +59,15 @@ RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y redis-server
 
 ###################################################
+RUN apt-get install -qq -y software-properties-common
+RUN add-apt-repository ppa:deadsnakes/ppa
 ## Install python
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
-    python3.12 python3.12-dev python3.12-venv python3-pip python-is-python3
+    python3.12 python3.12-dev python3.12-venv
+## Create a virtual environment
+RUN python3.12 -m venv /opt/venv/cosmos_rl
+ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
 RUN pip install -U pip setuptools wheel packaging
 # even though we don't depend on torchaudio, vllm does. in order to
