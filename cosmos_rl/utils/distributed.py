@@ -213,6 +213,7 @@ def gradient_norm_clipping(
     error_if_nonfinite: bool = False,
     foreach: Optional[bool] = None,
     pp_mesh: Optional[DeviceMesh] = None,
+    return_norm_only: bool = False,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -299,9 +300,10 @@ def gradient_norm_clipping(
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
 
-    # Perform clipping on each mesh group
-    for mesh, params in parameters_by_mesh.items():
-        torch.nn.utils.clip_grads_with_norm_(params, max_norm, total_norm, foreach)
+    if not return_norm_only:
+        # Perform clipping on each mesh group
+        for mesh, params in parameters_by_mesh.items():
+            torch.nn.utils.clip_grads_with_norm_(params, max_norm, total_norm, foreach)
     return total_norm
 
 

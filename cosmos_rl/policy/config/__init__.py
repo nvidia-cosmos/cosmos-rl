@@ -279,6 +279,11 @@ class GrpoConfig(BaseModel):
         "lower-bound specified in argument `epsilon`. Paper DAPO recommends `0.28`.",
     )
 
+    positive_nll_coef: Optional[float] = Field(
+        default=None,
+        description="Coefficient for Positive Example LM Loss. Set a positive value to enable; None disables the feature.",
+    )
+
     lower_bound_ratio: float = Field(
         default=3.0,
         description="Lower-bound ratio for dual-clip.",
@@ -333,6 +338,11 @@ class GrpoConfig(BaseModel):
         description="Allowed outdated-async steps for rollout engine. "
         "If the number of left pending rollouts is larger than the `allowed_outdated_steps * n_policy_replicas * train_batch_per_replica`, "
         "then rollout engine traffic will be throttled. ",
+    )
+
+    fully_on_policy: bool = Field(
+        default=False,
+        description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
     )
 
     min_filter_prefix_tokens: Optional[int] = Field(
@@ -514,6 +524,13 @@ class TrainingConfig(BaseModel):
             )
         if self.max_num_steps is not None and self.max_num_steps <= 0:
             raise ValueError("max_num_steps must be positive if specified")
+
+        if isinstance(self.train_policy, GrpoConfig):
+            if self.train_policy.fully_on_policy:
+                assert (
+                    self.sync_weight_interval == 1
+                ), "sync_weight_interval must be 1 when fully_on_policy is enabled"
+
         return self
 
 
@@ -621,13 +638,13 @@ class ValidationConfig(BaseModel):
     )
 
     temperature: float = Field(
-        default=0.9, description="Temperature for sampling during validation."
+        default=0.0, description="Temperature for sampling during validation."
     )
     top_p: Optional[float] = Field(
         default=None, description="Top-p for sampling during validation."
     )
     top_k: Optional[int] = Field(
-        default=None, description="Top-k for sampling during validation."
+        default=1, description="Top-k for sampling during validation."
     )
     repetition_penalty: float = Field(
         default=1.0, description="Repetition penalty for sampling during validation."

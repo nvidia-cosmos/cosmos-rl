@@ -951,6 +951,7 @@ def compute_logprobs(
     input_ids_batch: torch.Tensor,  # [batch_size, max_len]
     logprob_masks: torch.Tensor,  # [batch_size, max_len],
     full_logits: torch.Tensor,  # [batch_size, max_len, vocab_size]
+    tokenizer,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the per-token log probabilities and advantages
@@ -974,6 +975,14 @@ def compute_logprobs(
     # select the effective logits
     effective_logits = full_logits[logprob_masks]  # [n_logprob_tokens, vocab_size]
     effective_input_ids = shifted_input_ids[logprob_masks]  # [n_logprob_tokens,]
+    # Compute sft cross entropy loss
+    # sft_loss = torch.nn.functional.cross_entropy(
+    #     effective_logits.view(-1, effective_logits.size(-1)),
+    #     effective_input_ids.view(-1),
+    #     reduction="mean",
+    # )
+    # print(f"[Policy] SFT loss: {sft_loss}, shape: {effective_input_ids.shape, effective_logits.shape}")
+
     masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
     cu_seqlens = torch.zeros(
         bsz + 1, dtype=torch.int32, device=full_logits.device

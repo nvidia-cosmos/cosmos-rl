@@ -890,7 +890,7 @@ class GRPOTrainer(Trainer):
         logger.debug(f"[Policy] Train ack sent for global step {command.global_step}.")
         return command.replica_should_stop()
 
-    def execute_all_reduce(self):
+    def execute_all_reduce(self) -> float:
         """
         # Add nccl allreduce operations for all parameters and necessary states.
         """
@@ -908,26 +908,26 @@ class GRPOTrainer(Trainer):
             Compute the global grad norm on all parameters and then apply
             gradient clipping using the global grad norm.
             """
-            if self.config.train.optm_grad_norm_clip > 0:
-                # Must pass empty list even if model_part is None,
-                # GradNorm across pp stages will fail if some rank does not join the barrier
-                all_params = [
-                    p
-                    for m in [model for model in self.model_parts if model is not None]
-                    for p in m.parameters()
-                ]
-                dist_util.gradient_norm_clipping(
-                    all_params,
-                    self.config.train.optm_grad_norm_clip,
-                    foreach=True,
-                    pp_mesh=self.parallel_dims.mesh["pp"]
-                    if self.parallel_dims.pp_enabled
-                    else None,
-                )
+            # Must pass empty list even if model_part is None,
+            # GradNorm across pp stages will fail if some rank does not join the barrier
+            all_params = [
+                p
+                for m in [model for model in self.model_parts if model is not None]
+                for p in m.parameters()
+            ]
+            grad_norm = dist_util.gradient_norm_clipping(
+                all_params,
+                self.config.train.optm_grad_norm_clip,
+                foreach=True,
+                pp_mesh=self.parallel_dims.mesh["pp"]
+                if self.parallel_dims.pp_enabled
+                else None,
+                return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+            )
             self.optimizers.step()
             self.lr_schedulers.step()
             self.optimizers.zero_grad()
-        return True
+        return grad_norm
 
     async def fetch_command(self):
         # assert self.global_rank == 0, "Only rank 0 can fetch command"
@@ -1105,7 +1105,10 @@ class GRPOTrainer(Trainer):
             "logprob_masks" in minibatch
         ), "logprob_masks is required for computing logprobs"
         return logprobs_computing(
-            minibatch["input_ids"], minibatch["logprob_masks"], full_logits
+            minibatch["input_ids"],
+            minibatch["logprob_masks"],
+            full_logits,
+            self.tokenizer,
         )
 
     @torch.no_grad()
@@ -1161,6 +1164,17 @@ class GRPOTrainer(Trainer):
         payloads_list = [rollout.payload for rollout in rollouts]
         completions_list = [rollout.completion for rollout in rollouts]
         advantages_list = [rollout.advantage for rollout in rollouts]
+        # Optional Positive-NLL support: only compute flags when coefficient > 0
+        pos_coef_global = self.config.train.train_policy.positive_nll_coef
+        if pos_coef_global is not None and pos_coef_global > 0.0:
+            rewards_list = [rollout.reward for rollout in rollouts]
+            self._positive_flags_t = torch.tensor(
+                [1 if r > 0 else 0 for r in rewards_list],
+                device=self.device,
+                dtype=torch.bool,
+            )
+        else:
+            self._positive_flags_t = None
         n_ignore_prefix_tokens_list = [
             rollout.n_ignore_prefix_tokens for rollout in rollouts
         ]
@@ -1202,6 +1216,7 @@ class GRPOTrainer(Trainer):
 
         loss_sum = torch.tensor(0.0, device=self.device)
         kl_loss_sum = torch.tensor(0.0, device=self.device)
+        grad_norm_sum = torch.tensor(0.0, device=self.device)
         loss_count = 0
         is_computing_refs = [True, False] if need_compute_ref else [False]
         for is_computing_ref in is_computing_refs:
@@ -1338,6 +1353,15 @@ class GRPOTrainer(Trainer):
                                     [is_computing_ref] * mini_batch_size,
                                     dtype=torch.bool,
                                 )
+                                # Positive flags for Positive-NLL loss (only if coef >0)
+                                if self._positive_flags_t is not None:
+                                    is_pos_cpu = (
+                                        self._positive_flags_t[i:end]
+                                        .unsqueeze(1)
+                                        .expand(-1, 1)
+                                        .int()
+                                    )
+                                    user_mini_batch["positive_flags"] = is_pos_cpu
 
                                 pp_first_stage = self.parallel_dims.pp_coord[0] == 0
                                 # Pipeline Parallel forward / backward inside step() call
@@ -1354,6 +1378,8 @@ class GRPOTrainer(Trainer):
                                     user_mini_batch["is_computing_ref"] = (
                                         is_computing_ref_cpu
                                     )
+                                    if self._positive_flags_t is not None:
+                                        user_mini_batch["positive_flags"] = is_pos_cpu
                                 if pp_first_stage or pp_last_stage:
                                     # First/Last stage: pass all inputs
                                     kwargs = {}
@@ -1457,9 +1483,28 @@ class GRPOTrainer(Trainer):
                                         self.config,
                                         logprob_masks,
                                     )
+
+                                    # Positive Example LM Loss
+                                    if (
+                                        pos_coef_global is not None
+                                        and pos_coef_global > 0.0
+                                    ):
+                                        pos_flag_batch = self._positive_flags_t[i:end]
+                                        pos_mask = pos_flag_batch.unsqueeze(
+                                            1
+                                        ).expand_as(logprob_masks)
+                                        pos_token_mask = pos_mask & logprob_masks
+                                        if pos_token_mask.any():
+                                            flat_mask = pos_token_mask[logprob_masks]
+                                            l_nll = -current_per_token_logprobs[
+                                                flat_mask
+                                            ].mean()
+                                            loss = loss + pos_coef_global * l_nll
+
                                     loss = loss / num_mini_batch
                                     per_token_loss = per_token_loss / num_mini_batch
                                     kl_loss = kl_loss / num_mini_batch
+
                                     loss.backward()
                                     loss_sum += per_token_loss.item()
                                     kl_loss_sum += kl_loss.item()
@@ -1471,14 +1516,13 @@ class GRPOTrainer(Trainer):
                                 local_mini_step
                                 % int(os.environ.get("COSMOS_GRPO_STEP_INTERVAL", 10))
                                 == 0
-                            ):
-                                self.execute_all_reduce()
-                        if not is_computing_ref and (
-                            local_mini_step
-                            % int(os.environ.get("COSMOS_GRPO_STEP_INTERVAL", 10))
-                            != 0
-                        ):
-                            self.execute_all_reduce()
+                            ) and local_mini_step > 1:
+                                all_reduced = True
+                                grad_norm_sum += self.execute_all_reduce()
+                            else:
+                                all_reduced = False
+                        if not is_computing_ref and not all_reduced:
+                            grad_norm_sum += self.execute_all_reduce()
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()
@@ -1518,6 +1562,7 @@ class GRPOTrainer(Trainer):
                 if self.config.train.train_policy.kl_beta != 0.0:
                     report_data["train/kl_loss_avg"] = global_avg_kl_loss
                     report_data["train/kl_loss_max"] = global_max_kl_loss
+                report_data["train/grad_norm"] = grad_norm_sum.item()
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.
@@ -1604,6 +1649,7 @@ def _swizzle_pp_grpo_forward(
     loss_scaling = kwargs.pop("loss_scaling")
     is_computing_ref = kwargs.pop("is_computing_ref")
     advantages = kwargs.pop("advantages")
+    positive_flags = kwargs.pop("positive_flags", None)
 
     micro_batch_id = micro_batch_ids[0].item()
     mini_batch_id = mini_batch_ids[0].item()
@@ -1648,6 +1694,12 @@ def _swizzle_pp_grpo_forward(
     )
     logprob_masks = user_input["logprob_masks"]
     current_advantages = logprob_masks * advantages
+
+    if positive_flags is not None:
+        pos_mask = positive_flags.bool().expand_as(logprob_masks)
+        pos_token_mask = pos_mask & logprob_masks
+    else:
+        pos_token_mask = None
 
     if is_computing_ref:
         if trainer.ref_per_token_logps[mini_batch_id] is not None:
@@ -1708,5 +1760,17 @@ def _swizzle_pp_grpo_forward(
         config,
         logprob_masks,
     )
+
+    # Add Positive NLL if enabled and mask available
+    pos_coef = config.train.train_policy.positive_nll_coef
+    if (
+        pos_coef is not None
+        and pos_coef > 0.0
+        and pos_token_mask is not None
+        and pos_token_mask.any()
+    ):
+        flat_mask = pos_token_mask[logprob_masks]
+        l_nll = -current_per_token_logprobs[flat_mask].mean()
+        loss = loss + pos_coef * l_nll
 
     return loss.unsqueeze(0) * loss_scaling

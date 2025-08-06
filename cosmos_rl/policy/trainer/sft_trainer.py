@@ -651,25 +651,20 @@ class SFTTrainer(Trainer):
                 Compute the global grad norm on all parameters and then apply
                 gradient clipping using the global grad norm.
                 """
-                grad_norm = None
-                if self.config.train.optm_grad_norm_clip > 0:
-                    # Must pass empty list even if model_part is None,
-                    # GradNorm across pp stages will fail if some rank does not join the barrier
-                    all_params = [
-                        p
-                        for m in [
-                            model for model in self.model_parts if model is not None
-                        ]
-                        for p in m.parameters()
-                    ]
-                    grad_norm = dist_util.gradient_norm_clipping(
-                        all_params,
-                        self.config.train.optm_grad_norm_clip,
-                        foreach=True,
-                        pp_mesh=self.parallel_dims.mesh["pp"]
-                        if self.parallel_dims.pp_enabled
-                        else None,
-                    )
+                all_params = [
+                    p
+                    for m in [model for model in self.model_parts if model is not None]
+                    for p in m.parameters()
+                ]
+                grad_norm = dist_util.gradient_norm_clipping(
+                    all_params,
+                    self.config.train.optm_grad_norm_clip,
+                    foreach=True,
+                    pp_mesh=self.parallel_dims.mesh["pp"]
+                    if self.parallel_dims.pp_enabled
+                    else None,
+                    return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+                )
 
                 self.optimizers.step()
                 self.lr_schedulers.step()
