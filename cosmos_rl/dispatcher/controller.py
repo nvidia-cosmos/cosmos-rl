@@ -452,7 +452,7 @@ class Controller:
         current_fetch_count = len(prompt_id_and_payload_list)
         if (
             (not is_validation)
-            and self.config.train.train_policy.fully_on_policy
+            and self.config.train.train_policy.on_policy
             and len(self.rollout_status_manager.replica_scaling_log) == 0
         ):
             # Fully Synchronized mode is enabled, we need to tag the prompt with specific weight-version

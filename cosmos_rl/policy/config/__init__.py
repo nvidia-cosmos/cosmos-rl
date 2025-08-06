@@ -340,7 +340,7 @@ class GrpoConfig(BaseModel):
         "then rollout engine traffic will be throttled. ",
     )
 
-    fully_on_policy: bool = Field(
+    on_policy: bool = Field(
         default=False,
         description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
     )
@@ -526,10 +526,10 @@ class TrainingConfig(BaseModel):
             raise ValueError("max_num_steps must be positive if specified")
 
         if isinstance(self.train_policy, GrpoConfig):
-            if self.train_policy.fully_on_policy:
+            if self.train_policy.on_policy:
                 assert (
                     self.sync_weight_interval == 1
-                ), "sync_weight_interval must be 1 when fully_on_policy is enabled"
+                ), "sync_weight_interval must be 1 when on_policy is enabled"
 
         return self
 
