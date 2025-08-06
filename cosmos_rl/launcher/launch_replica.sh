@@ -90,10 +90,10 @@ set_env "TORCH_CPP_LOG_LEVEL" "ERROR"
 
 if [ "$TYPE" == "rollout" ]; then
   DEFAULT_MODULE="cosmos_rl.rollout.rollout_entrance"
-  set_env "COSMOS_ROLE" "Rollout"
+  export COSMOS_ROLE="Rollout"
 elif [ "$TYPE" == "policy" ]; then
   DEFAULT_MODULE="cosmos_rl.policy.train"
-  set_env "COSMOS_ROLE" "Policy"
+  export COSMOS_ROLE="Policy"
 else
   echo "Error: Invalid --type value '$TYPE'. Must be 'rollout' or 'policy'."
   print_help
