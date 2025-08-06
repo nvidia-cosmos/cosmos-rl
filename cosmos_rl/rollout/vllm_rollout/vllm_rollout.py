@@ -284,9 +284,9 @@ class vLLMRollout(RolloutBase):
                         use_tqdm=False,
                     )
 
-                # TODO(zjx): how to choose the assistant message?
-                # TODO(zjx): add tool_call support here.
-                payload = add_assistant_message(payload, results[0].outputs[0].text)
+                payload = data_packer.extend_conversation(
+                    payload, results[0].outputs[0].text
+                )
 
                 # check if the sequence length is reached the max_sequence_length
                 if (
