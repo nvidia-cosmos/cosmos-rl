@@ -82,6 +82,7 @@ LLMs
 - **Mistral**
 - **Gemma**
 - **Phi**
+- **GPT-OSS**
 
 VLMs
 ~~~~
