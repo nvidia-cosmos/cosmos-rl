@@ -136,6 +136,7 @@ class HFLLMModel(BaseModel):
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
+        revision: Optional[str] = None,
     ):
         """
         Load weights from a HuggingFace model.
@@ -147,7 +148,7 @@ class HFLLMModel(BaseModel):
         """
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
         model_with_weights = AutoModelForCausalLM.from_pretrained(
-            model_name_or_path
+            model_name_or_path, revision=revision
         ).to(device)
         state_dict = model_with_weights.state_dict()
         self_state_dict = self.model.state_dict()

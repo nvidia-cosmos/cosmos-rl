@@ -89,7 +89,7 @@ def write_json_file(data, file_path):
         json.dump(data, json_file, indent=4)
 
 
-def resolve_model_path(model_path: str) -> str:
+def resolve_model_path(model_path: str, revision: Optional[str] = None) -> str:
     if not os.path.exists(model_path.replace(":", "/")):
         if ":" in model_path:
             if model_path.count(":") > 1:
@@ -123,6 +123,7 @@ def resolve_model_path(model_path: str) -> str:
             try:
                 model_path = retry(snapshot_download)(
                     model_path,
+                    revision=revision,
                     token=os.environ.get("HF_TOKEN"),
                     cache_dir=os.environ.get(
                         "HF_HOME",

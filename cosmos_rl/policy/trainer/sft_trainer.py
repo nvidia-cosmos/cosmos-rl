@@ -332,11 +332,17 @@ class SFTTrainer(Trainer):
                     f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                 )
                 self.model.load_hf_weights(
-                    config.policy.model_name_or_path, parallel_dims, self.device
+                    config.policy.model_name_or_path,
+                    parallel_dims,
+                    self.device,
+                    revision=config.policy.model_revision,
                 )
         else:
             self.model.load_hf_weights(
-                config.policy.model_name_or_path, parallel_dims, self.device
+                config.policy.model_name_or_path,
+                parallel_dims,
+                self.device,
+                revision=config.policy.model_revision,
             )
         self.model.train()
 

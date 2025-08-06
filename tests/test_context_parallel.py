@@ -235,6 +235,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
         loaded_config.policy.model_name_or_path,
         parallel_dims=parallel_dims,
         device=device,
+        revision=loaded_config.policy.model_revision,
     )
 
     # Now we get the input ids for each rank.
@@ -317,6 +318,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
         loaded_config.policy.model_name_or_path,
         parallel_dims=parallel_dims,
         device=device,
+        revision=loaded_config.policy.model_revision,
     )
 
     # run the normal inference

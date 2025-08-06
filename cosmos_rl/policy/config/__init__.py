@@ -577,6 +577,10 @@ class PolicyConfig(BaseModel):
         default="Qwen/Qwen2.5-VL-7B-Instruct",
         description="The model name or path, compatible with huggingface model name or local path",
     )
+    model_revision: Optional[str] = Field(
+        default=None,
+        description="The revision of the model to use",
+    )
     model_max_length: int = Field(
         default=4096,
         description="The maximum length for training, longer than this will be ignored for training stability",

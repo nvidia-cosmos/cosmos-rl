@@ -351,6 +351,7 @@ class GRPOTrainer(Trainer):
             self.config.policy.model_name_or_path,
             self.parallel_dims,
             self.device,
+            revision=self.config.policy.model_revision,
         )
         self.model.train()
         self.model_ready = True

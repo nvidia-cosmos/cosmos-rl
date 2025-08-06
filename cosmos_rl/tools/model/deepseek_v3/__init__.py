@@ -978,6 +978,7 @@ class DeepseekV3MoEModel(BaseModel):
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
+        revision: Optional[str] = None,
     ):
         """
         Load weights from a HuggingFace model.
@@ -989,7 +990,7 @@ class DeepseekV3MoEModel(BaseModel):
         """
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
-        model_path = resolve_model_path(model_name_or_path)
+        model_path = resolve_model_path(model_name_or_path, revision=revision)
         safetensors_files = [
             f for f in os.listdir(model_path) if f.endswith(".safetensors")
         ]
