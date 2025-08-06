@@ -19,6 +19,7 @@ from typing import List, Tuple, Dict, Any
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils import util
 from transformers import AutoConfig
+from cosmos_rl.utils.logging import logger
 
 
 class HFLLMWeightMapper(WeightMapper):
@@ -31,6 +32,17 @@ class HFLLMWeightMapper(WeightMapper):
 
     def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
         # Happen to be the same as policy name mapping.
+        # FIXME: (huik) Please adapt this logic to general.
+        gpt_oss_rename_mapping = {
+            # Please do not change the order of the keys.
+            "attn.norm.weight": "input_layernorm.weight",
+            "attn": "self_attn",
+            "mlp.norm.weight": "post_attention_layernorm.weight",
+            "embedding": "embed_tokens",
+        }
+        for key, value in gpt_oss_rename_mapping.items():
+            if key in rollout_weight_name:
+                return rollout_weight_name.replace(key, value)
         return self.policy_map_local_key_to_hf_key(rollout_weight_name)
 
     def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
@@ -61,6 +73,7 @@ class HFLLMWeightMapper(WeightMapper):
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
+            logger.info(f"[Rollout] compatible_key: {param_name=} {compatible_key=}")
             # print(f"[Rollout] compatible_key: {param_name=} {compatible_key=}")
             if "qkv_proj" in compatible_key:
                 # must be inplace slicing.

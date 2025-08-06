@@ -621,6 +621,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 seed=self.config.rollout.seed,
                 load_format=load_format,
             )
+            model = self.get_underlying_model()
+            for name, module in model.named_modules():
+                if hasattr(module, "quant_method"):
+                    logger.info(
+                        f"Found quant_method in {name}: {type(module.quant_method)}"
+                    )
             _patch_vllm_rollout_locked_step(
                 self.rollout,
                 self.consume_command,
