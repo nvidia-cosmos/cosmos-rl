@@ -91,7 +91,7 @@ if [ "$TYPE" == "rollout" ]; then
   DEFAULT_MODULE="cosmos_rl.rollout.rollout_entrance"
   export COSMOS_ROLE="Rollout"
   if [ "$BACKEND" == "trtllm" ]; then
-    LAUNCH_BINARY="python"
+    LAUNCH_BINARY="mpirun"
   fi
 elif [ "$TYPE" == "policy" ]; then
   DEFAULT_MODULE="cosmos_rl.policy.train"
@@ -130,6 +130,14 @@ elif [ "$BACKEND" == "trtllm" ]; then
   COSMOS_LOCAL_WORLD_SIZE=$((NGPU))
   export COSMOS_LOCAL_WORLD_SIZE
   export COSMOS_RDZV_ENDPOINT="$RDZV_ENDPOINT"
+
+  # Set np to 1 just for trtllm to get OMP_* entvironments.
+  LAUNCH_CMD+=(
+    -np 1
+    --allow-run-as-root
+    --oversubscribe
+    python
+  )
 
   echo "Launching trtllm as the backend, ignoring:
           --log-rank flags."

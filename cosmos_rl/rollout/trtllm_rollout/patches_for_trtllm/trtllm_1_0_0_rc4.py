@@ -91,9 +91,6 @@ def patch_trtllm_llm_args():
     tensorrt_llm.LlmArgs = CosmosLLMArgs
     llm_trllm.LlmArgs = CosmosLLMArgs
     llm_trllm.TorchLlmArgs = CosmosLLMArgs
-    logger.info(
-        f"[Rollout] patched tllm_llm_args: {tllm_llm_args.TorchLlmArgs.model_fields.keys()}"
-    )
 
 
 patch_trtllm_llm_args()

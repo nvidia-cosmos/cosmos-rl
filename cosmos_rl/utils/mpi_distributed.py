@@ -104,5 +104,5 @@ def init_distributed_with_MPI():
     )
 
     logger.info(
-        f"[Rollout] init torch distributed environment inside trtllm worker with tcp://{rdzv_host}:{rdzv_port}."
+        f"[Rollout] init torch distributed environment inside trtllm worker with tcp://{rdzv_host}:{rdzv_port} in rank {local_rank}."
     )

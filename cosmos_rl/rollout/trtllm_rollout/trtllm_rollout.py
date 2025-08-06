@@ -99,12 +99,6 @@ class TRTLLM_Rollout(RolloutBase):
         elif trtllm_version == "1.0.0rc4":
             kwargs["disable_overlap_scheduler"] = True
 
-        from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
-        from tensorrt_llm import LlmArgs
-
-        logger.info(f"[Rollout]1  LlmArgs: {TorchLlmArgs.model_fields.keys()}")
-        logger.info(f"[Rollout]1 LlmArgs: {LlmArgs.model_fields.keys()}")
-
         self.rollout_engine = LLM(
             model=model_path,
             tensor_parallel_size=tp_size,

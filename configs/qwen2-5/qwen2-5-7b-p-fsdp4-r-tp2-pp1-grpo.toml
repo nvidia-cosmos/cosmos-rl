@@ -28,6 +28,7 @@ n_generation = 16
 batch_size = 8
 quantization = "none"
 max_response_length = 1024
+enforce_eager=false
 
 
 [policy]
@@ -62,7 +63,7 @@ save_freq = 30000
 save_mode = "async"
 
 [rollout.parallelism]
-n_init_replicas = 1
+n_init_replicas = 2
 tp_size = 2
 cp_size = 1
 dp_shard_size = 1
