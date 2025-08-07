@@ -53,13 +53,10 @@ def parallelize(
         not parallel_dims.cp_enabled
     ), "Context parallelism is not supported for HFModel"
     assert pp_size == 1, "Pipeline parallelism is not supported for HFModel"
+    assert not config.train.compile, "Compile is not supported for HFModel"
 
     if config.policy.model_gradient_checkpointing:
         apply_ac(model)
-
-    # turn on per-TransformerBlock compile after AC wrapping and before FSDP
-    if config.train.compile:
-        apply_compile(model)
 
     # apply FSDP or HSDP
     if parallel_dims.dp_shard_enabled:
@@ -91,8 +88,8 @@ def parallelize(
         apply_ddp(
             model,
             world_mesh,
-            enable_compile=config.train.compile,
-            enable_compiled_autograd=config.train.compile,
+            enable_compile=False,
+            enable_compiled_autograd=False,
         )
 
     return None, None
@@ -157,19 +154,6 @@ def apply_ac(model: nn.Module):
             model.vision_layers.register_module(layer_id, transformer_block)
 
     logger.info("Applied activation checkpointing to the model")
-
-
-def apply_compile(model: nn.Module, fullgraph: bool = True):
-    """
-    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-    repeated structure. Alternatively one can compile the whole model (after applying DP).
-    """
-    for layer_id, transformer_block in model.layers.named_children():
-        # transformer_block = torch.compile(transformer_block, fullgraph=True)
-        transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
-        model.layers.register_module(layer_id, transformer_block)
-
-    logger.info("Each TransformerBlock compiled with torch.compile")
 
 
 def apply_fsdp(
