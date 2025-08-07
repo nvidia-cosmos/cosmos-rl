@@ -15,9 +15,9 @@
 
 from typing import List, Optional
 
-from cosmos_rl.tools.tools_use.base_tool import BaseTool
-from cosmos_rl.tools.tools_use.base_tool_parser import ToolParser
-from cosmos_rl.tools.tools_use import ToolResponse
+from .base_tool import BaseTool
+from .base_tool_parser import ToolParser
+from .schema import ToolResponse
 
 
 class ToolAgent:

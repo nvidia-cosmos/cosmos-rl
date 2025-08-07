@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 from transformers.utils import get_json_schema
 
-from cosmos_rl.tools.tools_use import OpenAIFunctionToolSchema, ToolResponse
+from .schema import OpenAIFunctionToolSchema, ToolResponse
 
 
 class BaseTool(ABC):
