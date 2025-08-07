@@ -664,6 +664,7 @@ class Qwen3MoE(BaseModel):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor = None,
+        interested_tokens: Optional[torch.BoolTensor] = None,
         *args,
         **kwargs,
     ):
@@ -681,6 +682,11 @@ class Qwen3MoE(BaseModel):
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
+            if interested_tokens is not None:
+                assert not isinstance(
+                    h, torch.distributed.tensor.DTensor
+                ), "interested_tokens must be a local tensor"
+                h = h[interested_tokens]
             h = self.norm(h)
             if not self.tie_embed_tokens:
                 output = self.lm_head(h)
