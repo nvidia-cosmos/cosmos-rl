@@ -16,7 +16,7 @@
 from typing import Tuple
 from abc import ABC, abstractmethod
 
-from cosmos_rl.tools.tools_use import OpenAIFunctionCallSchema
+from .schema import OpenAIFunctionCallSchema
 
 
 class ToolParser(ABC):
