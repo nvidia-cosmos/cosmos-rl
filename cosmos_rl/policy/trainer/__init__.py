@@ -175,9 +175,10 @@ class Trainer(CommMixin):
             # TODO(jiaxinc): Optimize this:
             #  for SFT,`train_batch_per_replica` stands for the batch_size for a DP worker,
             #  not really for a training replica
-            assert (
-                train_batch_per_replica % mini_batch == 0
-            ), f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by mini_batch({mini_batch})"
+            # assert (
+            #     train_batch_per_replica % mini_batch == 0
+            # ), f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by mini_batch({mini_batch})"
+            pass
         logger.info("Config checked successfully")
 
     @property

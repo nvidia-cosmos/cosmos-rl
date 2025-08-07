@@ -558,6 +558,9 @@ class ParallelismConfig(BaseModel):
         description="Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.",
         choices=[1],
     )
+    enable_deep_ep: bool = Field(
+        default=False, description="Whether to enable DeepEP for Expert parallelism."
+    )
 
     @property
     def world_size(self):
