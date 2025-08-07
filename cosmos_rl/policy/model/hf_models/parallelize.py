@@ -250,14 +250,6 @@ def apply_ddp(
     enable_compile: bool,
     enable_compiled_autograd: bool,
 ):
-    if enable_compile:
-        if enable_compiled_autograd:
-            torch._dynamo.config.optimize_ddp = (
-                "python_reducer_without_compiled_forward"
-            )
-        else:
-            torch._dynamo.config.optimize_ddp = "ddp_optimizer"
-
     replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
 
     logger.info("Applied DDP to the model")
