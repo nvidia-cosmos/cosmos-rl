@@ -255,6 +255,19 @@ class vLLMRollout(RolloutBase):
         return qweight.t(), weight_scale
 
     def mxfp4_quantization(self, weight: torch.Tensor):
+        # https://github.com/vllm-project/vllm/pull/22259
+        # Note: vLLM use triton kernel for mxfp4 moe when ep not specified.
+        # We temporarily support this case first.
+        # Reference: https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L493
+
+        # Note: For mxfp4 quantizaiton, vLLM will load original mxfp4 weight from hf fp4 weight, and do some post processing like padding and swizzle.
+        # So we have two phases for quantization:
+        # 1. Quantize the original bf16 weight sent by policy:
+        # We use: https://github.com/openai/gpt-oss/blob/d0a300a40d6502a1bdd73d18464f3d69440656e0/gpt_oss/triton/model.py#L302
+
+        # 2. Post process the quantized weight as vLLM did for triton kernel:
+        # https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L173
+
         pass
 
     def model_param_map(self, weight_mapper: WeightMapper):

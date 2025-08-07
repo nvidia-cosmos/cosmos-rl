@@ -580,38 +580,63 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             tensors_to_check.clear()
 
             # here we got one full weight tensor sync done, if it is fp8 weight, we should do the quantization and check the numerical error.
-            if self.quantization_type == "fp8":
-                if inst_group_full_weight_name in self.vllm_hp_weight_map:
-                    weight_to_quantize = self.vllm_hp_weight_map[
-                        inst_group_full_weight_name
-                    ]  # [out_dim, in_dim]
-                    quantized_weight, weight_scale = self.rollout.fp8_quantization(
-                        weight_to_quantize
-                    )
-                    model_param_map = self.rollout.model_param_map(self.weight_mapper)
-                    vllm_native_weight = model_param_map[inst_group_full_weight_name]
+            if self.quantization_type is not None:
+                if self.quantization_type == "fp8":
+                    if inst_group_full_weight_name in self.vllm_hp_weight_map:
+                        weight_to_quantize = self.vllm_hp_weight_map[
+                            inst_group_full_weight_name
+                        ]  # [out_dim, in_dim]
+                        quantized_weight, weight_scale = self.rollout.fp8_quantization(
+                            weight_to_quantize
+                        )
+                        model_param_map = self.rollout.model_param_map(
+                            self.weight_mapper
+                        )
+                        vllm_native_weight = model_param_map[
+                            inst_group_full_weight_name
+                        ]
 
-                    # check weight sync
-                    if do_weight_sync_check:
-                        # allclose doesn't support fp8, promote it.
-                        bf16_vllm_native_weight = vllm_native_weight.to(torch.bfloat16)
-                        bf16_quantized_weight = quantized_weight.to(torch.bfloat16)
-                        if not torch.allclose(
-                            bf16_vllm_native_weight, bf16_quantized_weight
-                        ):
-                            raise ValueError(
-                                f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
+                        # check weight sync
+                        if do_weight_sync_check:
+                            # allclose doesn't support fp8, promote it.
+                            bf16_vllm_native_weight = vllm_native_weight.to(
+                                torch.bfloat16
                             )
-                    vllm_native_weight.copy_(quantized_weight)
-                    # get the scale key.
-                    scale_key = inst_group_full_weight_name.replace(
-                        ".weight", ".weight_scale"
-                    )
-                    scale_tensor = model_param_map[scale_key]
-                    assert (
-                        scale_tensor.shape == weight_scale.shape
-                    ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
-                    scale_tensor.copy_(weight_scale)
+                            bf16_quantized_weight = quantized_weight.to(torch.bfloat16)
+                            if not torch.allclose(
+                                bf16_vllm_native_weight, bf16_quantized_weight
+                            ):
+                                raise ValueError(
+                                    f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
+                                )
+                        vllm_native_weight.copy_(quantized_weight)
+                        # get the scale key.
+                        scale_key = inst_group_full_weight_name.replace(
+                            ".weight", ".weight_scale"
+                        )
+                        scale_tensor = model_param_map[scale_key]
+                        assert (
+                            scale_tensor.shape == weight_scale.shape
+                        ), f"scale_tensor.shape: {scale_tensor.shape}, weight_scale.shape: {weight_scale.shape}"
+                        scale_tensor.copy_(weight_scale)
+                elif self.quantization_type == "mxfp4":
+                    if inst_group_full_weight_name in self.vllm_hp_weight_map:
+                        # Weight to quantize:
+                        # [local_num_experts, 2* local_intermediate_size, hidden_size] for gate_up_proj
+                        # [local_num_experts, local_intermediate_size, hidden_size] for down_proj
+                        weight_to_quantize = self.vllm_hp_weight_map[
+                            inst_group_full_weight_name
+                        ]
+                        quantized_weight, weight_scale = (
+                            self.rollout.mxfp4_quantization(weight_to_quantize)
+                        )
+                        # The quantized version of the weight has been removed by vLLM internally.
+                        # https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L328
+                        # We can't get it from named_parameters.
+                        # FIXME: (lms) we have to find a way to get the final weight:
+                        # w13_weight_triton_tensor
+                        # w2_weight_triton_tensor
+                        # vllm_native_weight = ?
             else:
                 # For non-fp8 weights and fp8 not enabled cases, we just do nothing
                 pass

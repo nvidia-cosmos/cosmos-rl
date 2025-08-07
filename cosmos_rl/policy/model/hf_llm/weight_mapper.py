@@ -54,6 +54,7 @@ class HFLLMWeightMapper(WeightMapper):
                 return rollout_weight_name.replace("w13_bias", "gate_up_proj_bias")
             elif "w2_bias" in rollout_weight_name:
                 return rollout_weight_name.replace("w2_bias", "down_proj_bias")
+            # FIXME: (lms) sinks should be added later.
             else:
                 pass
 
