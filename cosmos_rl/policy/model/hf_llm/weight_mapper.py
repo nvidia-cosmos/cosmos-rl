@@ -32,17 +32,31 @@ class HFLLMWeightMapper(WeightMapper):
 
     def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
         # Happen to be the same as policy name mapping.
-        # FIXME: (huik) Please adapt this logic to general.
-        gpt_oss_rename_mapping = {
-            # Please do not change the order of the keys.
-            "attn.norm.weight": "input_layernorm.weight",
-            "attn": "self_attn",
-            "mlp.norm.weight": "post_attention_layernorm.weight",
-            "embedding": "embed_tokens",
-        }
-        for key, value in gpt_oss_rename_mapping.items():
-            if key in rollout_weight_name:
-                return rollout_weight_name.replace(key, value)
+        model_type = self.config.model_type
+        if model_type == "gpt_oss":
+            # Some special cases for GPT-OSS.
+            gpt_oss_rename_mapping = {
+                # Please do not change the order of the keys.
+                "attn.norm.weight": "input_layernorm.weight",
+                "attn": "self_attn",
+                "mlp.norm.weight": "post_attention_layernorm.weight",
+                "embedding": "embed_tokens",
+            }
+            for key, value in gpt_oss_rename_mapping.items():
+                if key in rollout_weight_name:
+                    return rollout_weight_name.replace(key, value)
+            # gate_up_proj
+            if "w13_weight" in rollout_weight_name:
+                return rollout_weight_name.replace("w13_weight", "gate_up_proj")
+            elif "w2_weight" in rollout_weight_name:
+                return rollout_weight_name.replace("w2_weight", "down_proj")
+            elif "w13_bias" in rollout_weight_name:
+                return rollout_weight_name.replace("w13_bias", "gate_up_proj_bias")
+            elif "w2_bias" in rollout_weight_name:
+                return rollout_weight_name.replace("w2_bias", "down_proj_bias")
+            else:
+                pass
+
         return self.policy_map_local_key_to_hf_key(rollout_weight_name)
 
     def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
@@ -73,23 +87,32 @@ class HFLLMWeightMapper(WeightMapper):
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            logger.info(f"[Rollout] compatible_key: {param_name=} {compatible_key=}")
-            # print(f"[Rollout] compatible_key: {param_name=} {compatible_key=}")
-            if "qkv_proj" in compatible_key:
-                # must be inplace slicing.
-                # split qkv weight
-                q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
-                    compatible_key, param
-                )
-                q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
-                k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
-                v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
-                vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                group_keys.append((q_proj_weight_key, q_weight.ndim))
-                vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                group_keys.append((k_proj_weight_key, k_weight.ndim))
-                vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                group_keys.append((v_proj_weight_key, v_weight.ndim))
+            logger.info(
+                f"[Rollout] compatible_key: {param_name=}, {compatible_key=}, shape: {param.shape}, dtype: {param.dtype}, device: {param.device}"
+            )
+            if "self_attn" in compatible_key:
+                # For QKV Proj in self attn
+                split_rules = [
+                    "qkv_proj",
+                    "qkv",
+                ]  # Please do not change the order of the keys.
+                for rule in split_rules:
+                    if rule in compatible_key:
+                        # must be inplace slicing.
+                        # split qkv weight
+                        q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
+                            compatible_key, param
+                        )
+                        q_proj_weight_key = compatible_key.replace(rule, "q_proj")
+                        k_proj_weight_key = compatible_key.replace(rule, "k_proj")
+                        v_proj_weight_key = compatible_key.replace(rule, "v_proj")
+
+                        vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
+                        group_keys.append((q_proj_weight_key, q_weight.ndim))
+                        vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
+                        group_keys.append((k_proj_weight_key, k_weight.ndim))
+                        vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
+                        group_keys.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in compatible_key:
                 # split gate and up proj
                 gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(

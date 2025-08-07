@@ -66,15 +66,6 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
 )
-from cosmos_rl.utils.fp8.fp8_util import (
-    IS_TORCH_COMPATIBLE_WITH_FP8,
-    MIN_TORCH_VERSION_FOR_FP8,
-)
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
-    cache_weight_of_quantized_module,
-    replace_weight_of_quantized_module,
-    post_process_view_map_for_fp8,
-)
 
 from vllm import SamplingParams
 import time
@@ -191,11 +182,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # determine the quantization type
         self.quantization_type = None
-        if self.config.rollout.quantization == "fp8":
-            self.quantization_type = "fp8"
-            assert (
-                IS_TORCH_COMPATIBLE_WITH_FP8
-            ), f"[Rollout] FP8 needs PyTorch >= {MIN_TORCH_VERSION_FOR_FP8}"
+        if self.config.rollout.quantization != "none":
+            self.quantization_type = self.config.rollout.quantization
 
         self.rollout: vLLMRollout = vLLMRollout(
             self.config,
@@ -229,6 +217,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             trust_remote_code=True,
         )
         model_type = hf_config.model_type
+        if self.quantization_type == "mxfp4":
+            assert (
+                model_type == "gpt_oss"
+            ), "[Rollout] Mxfp4 quantization is only supported for GPT-OSS now."
+
         if not ModelRegistry.check_model_type_supported(model_type):
             logger.warning(
                 f"[Rollout] Replica can not find {model_type} in weight mapper, use {constant.COSMOS_HF_MODEL_TYPES} model type instead, with replica name: {self.replica_name}"
@@ -278,6 +271,23 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         if self.quantization_type == "fp8":
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+                cache_weight_of_quantized_module,
+                replace_weight_of_quantized_module,
+            )
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+                post_process_view_map_for_fp8 as post_process_view_map_for_lowp,
+            )
+        elif self.quantization_type == "mxfp4":
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import (
+                cache_weight_of_quantized_module,
+                replace_weight_of_quantized_module,
+            )
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import (
+                post_process_view_map_for_mxfp4 as post_process_view_map_for_lowp,
+            )
+
+        if self.quantization_type is not None:
             promotion_dtype = util.str2torch_dtype(self.config.train.param_dtype)
             self.vllm_hp_weight_map, self.vllm_quantized_weight_map = (
                 cache_weight_of_quantized_module(
@@ -308,8 +318,17 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.recv_param_key_n_rank_list, key=lambda x: x[0]
         )
 
-        if self.quantization_type == "fp8":
-            self.vllm_weight_inplace_view_map = post_process_view_map_for_fp8(
+        local_shard_infos = ParallelTopoMapperGroup(
+            self.parallel_dims,
+            self.model_config,
+            is_policy=False,
+            underlying_model=self.get_underlying_model(),
+            weight_mapper=self.weight_mapper,
+        ).prepare_local_shard_infos(self.recv_param_key_n_rank_list, self.global_rank)
+
+        # this must be done after prepare_local_shard_infos
+        if self.quantization_type is not None:
+            self.vllm_weight_inplace_view_map = post_process_view_map_for_lowp(
                 self.vllm_weight_inplace_view_map
             )
             # Get vllm weight back into quantized.
@@ -318,14 +337,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.vllm_quantized_weight_map,
                 self.weight_mapper,
             )
-
-        local_shard_infos = ParallelTopoMapperGroup(
-            self.parallel_dims,
-            self.model_config,
-            is_policy=False,
-            underlying_model=self.get_underlying_model(),
-            weight_mapper=self.weight_mapper,
-        ).prepare_local_shard_infos(self.recv_param_key_n_rank_list, self.global_rank)
 
         self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
             local_shard_infos
@@ -557,6 +568,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 insts,
                 inst_dest_name,
             ) in tensors_to_check:
+                passed = torch.allclose(cloned_target_tensor, target_tensor)
+                logger.info(
+                    f"LMS: do weight sync check for {inst_dest_name}: cloned_target_tensor.shape: {cloned_target_tensor.shape}, target_tensor.shape: {target_tensor.shape}: {passed}, dtype: {cloned_target_tensor.dtype}, target_tensor.dtype: {target_tensor.dtype}"
+                )
+
                 if not torch.allclose(cloned_target_tensor, target_tensor):
                     raise ValueError(
                         f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
@@ -690,6 +706,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.policy_to_rollout_recv_insts = [
                     WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
                 ]
+
             except Exception as e:
                 raise RuntimeError(
                     f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."

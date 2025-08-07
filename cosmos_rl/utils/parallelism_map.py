@@ -26,6 +26,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     MergedColumnParallelLinear,
 )
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 
 from torch.nn.parameter import Parameter
@@ -823,6 +824,11 @@ class ParallelTopoMapper:
                             is_bias = True
                         elif part_name == "weight":
                             is_bias = False
+                        elif part_name == "w13_weight":
+                            is_bias = False
+                        elif part_name == "w2_weight":
+                            is_bias = False
+                        # FIXME: (lms) bias could also tp-ed?
                         else:
                             logger.warning(
                                 f"Part {part_name} is not a Parameter. Skipping."
@@ -871,6 +877,13 @@ class ParallelTopoMapper:
                     not is_bias
                 ), f"VocabParallelEmbedding {param_name} should not have bias."
                 dims_map["tp"] = output_dim
+            elif isinstance(part, FusedMoE):
+                if "w13_weight" in param_name:
+                    # FIXME: (lms) not use ep now. Add support for ep later.
+                    dims_map["tp"] = 1
+                elif "w2_weight" in param_name:
+                    # FIXME: (lms) not use ep now. Add support for ep later.
+                    dims_map["tp"] = 2
             else:
                 assert (
                     "Parallel" not in part.__class__.__name__

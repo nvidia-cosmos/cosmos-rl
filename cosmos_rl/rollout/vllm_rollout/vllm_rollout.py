@@ -254,6 +254,9 @@ class vLLMRollout(RolloutBase):
 
         return qweight.t(), weight_scale
 
+    def mxfp4_quantization(self, weight: torch.Tensor):
+        pass
+
     def model_param_map(self, weight_mapper: WeightMapper):
         if self._model_param_map:
             return self._model_param_map
