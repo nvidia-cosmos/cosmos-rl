@@ -828,12 +828,13 @@ class PolicyStatusManager:
             ):
                 self.validation_activate_dataloader(self.current_step)
 
-            for replica in arrived_replicas:
-                # Dispatch rollouts to policy replicas
-                for _ in range(items_count):
+            # Interleave-style data dispatch
+            for _ in range(items_count):
+                for replica in arrived_replicas:
                     rollout = self.rollout_buffer.get()
                     replica.put_rollout(rollout, self.redis_handler)
                     rollouts_of_this_step.append(rollout)
+            for replica in arrived_replicas:
                 command.DataFetchCommand.trigger(
                     replica=replica,
                     items_count=items_count,
