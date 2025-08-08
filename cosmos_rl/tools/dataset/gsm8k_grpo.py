@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import re
 from typing import Optional, Any, List, Dict
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
@@ -24,9 +24,23 @@ from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.utils.modelscope import modelscope_load_dataset
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.tools.tools_use import (
+    ToolAgent,
+    BaseTool,
+    OpenAIFunctionToolSchema,
+    ToolResponse,
+)
+from cosmos_rl.tools.tools_use.hermes_tool_parser import HermesToolParser
+from cosmos_rl.dispatcher.data.packer.multi_turn import (
+    ConversationType,
+    add_tool_response_messages,
+    add_assistant_message,
+)
 
 
 class GSM8kDataset(Dataset):
+    """TODO(zjx): we should refactor it with RLDataset."""
+
     def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
@@ -35,6 +49,7 @@ class GSM8kDataset(Dataset):
         """
         self.config = config
         self.tokenizer = tokenizer
+        self.apply_chat_template = not config.rollout.multi_turn_config.enable
         modelscope_dataset_if_enabled = modelscope_load_dataset(
             config.train.train_policy.dataset.name, subset_name="main", split="train"
         )
@@ -74,6 +89,10 @@ class GSM8kDataset(Dataset):
                 "content": f'{question} Let\'s think step by step and output the final answer after "####".',
             }
         ]
+
+        if not self.apply_chat_template:
+            return conversation
+
         prompt = self.tokenizer.apply_chat_template(
             conversation,
             tokenize=False,
@@ -126,6 +145,73 @@ def custom_reward_fn(
     # Add more reward functions here
     # ...
     return reward
+
+
+class GSM8kTool(BaseTool):
+    def __init__(self):
+        _tool_name = "calc_gsm8k_reward"
+        _tool_schema = OpenAIFunctionToolSchema.model_validate(
+            {
+                "type": "function",
+                "function": {
+                    "name": _tool_name,
+                    "description": "A tool for calculating the reward of gsm8k",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "answer": {
+                                "type": "string",
+                                "description": "The answer to the question",
+                            },
+                        },
+                        "required": ["answer"],
+                    },
+                },
+            }
+        )
+        super().__init__(_tool_name, _tool_schema)
+
+    def tool_context(self, groud_truth: str):
+        self.groud_truth = groud_truth
+        yield
+        self.groud_truth = None
+
+    def _extract_solution(solution_str, method="strict"):
+        assert method in ["strict", "flexible"]
+
+        if method == "strict":
+            # this also tests the formatting of the model
+            solution = re.search("#### (\\-?[0-9\\.\\,]+)", solution_str)
+            if solution is None:
+                final_answer = None
+            else:
+                final_answer = solution.group(0)
+                final_answer = (
+                    final_answer.split("#### ")[1].replace(",", "").replace("$", "")
+                )
+        elif method == "flexible":
+            answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
+            final_answer = None
+            if len(answer) == 0:
+                # no reward is there is no answer
+                pass
+            else:
+                invalid_str = ["", "."]
+                # find the last number that is not '.'
+                for final_answer in reversed(answer):
+                    if final_answer not in invalid_str:
+                        break
+        return final_answer
+
+    def function(self, answer: str) -> ToolResponse:
+        try:
+            final_answer = self._extract_solution(answer)
+            truth_answer = self._extract_solution(self.groud_truth)
+            reward = 1.0 if final_answer == truth_answer else 0.0
+        except Exception:
+            reward = 0.0
+
+        return ToolResponse(text=f"Current parsed {answer=} {reward=}")
 
 
 class GSM8kDataPacker(DataPacker):
@@ -188,6 +274,25 @@ class GSM8kDataPacker(DataPacker):
             processed_samples, computed_max_len
         )
 
+    def extend_conversation(
+        self,
+        conversation: ConversationType,
+        response: str,
+        ground_truth: Optional[str] = None,
+    ) -> ConversationType:
+        """
+        Extend the conversation by models response.
+        """
+        assert self.tool_agent is not None, "Tool agent is not set"
+
+        # 1. check if the response contains tool call
+        tool_response = self.tool_agent(response, ground_truth)
+        if tool_response:
+            return add_tool_response_messages(conversation, tool_response.text)
+
+        # By default, we add response as assistant message
+        return add_assistant_message(conversation, response)
+
 
 if __name__ == "__main__":
 
@@ -197,6 +302,9 @@ if __name__ == "__main__":
     def get_val_dataset(config: CosmosConfig) -> Dataset:
         return GSM8kValDataset()
 
+    # build the tool agent for multi-turn conversation
+    tool_agent = ToolAgent(HermesToolParser(), [GSM8kTool()])
+
     # It is best practice to pass the dataset as a factory function
     launch_worker(
         dataset=get_dataset,
@@ -204,6 +312,6 @@ if __name__ == "__main__":
         # Override the reward functions defined in toml
         reward_fns=[custom_reward_fn],
         # Optional: if not provided, the default data packer of the selected model will be used
-        data_packer=GSM8kDataPacker(),
-        val_data_packer=GSM8kDataPacker(),
+        data_packer=GSM8kDataPacker(tool_agent=tool_agent),
+        val_data_packer=GSM8kDataPacker(tool_agent=tool_agent),
     )

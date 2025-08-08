@@ -14,9 +14,14 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict, Type, Union
+from typing import Any, List, Dict, Type, Union, Optional
 from transformers import AutoTokenizer
 from cosmos_rl.policy.config import Config
+from cosmos_rl.tools.tools_use.tool_agent import ToolAgent
+from cosmos_rl.dispatcher.data.packer.multi_turn import (
+    ConversationType,
+    add_assistant_message,
+)
 
 
 class DataPacker(ABC):
@@ -63,7 +68,16 @@ class DataPacker(ABC):
             raise ValueError(f"DataPacker for {model_type} is not registered")
         return DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]()
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def __init__(self, tool_agent: Optional[ToolAgent] = None, *args, **kwargs):
+        self.tool_agent = tool_agent
+
+    def setup(
+        self,
+        config: Config,
+        tokenizer: AutoTokenizer,
+        *args,
+        **kwargs,
+    ):
         """
         Called by launcher after being mounted
         """
@@ -145,3 +159,15 @@ class DataPacker(ABC):
         raise NotImplementedError(
             "This method should be implemented by the subclass for SFT training"
         )
+
+    def extend_conversation(
+        self,
+        conversation: ConversationType,
+        response: str,
+        ground_truth: Optional[str] = None,
+    ) -> ConversationType:
+        """
+        Extend the conversation by models response.
+        """
+        # By default, we always add response as assistant message
+        return add_assistant_message(conversation, response)
