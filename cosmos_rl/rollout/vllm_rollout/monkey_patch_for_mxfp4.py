@@ -77,6 +77,7 @@ def cache_weight_of_quantized_module(
             hidden_size = module.hidden_size
             w13_bias = getattr(module, "w13_bias", None)
             assert w13_bias is not None, "w13_bias should be set"
+            # Note: we assume that Policy HFModel is in BF16.
             w13_hp_weight = torch.empty(
                 [
                     module.local_num_experts,

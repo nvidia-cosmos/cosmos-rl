@@ -268,7 +268,25 @@ class vLLMRollout(RolloutBase):
         # 2. Post process the quantized weight as vLLM did for triton kernel:
         # https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L173
 
-        pass
+        # weight is bf16 moe weight with shape:
+        # gate_up_proj: [num_experts, hidden_size, 2 * intermediate_size]
+        # donw_proj:    [num_experts, intermediate_size, hidden_size]
+
+        # 1. Quantize the original bf16 weight sent by policy:
+        from gpt_oss.triton.moe import quantize_mx4
+
+        weight_mxfp4, weight_scale_mxfp4 = quantize_mx4(weight)
+
+        # 2. Post process
+        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+            _swizzle_mxfp4,
+        )
+
+        num_warps = 8
+        swizzled_weight_mxfp4, swizzled_weight_scale_mxfp4 = _swizzle_mxfp4(
+            weight_mxfp4, weight_scale_mxfp4, num_warps
+        )
+        return swizzled_weight_mxfp4, swizzled_weight_scale_mxfp4
 
     def model_param_map(self, weight_mapper: WeightMapper):
         if self._model_param_map:

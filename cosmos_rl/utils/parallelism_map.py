@@ -879,6 +879,7 @@ class ParallelTopoMapper:
                 dims_map["tp"] = output_dim
             elif isinstance(part, FusedMoE):
                 if "w13_weight" in param_name:
+                    # https://github.com/vllm-project/vllm/pull/22259#discussion_r2256337548
                     # FIXME: (lms) not use ep now. Add support for ep later.
                     dims_map["tp"] = 1
                 elif "w2_weight" in param_name:
