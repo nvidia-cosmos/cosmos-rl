@@ -450,6 +450,18 @@ class TrainingConfig(BaseModel):
         default=(0.9, 0.999), description="Betas for optimizer"
     )
     optm_warmup_steps: int = Field(default=20, description="Warmup steps for optimizer")
+    optm_decay_ratio: Optional[float] = Field(
+        default=None,
+        description="Ratio of total steps for decay, range in [0.0, 1.0], 0 means no decay.",
+    )
+    optm_decay_type: Optional[str] = Field(
+        default=None,
+        description="Type of decay for optimizer",
+        choices=["sqrt", "cosine", "linear", "none"],
+    )
+    optm_min_lr_factor: float = Field(
+        default=0.0, description="Minimum lr factor for optimizer, range in [0.0, 1.0]"
+    )
     optm_grad_norm_clip: float = Field(
         default=1.0, description="Gradient norm clip for optimizer"
     )
