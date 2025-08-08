@@ -30,6 +30,7 @@ import requests
 import threading
 import asyncio
 from queue import Queue, Empty
+from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.dispatcher.command import (
     Command,
     BuildMeshCommand,
@@ -219,6 +220,8 @@ class GRPOTrainer(Trainer):
         super().__init__(config, parallel_dims)
         self.reference_state_dict = {}
 
+        self.lr_schedulers = build_lr_schedulers(self.optimizers, self.config, 1e6)
+        self.lr_schedulers_step_updated = False
         if parallel_dims.dp_replicate > 1:
             raise ValueError(
                 f"DP replicate size {parallel_dims.dp_replicate} is not supported for GRPO"
@@ -881,6 +884,14 @@ class GRPOTrainer(Trainer):
                 total_steps=command.total_steps,
                 remain_samples_num=command.remain_samples_num,
             )
+            if not self.lr_schedulers_step_updated:
+                assert (
+                    command.total_steps is not None and command.total_steps > 0
+                ), "Total steps must be set for lr scheduler"
+                self.lr_schedulers = build_lr_schedulers(
+                    self.optimizers, self.config, command.total_steps
+                )
+                self.lr_schedulers_step_updated = True
         else:
             report_data = {}
             logger.info(
