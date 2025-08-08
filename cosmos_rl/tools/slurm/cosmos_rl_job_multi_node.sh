@@ -28,6 +28,7 @@ export COSMOS_RL_ROOT="/workspace/cosmos_rl"
 if [[ -n "${REPO_ROOT_PATH}" ]]; then
     MOUNTS="${MOUNTS},${REPO_ROOT_PATH}:/opt/cosmos-rl"
     export COSMOS_RL_ROOT="/opt/cosmos-rl"
+    export PYTHONPATH="/opt/cosmos-rl:${PYTHONPATH}"
 fi
 
 
