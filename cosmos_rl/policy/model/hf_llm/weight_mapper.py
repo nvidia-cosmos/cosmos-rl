@@ -83,6 +83,7 @@ class HFLLMWeightMapper(WeightMapper):
     def rollout_prepare_recv(
         self, vllm_model: Any
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
+        models_do_not_split_gate_up_proj = ["gpt_oss"]
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
@@ -91,30 +92,27 @@ class HFLLMWeightMapper(WeightMapper):
             logger.info(
                 f"[Rollout] compatible_key: {param_name=}, {compatible_key=}, shape: {param.shape}, dtype: {param.dtype}, device: {param.device}"
             )
-            if "self_attn" in compatible_key:
-                # For QKV Proj in self attn
-                split_rules = [
-                    "qkv_proj",
-                    "qkv",
-                ]  # Please do not change the order of the keys.
-                for rule in split_rules:
-                    if rule in compatible_key:
-                        # must be inplace slicing.
-                        # split qkv weight
-                        q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
-                            compatible_key, param
-                        )
-                        q_proj_weight_key = compatible_key.replace(rule, "q_proj")
-                        k_proj_weight_key = compatible_key.replace(rule, "k_proj")
-                        v_proj_weight_key = compatible_key.replace(rule, "v_proj")
+            if any(rule in compatible_key for rule in ["qkv_proj", "qkv"]):
+                # must be inplace slicing.
+                # split qkv weight
+                rule = "qkv_proj" if "qkv_proj" in compatible_key else "qkv"
+                q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
+                    compatible_key, param
+                )
+                q_proj_weight_key = compatible_key.replace(rule, "q_proj")
+                k_proj_weight_key = compatible_key.replace(rule, "k_proj")
+                v_proj_weight_key = compatible_key.replace(rule, "v_proj")
 
-                        vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                        group_keys.append((q_proj_weight_key, q_weight.ndim))
-                        vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                        group_keys.append((k_proj_weight_key, k_weight.ndim))
-                        vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                        group_keys.append((v_proj_weight_key, v_weight.ndim))
-            elif "gate_up_proj" in compatible_key:
+                vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
+                group_keys.append((q_proj_weight_key, q_weight.ndim))
+                vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
+                group_keys.append((k_proj_weight_key, k_weight.ndim))
+                vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
+                group_keys.append((v_proj_weight_key, v_weight.ndim))
+            elif (
+                "gate_up_proj" in compatible_key
+                and self.config.model_type not in models_do_not_split_gate_up_proj
+            ):
                 # split gate and up proj
                 gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
                     compatible_key, param

@@ -13,6 +13,18 @@ This file is used to patch the vllm model to use mxfp4 for GPT-OSS now.
 """
 
 
+def quantize_mx4(w):
+    from triton_kernels.numerics_details.mxfp import downcast_to_mxfp
+    from triton_kernels.tensor import convert_layout
+    from triton_kernels.tensor_details.layout import StridedLayout, HopperMXValueLayout
+    from triton_kernels.tensor import wrap_torch_tensor, FP4
+
+    w, w_scale = downcast_to_mxfp(w.to(torch.bfloat16), torch.uint8, axis=1)
+    w = convert_layout(wrap_torch_tensor(w, dtype=FP4), HopperMXValueLayout, mx_axis=1)
+    w_scale = convert_layout(wrap_torch_tensor(w_scale), StridedLayout)
+    return w, w_scale
+
+
 def replace_weight_of_quantized_module(
     vllm_model: torch.nn.Module,
     cached_weight_map: Dict[str, torch.Tensor],
@@ -70,7 +82,7 @@ def cache_weight_of_quantized_module(
             # We assume that MoE high precision weight should have shape:
             # w13:[num_experts, 2 * intermediate_size, hidden_size]
             # w2: [num_experts, hidden_size, intermediate_size]
-            # FIXME: (lms) So we just don't support EP for temporarily.
+            # FIXME: (lms) So we just don't support EP for temporarily. When vLLM support EP for gpt-oss, fix this.
             intermediate_size_per_partition = (
                 module.intermediate_size_per_partition
             )  # equals to: intermediate_size // self.tp_size

@@ -296,3 +296,14 @@ class HFLLMModel(BaseModel):
             raise ValueError(
                 f"Model is not compatible with cp parallelism, model's head number={self.hf_config.num_attention_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
             )
+
+    def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
+        if self.hf_config.model_type == "gpt_oss":
+            if "gate_up_proj" in name:
+                return local_view.transpose(-2, -1).contiguous()
+            elif "down_proj" in name:
+                return local_view.transpose(-2, -1).contiguous()
+            else:
+                return local_view
+        else:
+            return local_view

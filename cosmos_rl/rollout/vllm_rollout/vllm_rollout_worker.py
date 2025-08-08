@@ -317,7 +317,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.recv_param_key_n_rank_list = sorted(
             self.recv_param_key_n_rank_list, key=lambda x: x[0]
         )
-
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             self.model_config,
@@ -496,7 +495,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         do_weight_sync_check: bool = False,
     ):
         check_inside_group = do_weight_sync_check
-        if self.quantization_type == "fp8":
+        if self.quantization_type is not None:
             inst_group_weight_name = (
                 insts_group.param_instructions[0].param_name
             )  # take a name from the inst group to determine the full weight name
@@ -504,10 +503,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             inst_group_full_weight_name = self.weight_mapper.get_unsplited_weight_name(
                 inst_group_weight_name
             )
-            is_fp8_quantized_module = (
+            is_lowp_quantized_module = (
                 inst_group_full_weight_name in self.vllm_quantized_weight_map
             )
-            check_inside_group = do_weight_sync_check and (not is_fp8_quantized_module)
+            check_inside_group = do_weight_sync_check and (not is_lowp_quantized_module)
 
         total_bytes_received = 0
 
@@ -623,7 +622,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     if inst_group_full_weight_name in self.vllm_hp_weight_map:
                         # Weight to quantize:
                         # [local_num_experts, 2* local_intermediate_size, hidden_size] for gate_up_proj
-                        # [local_num_experts, local_intermediate_size, hidden_size] for down_proj
+                        # [local_num_experts, hidden_size, local_intermediate_size] for down_proj
                         weight_to_quantize = self.vllm_hp_weight_map[
                             inst_group_full_weight_name
                         ]
@@ -654,22 +653,19 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                             )
 
                             # mxfp4 weight and mxfp4 weight scale are in int8 data type.
+                            # Two fp4 are packed into one int8 memory.
                             if (
                                 inst_group_full_weight_name
                                 == w13_compatible_weight_name
                             ):
-                                vllm_native_weight = module.w13_weight_triton_tensor
-                                vllm_native_weight_scale = (
-                                    module.w13_precision_config.weight_scale
-                                )
+                                vllm_native_weight = module.quant_method.w13_weight_triton_tensor.storage.data
+                                vllm_native_weight_scale = module.quant_method.w13_precision_config.weight_scale.storage.data
                                 break
                             elif (
                                 inst_group_full_weight_name == w2_compatible_weight_name
                             ):
-                                vllm_native_weight = module.w2_weight_triton_tensor
-                                vllm_native_weight_scale = (
-                                    module.w2_precision_config.weight_scale
-                                )
+                                vllm_native_weight = module.quant_method.w2_weight_triton_tensor.storage.data
+                                vllm_native_weight_scale = module.quant_method.w2_precision_config.weight_scale.storage.data
                                 break
 
                         assert (
@@ -678,6 +674,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         assert (
                             vllm_native_weight_scale is not None
                         ), f"Failed to find the original weight scale for {inst_group_full_weight_name}"
+                        logger.info(
+                            f"LMS: dtype: {vllm_native_weight.dtype} and {quantized_weight.dtype}, vllm_native_weight.shape: {vllm_native_weight.shape}, quantized_weight.shape: {quantized_weight.shape}"
+                        )
                         vllm_native_weight.copy_(quantized_weight)
                         vllm_native_weight_scale.copy_(weight_scale)
             else:
