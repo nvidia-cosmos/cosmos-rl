@@ -34,10 +34,6 @@ from cosmos_rl.policy.model.deepseek_v3.weight_mapper import DeepseekV3MoEWeight
 from cosmos_rl.dispatcher.data.packer.deepseek_data_packer import DeepSeek_DataPacker
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 
-# TODO: honor HF config
-from cosmos_rl.policy.model.deepseek_v3.configs.deepseek_config_full import create_default_deepseek_config
-from cosmos_rl.policy.model.deepseek_v3.configs.model_config import DeepseekConfig
-
 from cosmos_rl.policy.kernel.moe import moe
 from cosmos_rl.policy.model.deepseek_v3 import deepseekv3_mapped
 from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
@@ -90,9 +86,9 @@ class DeepseekV3MoEModel(BaseModel):
         
         assert "deepseek-v3" in model_name_or_path.lower(), f"Unsupported model {model_name_or_path}"
 
-        if hf_config.llm_config.num_hidden_layers == 4:
+        if hf_config.num_hidden_layers == 4:
             deepseek_config = deepseekv3_mapped.DeepseekConfig(n_layers=4)
-        elif hf_config.llm_config.num_hidden_layers == 61:
+        elif hf_config.num_hidden_layers == 61:
             deepseek_config = deepseekv3_mapped.DeepseekConfig()
         else:
             raise ValueError(
@@ -108,7 +104,7 @@ class DeepseekV3MoEModel(BaseModel):
 
     def __init__(
         self,
-        model_config: DeepseekConfig,
+        model_config: deepseekv3_mapped.DeepseekConfig,
         hf_config: AutoConfig,
     ):
         super().__init__(hf_config=hf_config)
@@ -126,7 +122,7 @@ class DeepseekV3MoEModel(BaseModel):
         )  # Reset the default dtype to the original value
         logger.info(f"Reset torch default dtype to {orig_precision}")
 
-    def build_model(self, model_config: DeepseekConfig):
+    def build_model(self, model_config: deepseekv3_mapped.DeepseekConfig):
         # Create reasoning model
         self.model = deepseekv3_mapped.Transformer(args=model_config)
 
@@ -172,12 +168,6 @@ class DeepseekV3MoEModel(BaseModel):
         from cosmos_rl.policy.model.deepseek_v3.parallelize import parallelize_model
 
         return parallelize_model, self
-
-    def update_moe_gate_bias(self) -> None:
-        # FIXME - unused - remove
-        assert isinstance(self.config, DeepseekConfig)
-        if self.config.train_gate and self.config.gate_bias_update_factor > 0:
-            self.model.update_moe_gate_bias()
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         return

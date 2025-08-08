@@ -41,7 +41,7 @@ class DeepseekConfig:
     Attributes:
         max_batch_size (int): Maximum batch size.
         max_seq_len (int): Maximum sequence length.
-        dtype (Literal["bf16", "fp8"]): Data type for computations.
+        dtype (Literal["bfloat16", "fp8"]): Data type for computations.
         vocab_size (int): Vocabulary size.
         dim (int): Model dimension.
         inter_dim (int): Intermediate dimension for MLP layers.
@@ -71,7 +71,7 @@ class DeepseekConfig:
 
     max_batch_size: int = 1
     max_seq_len: int = 4096 * 4
-    dtype: Literal["bf16", "fp8"] = "bf16"
+    dtype: Literal["bfloat16", "fp8"] = "bfloat16"
     vocab_size: int = 129280
     dim: int = 7168
     inter_dim: int = 18432
@@ -575,10 +575,3 @@ class Transformer(nn.Module):
         )
         logits = self.lm_head(h) if self.lm_head else h
         return logits, aux_loss
-
-    def update_moe_gate_bias(self) -> None:
-        # FIXME: unused - remove
-        with torch.no_grad():
-            for _, block in self.model.layers.named_children():
-                if isinstance(block.mlp, MoE):
-                    block.mlp.gate.update_bias()
