@@ -38,6 +38,7 @@ mkdir -p ${OUTDIR}/${SLURM_JOB_ID}
 mkdir -p ${OUTDIR}/${SLURM_JOB_ID}/controller
 mkdir -p ${OUTDIR}/${SLURM_JOB_ID}/policy
 mkdir -p ${OUTDIR}/${SLURM_JOB_ID}/rollout
+export NCCL_DEBUG_FILE_PATH=${OUTDIR}/${SLURM_JOB_ID}/nccl.log
 
 export CONTROLLER_PORT=8082
 export NODELIST=$(scontrol show hostname $SLURM_JOB_NODELIST)
@@ -90,6 +91,11 @@ srun \
     -e ${OUTDIR}/%j/policy/%t.err \
     bash -c \
     '
+    export NCCL_DEBUG=INFO
+    export NCCL_DEBUG_SUBSYS=ALL
+    export TORCH_NCCL_DUMP_ON_TIMEOUT=1
+    export TORCH_NCCL_TRACE_BUFFER_SIZE=1024
+    export TORCH_NCCL_DEBUG_INFO_TEMP_FILE=${NCCL_DEBUG_FILE_PATH}
     cd ${COSMOS_RL_ROOT}
     python ./tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
     ' \
