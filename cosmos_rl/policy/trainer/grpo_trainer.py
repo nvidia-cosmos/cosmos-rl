@@ -221,7 +221,7 @@ class GRPOTrainer(Trainer):
         self.reference_state_dict = {}
 
         self.lr_schedulers = build_lr_schedulers(self.optimizers, self.config, 1e6)
-        self.lr_schedulers_step_updated = False
+        self.last_lr_scheduler_total_step = 0
         if parallel_dims.dp_replicate > 1:
             raise ValueError(
                 f"DP replicate size {parallel_dims.dp_replicate} is not supported for GRPO"
@@ -879,19 +879,22 @@ class GRPOTrainer(Trainer):
 
         is_fake_step = self.replica_batch_for_this_step == 0
         if not is_fake_step:
+            if self.last_lr_scheduler_total_step != command.total_steps:
+                assert (
+                    command.total_steps is not None and command.total_steps > 0
+                ), "Total steps must be set for lr scheduler"
+                logger.info(
+                    f"[Policy] Building lr schedulers for total steps {command.total_steps}"
+                )
+                self.lr_schedulers = build_lr_schedulers(
+                    self.optimizers, self.config, command.total_steps
+                )
+                self.last_lr_scheduler_total_step = command.total_steps
             report_data = self.train(
                 current_step=command.global_step,
                 total_steps=command.total_steps,
                 remain_samples_num=command.remain_samples_num,
             )
-            if not self.lr_schedulers_step_updated:
-                assert (
-                    command.total_steps is not None and command.total_steps > 0
-                ), "Total steps must be set for lr scheduler"
-                self.lr_schedulers = build_lr_schedulers(
-                    self.optimizers, self.config, command.total_steps
-                )
-                self.lr_schedulers_step_updated = True
         else:
             report_data = {}
             logger.info(
