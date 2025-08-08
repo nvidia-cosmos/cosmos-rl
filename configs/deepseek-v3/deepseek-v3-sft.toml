@@ -48,9 +48,9 @@ save_mode = "async"
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
-cp_size = 1
+cp_size = 2
 ep_size = 1
-dp_shard_size = 64
+dp_shard_size = -1
 pp_size = 1
 dp_replicate_size = 1
 cp_rotate_method = "allgather"

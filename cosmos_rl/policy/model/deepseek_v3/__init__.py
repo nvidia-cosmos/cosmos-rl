@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
-from dataclasses import dataclass
+from typing import Callable, List, Optional, Tuple, Union
 
-import functools
 from functools import cached_property
 from safetensors import safe_open
 import torch
@@ -33,14 +31,12 @@ except ImportError:
 from cosmos_rl.policy.model.deepseek_v3.weight_mapper import DeepseekV3MoEWeightMapper
 from cosmos_rl.dispatcher.data.packer.deepseek_data_packer import DeepSeek_DataPacker
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
-
 from cosmos_rl.policy.kernel.moe import moe
 from cosmos_rl.policy.model.deepseek_v3 import deepseekv3_mapped
 from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
     convert_weight_from_hf,
     weight_dequant,
 )
-
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -188,8 +184,34 @@ class DeepseekV3MoEModel(BaseModel):
     def apply_pipeline_split(self, pp_rank, pp_size):
         raise NotImplementedError
 
-    def get_nparams_and_flops(self, seq_len: int) -> Tuple[int, int]:
-        return (100, 100)
+    @cached_property
+    def _get_nparams_and_flops_fn(self) -> Callable[[int], tuple[int, int]]:
+        nparams = sum(p.numel() for p in self.parameters())
+        nparams_embedding = sum(
+            sum(p.numel() for p in m.parameters())
+            for m in self.children()
+            if isinstance(m, nn.Embedding)
+        )
+
+        # Reasoning behind the factor of 12 for the self-attention part of the formula:
+        # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
+        # 2. the flash attention does 1 more matmul recomputation in the backward
+        #    but recomputation should not be counted in calculating MFU           (+0)
+        # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
+        # 4. we follow the convention and do not account for sparsity in causal attention
+        layers, heads, head_dim = (
+            self.config.n_layers,
+            self.config.n_heads,
+            self.config.dim // self.config.n_heads,
+        )
+        return lambda seq_len: (
+            nparams,
+            6 * (nparams - nparams_embedding)
+            + 12 * layers * heads * head_dim * seq_len,
+        )
+
+    def get_nparams_and_flops(self, seq_len: int) -> tuple[int, int]:
+        return self._get_nparams_and_flops_fn(seq_len)
 
     def load_hf_weights(
         self, model_name_or_path: str, parallel_dims: ParallelDims, device: torch.device

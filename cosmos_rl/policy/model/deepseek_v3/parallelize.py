@@ -24,7 +24,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch._utils import _get_available_device_type, _get_device_module
 
 try:
-    from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_module, distribute_tensor
+    from torch.distributed.tensor import Shard, distribute_module, distribute_tensor
 except ImportError:
     print("torch.distributed.tensor is not available. DeepSeek model will not work.")
 
@@ -106,35 +106,6 @@ def _apply_cp(model: nn.Module, cp_mesh: DeviceMesh, parallel_dims: ParallelDims
 
             block.self_attn.attn_module = attn_module_with_cp
             block.self_attn.attn_func = attn_func_with_cp
-
-        def _input_features_with_cp(
-            input_ids: torch.Tensor,
-            image_token_id: int,
-            image_features: torch.Tensor,
-            embed_tokens: nn.Module,
-            original_func: Callable,
-            cp_mesh: DeviceMesh,
-        ) -> torch.Tensor:
-            input_ids = DTensor.from_local(
-                input_ids, device_mesh=cp_mesh, placements=[Shard(1)]
-            ).full_tensor()
-
-            features = original_func(
-                input_ids=input_ids,
-                image_token_id=image_token_id,
-                image_features=image_features,
-                embed_tokens=embed_tokens,
-            )
-
-            return DTensor.from_local(
-                features, device_mesh=cp_mesh, placements=[Replicate()]
-            ).redistribute(placements=[Shard(1)]).to_local()
-
-        _model.model.input_features_func = functools.partial(
-            _input_features_with_cp,
-            original_func=_model.model.input_features_func,
-            cp_mesh=cp_mesh,
-        )
 
         if _model.lm_head is not None:
             # Apply CP to the lm_head to get the logits for all tokens.
