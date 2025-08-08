@@ -90,7 +90,7 @@ srun \
     bash -c \
     '
     cd ${COSMOS_RL_ROOT}
-    python ./tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]]
+    python ./tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
     ' \
     &
 pid_policy=$!
@@ -111,7 +111,7 @@ if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
         bash -c \
         '
         cd ${COSMOS_RL_ROOT}
-        python ./tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]]
+        python ./tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
         ' \
         &
     pid_rollout=$!
