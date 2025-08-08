@@ -1088,14 +1088,16 @@ class GRPOTrainer(Trainer):
     def compute_logprobs(
         self,
         minibatch: Dict[str, Any],
-        full_logits: torch.Tensor,
+        logits: torch.Tensor,
+        is_full_logits: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute the per-token log probabilities and advantages
 
         Args:
             minibatch: a dictionary containing the input_ids and logprob_masks
-            full_logits: the logits of the model
+            logits: the logits of the model
+            is_full_logits: whether the logits are full logits or have been index-selected for memory efficiency
 
         Returns:
             logps: the per-token log probabilities
@@ -1108,8 +1110,8 @@ class GRPOTrainer(Trainer):
         return logprobs_computing(
             minibatch["input_ids"],
             minibatch["logprob_masks"],
-            full_logits,
-            self.tokenizer,
+            logits,
+            is_full_logits=is_full_logits,
         )
 
     @torch.no_grad()
@@ -1268,6 +1270,10 @@ class GRPOTrainer(Trainer):
                                     computed_max_len=computed_max_len,
                                 )
                             )
+
+                            user_mini_batch["interested_tokens"] = user_mini_batch[
+                                "logprob_masks"
+                            ]
 
                             # Move all tensor to device
                             for k in user_mini_batch.keys():
@@ -1440,7 +1446,10 @@ class GRPOTrainer(Trainer):
                                 current_per_token_logprobs, cu_seqlens = (
                                     self.compute_logprobs(
                                         user_mini_batch,
-                                        full_logits=raw_logits,
+                                        logits=raw_logits,
+                                        is_full_logits=True
+                                        if raw_logits.ndim == 3
+                                        else False,
                                     )
                                 )
                                 logprob_masks = user_mini_batch["logprob_masks"]
@@ -1691,7 +1700,8 @@ def _swizzle_pp_grpo_forward(
         minibatch={
             **user_input,
         },
-        full_logits=raw_logits,
+        logits=raw_logits,
+        is_full_logits=True if raw_logits.ndim == 3 else False,
     )
     logprob_masks = user_input["logprob_masks"]
     current_advantages = logprob_masks * advantages
