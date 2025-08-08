@@ -633,10 +633,53 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         # The quantized version of the weight has been removed by vLLM internally.
                         # https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L328
                         # We can't get it from named_parameters.
-                        # FIXME: (lms) we have to find a way to get the final weight:
-                        # w13_weight_triton_tensor
-                        # w2_weight_triton_tensor
-                        # vllm_native_weight = ?
+                        vllm_native_weight = None
+                        vllm_native_weight_scale = None
+
+                        for (
+                            module_name,
+                            module,
+                        ) in self.get_underlying_model().named_modules():
+                            w13_weight_name = f"{module_name}.w13_weight"
+                            w2_weight_name = f"{module_name}.w2_weight"
+                            w13_compatible_weight_name = (
+                                self.weight_mapper._rollout_vllm_name_to_hf(
+                                    w13_weight_name
+                                )
+                            )
+                            w2_compatible_weight_name = (
+                                self.weight_mapper._rollout_vllm_name_to_hf(
+                                    w2_weight_name
+                                )
+                            )
+
+                            # mxfp4 weight and mxfp4 weight scale are in int8 data type.
+                            if (
+                                inst_group_full_weight_name
+                                == w13_compatible_weight_name
+                            ):
+                                vllm_native_weight = module.w13_weight_triton_tensor
+                                vllm_native_weight_scale = (
+                                    module.w13_precision_config.weight_scale
+                                )
+                                break
+                            elif (
+                                inst_group_full_weight_name == w2_compatible_weight_name
+                            ):
+                                vllm_native_weight = module.w2_weight_triton_tensor
+                                vllm_native_weight_scale = (
+                                    module.w2_precision_config.weight_scale
+                                )
+                                break
+
+                        assert (
+                            vllm_native_weight is not None
+                        ), f"Failed to find the original weight for {inst_group_full_weight_name}"
+                        assert (
+                            vllm_native_weight_scale is not None
+                        ), f"Failed to find the original weight scale for {inst_group_full_weight_name}"
+                        vllm_native_weight.copy_(quantized_weight)
+                        vllm_native_weight_scale.copy_(weight_scale)
             else:
                 # For non-fp8 weights and fp8 not enabled cases, we just do nothing
                 pass
