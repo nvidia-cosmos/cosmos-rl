@@ -372,6 +372,8 @@ class Controller:
         n: int,
         validation_step: Optional[int] = None,
     ) -> Tuple[List[Tuple[int, str]], bool]:
+        add_answer = self.config.rollout.multi_turn_config.enable
+
         # query n prompts from the dataset
         prompt_id_and_payload_list: List[Tuple[int, str]] = []
         is_end = False
@@ -417,12 +419,18 @@ class Controller:
 
         for _ in range(n):
             payload = None
+            answer = None
             try:
                 idx, payload = next(iterator)
                 assert len(idx) == 1
                 assert len(payload) == 1
                 idx = idx[0]
                 payload = payload[0].payload
+                if add_answer:
+                    if is_validation:
+                        answer = self.val_dataset.val_set.get_reference_answer(idx)
+                    else:
+                        answer = self.dataset.train_set.get_reference_answer(idx)
             except StopIteration:
                 if not is_validation:
                     self.epoch += 1
@@ -435,6 +443,15 @@ class Controller:
                         assert len(payload) == 1
                         idx = idx[0]
                         payload = payload[0].payload
+                        if add_answer:
+                            if is_validation:
+                                answer = self.val_dataset.val_set.get_reference_answer(
+                                    idx
+                                )
+                            else:
+                                answer = self.dataset.train_set.get_reference_answer(
+                                    idx
+                                )
                     else:
                         if self.epoch == self.config.train.epoch + 1:
                             # We only log this all finished information once.
@@ -447,7 +464,10 @@ class Controller:
                     is_end = True
                     break
             idx = idx.item() if isinstance(idx, torch.Tensor) else idx
-            prompt_id_and_payload_list.append((idx, payload))
+            if add_answer:
+                prompt_id_and_payload_list.append((idx, payload, answer))
+            else:
+                prompt_id_and_payload_list.append((idx, payload))
 
         current_fetch_count = len(prompt_id_and_payload_list)
         if (
@@ -471,12 +491,20 @@ class Controller:
         else:
             weight_versions = [0] * current_fetch_count
 
-        prompt_id_and_payload_list = [
-            (idx, payload, weight_version)
-            for (idx, payload), weight_version in zip(
-                prompt_id_and_payload_list, weight_versions
-            )
-        ]
+        if add_answer:
+            prompt_id_and_payload_list = [
+                (idx, payload, weight_version, answer)
+                for (idx, payload, answer), weight_version in zip(
+                    prompt_id_and_payload_list, weight_versions
+                )
+            ]
+        else:
+            prompt_id_and_payload_list = [
+                (idx, payload, weight_version)
+                for (idx, payload), weight_version in zip(
+                    prompt_id_and_payload_list, weight_versions
+                )
+            ]
         return prompt_id_and_payload_list, is_end
 
     def query_reference_answer(

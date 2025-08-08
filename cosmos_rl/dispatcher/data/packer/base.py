@@ -161,7 +161,10 @@ class DataPacker(ABC):
         )
 
     def extend_conversation(
-        self, conversation: ConversationType, response: str
+        self,
+        conversation: ConversationType,
+        response: str,
+        ground_truth: Optional[str] = None,
     ) -> ConversationType:
         """
         Extend the conversation by models response.

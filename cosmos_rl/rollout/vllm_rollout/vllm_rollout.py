@@ -266,7 +266,7 @@ class vLLMRollout(RolloutBase):
             )
         stream = torch.cuda.current_stream() if stream is None else stream
 
-        def generation_multi_turn_for_one_payload(payload: Any) -> Any:
+        def generation_multi_turn_for_one_payload(payload: Any, answer: str) -> Any:
             assistant_turn_count = 0
             while (
                 assistant_turn_count
@@ -284,7 +284,7 @@ class vLLMRollout(RolloutBase):
                     )
 
                 payload = data_packer.extend_conversation(
-                    payload, results[0].outputs[0].text
+                    payload, results[0].outputs[0].text, ground_truth=answer
                 )
 
                 # check if the sequence length is reached the max_sequence_length
@@ -310,8 +310,11 @@ class vLLMRollout(RolloutBase):
         # ]
         response: List[Any] = []
         for payload_list in prompt_id_and_payload_list:
+            # payload_list format: [conversation, payload, weight_version, answer]
             response.append(
-                generation_multi_turn_for_one_payload(copy.deepcopy(payload_list[0]))
+                generation_multi_turn_for_one_payload(
+                    copy.deepcopy(payload_list[0]), payload_list[3]
+                )
             )
 
         return response

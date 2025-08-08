@@ -39,6 +39,8 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 
 
 class GSM8kDataset(Dataset):
+    """TODO(zjx): we should refactor it with RLDataset."""
+
     def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
@@ -47,6 +49,7 @@ class GSM8kDataset(Dataset):
         """
         self.config = config
         self.tokenizer = tokenizer
+        self.apply_chat_template = not config.rollout.multi_turn_config.enable
         modelscope_dataset_if_enabled = modelscope_load_dataset(
             config.train.train_policy.dataset.name, subset_name="main", split="train"
         )
@@ -86,6 +89,10 @@ class GSM8kDataset(Dataset):
                 "content": f'{question} Let\'s think step by step and output the final answer after "####".',
             }
         ]
+
+        if not self.apply_chat_template:
+            return conversation
+
         prompt = self.tokenizer.apply_chat_template(
             conversation,
             tokenize=False,
@@ -268,18 +275,18 @@ class GSM8kDataPacker(DataPacker):
         )
 
     def extend_conversation(
-        self, conversation: ConversationType, response: str
+        self,
+        conversation: ConversationType,
+        response: str,
+        ground_truth: Optional[str] = None,
     ) -> ConversationType:
         """
         Extend the conversation by models response.
         """
         assert self.tool_agent is not None, "Tool agent is not set"
 
-        # TODO(zjx): find way to get the ground truth
-        groud_truth = ...
-
         # 1. check if the response contains tool call
-        tool_response = self.tool_agent(response, groud_truth)
+        tool_response = self.tool_agent(response, ground_truth)
         if tool_response:
             return add_tool_response_messages(conversation, tool_response.text)
 
