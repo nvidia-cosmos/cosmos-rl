@@ -15,11 +15,13 @@
 
 
 import functools
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
+import os
 
 import torch
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
+from torch._utils import _get_available_device_type, _get_device_module
 
 try:
     from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_module, distribute_tensor
@@ -48,8 +50,7 @@ from cosmos_rl.policy.kernel.moe.moe import (
 from cosmos_rl.utils.parallelism import ParallelDims
 
 
-
-def get_dp_mesh(
+def _get_dp_mesh(
     world_mesh: DeviceMesh, parallel_dims: ParallelDims
 ) -> DeviceMesh | None:
     """
@@ -71,11 +72,10 @@ def get_dp_mesh(
         return None
 
 
-def apply_cp(model: nn.Module, cp_mesh: DeviceMesh, parallel_dims: ParallelDims):
+def _apply_cp(model: nn.Module, cp_mesh: DeviceMesh, parallel_dims: ParallelDims):
     """Apply Context Parallel to the model."""
     assert cp_mesh.size() > 1
     assert cp_mesh.ndim == 1
-    cp_rank = cp_mesh.get_local_rank()
 
     if model.model is not None:
         _model = model.model
@@ -141,7 +141,7 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh, parallel_dims: ParallelDims)
             swizzle_cp_forward(_model.lm_head, parallel_dims)
 
 
-class ExpertParallel(ParallelStyle):
+class _ExpertParallel(ParallelStyle):
     """
     ExpertParallel class is used to shard the MoE parameters on the EP mesh.
     Dim `0` of each parameter is sharded since that is the expert dimension.
@@ -166,7 +166,7 @@ class ExpertParallel(ParallelStyle):
         )
 
 
-def apply_ep(model: nn.Module, ep_mesh: DeviceMesh):
+def _apply_ep(model: nn.Module, ep_mesh: DeviceMesh):
     """Applies EP to MoE module."""
     assert ep_mesh.size() > 1
 
@@ -177,11 +177,11 @@ def apply_ep(model: nn.Module, ep_mesh: DeviceMesh):
                 parallelize_module(
                     module=block.mlp.experts,
                     device_mesh=ep_mesh,
-                    parallelize_plan=ExpertParallel(),
+                    parallelize_plan=_ExpertParallel(),
                 )
 
 
-def apply_ac(model: nn.Module):
+def _apply_ac(model: nn.Module):
     """Apply activation checkpointing to the model."""
     if model.model is not None:
         _model = model.model
@@ -190,13 +190,13 @@ def apply_ac(model: nn.Module):
             _model.model.layers.register_module(layer_id, block)
 
 
-def apply_fsdp(
+def _apply_fsdp(
     model: nn.Module,
     meshes: dict[str, DeviceMesh],
     parallel_dims: ParallelDims,
 ):
     """Apply FSDP sharding to model layers using data parallel mesh."""
-    default_dp_mesh = get_dp_mesh(meshes["default"], parallel_dims)
+    default_dp_mesh = _get_dp_mesh(meshes["default"], parallel_dims)
     if default_dp_mesh is None:
         return
 
@@ -242,13 +242,43 @@ def apply_fsdp(
         fully_shard_default(_model)
 
 
+def _get_device_info():
+    device_type = _get_available_device_type()
+    if device_type is None:
+        device_type = "cuda"  # default device_type: cuda
+    device_module = _get_device_module(device_type)  # default device_module: torch.cuda
+    return device_type, device_module
+
+
+def _init_meshes(
+    parallel_dims: ParallelDims,
+) -> dict[str, DeviceMesh]:
+    """
+    Initialize the meshes for the model. There are generally two meshes, "default"
+    for non-MoE modules and "moe" for MoE modules. Each mesh contains several
+    dimensions for parallelization.
+
+    Args:
+        parallelism_config (TrainingConfig): The parallelism configuration for the model.
+
+    Returns:
+        meshes (dict[str, DeviceMesh]): The meshes for the model.
+    """
+    
+    device_type, device_module = _get_device_info()
+
+    local_rank = int(os.getenv("LOCAL_RANK", 0))
+    device = torch.device(f"{device_type}:{local_rank}")
+    device_module.set_device(device)
+    meshes = parallel_dims.build_meshes_with_ep(device_type=device_type)
+    return meshes
+
+
 def parallelize_model(
     model: nn.Module,
     parallel_dims: ParallelDims,
     config: CosmosConfig,
     pp_loss_fn: Optional[Callable],
-    meshes: dict[str, DeviceMesh],
-    parallel_dims_img4: ParallelDims,
 ) -> nn.Module:
     """
     Parallelizes the DeepSeek model based on the provided meshes and parallel dimensions.
@@ -257,39 +287,33 @@ def parallelize_model(
         model (nn.Module): The DeepSeek model to parallelize. Note that this maybe
             a model part due to pipelining. We must check for the presence of an
             nn.Module before executing the relevant parallelization functions.
-        meshes (dict[str, DeviceMesh]): A mapping of mesh names to DeviceMesh objects.
-            There are generally two meshes, "default" for non-MoE modules and "moe"
-            for MoE modules. Each mesh contains several dimensions for parallelization.
-        parallel_dims_img4 (ParallelDims): The parallel dimensions configuration.
 
     Returns:
         nn.Module: The parallelized DeepSeek model.
     """
-    parallel_dims = parallel_dims_img4
+    meshes = _init_meshes(parallel_dims)
     del config
     del pp_loss_fn
-    del parallel_dims_img4
 
-    parallelism_config = model.config.training
     assert (
-        model.config.n_routed_experts % parallelism_config.expert_parallel_degree == 0
+        model.config.n_routed_experts % parallel_dims.ep == 0
     ), (
         f"n_routed_experts {model.config.n_routed_experts} must be divisible by "
-        f"expert_parallel_degree {parallelism_config.expert_parallel_degree}"
+        f"expert_parallel_degree {parallel_dims.ep}"
     )
     assert (
-        parallelism_config.tensor_parallel_degree == 1
+        parallel_dims.tp == 1
     ), "Tensor parallelism not support for DeepSeek model"
 
     if parallel_dims.cp_enabled:
-        apply_cp(model, meshes["default"]["cp"], parallel_dims)
+        _apply_cp(model, meshes["default"]["cp"], parallel_dims)
 
     if parallel_dims.ep_enabled:
         assert "moe" in meshes
-        apply_ep(model, meshes["moe"]["ep"])
+        _apply_ep(model, meshes["moe"]["ep"])
 
-    apply_ac(model)
+    _apply_ac(model)
 
-    apply_fsdp(model, meshes, parallel_dims)
+    _apply_fsdp(model, meshes, parallel_dims)
 
     return None, None

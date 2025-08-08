@@ -34,7 +34,7 @@ from cosmos_rl.policy.kernel.moe.moe import MoE
 
 
 @dataclass
-class ModelArgs:
+class DeepseekConfig:
     """
     Data class for defining model arguments and hyperparameters.
 
@@ -69,28 +69,30 @@ class ModelArgs:
         mscale (float): Scaling factor for extended attention.
     """
 
-    max_batch_size: int = 8
+    max_batch_size: int = 1
     max_seq_len: int = 4096 * 4
     dtype: Literal["bf16", "fp8"] = "bf16"
-    vocab_size: int = 102400
-    dim: int = 2048
-    inter_dim: int = 10944
-    moe_inter_dim: int = 1408
-    n_layers: int = 27
-    n_dense_layers: int = 1
-    n_heads: int = 16
+    vocab_size: int = 129280
+    dim: int = 7168
+    inter_dim: int = 18432
+    moe_inter_dim: int = 2048
+    n_layers: int = 61
+    n_dense_layers: int = 3
+    n_heads: int = 128
     # moe
-    n_routed_experts: int = 64
-    n_shared_experts: int = 2
-    n_activated_experts: int = 6
-    n_expert_groups: int = 1
-    n_limited_groups: int = 1
+    n_routed_experts: int = 256
+    n_shared_experts: int = 1
+    n_activated_experts: int = 8
+    n_expert_groups: int = 8
+    n_limited_groups: int = 4
     train_gate: bool = True
-    gate_bias_update_factor: float = 0.001
-    score_func: Literal["softmax", "sigmoid"] = "softmax"
-    route_scale: float = 1.0
+    gate_bias_update_factor: float = 0.01
+    score_func: Literal["softmax", "sigmoid"] = "sigmoid"
+    route_scale: float = 2.5
+    enable_deepep: bool = False
+    fake_balanced_gate: bool = False
     # mla
-    q_lora_rank: int = 0
+    q_lora_rank: int = 1536
     kv_lora_rank: int = 512
     qk_nope_head_dim: int = 128
     qk_rope_head_dim: int = 64
@@ -102,6 +104,8 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.0
+    # aux loss
+    aux_loss_coeff: float = 0.0
 
 
 class RMSNorm(_RMSNorm):
@@ -117,12 +121,12 @@ class RMSNorm(_RMSNorm):
         super().__init__(normalized_shape=dim, eps=eps)
 
 
-def precompute_base_freqs(args: ModelArgs) -> torch.Tensor:
+def precompute_base_freqs(args: DeepseekConfig) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
 
     Args:
-        args (ModelArgs): Model arguments containing positional embedding parameters.
+        args (DeepseekConfig): Model arguments containing positional embedding parameters.
 
     Returns:
         torch.Tensor: Precomputed complex exponential values for positional embeddings.
@@ -219,7 +223,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
 
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: DeepseekConfig):
         super().__init__()
         self.args = args
 
@@ -237,7 +241,7 @@ class RotaryEmbedding(nn.Module):
             self._reset_base_freqs(position_ids.device)
 
         freqs = torch.matmul(position_ids.unsqueeze(-1).float(), self.freqs.unsqueeze(0))
-        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+        freqs_cis = torch.polar(torch.ones_like(freqs, dtype=torch.float32), freqs.float())
         return freqs_cis
 
 
@@ -258,7 +262,7 @@ class MLA(nn.Module):
         softmax_scale (float): Scaling factor for softmax in attention computation.
     """
 
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: DeepseekConfig):
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.n_heads
@@ -391,13 +395,13 @@ class Block(nn.Module):
         post_attention_layernorm (nn.Module): Layer normalization for feed-forward network.
     """
 
-    def __init__(self, layer_id: int, args: ModelArgs):
+    def __init__(self, layer_id: int, args: DeepseekConfig):
         """
         Initializes the Transformer block.
 
         Args:
             layer_id (int): Layer index in the transformer.
-            args (ModelArgs): Model arguments containing block parameters.
+            args (DeepseekConfig): Model arguments containing block parameters.
         """
         super().__init__()
         self.self_attn = MLA(args)
@@ -477,12 +481,12 @@ class TransformerModel(nn.Module):
         freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
     """
 
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: DeepseekConfig):
         """
         Initializes the Transformer model.
 
         Args:
-            args (ModelArgs): Model arguments containing transformer parameters.
+            args (DeepseekConfig): Model arguments containing transformer parameters.
         """
         # Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
         super().__init__()
@@ -536,7 +540,7 @@ class TransformerModel(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: DeepseekConfig):
         super().__init__()
         self.model = TransformerModel(args)
         self.lm_head = nn.Linear(

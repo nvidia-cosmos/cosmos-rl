@@ -27,21 +27,18 @@ class DeepSeek_DataPacker(DecoderOnlyLLMDataPacker):
     """
     Data protocol & processing logic for the decoder only LLM for SFT and RL training.
     """
-    def __init__(self, seq_len=1024):
+    def __init__(self):
         super().__init__()
-        self.seq_len = seq_len
     
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         super().setup(config, tokenizer, *args, **kwargs)
-        self.seq_len = config.policy.model_max_length
 
     def policy_compute_max_len(self, processed_samples: List[DecoderOnlyLLMDataPacker.RLPolicyInput]) -> int:
-        return max(self.seq_len, max([len(x.input_ids) for x in processed_samples]))
+        return max([len(x.input_ids) for x in processed_samples])
 
     def policy_collate_fn(
         self, processed_samples: List[DecoderOnlyLLMDataPacker.RLPolicyInput], computed_max_len: int
     ) -> Dict[str, Any]:
-        computed_max_len = max(computed_max_len, self.seq_len)
         input_ids = [x.input_ids for x in processed_samples]
         logprob_masks = [x.logprob_masks for x in processed_samples]
         assert len(input_ids) == len(
@@ -78,7 +75,6 @@ class DeepSeek_DataPacker(DecoderOnlyLLMDataPacker):
         """
         Collate the processed samples into a minibatch dictionary passed to the SFT model.
         """
-        computed_max_len = max(computed_max_len, self.seq_len)
         # First truncate the samples to the computed_max_len
         list_of_input_ids = [
             x["token_ids"][:computed_max_len] for x in processed_samples
@@ -105,11 +101,6 @@ class DeepSeek_DataPacker(DecoderOnlyLLMDataPacker):
             ],
             dtype=torch.long,
         )
-
-        # valid_label_mask = label_ids != ignore_label_id
-        # assert torch.all(input_ids[valid_label_mask] == label_ids[valid_label_mask]), "input_ids and label_ids should have the same value"
-        # print(f"input_ids: {self.tokenizer.decode(input_ids[0])}")
-        # print(f"label_ids: {self.tokenizer.decode(label_ids[0][label_ids[0] != ignore_label_id])}")
 
         return {
             "input_ids": input_ids,

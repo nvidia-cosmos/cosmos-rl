@@ -89,6 +89,9 @@ srun \
     -e ${OUTDIR}/%j/policy/%t.err \
     bash -c \
     '
+    export NCCL_DEBUG=INFO
+    export NCCL_DEBUG_SUBSYS=ALL
+    export TORCH_NCCL_TRACE_BUFFER_SIZE=1048576
     cd ${COSMOS_RL_ROOT}
     python ./tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]]
     ' \

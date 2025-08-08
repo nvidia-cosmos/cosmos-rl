@@ -25,7 +25,6 @@ sync_weight_interval = 1
 model_name_or_path = "deepseek-ai/DeepSeek-V3"
 model_max_length = 1024
 model_gradient_checkpointing = true
-llm_only = true
 
 [logging]
 logger = ['console', 'wandb']
@@ -50,6 +49,7 @@ save_mode = "async"
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
+ep_size = 64
 dp_shard_size = 64
 pp_size = 1
 dp_replicate_size = 1

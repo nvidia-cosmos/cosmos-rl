@@ -90,8 +90,14 @@ class DeepseekV3MoEModel(BaseModel):
         
         assert "deepseek-v3" in model_name_or_path.lower(), f"Unsupported model {model_name_or_path}"
 
-        # TODO: read the model configuration directly from HF config
-        deepseek_config = create_default_deepseek_config()
+        if hf_config.llm_config.num_hidden_layers == 4:
+            deepseek_config = deepseekv3_mapped.DeepseekConfig(n_layers=4)
+        elif hf_config.llm_config.num_hidden_layers == 61:
+            deepseek_config = deepseekv3_mapped.DeepseekConfig()
+        else:
+            raise ValueError(
+                f"Only 4 or 61 layer models supported at the moment. Got hf_config.llm_config.num_hidden_layers={hf_config.llm_config.num_hidden_layers}")
+
         model = DeepseekV3MoEModel(deepseek_config, hf_config=hf_config)
 
         logger.info("Initializing the model")
@@ -109,7 +115,7 @@ class DeepseekV3MoEModel(BaseModel):
         self.config = model_config
 
         orig_precision = torch.get_default_dtype()
-        precision = getattr(torch, model_config.precision)
+        precision = getattr(torch, model_config.dtype)
         torch.set_default_dtype(precision)
         logger.info(f"Setting torch default dtype from {orig_precision} to {precision}")
 
@@ -122,17 +128,7 @@ class DeepseekV3MoEModel(BaseModel):
 
     def build_model(self, model_config: DeepseekConfig):
         # Create reasoning model
-
         self.model = deepseekv3_mapped.Transformer(args=model_config)
-
-        # Xiaohui:
-        # With this line, the dcp checkpoint loading wont get correct eval results
-        # Verified with scripts: cosmos_reason1.policy.model.deepseek_vlm/scripts/test_generate_torchtitan.py
-        # Commented out this line we could get same results as torchtitan eval.
-        # I verified both model_config.precision = "float32" and "bfloat16" could
-        # get correct eval results with this line commented. and bfloat16 has half gpu memory usage.
-        # TODO(@Maciej): do we need this line?
-        # model = model.to(precision)  # ensure model parameters are in the correct precision
 
     def init_weights(
         self,
@@ -173,14 +169,9 @@ class DeepseekV3MoEModel(BaseModel):
 
     @property
     def parallelize_fn(self):
-        from cosmos_rl.policy.model.deepseek_v3.parallelize_utils import init_meshes
         from cosmos_rl.policy.model.deepseek_v3.parallelize import parallelize_model
 
-        meshes, parallel_dims, _ = init_meshes(self.config.training)
-        parallelize_model_fn = functools.partial(
-            parallelize_model, meshes=meshes, parallel_dims_img4=parallel_dims
-        )
-        return parallelize_model_fn, self
+        return parallelize_model, self
 
     def update_moe_gate_bias(self) -> None:
         # FIXME - unused - remove

@@ -84,7 +84,6 @@ class ParallelDims:
     # to 64 for the attention module, and have ep = 4, dp_shard_with_ep = 16
     # for the MoE module.
     dp_shard_with_ep: int = -1
-    enable_loss_parallel: bool = False
 
     @staticmethod
     def from_config(parallesim_config: ParallelismConfig):
@@ -202,7 +201,7 @@ class ParallelDims:
         mesh = self._build_mesh(
             device_type, 
             [self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp],
-            ["pp", "dp_replicate", "dp_shard", "cp", "tp"], # reverse order to apply N-dim prallel.
+            ["pp", "dp_replicate", "dp_shard", "cp", "tp"], # reverse order to apply N-dim parallel.
         )
         
         # Create all the submesh here to ensure all required process groups are
@@ -316,10 +315,6 @@ class ParallelDims:
     @property
     def dp_shard_with_ep_enabled(self) -> bool:
         return self.dp_shard_with_ep > 1
-
-    @property
-    def loss_parallel_enabled(self) -> bool:
-        return self.tp > 1 and self.enable_loss_parallel
 
     @property
     def pp_dynamic_shape_enabled(self) -> bool:
