@@ -149,7 +149,9 @@ class vLLMRollout(RolloutBase):
                 if 2048 >= policy_config.model_max_length
                 else policy_config.model_max_length,
                 enable_chunked_prefill=self.rollout_config.enable_chunked_prefill,
-                enable_prefix_caching=True,
+                # Always disable prefix caching, since RL will change the underlying model.
+                # The prefix cache will be invalid after training.
+                enable_prefix_caching=False,
                 trust_remote_code=trust_remote_code,
                 quantization=self.quantization,
                 seed=seed or 42,
