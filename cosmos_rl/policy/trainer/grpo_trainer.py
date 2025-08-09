@@ -1305,9 +1305,13 @@ class GRPOTrainer(Trainer):
                                 )
                             )
 
-                            user_mini_batch["interested_tokens"] = user_mini_batch[
-                                "logprob_masks"
-                            ]
+                            # TP will shard the sequence dimension into n-ranks.
+                            # The interested_tokens will be unevenly distributed across ranks.
+                            # So do not enable interested_tokens in TP.
+                            if not self.parallel_dims.tp_enabled:
+                                user_mini_batch["interested_tokens"] = user_mini_batch[
+                                    "logprob_masks"
+                                ]
 
                             # Move all tensor to device
                             for k in user_mini_batch.keys():
