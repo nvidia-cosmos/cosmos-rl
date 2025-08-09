@@ -86,6 +86,7 @@ class vLLMRollout(RolloutBase):
         self.rollout_engine = None
 
         self._model_param_map = None  # key: compatible name, value: param
+        self.is_vlm = getattr(self.model_config, "vision_config", None) is not None
 
     def init_engine(
         self,
@@ -193,6 +194,10 @@ class vLLMRollout(RolloutBase):
         # Pack the payloads into prompts for vllm.
         prompts = [data_packer.get_rollout_input(payload) for payload in payloads]
         prompts = data_packer.rollout_collate_fn(prompts)
+        if self.is_vlm:
+            new_prompts = util.decode_vision_info(prompts)
+        else:
+            new_prompts = prompts
 
         # List of completions per prompt.
         # [
@@ -206,7 +211,7 @@ class vLLMRollout(RolloutBase):
         try:
             with torch.cuda.stream(stream):
                 results = self.rollout_engine.generate(
-                    prompts=prompts,
+                    new_prompts,
                     sampling_params=sampling_params,
                     use_tqdm=False,
                 )

@@ -823,6 +823,12 @@ class ParallelTopoMapper:
                             is_bias = True
                         elif part_name == "weight":
                             is_bias = False
+                        elif part_name == "class_embedding":
+                            # class_embedding is a parameter in vision encoder
+                            is_bias = True
+                        elif part_name == "mm_input_projection_weight":
+                            # Gemma has mm_input_projection_weight
+                            is_bias = True
                         else:
                             logger.warning(
                                 f"Part {part_name} is not a Parameter. Skipping."

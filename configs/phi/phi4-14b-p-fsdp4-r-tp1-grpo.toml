@@ -3,7 +3,7 @@ redis = "12800"
 [train]
 resume = false
 epoch = 15
-output_dir = "./outputs/mistral-7b-p-fsdp2-r-tp4-grpo"
+output_dir = "./outputs/phi4-14b-p-fsdp2-r-tp1-grpo"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 1e-6
@@ -18,7 +18,7 @@ param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 256
+train_batch_per_replica = 128
 sync_weight_interval = 1
 
 [rollout]
@@ -31,7 +31,7 @@ max_response_length = 1024
 
 
 [policy]
-model_name_or_path = "mistralai/Mistral-7B-Instruct-v0.3"
+model_name_or_path = "microsoft/phi-4"
 model_max_length = 4096
 model_gradient_checkpointing = true
 
@@ -61,7 +61,7 @@ save_mode = "async"
 
 [rollout.parallelism]
 n_init_replicas = 1
-tp_size = 4
+tp_size = 1
 pp_size = 1
 
 [rollout.sampling_config]
@@ -73,6 +73,6 @@ top_k = 10
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-dp_shard_size = 2
+dp_shard_size = 4
 pp_size = 1
 dp_replicate_size = 1

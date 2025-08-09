@@ -3,7 +3,7 @@ redis = "12800"
 [train]
 resume = false
 epoch = 15
-output_dir = "./outputs/mistral-7b-p-fsdp1-r-tp1-grpo"
+output_dir = "./outputs/gemma3-1b-p-fsdp4-r-tp4-grpo"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 1e-6
@@ -18,21 +18,21 @@ param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 256
+train_batch_per_replica = 128
 sync_weight_interval = 1
 
 [rollout]
 gpu_memory_utilization = 0.7
-enable_chunked_prefill = false
+enable_chunked_prefill = true
 n_generation = 16
-batch_size = 1
+batch_size = 8
 quantization = "none"
 max_response_length = 1024
 
 
 [policy]
-model_name_or_path = "mistralai/Mistral-7B-Instruct-v0.3"
-model_max_length = 4096
+model_name_or_path = "google/gemma-3-1b-pt"
+model_max_length = 1024
 model_gradient_checkpointing = true
 
 [logging]
@@ -64,15 +64,11 @@ n_init_replicas = 1
 tp_size = 1
 pp_size = 1
 
-[rollout.sampling_config]
-temperature = 0.9
-top_p = 1.0
-top_k = 10
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-dp_shard_size = 1
+dp_shard_size = 4
 pp_size = 1
 dp_replicate_size = 1
