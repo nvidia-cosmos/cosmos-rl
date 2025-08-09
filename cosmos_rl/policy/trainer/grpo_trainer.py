@@ -1146,6 +1146,8 @@ class GRPOTrainer(Trainer):
             minibatch["logprob_masks"],
             logits,
             is_full_logits=is_full_logits,
+            label_packing_mask=minibatch.get("label_packing_mask", None),
+            input_packing_mask=minibatch.get("input_packing_mask", None),
         )
 
     @torch.no_grad()
@@ -1291,19 +1293,32 @@ class GRPOTrainer(Trainer):
                                 // self.seq_len_multiple
                                 * self.seq_len_multiple
                             )
-                            minibatched_advantages = (
-                                advantages_t[i:end]
-                                .unsqueeze(1)
-                                .expand(-1, computed_max_len)
-                                .to(self.device)
-                            )
-
-                            user_mini_batch: Dict[str, Any] = (
-                                self.data_packer.policy_collate_fn(
-                                    minibatched_processed_samples,
-                                    computed_max_len=computed_max_len,
+                            packing_seq = self.config.train.sequence_packing
+                            if packing_seq:
+                                user_mini_batch = (
+                                    self.data_packer.policy_collate_fn_packing_seq(
+                                        minibatched_processed_samples,
+                                        advantages=advantages_t[i:end],
+                                        computed_max_len=computed_max_len,
+                                    )
                                 )
-                            )
+                                minibatched_advantages = user_mini_batch.pop(
+                                    "advantages"
+                                )
+                            else:
+                                minibatched_advantages = (
+                                    advantages_t[i:end]
+                                    .unsqueeze(1)
+                                    .expand(-1, computed_max_len)
+                                    .to(self.device)
+                                )
+
+                                user_mini_batch: Dict[str, Any] = (
+                                    self.data_packer.policy_collate_fn(
+                                        minibatched_processed_samples,
+                                        computed_max_len=computed_max_len,
+                                    )
+                                )
 
                             # TP will shard the sequence dimension into n-ranks.
                             # The interested_tokens will be unevenly distributed across ranks.

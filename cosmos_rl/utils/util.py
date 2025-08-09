@@ -954,6 +954,8 @@ def compute_logprobs(
     logprob_masks: torch.Tensor,  # [batch_size, max_len],
     logits: torch.Tensor,  # [batch_size, max_len, vocab_size] or [n_logprob_tokens, vocab_size] if is_full_logits is False
     is_full_logits: bool = False,
+    label_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
+    input_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the per-token log probabilities and advantages
@@ -969,9 +971,24 @@ def compute_logprobs(
         cu_seqlens: the cumulative sequence lengths of the logps
     """
     # Shift token_ids
-    shifted_input_ids = torch.empty_like(input_ids_batch)
-    shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
-    shifted_input_ids[:, -1] = 0
+    logger.info(
+        f"[Policy] Computing logprobs for {input_ids_batch.shape} input_ids and {logits.shape} logits"
+    )
+
+    if label_packing_mask is not None:
+        assert (
+            input_packing_mask is not None
+        ), "input_packing_mask must be provided if label_packing_mask is used"
+        shifted_input_ids = torch.zeros_like(input_ids_batch)
+        logger.info(
+            f"[Policy] Using label_packing_mask: {label_packing_mask.shape}, input_packing_mask: {input_packing_mask.shape}"
+        )
+        shifted_input_ids[input_packing_mask] = input_ids_batch[label_packing_mask]
+    else:
+        shifted_input_ids = torch.empty_like(input_ids_batch)
+        shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
+        shifted_input_ids[:, -1] = 0
+
     if is_full_logits:
         assert (
             logits.shape[:2] == shifted_input_ids.shape[:2]

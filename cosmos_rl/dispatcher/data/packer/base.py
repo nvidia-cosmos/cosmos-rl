@@ -145,3 +145,28 @@ class DataPacker(ABC):
         raise NotImplementedError(
             "This method should be implemented by the subclass for SFT training"
         )
+
+    def sft_collate_fn_packing_seq(
+        self,
+        processed_samples: List[Dict[str, Any]],
+        computed_max_len: int,
+    ) -> Dict[str, Any]:
+        """
+        Flatten the mini-batch into a single batch for training
+        """
+        raise NotImplementedError(
+            "This method should be implemented by the subclass for SFT training"
+        )
+
+    def policy_collate_fn_packing_seq(
+        self,
+        processed_samples: List[Any],
+        advantages: List[float],
+        computed_max_len: int,
+    ) -> Dict[str, Any]:
+        """
+        Flatten the mini-batch into a single batch for training
+        """
+        raise NotImplementedError(
+            "This method should be implemented by the subclass for policy training"
+        )

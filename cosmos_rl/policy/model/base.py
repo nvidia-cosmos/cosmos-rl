@@ -274,6 +274,24 @@ class BaseModel(torch.nn.Module, ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_position_ids_seq_packing(
+        self, **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        """
+        Method to get the position ids of the model with sequence packing.
+
+        Args:
+            **kwargs: Keyword arguments.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, int]:
+                - Tensor of position ids
+                - Tensor of input ids
+                - Sequence dimension index of position ids.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def load_hf_weights(
         self,
         model_name_or_path: str,
