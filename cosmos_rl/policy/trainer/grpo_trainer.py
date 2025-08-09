@@ -665,6 +665,10 @@ class GRPOTrainer(Trainer):
     @Trainer.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         assert command.src_replica_size == self.world_size
+        for name, param in self.model.named_parameters():
+            logger.info(
+                f"LMS: Policy param: {name}: {param.shape}, {param.dtype}, {param.device}"
+            )
         if not command.src_replica_name == self.replica_name:
             logger.error(
                 f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
