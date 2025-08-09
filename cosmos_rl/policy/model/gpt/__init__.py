@@ -37,6 +37,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
 from flash_attn import flash_attn_func
+from flash_attn import flash_attn_varlen_func
 
 
 class RMSNorm(nn.Module):
@@ -194,6 +195,7 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
         self.attn_func = flash_attn_func
+        self.attn_func_varlen = flash_attn_varlen_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -232,6 +234,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor],
+        **kwargs,
     ):
         """
         Forward pass of the attention module.
@@ -272,7 +275,19 @@ class Attention(nn.Module):
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
 
-        output = self.attn_func(xq, xk, xv, causal=True)
+        if "cu_seqlens" in kwargs:
+            output = self.attn_func_varlen(
+                xq,
+                xk,
+                xv,
+                kwargs["cu_seqlens"],
+                kwargs["cu_seqlens"],
+                kwargs["max_seqlen"],
+                kwargs["max_seqlen"],
+                causal=False,
+            )
+        else:
+            output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
@@ -357,6 +372,7 @@ class GPTBlock(nn.Module):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # necessary, but kept here for BC
+        **kwargs,
     ):
         """
         Perform a forward pass through the GPTBlock.
@@ -369,7 +385,11 @@ class GPTBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.self_attn(self.input_layernorm(x), position_embeddings)
+        h = x + self.self_attn(
+            self.input_layernorm(x),
+            position_embeddings=position_embeddings,
+            kwargs=kwargs,
+        )
         out = h + self.mlp(self.post_attention_layernorm(h))
         return out
 
@@ -441,9 +461,12 @@ class GPT(BaseModel):
         else:
             h = input_ids
 
+        logger.info(
+            f"Input shape: {h.shape}, position_ids shape: {position_ids.shape if position_ids is not None else None}"
+        )
         position_embeddings = self.rotary_emb(h, position_ids.to(dtype=torch.long))
         for layer in self.layers.values():
-            h = layer(h, position_embeddings=position_embeddings)
+            h = layer(h, position_embeddings=position_embeddings, kwargs=kwargs)
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
@@ -610,6 +633,17 @@ class GPT(BaseModel):
             .expand_as(inputs)
         )
         return position_ids, inputs, seq_dim_idx
+
+    def get_position_ids_seq_packing(
+        self, **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        seq_dim_idx = 1
+        assert "position_ids" in kwargs, "position_ids must be provided"
+        return (
+            kwargs["position_ids"],
+            kwargs["input_ids"],
+            seq_dim_idx,
+        )
 
     def separate_model_parts(self) -> List[nn.Module]:
         return [self]

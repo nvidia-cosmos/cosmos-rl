@@ -51,11 +51,30 @@ def async_safe_ce(
     target: torch.LongTensor,
     ignore_index: int = -100,
     loss_scaling_factor: float = 1.0,
+    output_packing_mask: Optional[torch.Tensor] = None,
+    target_packing_mask: Optional[torch.Tensor] = None,
     dp_group: Optional[torch.distributed.ProcessGroup] = None,
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> torch.Tensor:
-    target = target[:, 1:].contiguous().view(-1)
-    output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+    logger.info(
+        f"[Policy] Computing async safe cross entropy loss for output shape {output.shape} and target shape {target.shape}"
+    )
+
+    if output_packing_mask is not None:
+        output = (
+            output[output_packing_mask].contiguous().view(-1, output.size(-1)).float()
+        )
+    else:
+        output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+
+    if target_packing_mask is not None:
+        target = target[target_packing_mask].contiguous().view(-1)
+    else:
+        target = target[:, 1:].contiguous().view(-1)
+
+    logger.info(
+        f"[Policy] output shape after packing: {output.shape}, target shape after packing: {target.shape}"
+    )
 
     if cp_group is not None and cp_group.size() > 1:
         # Fallback to unbalance loss
@@ -519,12 +538,19 @@ class SFTTrainer(Trainer):
                             // self.seq_len_multiple
                             * self.seq_len_multiple
                         )
-                    batch = self.data_packer.sft_collate_fn(
-                        raw_batch,
-                        computed_max_len=max_len,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                        ignore_label_id=-100,
-                    )
+                    packing_seq = self.config.train.sequence_packing
+                    if packing_seq:
+                        batch = self.data_packer.sft_collate_fn_packing_seq(
+                            raw_batch,
+                            computed_max_len=max_len,
+                        )
+                    else:
+                        batch = self.data_packer.sft_collate_fn(
+                            raw_batch,
+                            computed_max_len=max_len,
+                            pad_token_id=self.tokenizer.pad_token_id,
+                            ignore_label_id=-100,
+                        )
 
                     # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
                     # settings from [profiler.sub_profiler_config] are reused
@@ -645,9 +671,14 @@ class SFTTrainer(Trainer):
                             if padding_mask_before_cp is not None:
                                 batch["padding_mask"] = padding_mask_before_cp
 
+                        logger.info(
+                            f"logits shape: {logits.shape} labels shape: {labels.shape}"
+                        )
                         loss = self.loss_fn(
                             logits,
                             labels,
+                            output_packing_mask=batch.get("input_packing_mask", None),
+                            target_packing_mask=batch.get("label_packing_mask", None),
                             loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                         )
 

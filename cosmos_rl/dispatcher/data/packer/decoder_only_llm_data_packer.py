@@ -306,3 +306,180 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             "input_ids": input_ids,
             "label_ids": label_ids,
         }
+
+    def sft_collate_fn_packing_seq(
+        self,
+        processed_samples: List[Dict[str, Any]],
+        computed_max_len: int,
+    ) -> Dict[str, Any]:
+        """
+        Flatten the mini-batch into a single batch for training
+        """
+        """
+        Collate the processed samples into a minibatch dictionary passed to the SFT model.
+        """
+        # First truncate the samples to the computed_max_len
+        list_of_input_ids = [
+            x["token_ids"][:computed_max_len] for x in processed_samples
+        ]
+        list_of_label_ids = [
+            x["label_ids"][:computed_max_len] for x in processed_samples
+        ]
+
+        # Merge the input_ids and label_ids into a single batch
+        concatenated_input_ids = [
+            item for sublist in list_of_input_ids for item in sublist
+        ]
+        concatenated_label_ids = [
+            item for sublist in list_of_label_ids for item in sublist
+        ]
+
+        seq_lens = [len(sublist) for sublist in list_of_input_ids]
+
+        position_ids = [
+            item for sublist in list_of_input_ids for item in list(range(len(sublist)))
+        ]
+
+        label_packing_mask = []
+        for sublist in list_of_label_ids:
+            label_packing_mask.extend([0] + [1] * (len(sublist) - 1))
+        input_packing_mask = []
+        for sublist in list_of_input_ids:
+            input_packing_mask.extend([1] * (len(sublist) - 1) + [0])
+
+        label_lens = [len(sublist) for sublist in list_of_label_ids]
+        # Then pad the samples to the computed_max_len
+        input_ids = torch.tensor(
+            [concatenated_input_ids],
+            dtype=torch.long,
+        )
+        # Model accept unshifted label_ids for loss computation
+        label_ids = torch.tensor(
+            [concatenated_label_ids],
+            dtype=torch.long,
+        )
+        position_ids = torch.tensor(
+            [position_ids],
+            dtype=torch.long,
+        )
+
+        seq_len = torch.tensor(seq_lens, dtype=torch.int32)
+        prefill_start_pos = torch.cumsum(seq_len, dim=0, dtype=torch.int32) - seq_len
+        cu_seqlens = torch.cat(
+            [prefill_start_pos, torch.tensor([torch.sum(seq_len)], dtype=torch.int32)],
+            dim=0,
+        )
+        max_seqlen = max(seq_lens)
+
+        label_len = torch.tensor(label_lens, dtype=torch.int32)
+        label_start_pos = torch.cumsum(label_len, dim=0) - label_len
+        cu_seqlens_label = torch.cat(
+            [label_start_pos, torch.tensor([torch.sum(label_len)], dtype=torch.int32)],
+            dim=0,
+        )
+        max_seqlen_label = max(label_lens)
+        return {
+            "input_ids": input_ids,
+            "label_ids": label_ids,
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": max_seqlen,
+            "cu_seqlens_label": cu_seqlens_label,
+            "max_seqlen_label": max_seqlen_label,
+            "position_ids": position_ids,
+            "label_packing_mask": torch.tensor(
+                [label_packing_mask],
+                dtype=torch.bool,
+            ),
+            "input_packing_mask": torch.tensor(
+                [input_packing_mask],
+                dtype=torch.bool,
+            ),
+        }
+
+    def policy_collate_fn_packing_seq(
+        self,
+        processed_samples: List[RLPolicyInput],
+        advantages: List[float],
+        computed_max_len: int,
+    ) -> Dict[str, Any]:
+        # First truncate the samples to the computed_max_len
+        list_of_input_ids = [x.input_ids[:computed_max_len] for x in processed_samples]
+        list_of_logprob_masks = [
+            x.logprob_masks[:computed_max_len] for x in processed_samples
+        ]
+        assert len(list_of_input_ids) == len(
+            list_of_logprob_masks
+        ), "The length of input_ids, and logprob_masks should be the same"
+        device = torch.cuda.current_device()
+
+        # Merge the input_ids and logprob_masks into a single batch
+        concatenated_input_ids = [
+            item for sublist in list_of_input_ids for item in sublist
+        ]
+        concatenated_logprob_masks = [
+            item for sublist in list_of_logprob_masks for item in sublist
+        ]
+
+        seq_lens = [len(sublist) for sublist in list_of_input_ids]
+
+        assert len(list_of_logprob_masks) == len(
+            advantages
+        ), "The length of logprob_masks and advantages should be the same"
+
+        concatenated_advantages = [
+            adv
+            for idx, adv in enumerate(advantages)
+            for _ in range(len(list_of_logprob_masks[idx]))
+        ]
+
+        position_ids = [
+            item for sublist in list_of_input_ids for item in list(range(len(sublist)))
+        ]
+        label_packing_mask = []
+        for sublist in list_of_input_ids:
+            label_packing_mask.extend([0] + [1] * (len(sublist) - 1))
+        input_packing_mask = []
+        for sublist in list_of_input_ids:
+            input_packing_mask.extend([1] * (len(sublist) - 1) + [0])
+
+        # Then pad the samples to the computed_max_len
+        input_ids = torch.tensor(
+            [concatenated_input_ids],
+            dtype=torch.long,
+        ).to(device)
+        # Model accept unshifted label_ids for loss computation
+        logprob_masks = torch.tensor(
+            [concatenated_logprob_masks],
+            dtype=torch.bool,
+        ).to(device)
+        position_ids = torch.tensor(
+            [position_ids],
+            dtype=torch.long,
+        ).to(device)
+        advantages = torch.tensor(
+            [concatenated_advantages],
+            dtype=torch.float32,
+        ).to(device)
+        seq_len = torch.tensor(seq_lens, dtype=torch.int32)
+        prefill_start_pos = torch.cumsum(seq_len, dim=0, dtype=torch.int32) - seq_len
+        cu_seqlens = torch.cat(
+            [prefill_start_pos, torch.tensor([torch.sum(seq_len)], dtype=torch.int32)],
+            dim=0,
+        ).to(device)
+        max_seqlen = max(seq_lens)
+        return {
+            "input_ids": input_ids,
+            "logprob_masks": logprob_masks,
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": max_seqlen,
+            "position_ids": position_ids,
+            "advantages": advantages,
+            "label_packing_mask": torch.tensor(
+                [label_packing_mask],
+                dtype=torch.bool,
+            ).to(device),
+            "input_packing_mask": torch.tensor(
+                [input_packing_mask],
+                dtype=torch.bool,
+            ).to(device),
+        }

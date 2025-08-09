@@ -528,6 +528,11 @@ class TrainingConfig(BaseModel):
         description="The interval of train step for synchronizing weights between replicas.",
     )
 
+    sequence_packing: bool = Field(
+        default=True,
+        description="Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.async_tp_enabled and not self.compile:
