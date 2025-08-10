@@ -36,6 +36,7 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
     add_tool_response_messages,
     add_assistant_message,
 )
+from cosmos_rl.dispatcher.data import RLPayload
 
 
 class GSM8kDataset(Dataset):
@@ -61,7 +62,7 @@ class GSM8kDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> tuple[str, str]:
+    def __getitem__(self, idx: int) -> RLPayload:
         """
         For DecoderOnlyLLMDataPacker, it should either return:
         - raw text prompt to be converted into input_ids by both rollout and policy models;
@@ -91,14 +92,14 @@ class GSM8kDataset(Dataset):
         ]
 
         if not self.apply_chat_template:
-            return conversation
+            return RLPayload(conversation=conversation)
 
         prompt = self.tokenizer.apply_chat_template(
             conversation,
             tokenize=False,
             add_generation_prompt=True,
         )
-        return prompt
+        return RLPayload(prompt=prompt)
 
     def get_reference_answer(self, idx: int) -> Any:
         """
@@ -314,7 +315,7 @@ class GSM8kDataPacker(DataPacker):
     def extend_conversation(
         self,
         conversation: ConversationType,
-        response: str,
+        responses: List[str],
         ground_truth: Optional[str] = None,
     ) -> ConversationType:
         """
@@ -322,13 +323,21 @@ class GSM8kDataPacker(DataPacker):
         """
         assert self.tool_agent is not None, "Tool agent is not set"
 
+        real_response = None
+        for response in responses:
+            if response:
+                real_response = response
+                break
+        if real_response is None:
+            real_response = ""
+
         # 1. check if the response contains tool call
-        tool_response = self.tool_agent(response, ground_truth)
+        tool_response = self.tool_agent(real_response, ground_truth)
         if tool_response:
             return add_tool_response_messages(conversation, tool_response.text)
 
         # By default, we add response as assistant message
-        return add_assistant_message(conversation, response)
+        return add_assistant_message(conversation, real_response)
 
 
 if __name__ == "__main__":

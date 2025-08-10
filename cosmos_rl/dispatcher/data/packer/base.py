@@ -163,11 +163,11 @@ class DataPacker(ABC):
     def extend_conversation(
         self,
         conversation: ConversationType,
-        response: str,
+        responses: List[str],
         ground_truth: Optional[str] = None,
     ) -> ConversationType:
         """
         Extend the conversation by models response.
         """
         # By default, we always add response as assistant message
-        return add_assistant_message(conversation, response)
+        return add_assistant_message(conversation, "" if responses else responses[0])
