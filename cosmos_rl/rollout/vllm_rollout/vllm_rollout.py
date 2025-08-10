@@ -13,13 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import copy
 
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
 
 import vllm
 import torch
-from typing import List, Tuple, Any, Optional, Dict
+from typing import List, Any, Optional, Dict, Union
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
@@ -38,6 +37,7 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
     add_assistant_message,
 )
 from cosmos_rl.tools.tools_use import OpenAIFunctionToolSchema
+from cosmos_rl.dispatcher.data import RLPayload
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -198,7 +198,7 @@ class vLLMRollout(RolloutBase):
     @torch.no_grad()
     def rollout_generation_single_turn(
         self,
-        prompt_id_and_payload_list: List[Tuple[int, Any]],
+        payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
@@ -208,16 +208,13 @@ class vLLMRollout(RolloutBase):
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
 
-        # List of payloads.
-        # [
-        #   payload,
-        #   payload,
-        #   ...
-        # ]
-        payloads = [x[1] for x in prompt_id_and_payload_list]
-
         # Pack the payloads into prompts for vllm.
-        prompts = [data_packer.get_rollout_input(payload) for payload in payloads]
+        prompts = []
+        for pl in payloads:
+            assert (
+                pl.prompt is not None
+            ), "Prompt should not be None for single turn rollout generation."
+            prompts.append(data_packer.get_rollout_input(pl.prompt))
         prompts = data_packer.rollout_collate_fn(prompts)
         if self.is_vlm:
             new_prompts = util.decode_vision_info(prompts)
@@ -256,25 +253,25 @@ class vLLMRollout(RolloutBase):
     @torch.no_grad()
     def rollout_generation_multi_turn(
         self,
-        prompt_id_and_payload_list: List[Tuple[int, Any]],
+        payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
-    ) -> List[Any]:
+    ) -> List[RLPayload]:
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
         stream = torch.cuda.current_stream() if stream is None else stream
 
-        def generation_multi_turn_for_one_payload(payload: Any, answer: str) -> Any:
+        def generation_multi_turn_for_one_payload(payload: RLPayload) -> Any:
             assistant_turn_count = 0
             while (
                 assistant_turn_count
                 < self.rollout_config.multi_turn_config.max_assistant_turns
             ):
                 # Pack the payloads into prompts for vllm.
-                prompts = [data_packer.get_rollout_input(payload)]
+                prompts = [data_packer.get_rollout_input(payload.conversation)]
                 prompts = data_packer.rollout_collate_fn(prompts)
 
                 with torch.cuda.stream(stream):
@@ -284,8 +281,12 @@ class vLLMRollout(RolloutBase):
                         use_tqdm=False,
                     )
 
-                payload = data_packer.extend_conversation(
-                    payload, results[0].outputs[0].text, ground_truth=answer
+                # extend the conversation with the rollout result
+                responses = [output.text for output in results[0].outputs]
+                payload.conversation = data_packer.extend_conversation(
+                    payload.conversation,
+                    responses,
+                    ground_truth=payload.reference_answer,
                 )
 
                 # check if the sequence length is reached the max_sequence_length
@@ -309,31 +310,26 @@ class vLLMRollout(RolloutBase):
         #   [completion_str, completion_str, ...],
         #   ...
         # ]
-        response: List[Any] = []
-        for payload_list in prompt_id_and_payload_list:
-            # payload_list format: [conversation, payload, weight_version, answer]
-            response.append(
-                generation_multi_turn_for_one_payload(
-                    copy.deepcopy(payload_list[0]), payload_list[3]
-                )
-            )
+        response: List[RLPayload] = []
+        for payload in payloads:
+            response.append(generation_multi_turn_for_one_payload(payload))
 
         return response
 
     def rollout_generation(
         self,
-        prompt_id_and_payload_list: List[Tuple[int, Any]],
+        payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
-    ) -> List[List[str]]:
+    ) -> Union[List[List[str]], List[RLPayload]]:
         if self.rollout_config.multi_turn_config.enable:
             return self.rollout_generation_multi_turn(
-                prompt_id_and_payload_list, stream, data_packer, sampling_params
+                payloads, stream, data_packer, sampling_params
             )
         else:
             return self.rollout_generation_single_turn(
-                prompt_id_and_payload_list, stream, data_packer, sampling_params
+                payloads, stream, data_packer, sampling_params
             )
 
     def get_underlying_model(self):
