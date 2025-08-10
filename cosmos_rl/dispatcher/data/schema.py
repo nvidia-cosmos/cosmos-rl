@@ -60,7 +60,7 @@ class RLPayload(BaseModel):
     # The weight version for the prompt.
     weight_version: int = 0
 
-    @model_validator(model="after")
+    @model_validator(mode="after")
     def check_params_value(self):
         assert self.prompt or self.conversation, "Must set prompt or conversation"
         return self
