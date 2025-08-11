@@ -14,6 +14,7 @@ ARG EFA_INSTALLER_VERSION=1.42.0
 ARG AWS_OFI_NCCL_VERSION=v1.16.0
 # NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
 ARG NCCL_VERSION=2.26.2-1+cuda12.8
+ARG PYTHON_VERSION=3.12
 
 ENV TZ=Etc/UTC
 
@@ -59,10 +60,15 @@ RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y redis-server
 
 ###################################################
+RUN apt-get install -qq -y software-properties-common
+RUN add-apt-repository ppa:deadsnakes/ppa
 ## Install python
 RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
-    python3.10 python3.10-dev python3.10-venv python3-pip python-is-python3
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv
+## Create a virtual environment
+RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
+ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
 RUN pip install -U pip setuptools wheel packaging
 

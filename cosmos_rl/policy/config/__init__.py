@@ -340,7 +340,7 @@ class GrpoConfig(BaseModel):
         "then rollout engine traffic will be throttled. ",
     )
 
-    fully_on_policy: bool = Field(
+    on_policy: bool = Field(
         default=False,
         description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
     )
@@ -450,6 +450,18 @@ class TrainingConfig(BaseModel):
         default=(0.9, 0.999), description="Betas for optimizer"
     )
     optm_warmup_steps: int = Field(default=20, description="Warmup steps for optimizer")
+    optm_decay_ratio: Optional[float] = Field(
+        default=None,
+        description="Ratio of total steps for decay, range in [0.0, 1.0], 0 means no decay.",
+    )
+    optm_decay_type: Optional[str] = Field(
+        default=None,
+        description="Type of decay for optimizer",
+        choices=["sqrt", "cosine", "linear", "none"],
+    )
+    optm_min_lr_factor: float = Field(
+        default=0.0, description="Minimum lr factor for optimizer, range in [0.0, 1.0]"
+    )
     optm_grad_norm_clip: float = Field(
         default=1.0, description="Gradient norm clip for optimizer"
     )
@@ -526,10 +538,10 @@ class TrainingConfig(BaseModel):
             raise ValueError("max_num_steps must be positive if specified")
 
         if isinstance(self.train_policy, GrpoConfig):
-            if self.train_policy.fully_on_policy:
+            if self.train_policy.on_policy:
                 assert (
                     self.sync_weight_interval == 1
-                ), "sync_weight_interval must be 1 when fully_on_policy is enabled"
+                ), "sync_weight_interval must be 1 when on_policy is enabled"
 
         return self
 
@@ -576,6 +588,10 @@ class PolicyConfig(BaseModel):
         # default="Qwen/Qwen2.5-3B-Instruct",  #'Qwen/Qwen2.5-VL-7B-Instruct'
         default="Qwen/Qwen2.5-VL-7B-Instruct",
         description="The model name or path, compatible with huggingface model name or local path",
+    )
+    model_revision: Optional[str] = Field(
+        default=None,
+        description="The revision of the model to use",
     )
     model_max_length: int = Field(
         default=4096,

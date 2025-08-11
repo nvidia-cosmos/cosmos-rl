@@ -39,6 +39,12 @@ if __name__ == "__main__":
         required=True,
         choices=["policy", "rollout"],
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to the config file for the policy or rollout script.",
+    )
     parser.add_argument("--script", type=str)
     args = parser.parse_args()
 
@@ -88,6 +94,8 @@ if __name__ == "__main__":
             "--nnodes",
             str(nnode),
         ]
+        if args.config:
+            cmd += ["--config", args.config]
         if args.script:
             cmd += ["--script", args.script]
         cmds.append(cmd)

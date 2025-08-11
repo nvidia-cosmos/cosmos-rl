@@ -23,7 +23,7 @@ from cosmos_rl.utils.checkpoint import (
     CheckpointMananger,
 )
 from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationConfig
-from cosmos_rl.policy.trainer.optm import build_optimizers, build_lr_schedulers
+from cosmos_rl.policy.trainer.optm import build_optimizers
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -142,8 +142,8 @@ class Trainer(CommMixin):
                 )
             )
 
-        self.lr_schedulers = build_lr_schedulers(self.optimizers, self.config)
         self.seq_len_multiple = parallel_dims.cp * parallel_dims.tp
+        self.lr_schedulers = None
         if self.config.train.fp8.enable_fp8:
             # Constraint of FP8 kernel(torch._scaled_mm): it requires K in MNK is mutiple of 16. In backward of Linear, to
             # calculate the gradient of weight, we have to round the seq_len_multiple to mutiple of 16.

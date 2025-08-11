@@ -429,6 +429,7 @@ class GPT(BaseModel):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor = None,
+        interested_tokens: Optional[torch.BoolTensor] = None,
         *args,
         **kwargs,
     ):
@@ -446,6 +447,11 @@ class GPT(BaseModel):
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
+            if interested_tokens is not None:
+                assert not isinstance(
+                    h, torch.distributed.tensor.DTensor
+                ), "logprob_masks must be a local tensor"
+                h = h[interested_tokens]
             h = self.norm(h)
             if not self.tie_embed_tokens:
                 output = self.lm_head(h)
@@ -512,6 +518,7 @@ class GPT(BaseModel):
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
+        revision: Optional[str] = None,
     ):
         """
         Load weights from a HuggingFace model.
@@ -523,7 +530,7 @@ class GPT(BaseModel):
         """
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
-        model_path = resolve_model_path(model_name_or_path)
+        model_path = resolve_model_path(model_name_or_path, revision=revision)
         safetensors_files = [
             f for f in os.listdir(model_path) if f.endswith(".safetensors")
         ]

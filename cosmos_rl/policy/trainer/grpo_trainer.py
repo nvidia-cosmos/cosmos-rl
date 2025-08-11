@@ -30,6 +30,7 @@ import requests
 import threading
 import asyncio
 from queue import Queue, Empty
+from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.dispatcher.command import (
     Command,
     BuildMeshCommand,
@@ -89,6 +90,8 @@ def compute_loss(
     cu_seqlens: torch.Tensor,  # of shape `[batch_size + 1]`
     config: CosmosConfig,
     logprob_masks: torch.Tensor,  # of shape `[batch_size, max_len]`
+    dp_group: Optional[torch.distributed.ProcessGroup] = None,
+    ddp_comm: HighAvailabilitylNccl = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
     current_advantages = torch.masked_select(current_advantages, logprob_masks)
@@ -180,10 +183,29 @@ def compute_loss(
         per_token_loss = per_token_loss_seq_sum.mean()
         kl_loss = kl_loss_seq_sum.mean()
     elif config.train.train_policy.loss_type == "token-mean":
-        # token-mean
         length_sum = shifted_length.sum()
-        per_token_loss = per_token_loss_seq_sum.sum() / length_sum
-        kl_loss = kl_loss_seq_sum.sum() / length_sum
+        num_dp_workers = 1
+        # dps = [(num_dp_workers, length_sum.item())]
+        if dp_group is not None:
+            # # token-mean
+            # per_token_loss = per_token_loss_seq_sum.sum() / length_sum
+            # kl_loss = kl_loss_seq_sum.sum() / length_sum
+            # Take DP tokens into account
+            num_dp_workers *= torch.distributed.get_world_size(group=dp_group)
+            torch.distributed.all_reduce(length_sum, group=dp_group)
+            # dps.append((num_dp_workers, length_sum.item()))
+
+        if ddp_comm is not None:
+            num_dp_workers *= ddp_comm.world_size()
+            ddp_comm.allreduce(
+                length_sum, length_sum, op=torch.distributed.ReduceOp.SUM
+            )
+            # dps.append((num_dp_workers, length_sum.item()))
+        # print(f"dps: {dps}")
+        per_token_loss = (
+            per_token_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
+        )
+        kl_loss = kl_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
     else:
         raise ValueError(f"Invalid loss type: {config.train.train_policy.loss_type}")
     return (
@@ -198,6 +220,8 @@ class GRPOTrainer(Trainer):
         super().__init__(config, parallel_dims)
         self.reference_state_dict = {}
 
+        self.lr_schedulers = build_lr_schedulers(self.optimizers, self.config, 1e6)
+        self.lr_schedulers_updated = False
         if parallel_dims.dp_replicate > 1:
             raise ValueError(
                 f"DP replicate size {parallel_dims.dp_replicate} is not supported for GRPO"
@@ -351,6 +375,7 @@ class GRPOTrainer(Trainer):
             self.config.policy.model_name_or_path,
             self.parallel_dims,
             self.device,
+            revision=self.config.policy.model_revision,
         )
         self.model.train()
         self.model_ready = True
@@ -854,6 +879,17 @@ class GRPOTrainer(Trainer):
 
         is_fake_step = self.replica_batch_for_this_step == 0
         if not is_fake_step:
+            if not self.lr_schedulers_updated:
+                assert (
+                    command.total_steps is not None and command.total_steps > 0
+                ), "Total steps must be set for lr scheduler"
+                logger.info(
+                    f"[Policy] Building lr schedulers for total steps {command.total_steps}"
+                )
+                self.lr_schedulers = build_lr_schedulers(
+                    self.optimizers, self.config, command.total_steps
+                )
+                self.lr_schedulers_updated = True
             report_data = self.train(
                 current_step=command.global_step,
                 total_steps=command.total_steps,
@@ -925,7 +961,6 @@ class GRPOTrainer(Trainer):
                 return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
             )
             self.optimizers.step()
-            self.lr_schedulers.step()
             self.optimizers.zero_grad()
         return grad_norm
 
@@ -1087,14 +1122,16 @@ class GRPOTrainer(Trainer):
     def compute_logprobs(
         self,
         minibatch: Dict[str, Any],
-        full_logits: torch.Tensor,
+        logits: torch.Tensor,
+        is_full_logits: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute the per-token log probabilities and advantages
 
         Args:
             minibatch: a dictionary containing the input_ids and logprob_masks
-            full_logits: the logits of the model
+            logits: the logits of the model
+            is_full_logits: whether the logits are full logits or have been index-selected for memory efficiency
 
         Returns:
             logps: the per-token log probabilities
@@ -1107,8 +1144,8 @@ class GRPOTrainer(Trainer):
         return logprobs_computing(
             minibatch["input_ids"],
             minibatch["logprob_masks"],
-            full_logits,
-            self.tokenizer,
+            logits,
+            is_full_logits=is_full_logits,
         )
 
     @torch.no_grad()
@@ -1267,6 +1304,14 @@ class GRPOTrainer(Trainer):
                                     computed_max_len=computed_max_len,
                                 )
                             )
+
+                            # TP will shard the sequence dimension into n-ranks.
+                            # The interested_tokens will be unevenly distributed across ranks.
+                            # So do not enable interested_tokens in TP.
+                            if not self.parallel_dims.tp_enabled:
+                                user_mini_batch["interested_tokens"] = user_mini_batch[
+                                    "logprob_masks"
+                                ]
 
                             # Move all tensor to device
                             for k in user_mini_batch.keys():
@@ -1439,7 +1484,10 @@ class GRPOTrainer(Trainer):
                                 current_per_token_logprobs, cu_seqlens = (
                                     self.compute_logprobs(
                                         user_mini_batch,
-                                        full_logits=raw_logits,
+                                        logits=raw_logits,
+                                        is_full_logits=True
+                                        if raw_logits.ndim == 3
+                                        else False,
                                     )
                                 )
                                 logprob_masks = user_mini_batch["logprob_masks"]
@@ -1482,6 +1530,12 @@ class GRPOTrainer(Trainer):
                                         cu_seqlens,
                                         self.config,
                                         logprob_masks,
+                                        dp_group=self.parallel_dims.mesh[
+                                            "dp"
+                                        ].get_group()
+                                        if self.parallel_dims.dp_enabled
+                                        else None,
+                                        ddp_comm=self.inter_policy_nccl,
                                     )
 
                                     # Positive Example LM Loss
@@ -1526,6 +1580,9 @@ class GRPOTrainer(Trainer):
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()
+
+        # Only step lr scheduler when all the mini-batches are processed
+        self.lr_schedulers.step()
 
         loss = (loss_sum / loss_count) if loss_count > 0 else loss_sum
         kl_loss = (kl_loss_sum / loss_count) if loss_count > 0 else kl_loss_sum
@@ -1690,7 +1747,8 @@ def _swizzle_pp_grpo_forward(
         minibatch={
             **user_input,
         },
-        full_logits=raw_logits,
+        logits=raw_logits,
+        is_full_logits=True if raw_logits.ndim == 3 else False,
     )
     logprob_masks = user_input["logprob_masks"]
     current_advantages = logprob_masks * advantages
@@ -1759,6 +1817,10 @@ def _swizzle_pp_grpo_forward(
         cu_seqlens,
         config,
         logprob_masks,
+        dp_group=trainer.parallel_dims.mesh["dp"].get_group()
+        if trainer.parallel_dims.dp_enabled
+        else None,
+        ddp_comm=trainer.inter_policy_nccl,
     )
 
     # Add Positive NLL if enabled and mask available

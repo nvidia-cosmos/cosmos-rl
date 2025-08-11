@@ -88,7 +88,7 @@ def write_json_file(data, file_path):
         json.dump(data, json_file, indent=4)
 
 
-def resolve_model_path(model_path: str) -> str:
+def resolve_model_path(model_path: str, revision: Optional[str] = None) -> str:
     if not os.path.exists(model_path.replace(":", "/")):
         if ":" in model_path:
             if model_path.count(":") > 1:
@@ -122,6 +122,7 @@ def resolve_model_path(model_path: str) -> str:
             try:
                 model_path = retry(snapshot_download)(
                     model_path,
+                    revision=revision,
                     token=os.environ.get("HF_TOKEN"),
                     cache_dir=os.environ.get(
                         "HF_HOME",
@@ -950,15 +951,17 @@ def create_async_task(coro):
 def compute_logprobs(
     input_ids_batch: torch.Tensor,  # [batch_size, max_len]
     logprob_masks: torch.Tensor,  # [batch_size, max_len],
-    full_logits: torch.Tensor,  # [batch_size, max_len, vocab_size]
-    tokenizer,
+    logits: torch.Tensor,  # [batch_size, max_len, vocab_size] or [n_logprob_tokens, vocab_size] if is_full_logits is False
+    is_full_logits: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the per-token log probabilities and advantages
 
     Args:
-        minibatch: a dictionary containing the input_ids and logprob_masks
-        full_logits: the logits of the model
+        input_ids_batch: the input_ids of the model [batch_size, max_len]
+        logprob_masks: the logprob_masks of the model [batch_size, max_len]
+        logits: the logits of the model [batch_size, max_len, vocab_size] or [n_logprob_tokens, vocab_size]
+        is_full_logits: whether the logits are full logits or have been index-selected for memory efficiency
 
     Returns:
         logps: the per-token log probabilities
@@ -968,12 +971,15 @@ def compute_logprobs(
     shifted_input_ids = torch.empty_like(input_ids_batch)
     shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
     shifted_input_ids[:, -1] = 0
-    assert (
-        full_logits.shape[:2] == shifted_input_ids.shape[:2]
-    ), f"Logits shape {full_logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
-    bsz, _, _ = full_logits.shape
-    # select the effective logits
-    effective_logits = full_logits[logprob_masks]  # [n_logprob_tokens, vocab_size]
+    if is_full_logits:
+        assert (
+            logits.shape[:2] == shifted_input_ids.shape[:2]
+        ), f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        effective_logits = logits[logprob_masks]
+    else:
+        effective_logits = logits
+    bsz, _ = input_ids_batch.shape
+
     effective_input_ids = shifted_input_ids[logprob_masks]  # [n_logprob_tokens,]
     # Compute sft cross entropy loss
     # sft_loss = torch.nn.functional.cross_entropy(
@@ -985,7 +991,7 @@ def compute_logprobs(
 
     masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
     cu_seqlens = torch.zeros(
-        bsz + 1, dtype=torch.int32, device=full_logits.device
+        bsz + 1, dtype=torch.int32, device=logits.device
     )  # [bsz + 1,]
     cu_seqlens[1:] = torch.cumsum(masked_seqlens, dim=0)
     logps = selective_log_softmax(

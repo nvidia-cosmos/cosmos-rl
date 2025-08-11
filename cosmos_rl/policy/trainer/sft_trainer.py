@@ -22,6 +22,7 @@ from cosmos_rl.policy.config import (
     SFTDataConfig,
     config_hash,
 )
+from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.wandb_logger import (
     init_wandb,
@@ -310,6 +311,10 @@ class SFTTrainer(Trainer):
             self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
         else:
             self.total_steps = steps_by_dataset
+
+        self.lr_schedulers = build_lr_schedulers(
+            self.optimizers, self.config, self.total_steps
+        )
         self.train_step = 0
 
         # Load model
@@ -332,11 +337,17 @@ class SFTTrainer(Trainer):
                     f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                 )
                 self.model.load_hf_weights(
-                    config.policy.model_name_or_path, parallel_dims, self.device
+                    config.policy.model_name_or_path,
+                    parallel_dims,
+                    self.device,
+                    revision=config.policy.model_revision,
                 )
         else:
             self.model.load_hf_weights(
-                config.policy.model_name_or_path, parallel_dims, self.device
+                config.policy.model_name_or_path,
+                parallel_dims,
+                self.device,
+                revision=config.policy.model_revision,
             )
         self.model.train()
 

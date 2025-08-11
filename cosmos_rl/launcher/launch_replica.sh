@@ -30,6 +30,14 @@ print_help() {
   echo ""
 }
 
+set_env() {
+  local env_name="$1"
+  local env_value="$2"
+  local upper_type="${TYPE^^}"
+  echo "[Cosmos-RL] $upper_type Pre-setting environment variable $env_name=$env_value"
+  export "$env_name=$env_value"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --ngpus)
@@ -82,8 +90,10 @@ if [ -z "$TYPE" ]; then
   exit 1
 fi
 
-export NCCL_CUMEM_ENABLE="1"
-export TORCH_CPP_LOG_LEVEL="ERROR"
+# NCCL related
+set_env "NCCL_CUMEM_ENABLE" "1"
+# Torch related
+set_env "TORCH_CPP_LOG_LEVEL" "ERROR"
 
 LAUNCH_BINARY="torchrun"
 

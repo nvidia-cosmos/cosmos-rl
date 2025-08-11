@@ -819,6 +819,7 @@ class Qwen2_5_VLModel(nn.Module):
         self,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        interested_tokens: Optional[torch.BoolTensor] = None,
     ):
         h = self.identity_layer(inputs_embeds)
 
@@ -829,6 +830,11 @@ class Qwen2_5_VLModel(nn.Module):
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
+            if interested_tokens is not None:
+                assert not isinstance(
+                    h, torch.distributed.tensor.DTensor
+                ), "interested_tokens must be a local tensor"
+                h = h[interested_tokens]
             assert self.lm_head is not None, "lm_head must be provided in last stage"
             h = self.lm_head(self.norm(h))
         return h
@@ -940,10 +946,13 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             ), "input of pipeline stage > 0 must be of floating point type"
             inputs_embeds = input_ids
 
+        # For GRPO, we can pass in the logprob_masks to the model
+        # to avoid computing the logits which are not needed for the model
         outputs = self.model(
             inputs_embeds=inputs_embeds,
             # Permute back to [3, batch_size, seq_len] for Pipeline Parallelism micro batch
             position_ids=position_ids.permute(1, 0, 2).contiguous(),
+            interested_tokens=kwargs.get("interested_tokens", None),
         )
         return outputs
 
@@ -1023,6 +1032,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
+        revision: Optional[str] = None,
     ):
         """
         Load weights from a HuggingFace model.
@@ -1033,7 +1043,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         """
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
-        model_path = resolve_model_path(model_name_or_path)
+        model_path = resolve_model_path(model_name_or_path, revision=revision)
         safetensors_files = [
             f for f in os.listdir(model_path) if f.endswith(".safetensors")
         ]
