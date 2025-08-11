@@ -21,7 +21,7 @@ To design a powerfull prompt, you can refer https://huggingface.co/docs/transfor
 """
 
 from transformers import AutoTokenizer
-from typing import List, Dict
+from typing import List
 from cosmos_rl.dispatcher.data.schema import ConversationType, ChatMessage
 
 
