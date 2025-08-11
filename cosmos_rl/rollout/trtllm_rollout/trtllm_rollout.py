@@ -23,7 +23,7 @@ trtllm_version = tensorrt_llm.__version__
 
 if trtllm_version == "0.20.0":
     from tensorrt_llm._torch import LLM
-elif trtllm_version == "1.0.0rc4":
+elif trtllm_version == "1.0.0rc6":
     from tensorrt_llm import LLM
 else:
     raise NotImplementedError(f"Unsupported trtllm version: {trtllm_version}")
@@ -96,7 +96,7 @@ class TRTLLM_Rollout(RolloutBase):
             kwargs["pytorch_backend_config"] = PyTorchConfig(
                 disable_overlap_scheduler=True
             )
-        elif trtllm_version == "1.0.0rc4":
+        elif trtllm_version == "1.0.0rc6":
             kwargs["disable_overlap_scheduler"] = True
 
         self.rollout_engine = LLM(

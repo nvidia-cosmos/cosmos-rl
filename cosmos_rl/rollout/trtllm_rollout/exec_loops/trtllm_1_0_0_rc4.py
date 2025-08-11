@@ -16,20 +16,23 @@
 
 import torch
 import time
+
+from cuda import cudart
 from tensorrt_llm._torch.pyexecutor.py_executor import BatchState
 from tensorrt_llm._torch.pyexecutor.llm_request import LlmRequestState
 from tensorrt_llm._torch.pyexecutor.sampler import SampleState
-
-from cosmos_rl.utils.logging import logger
+from tensorrt_llm.runtime.generation import CUASSERT
 
 
 def cosmos_patched_executor_loop(self):
     torch.cuda.set_device(self.device_id)
+    # ensure the context is created, otherwise, some MPI calls will fail.
+    CUASSERT(cudart.cudaSetDevice(self.device_id))
     with self._profiler() as profile_step:
         sample_state = None
         iter_start_time = time.time()
         iter_stats = None
-        while not self.should_stop_processing:
+        while True:
             # Cosmos-RL specific code start
             if self.ready:
                 self.consume_command(cmd_pred=None)
@@ -40,47 +43,10 @@ def cosmos_patched_executor_loop(self):
             profile_step()
             if self.enable_iter_perf_stats:
                 iter_start_time = time.time()
-            new_requests = self._fetch_new_requests()
-            if self.should_stop_processing:
+
+            scheduled_batch, iter_stats = self._prepare_and_schedule_batch()
+            if scheduled_batch is None:
                 break
-
-            if self.kv_cache_transceiver:
-                self._check_disagg_gen_transfer_status()
-
-            if self.enable_iter_perf_stats:
-                iter_stats = self._get_init_iter_stats(
-                    len(new_requests), self.new_active_requests_queue_latency_ms
-                )
-
-            self._pad_attention_dp_dummy_request()
-
-            if self.drafter is not None:
-                self._prepare_draft_requests(self.active_requests)
-
-            scheduled_batch, fitting_disagg_gen_init_requests, num_fitting_reqs = (
-                self._schedule()
-            )
-
-            if self.kv_cache_transceiver:
-                # For requests that are fitting disagg gen init, also prepare resources for KV cache manager
-                self._prepare_disagg_gen_init(fitting_disagg_gen_init_requests)
-                if num_fitting_reqs == 0 and not fitting_disagg_gen_init_requests:
-                    logger.warning(
-                        "num_fitting_reqs=0 and fitting_disagg_gen_init_requests is empty, may not have enough kvCache"
-                    )
-                    self.kv_cache_transceiver.check_context_transfer_status(1)
-            else:
-                assert scheduled_batch.batch_size > 0, (
-                    "fail to schedule any pending request, "
-                    "probably run out of resource."
-                )
-
-            self.num_scheduled_requests = scheduled_batch.batch_size
-            logger.debug(
-                f"has {len(self.active_requests)} active_request, "
-                f"scheduled {len(scheduled_batch.context_requests)} context requests and "
-                f"{len(scheduled_batch.generation_requests)} generation requests"
-            )
 
             self._pause_requests(scheduled_batch.paused_requests)
 
@@ -97,31 +63,23 @@ def cosmos_patched_executor_loop(self):
                     self._handle_first_token_response(scheduled_batch)
 
                 self.resource_manager.prepare_resources(scheduled_batch)
-                if self.drafter is not None:
+                if self.drafter is not None and self.use_spec_decode:
                     self.drafter.prepare_draft_tokens(
                         scheduled_batch, self.resource_manager
                     )
 
                 batch_outputs = self._forward_step(scheduled_batch)
-
-                if self.guided_decoder is not None:
-                    self.guided_decoder.build(scheduled_batch)
-                    self.guided_decoder.execute(
-                        scheduled_batch, batch_outputs["logits"]
-                    )
+                self._execute_guided_decoder(scheduled_batch, batch_outputs["logits"])
 
                 sample_state = self._sample_async(scheduled_batch, batch_outputs)
 
                 self._update_request_states(scheduled_batch)
                 self._update_requests(sample_state)
 
-                ctx_transmission_reqs = (
-                    self._send_disagg_ctx_cache(scheduled_batch.context_requests)
-                    if self.kv_cache_transceiver
-                    else []
-                )
-
                 if self.kv_cache_transceiver:
+                    ctx_transmission_reqs = self._send_disagg_ctx_cache(
+                        scheduled_batch.context_requests
+                    )
                     # For context only req in transmission, we reset the state since sampler might have changed it
                     for req in ctx_transmission_reqs:
                         req.state = LlmRequestState.DISAGG_CONTEXT_TRANS_IN_PROGRESS

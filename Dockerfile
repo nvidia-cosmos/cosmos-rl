@@ -73,7 +73,7 @@ ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 RUN pip install -U pip setuptools wheel packaging
 
 # To solve tensorrt-llm version conflict, we pre-install it here inside image.
-RUN pip install tensorrt_llm==1.0.0rc4
+RUN pip install tensorrt_llm==1.0.0rc6
 
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.

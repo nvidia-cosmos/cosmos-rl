@@ -25,7 +25,7 @@ from tensorrt_llm._torch.pyexecutor.py_executor import PyExecutor
 from tensorrt_llm.lora_manager import (
     LoraConfig,
     get_default_trtllm_modules_to_hf_modules,
-    load_torch_hf_lora,
+    load_torch_lora,
 )
 from tensorrt_llm.llmapi.llm_utils import print_traceback_on_error
 
@@ -46,6 +46,7 @@ from tensorrt_llm._torch.pyexecutor.resource_manager import (
     ResourceManager,
     ResourceManagerType,
 )
+from tensorrt_llm.llmapi.llm_args import PeftCacheConfig, NGramDecodingConfig
 from tensorrt_llm._torch.pyexecutor.scheduler import (
     BindCapacityScheduler,
     BindMicroBatchScheduler,
@@ -127,11 +128,13 @@ def extend_create_py_executor_instance():
                 raise ValueError(f"Cannot overwrite existing resource manager {key}.")
             resources[key] = value
 
+        peft_cache_manager = None
         if lora_config is not None:
             from tensorrt_llm.bindings import LoraModule
 
             if len(lora_config.lora_dir) == 1:
-                load_torch_hf_lora(lora_config)
+                # Route to appropriate loader based on checkpoint source
+                load_torch_lora(lora_config)
             else:
                 assert (
                     len(lora_config.lora_target_modules) >= 1
@@ -147,12 +150,26 @@ def extend_create_py_executor_instance():
 
             num_experts = _try_infer_num_experts(model_engine.model.model_config)
 
+            num_kv_attention_heads_per_layer = (
+                model_binding_config.num_kv_heads_per_layer
+            )
+            if max(num_kv_attention_heads_per_layer) != min(
+                num_kv_attention_heads_per_layer
+            ):
+                logger.warning(
+                    "Defining LORA with per-layer KV heads is not supported for LORA, using the max number of KV heads per layer"
+                )
+                num_kv_attention_heads = max(num_kv_attention_heads_per_layer)
+            else:
+                # all layers have the same number of KV heads
+                num_kv_attention_heads = num_kv_attention_heads_per_layer[0]
+
             lora_modules = LoraModule.create_lora_modules(
                 lora_module_names=lora_config.lora_target_modules,
                 hidden_size=model_binding_config.hidden_size,
                 mlp_hidden_size=model_binding_config.mlp_hidden_size,
                 num_attention_heads=model_binding_config.num_heads,
-                num_kv_attention_heads=model_binding_config.num_heads,
+                num_kv_attention_heads=num_kv_attention_heads,
                 attention_head_size=model_binding_config.head_size,
                 tp_size=mapping.tp_size,
                 num_experts=num_experts,
@@ -167,14 +184,20 @@ def extend_create_py_executor_instance():
                 * len(lora_config.lora_target_modules + lora_config.missing_qkv_modules)
             )
 
-            executor_config.peft_cache_config = tllm_executor.PeftCacheConfig(
-                num_device_module_layer=max_lora_rank
-                * num_lora_modules
-                * lora_config.max_loras,
-                num_host_module_layer=max_lora_rank
-                * num_lora_modules
-                * lora_config.max_cpu_loras,
+            peft_cache_config_model = (
+                PeftCacheConfig.from_pybind(executor_config.peft_cache_config)
+                if executor_config.peft_cache_config is not None
+                else PeftCacheConfig()
             )
+            if lora_config.max_loras is not None:
+                peft_cache_config_model.num_device_module_layer = (
+                    max_lora_rank * num_lora_modules * lora_config.max_loras
+                )
+            if lora_config.max_cpu_loras is not None:
+                peft_cache_config_model.num_host_module_layer = (
+                    max_lora_rank * num_lora_modules * lora_config.max_cpu_loras
+                )
+            executor_config.peft_cache_config = peft_cache_config_model._to_pybind()
 
             from tensorrt_llm.bindings import WorldConfig
 
@@ -214,6 +237,7 @@ def extend_create_py_executor_instance():
         capacity_scheduler = BindCapacityScheduler(
             max_num_sequences,
             kv_cache_manager.impl if kv_cache_manager is not None else None,
+            peft_cache_manager.impl if peft_cache_manager is not None else None,
             executor_config.scheduler_config.capacity_scheduler_policy,
             two_step_lookahead=mapping.has_pp(),
         )
@@ -282,14 +306,22 @@ def patch_trtllm_build_model():
         max_num_tokens = self.args.max_num_tokens
         max_seq_len = self.args.max_seq_len
 
+        kwargs = {}
+        if self._on_trt_backend:
+            kwargs["batching_type"] = (
+                self.args.batching_type or tllm_executor.BatchingType.INFLIGHT
+            )
+
         self._executor_config = tllm_executor.ExecutorConfig(
             max_beam_width=self.args.max_beam_width,
             scheduler_config=PybindMirror.maybe_to_pybind(self.args.scheduler_config),
-            batching_type=PybindMirror.maybe_to_pybind(self.args.batching_type)
-            or tllm_executor.BatchingType.INFLIGHT,
             max_batch_size=max_batch_size,
             max_num_tokens=max_num_tokens,
             gather_generation_logits=self.args.gather_generation_logits,
+            fail_fast_on_attention_window_too_large=getattr(
+                self.args, "fail_fast_on_attention_window_too_large", False
+            ),
+            **kwargs,
         )
 
         if self.args.kv_cache_config is not None:
@@ -321,7 +353,8 @@ def patch_trtllm_build_model():
                 f"Unsupported guided decoding backend {self.args.guided_decoding_backend}"
             )
 
-        self._executor_config.normalize_log_probs = self.args.normalize_log_probs
+        if self._on_trt_backend:
+            self._executor_config.normalize_log_probs = self.args.normalize_log_probs
         self._executor_config.enable_chunked_context = self.args.enable_chunked_prefill
         self._executor_config.max_beam_width = self.args.max_beam_width
         if self.args.cache_transceiver_config is not None:
@@ -330,6 +363,35 @@ def patch_trtllm_build_model():
             )
         from tensorrt_llm._torch.pyexecutor.config import update_executor_config
 
+        spec_config = self.args.speculative_config
+        max_batch_size = self._executor_config.max_batch_size
+        # Apply default heuristic to AutoDecodingConfig based on benchmark results
+        # With concurrency <= 4, max_draft_len = 5, max_matching_ngram_size = 3
+        # With concurrency <= 32, max_draft_len = 3, max_matching_ngram_size = 5
+        # With concurrency > 32, speculative decoding is disabled.
+        if spec_config is not None and spec_config.decoding_type == "AUTO":
+            if not self.args.disable_overlap_scheduler:
+                logger.info(
+                    "Disable overlap scheduler to enable Auto speculative decoding with Ngram."
+                )
+                # From benchmark results, we found that NGram speculative decoding provides better performance than overlap scheduler with low concurrency <= 32.
+                # Therefore, we disable overlap scheduler to enable NGram speculative decoding.
+                self.args.disable_overlap_scheduler = True
+
+            spec_config = NGramDecodingConfig(
+                max_draft_len=5 if max_batch_size <= 4 else 3,
+                max_matching_ngram_size=3 if max_batch_size <= 4 else 5,
+                is_keep_all=True,
+                is_use_oldest=True,
+                is_public_pool=True,
+                # Flag to indicate the NGramDecodingConfig is instantiated by auto heuristic.
+                is_auto_heuristic=True,
+            )
+
+            logger.info(
+                f"Apply heuristic to incomplete NGramDecodingConfig: max_draft_len={spec_config.max_draft_len}, max_matching_ngram_size={spec_config.max_matching_ngram_size}"
+            )
+
         update_executor_config(
             self._executor_config,
             backend=self.args.backend,
@@ -337,7 +399,7 @@ def patch_trtllm_build_model():
             if self.args.backend in ["pytorch", "_autodeploy"]
             else None,
             mapping=self.args.parallel_config.to_mapping(),
-            speculative_config=self.args.speculative_config,
+            speculative_config=spec_config,
             hf_model_dir=self._hf_model_dir,
             max_input_len=self.args.max_input_len,
             max_seq_len=max_seq_len,
@@ -457,6 +519,14 @@ def patch_worker_main():
         if ready_signal != GenerationExecutorProxy.READY_SIGNAL:
             self.mpi_session.shutdown_abort(reason=ready_signal)
             raise RuntimeError("Executor worker returned error") from ready_signal
+        self_ref = weakref.ref(self)
+
+        def mpi_done_callback(future: concurrent.futures.Future):
+            # This is called when the MPI worker is done, so future.exception()
+            # will not block.
+            if future.exception() is not None:
+                if self_ := self_ref():
+                    self_._error_queue.put_nowait(future.exception())
 
     GenerationExecutorProxy.worker_main = cosmos_worker_main
     GenerationExecutorProxy._start_executor_workers = cosmos_start_executor_workers
