@@ -22,7 +22,7 @@ To design a powerfull prompt, you can refer https://huggingface.co/docs/transfor
 
 from transformers import AutoTokenizer
 from typing import List, Dict
-from cosmos_rl.dispatcher.data.schema import ConversationType
+from cosmos_rl.dispatcher.data.schema import ConversationType, ChatMessage
 
 
 def process_conversation_with_chat_template(
@@ -49,17 +49,17 @@ def process_conversation_with_chat_template(
 
     st = 0
     for i, msg in enumerate(conversation):
-        assert msg["role"] in [
+        assert msg.role in [
             "user",
             "assistant",
             "system",
             "tool",
-        ], "Unknown role: {}".format(msg["role"])
-        if msg["role"] == "system":
+        ], "Unknown role: {}".format(msg.role)
+        if msg.role == "system":
             assert i == 0, "System message should be the first message"
 
         # wait for the next assistant message, or process the full sample
-        if msg["role"] != "assistant" and i < len(conversation) - 1:
+        if msg.role != "assistant" and i < len(conversation) - 1:
             continue
 
         if i == 0:
@@ -82,7 +82,7 @@ def process_conversation_with_chat_template(
         )
 
         # Get tokens for the current message only
-        if msg["role"] == "assistant":
+        if msg.role == "assistant":
             prev_applied_text_with_generation_prompt = tokenizer.apply_chat_template(
                 conversation[:st],
                 tokenize=False,
@@ -121,7 +121,7 @@ def add_user_message(messages: ConversationType, content: str) -> ConversationTy
     """
     Add a user message to the conversation.
     """
-    messages += [{"role": "user", "content": content}]
+    messages += [ChatMessage(role="user", content=content)]
     return messages
 
 
@@ -129,7 +129,7 @@ def add_assistant_message(messages: ConversationType, content: str) -> Conversat
     """
     Add an assistant message to the conversation.
     """
-    messages += [{"role": "assistant", "content": content}]
+    messages += [ChatMessage(role="assistant", content=content)]
     return messages
 
 
@@ -139,5 +139,5 @@ def add_tool_response_messages(
     """
     Add a tool response message to the conversation.
     """
-    messages += [{"role": "tool", "content": tool_response}]
+    messages += [ChatMessage(role="tool", content=tool_response)]
     return messages
