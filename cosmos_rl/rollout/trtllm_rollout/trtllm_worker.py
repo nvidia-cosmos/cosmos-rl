@@ -422,7 +422,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 nccl_unique_id_key
             ]
         else:
-            logger.info(f"[Rollout] Querying nccl group id for {nccl_unique_id_key}")
+            logger.debug(f"[Rollout] Querying nccl group id for {nccl_unique_id_key}")
             # query the nccl group id from controller
             nccl_group_id = self.query_nccl_unique_id_from_controller(
                 nccl_unique_id_key
@@ -584,7 +584,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 )
             try:
                 handler(self, current_command)
-                logger.info(
+                logger.debug(
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
                 )
             except Exception as e:
