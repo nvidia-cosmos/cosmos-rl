@@ -406,6 +406,15 @@ class ModelRegistry:
                         model_name_or_path,
                         max_position_embeddings=config.policy.model_max_length,
                     )
+                    if config.policy.lora is not None:
+                        logger.info(f"Applying LoRA to the model: {config.policy.lora}")
+                        from cosmos_rl.policy.lora.plugin import (
+                            inject_lora_adapters,
+                            mark_only_lora_as_trainable,
+                        )
+
+                        model, _ = inject_lora_adapters(model, config.policy.lora)
+                        mark_only_lora_as_trainable(model, config.policy.lora)
                 except Exception as e:
                     logger.error(
                         f"Failed to load model {model_name_or_path} with error: {e}"
