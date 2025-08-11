@@ -81,6 +81,8 @@ class OptimizersContainer(Optimizer, Generic[T]):
         all_params = []
         self.model_parts = model_parts
         self.optimizers = [[] for _ in self.model_parts]
+        # Compute total number of parameters
+        total_trainable_params = 0
         for model_id, (model, optimizer_kwargs_i) in enumerate(
             zip(self.model_parts, optimizer_kwargs)
         ):
@@ -98,6 +100,7 @@ class OptimizersContainer(Optimizer, Generic[T]):
                         )
                         parameters_by_mesh[device_mesh].append(p)
                         all_params.append(p)
+                        total_trainable_params += p.numel()
                 for params in parameters_by_mesh.values():
                     optimizer = optimizer_cls(params, **optimizer_kwargs_copy)
                     self.optimizers[model_id].append(optimizer)
@@ -107,6 +110,8 @@ class OptimizersContainer(Optimizer, Generic[T]):
                         optimizer = optimizer_cls([p], **optimizer_kwargs_copy)
                         self.optimizers[model_id].append(optimizer)
                         all_params.append(p)
+                        total_trainable_params += p.numel()
+        logger.info(f"Total number of trainable parameters: {total_trainable_params}")
 
         self._post_init(all_params, optimizer_kwargs)
 

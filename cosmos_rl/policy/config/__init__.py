@@ -582,6 +582,36 @@ class ParallelismConfig(BaseModel):
         return int(local_world_size)
 
 
+class LoraConfig(BaseModel):
+    r: int = Field(default=8, description="LoRA rank")
+    lora_alpha: float = Field(default=8.0, description="LoRA alpha")
+    lora_dropout: float = Field(default=0.0, description="LoRA dropout")
+    target_modules: List[str] = Field(default=None, description="LoRA target modules")
+    use_rslora: bool = Field(
+        default=False,
+        description="When set to True, uses [Rank-Stabilized LoRA](https://huggingface.co/papers/2312.03732)"
+        " which sets the adapter scaling factor to `lora_alpha/math.sqrt(r)`, since it"
+        " was proven to work better. Otherwise, it will use the original default"
+        " value of `lora_alpha/r`.",
+    )
+    modules_to_save: Optional[List[str]] = Field(
+        default=None,
+        description="List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint. ",
+    )
+    init_lora_weights: Union[
+        bool,
+        Literal["gaussian", "eva", "olora", "pissa", "pissa_niter_[number of iters]"],
+    ] = Field(
+        default=True,
+        description="How to initialize the weights of the adapter layers."
+        "Passing True (default) results in the default initialization from the reference implementation from Microsoft, with the LoRA B weight being set to 0. "
+        "This means that without further training, the LoRA adapter will be a no-op."
+        "Setting the initialization to False leads to random initialization of LoRA A and B, meaning that LoRA is not a no-op before training; this setting is intended for debugging purposes."
+        "Passing ‘gaussian’ results in Gaussian initialization scaled by the LoRA rank for linear and layers. Pass 'loftq' to use LoftQ initialization. Passing 'eva' results in a data-driven initialization of Explained Variance Adaptation."
+        "EVA initializes LoRA based on the SVD of layer input activations and achieves SOTA performance due to its ability to adapt to the finetuning data. Pass 'olora' to use OLoRA initialization. Passing 'pissa' results in the initialization of https://huggingface.co/papers/2404.02948",
+    )
+
+
 class PolicyConfig(BaseModel):
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
     model_name_or_path: str = Field(
@@ -600,6 +630,7 @@ class PolicyConfig(BaseModel):
     model_gradient_checkpointing: bool = Field(
         default=True, description="Whether to use gradient checkpointing"
     )
+    lora: LoraConfig | None = Field(default=None, description="LoRA configuration")
 
     @model_validator(mode="after")
     def check_params_value(self):
