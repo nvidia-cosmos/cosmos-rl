@@ -44,7 +44,7 @@ class HermesToolParser(ToolParser):
                 name, arguments = function_call["name"], function_call["arguments"]
                 function_calls.append(
                     OpenAIFunctionCallSchema(
-                        name=name, arguments=json.dumps(arguments, ensure_ascii=False)
+                        name=name, arguments=arguments
                     )
                 )
             except Exception as e:
