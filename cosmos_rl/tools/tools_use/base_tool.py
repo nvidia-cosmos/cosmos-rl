@@ -15,6 +15,7 @@
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from inspect import isgeneratorfunction
 from typing import Any, Optional
 
 from transformers.utils import get_json_schema
@@ -26,9 +27,21 @@ class BaseTool(ABC):
     def __init__(self, name: str, schema: Optional[OpenAIFunctionToolSchema] = None):
         self.name = name
         self._schema = schema
+        self._validate_tool_context()
 
     def __call__(self, *args, **kwargs) -> Any:
         return self.function(*args, **kwargs)
+
+    def _validate_tool_context(self):
+        """Make sure the tool_context method is implemented correctly"""
+        if not hasattr(self, "tool_context"):
+            raise NotImplementedError("tool_context method must be implemented")
+        if not hasattr(self.tool_context, "__wrapped__"):
+            raise TypeError(
+                "tool_context method must be decorated with @contextmanager"
+            )
+        if not isgeneratorfunction(self.tool_context.__wrapped__):
+            raise TypeError("tool_context method must be a generator function")
 
     @abstractmethod
     @contextmanager
