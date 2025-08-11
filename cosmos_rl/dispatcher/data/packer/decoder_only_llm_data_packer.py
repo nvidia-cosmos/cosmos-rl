@@ -5,7 +5,6 @@ import copy
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
-    check_chat_template_schema,
     process_conversation_with_chat_template,
 )
 
@@ -35,7 +34,6 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             return sample
 
         # 2. if item is a list, check the conversation format
-        check_chat_template_schema(sample)
         if not self.config.rollout.multi_turn_config.enable:
             # Apply template to each item
             prompt = self.tokenizer.apply_chat_template(
@@ -45,9 +43,10 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             )
             return prompt
         else:
+            assert self.tool_agent is not None, "Tool agent is not set"
             prompt = self.tokenizer.apply_chat_template(
                 sample,
-                tools=self.tools,
+                tools=self.tool_agent.tool_schemas(),
                 tokenize=False,
                 add_generation_prompt=False,
                 enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
@@ -200,7 +199,6 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             label_ids = token_ids.copy()
         # 2. if item is a list, then assume it is in conversation format:
         else:
-            check_chat_template_schema(sample)
 
             original_sample = copy.deepcopy(sample)
 
