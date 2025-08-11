@@ -18,14 +18,10 @@ from datasets import concatenate_datasets
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.util import load_data_from_disk_or_hf
 from cosmos_rl.utils.logging import logger
-from typing import Optional, Any, Tuple
+from typing import Optional, Any
 from transformers import AutoTokenizer
 
-from .schema import RLPayload
-
-
-# When we use iter(dataset), we can get the index of the payload in this way
-IdxAndRLPayload = Tuple[int, RLPayload]
+from .schema import RLPayload, IdxAndRLPayload
 
 
 # TODO: we should add a Dataset interface for all the dataset classes.

@@ -37,6 +37,7 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
     add_assistant_message,
 )
 from cosmos_rl.dispatcher.data import RLPayload
+from contextlib import contextmanager
 
 
 class GSM8kDataset(Dataset):
@@ -172,6 +173,7 @@ class GSM8kTool(BaseTool):
         )
         super().__init__(_tool_name, _tool_schema)
 
+    @contextmanager
     def tool_context(self, groud_truth: str):
         self.groud_truth = groud_truth
         yield
@@ -341,9 +343,11 @@ class GSM8kDataPacker(DataPacker):
             real_response = ""
 
         # 1. check if the response contains tool call
-        tool_response = self.tool_agent(real_response, ground_truth)
-        if tool_response:
-            return add_tool_response_messages(conversation, tool_response.text)
+        tool_responses = self.tool_agent(real_response, ground_truth)
+        if tool_responses:
+            for tr in tool_responses:
+                conversation = add_tool_response_messages(conversation, tr.text)
+            return conversation
 
         # By default, we add response as assistant message
         return add_assistant_message(conversation, real_response)
