@@ -13,39 +13,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 
+from cosmos_rl.tools.tools_use.schema import OpenAIFunctionToolSchema
+from cosmos_rl.utils.logging import logger
 from .base_tool import BaseTool
 from .base_tool_parser import ToolParser
 from .schema import ToolResponse
-from cosmos_rl.tools.tools_use.schema import OpenAIFunctionToolSchema
 
 
 class ToolAgent:
     def __init__(self, tool_parser: ToolParser, tools: List[BaseTool]):
         self.tool_parser = tool_parser
-        self.tools = tools
+        self.tools: Dict[str, BaseTool] = {tool.name: tool for tool in tools}
 
     def __call__(
         self, text: str, groud_truth: Optional[str] = None
     ) -> ToolResponse | None:
-        """Call tool and return tool response"""
+        """Call tool and return tool response. Support multiple tool calls."""
         _, tool_calls = self.tool_parser.extract_tool_calls(text)
 
         if not tool_calls:
             return None
 
-        # Only one tool call is supported for now
-        # TODO(zjx): discuss if we need to support multiple tool calls
-        tool_call = tool_calls[0]
+        tool_responses = []
+        for tool_call in tool_calls:
+            try:
+                tool_name = tool_call.name
+                tool = self.tools[tool_name]
+                with tool.tool_context(groud_truth):
+                    response = tool(**tool_call.arguments)
+                    tool_responses.append(response)
+            except Exception as e:
+                logger.error(f"[ToolAgent] Failed to execute tool {tool_name}: {e}")
 
-        try:
-            tool_name = tool_call.name
-            tool = self.tools[tool_name]
-            with tool.tool_context(groud_truth):
-                return tool(**tool_call.arguments)
-        except Exception:
-            return None
+        return tool_responses
 
     def tool_schemas(self) -> List[OpenAIFunctionToolSchema]:
-        return [tool.tool_schema.model_dump() for tool in self.tools]
+        return [tool.tool_schema.model_dump() for tool in self.tools.values()]

@@ -18,6 +18,9 @@ from pydantic import BaseModel, Field, model_validator
 
 ConversationType = List["ChatMessage"]
 
+# When we use iter(dataset), we can get the index of the payload in this way
+IdxAndRLPayload = Tuple[int, "RLPayload"]
+
 
 class ChatMessage(BaseModel):
     """
@@ -73,7 +76,7 @@ class RLPayload(BaseModel):
 
     @staticmethod
     def collate_fn(
-        batch: List[Tuple[int, "RLPayload"]],
+        batch: List[IdxAndRLPayload],
     ) -> tuple[List[int], List["RLPayload"]]:
         idx_list = []
         payload_list = []
