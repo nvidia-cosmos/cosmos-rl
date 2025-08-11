@@ -77,8 +77,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         self.rollout.init_engine(seed=self.config.rollout.seed, load_format="auto")
 
         self.sampling_params = SamplingParams(
-            # n=self.config.rollout.n_generation,
-            n=1,  # FIXME: (lms) trtllm pytorch doesn't support n > 1 now.
+            n=self.config.rollout.n_generation,
             logprobs=0,
             top_p=self.config.rollout.sampling_config.top_p,
             top_k=self.config.rollout.sampling_config.top_k,

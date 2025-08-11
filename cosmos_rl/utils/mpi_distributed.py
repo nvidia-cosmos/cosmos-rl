@@ -2,7 +2,7 @@ import torch.distributed as dist
 from mpi4py import MPI
 import os
 import torch
-
+import random
 from tensorrt_llm._utils import mpi_broadcast
 
 from cosmos_rl.utils.constant import COSMOS_HTTP_RETRY_CONFIG
@@ -88,12 +88,16 @@ def init_distributed_with_MPI():
     rdzv_host, rdzv_port = rdzv_endpoint.split(":")
 
     torch.cuda.set_device(local_rank)
+    max_port = 65535
+    min_port = 12371
 
     for _ in range(COSMOS_HTTP_RETRY_CONFIG.max_retries):
         if not int(rdzv_port):
             rdzv_port = None
             if mpi_rank() == 0:
-                rdzv_port = find_available_port(start_port=12371)
+                rdzv_port = find_available_port(
+                    start_port=random.randint(min_port, max_port)
+                )
             rdzv_port = mpi_broadcast(rdzv_port, root=0)
 
         os.environ["LOCAL_RANK"] = str(local_rank)
