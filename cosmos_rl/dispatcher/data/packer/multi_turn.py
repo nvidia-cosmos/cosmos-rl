@@ -22,36 +22,7 @@ To design a powerfull prompt, you can refer https://huggingface.co/docs/transfor
 
 from transformers import AutoTokenizer
 from typing import List, Dict
-
-
-ConversationType = List[Dict[str, str]]
-
-
-def check_chat_template_schema(conversation: ConversationType) -> bool:
-    """
-    Check the conversation meet chat template schema.
-    the conversation format should be:
-    ```
-        [
-            {
-                "role": "user",
-                "content": "..."
-            },
-            {
-                "role": "assistant",
-                "content": "..."
-            }
-        ]
-        ```
-    """
-    assert isinstance(conversation, list), "All items should be list, got: {}".format(
-        conversation
-    )
-    # Check `role` and `content` in each item
-    for x in conversation:
-        assert isinstance(x, dict), "Each item should be a dict"
-        assert "role" in x, "Each item should have 'role'"
-        assert "content" in x, "Each item should have 'content'"
+from cosmos_rl.dispatcher.data.schema import ConversationType
 
 
 def process_conversation_with_chat_template(

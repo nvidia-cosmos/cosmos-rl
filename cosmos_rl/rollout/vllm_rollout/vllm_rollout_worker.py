@@ -125,7 +125,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # CommandQueue queried from controller.
         self._command_queue: Queue[Command] = Queue()
-        self._prompt_queue: Queue[List[List[int, str]]] = Queue()
+        self._prompt_queue: Queue[List[IdxAndRLPayload]] = Queue()
         self.current_weight_version = 0
 
         # determine the quantization type
@@ -1318,8 +1318,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
 
                 # Check if the prompt is valid for the current weight version
+                first_payload = RLPayload.model_validate(
+                    self._prompt_queue.queue[0][0][1]
+                )
                 is_valid_prompt_for_current_weight_version = (
-                    self._prompt_queue.queue[0][0][2] <= self.current_weight_version
+                    first_payload.weight_version <= self.current_weight_version
                 )
                 if not is_valid_prompt_for_current_weight_version:
                     # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
@@ -1329,7 +1332,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     self._prompt_queue.get()
                 )
                 prompts: List[RLPayload] = [
-                    payload for _, payload in prompt_id_and_payload_list
+                    RLPayload.model_validate(payload)
+                    for _, payload in prompt_id_and_payload_list
                 ]
 
                 completions: Union[List[List[str]], List[RLPayload]] = (
