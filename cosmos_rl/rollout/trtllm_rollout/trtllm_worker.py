@@ -65,12 +65,8 @@ from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
 
 trtllm_version = tensorrt_llm.__version__
 logger.info(f"[Rollout] Using trtllm version: {trtllm_version}")
-if trtllm_version == "0.20.0":
-    from cosmos_rl.rollout.trtllm_rollout.exec_loops.trtllm_0_20_0 import (
-        cosmos_patched_executor_loop,
-    )
-elif trtllm_version == "1.0.0rc6":
-    from cosmos_rl.rollout.trtllm_rollout.exec_loops.trtllm_1_0_0_rc4 import (
+if trtllm_version == "1.0.0rc6":
+    from cosmos_rl.rollout.trtllm_rollout.exec_loops.trtllm_1_0_0_rc6 import (
         cosmos_patched_executor_loop,
     )
 else:

@@ -19,10 +19,8 @@ import tensorrt_llm
 
 trtllm_version = tensorrt_llm.__version__
 
-if trtllm_version == "0.20.0":
-    from cosmos_rl.rollout.trtllm_rollout.patches_for_trtllm import trtllm_0_20_0  # noqa: F401
-elif trtllm_version == "1.0.0rc6":
-    from cosmos_rl.rollout.trtllm_rollout.patches_for_trtllm import trtllm_1_0_0_rc4  # noqa: F401
+if trtllm_version == "1.0.0rc6":
+    from cosmos_rl.rollout.trtllm_rollout.patches_for_trtllm import trtllm_1_0_0_rc6  # noqa: F401
 else:
     raise NotImplementedError(
         f"[Rollout] Unsupported trtllm version: {trtllm_version}."
