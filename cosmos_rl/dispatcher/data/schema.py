@@ -16,6 +16,7 @@
 from typing import List, Any, Dict, Optional, Tuple
 from pydantic import BaseModel, Field, model_validator
 
+ConversationType = List["ChatMessage"]
 
 class ChatMessage(BaseModel):
     """
@@ -48,17 +49,19 @@ class RLPayload(BaseModel):
     The payload schema of RL sample.
     """
 
-    # The prompt for the rollout.
-    prompt: Optional[str]
+    prompt: Optional[str] = Field(default=None, description="The prompt for the rollout.")
 
-    # For multi-turn generation, we should set the conversation.
-    conversation: Optional[List[ChatMessage]]
+    conversation: Optional[List[ChatMessage]] = Field(
+        default=None, description="The conversation for the rollout."
+    )
 
-    # The reference answer for the prompt.
-    reference_answer: Optional[str]
+    reference_answer: Optional[str] = Field(
+        default=None, description="The reference answer for the rollout."
+    )
 
-    # The weight version for the prompt.
-    weight_version: int = 0
+    weight_version: int = Field(
+        default=0, description="The weight version for the rollout."
+    )
 
     @model_validator(mode="after")
     def check_params_value(self):
@@ -67,22 +70,13 @@ class RLPayload(BaseModel):
 
     @staticmethod
     def collate_fn(
-        batch: List[Tuple[int, "RLPayload", str]],
-    ) -> tuple[List[int], List["RLPayload"], List[str]]:
-        prompt_list = []
-        conversation_list = []
-        reference_answer_list = []
-        weight_version_list = []
+        batch: List[Tuple[int, "RLPayload"]],
+    ) -> tuple[List[int], List["RLPayload"]]:
+        idx_list = []
+        payload_list = []
 
-        for item in batch:
-            prompt_list.append(item[1].prompt)
-            conversation_list.append(item[1].conversation)
-            reference_answer_list.append(item[1].reference_answer)
-            weight_version_list.append(item[1].weight_version)
+        for idx, payload in batch:
+            idx_list.append(idx)
+            payload_list.append(payload)
 
-        return (
-            prompt_list,
-            conversation_list,
-            reference_answer_list,
-            weight_version_list,
-        )
+        return idx_list, payload_list

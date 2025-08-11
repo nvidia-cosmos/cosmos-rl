@@ -18,7 +18,7 @@ from typing import List, Optional
 from .base_tool import BaseTool
 from .base_tool_parser import ToolParser
 from .schema import ToolResponse
-
+from cosmos_rl.tools.tools_use.schema import OpenAIFunctionToolSchema
 
 class ToolAgent:
     def __init__(self, tool_parser: ToolParser, tools: List[BaseTool]):
@@ -42,3 +42,6 @@ class ToolAgent:
                 return tool(**tool_call.arguments)
         except Exception:
             return None
+
+    def tool_schemas(self) -> List[OpenAIFunctionToolSchema]:
+        return [tool.tool_schema for tool in self.tools]
