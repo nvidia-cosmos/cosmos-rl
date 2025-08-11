@@ -20,19 +20,21 @@ from .base_tool_parser import ToolParser
 from .schema import ToolResponse
 from cosmos_rl.tools.tools_use.schema import OpenAIFunctionToolSchema
 
+
 class ToolAgent:
     def __init__(self, tool_parser: ToolParser, tools: List[BaseTool]):
         self.tool_parser = tool_parser
         self.tools = tools
 
-    def __call__(self, text: str, groud_truth: Optional[str] = None) -> ToolResponse:
+    def __call__(self, text: str, groud_truth: Optional[str] = None) -> ToolResponse | None:
         """Call tool and return tool response"""
         _, tool_calls = self.tool_parser.extract_tool_calls(text)
 
         if not tool_calls:
             return None
 
-        assert len(tool_calls) == 1, "Only one tool call is supported for now"
+        # Only one tool call is supported for now
+        # TODO(zjx): discuss if we need to support multiple tool calls
         tool_call = tool_calls[0]
 
         try:
@@ -44,4 +46,4 @@ class ToolAgent:
             return None
 
     def tool_schemas(self) -> List[OpenAIFunctionToolSchema]:
-        return [tool.tool_schema for tool in self.tools]
+        return [tool.tool_schema.model_dump() for tool in self.tools]

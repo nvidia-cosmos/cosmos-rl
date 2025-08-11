@@ -260,19 +260,19 @@ class GSM8kDataPacker(DataPacker):
         - how rollout output is processed and collated into a mini-batch for policy model;
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, tool_agent: Optional[ToolAgent] = None, *args, **kwargs):
+        super().__init__(tool_agent=tool_agent, *args, **kwargs)
         # Check source code of DecoderOnlyLLMDataPacker to see how it's implemented
-        self.underlying_data_packer = DecoderOnlyLLMDataPacker()
+        self.underlying_data_packer = DecoderOnlyLLMDataPacker(tool_agent=tool_agent)
 
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, tool_agent: Optional[ToolAgent] = None, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
         `tokenizer`: tokenizer;
         """
-        super().setup(config, tokenizer, *args, **kwargs)
-        self.underlying_data_packer.setup(config, tokenizer, *args, **kwargs)
+        super().setup(config, tokenizer, *args, tool_agent=tool_agent, **kwargs)
+        self.underlying_data_packer.setup(config, tokenizer, *args, tool_agent=tool_agent, **kwargs)
 
     def get_rollout_input(self, item: Any) -> Any:
         """

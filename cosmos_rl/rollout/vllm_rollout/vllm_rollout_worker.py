@@ -1344,71 +1344,74 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         sampling_params=self.sampling_params,
                     )
                 )
-                # Remove empty completions
-                valid_completions: List[List[str]] = []
-                prompt_indices_to_remove: List[int] = []
-                if len(completions):
-                    batch_size = len(prompts)
-                    assert (
-                        len(completions) == batch_size
-                    ), f"Error: VLLM returned {len(completions)} for {batch_size}"
-                    for i in range(batch_size):
-                        completion = completions[i]
-                        skip_output = False
-                        total_generation_count = len(completion)
-                        empty_generation_count = 0
-                        output_texts = []
-                        for j in range(total_generation_count):
-                            output_text = completion[j]
-                            # if output_text == "":
-                            #     logger.warning(
-                            #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
-                            #     )
-                            #     empty_generation_count += 1
-                            # else:
-                            #     output_texts.append(output_text)
-
-                            # Note: (jiaxinc)
-                            # We still need to upload the output text, even if it is empty. (replace empty with eos_token)
-                            # Because if fully synchronized mode is enabled, we need to make sure the expected
-                            # number of global_batch_size is reached at exact time.
-                            output_texts.append(
-                                output_text
-                                if output_text != ""
-                                else self.tokenizer.eos_token
-                            )
-                        # Skip the output if there is one or zero non-empty completions
-                        skip_output = (
-                            total_generation_count - empty_generation_count
-                        ) <= 1
-                        if not skip_output:
-                            valid_completions.append(output_texts)
-                        else:
-                            prompt_indices_to_remove.append(i)
-                if len(prompt_indices_to_remove):
-                    prompts = [
-                        prompt
-                        for i, prompt in enumerate(prompt_id_and_payload_list)
-                        if i not in prompt_indices_to_remove
-                    ]
-                    assert (
-                        len(prompts) == len(valid_completions)
-                    ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
-
-                logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
-
-                should_report = (
-                    self.parallel_dims.tp_coord[0] == 0
-                    and (
-                        self.parallel_dims.pp_coord[0]
-                        == self.parallel_dims.pp_coord[1] - 1
-                    )
-                    and len(valid_completions) > 0
-                )
 
                 if self.rollout.rollout_config.multi_turn_config.enable:
                     # HACK(zjx): always report the multi-turn completions to the controller
                     should_report = True
+                    valid_completions = [[""] for _ in range(len(completions))]
+                else:
+                    # Remove empty completions
+                    valid_completions: List[List[str]] = []
+                    prompt_indices_to_remove: List[int] = []
+                    if len(completions):
+                        batch_size = len(prompts)
+                        assert (
+                            len(completions) == batch_size
+                        ), f"Error: VLLM returned {len(completions)} for {batch_size}"
+                        for i in range(batch_size):
+                            completion = completions[i]
+                            skip_output = False
+                            total_generation_count = len(completion)
+                            empty_generation_count = 0
+                            output_texts = []
+                            for j in range(total_generation_count):
+                                output_text = completion[j]
+                                # if output_text == "":
+                                #     logger.warning(
+                                #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                                #     )
+                                #     empty_generation_count += 1
+                                # else:
+                                #     output_texts.append(output_text)
+
+                                # Note: (jiaxinc)
+                                # We still need to upload the output text, even if it is empty. (replace empty with eos_token)
+                                # Because if fully synchronized mode is enabled, we need to make sure the expected
+                                # number of global_batch_size is reached at exact time.
+                                output_texts.append(
+                                    output_text
+                                    if output_text != ""
+                                    else self.tokenizer.eos_token
+                                )
+                            # Skip the output if there is one or zero non-empty completions
+                            skip_output = (
+                                total_generation_count - empty_generation_count
+                            ) <= 1
+                            if not skip_output:
+                                valid_completions.append(output_texts)
+                            else:
+                                prompt_indices_to_remove.append(i)
+                    if len(prompt_indices_to_remove):
+                        prompts = [
+                            prompt
+                            for i, prompt in enumerate(prompt_id_and_payload_list)
+                            if i not in prompt_indices_to_remove
+                        ]
+                        assert (
+                            len(prompts) == len(valid_completions)
+                        ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+
+                    logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
+
+                    should_report = (
+                        self.parallel_dims.tp_coord[0] == 0
+                        and (
+                            self.parallel_dims.pp_coord[0]
+                            == self.parallel_dims.pp_coord[1] - 1
+                        )
+                        and len(valid_completions) > 0
+                    )
+
 
                 if should_report:
                     url_suffix = COSMOS_API_ROLLOUT_SUFFIX

@@ -102,6 +102,7 @@ class DataPacker(ABC):
         self,
         config: Config,
         tokenizer: AutoTokenizer,
+        tool_agent: Optional[ToolAgent] = None,
         *args,
         **kwargs,
     ):
@@ -112,6 +113,8 @@ class DataPacker(ABC):
         assert tokenizer is not None, "tokenizer should be set"
         self.config = config
         self.tokenizer = tokenizer
+        if tool_agent is not None:
+            self.tool_agent = tool_agent
 
     @abstractmethod
     def get_rollout_input(self, item: Any) -> Any:
