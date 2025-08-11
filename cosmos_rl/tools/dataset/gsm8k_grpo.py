@@ -265,14 +265,23 @@ class GSM8kDataPacker(DataPacker):
         # Check source code of DecoderOnlyLLMDataPacker to see how it's implemented
         self.underlying_data_packer = DecoderOnlyLLMDataPacker(tool_agent=tool_agent)
 
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, tool_agent: Optional[ToolAgent] = None, **kwargs):
+    def setup(
+        self,
+        config: CosmosConfig,
+        tokenizer: AutoTokenizer,
+        *args,
+        tool_agent: Optional[ToolAgent] = None,
+        **kwargs,
+    ):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
         `tokenizer`: tokenizer;
         """
         super().setup(config, tokenizer, *args, tool_agent=tool_agent, **kwargs)
-        self.underlying_data_packer.setup(config, tokenizer, *args, tool_agent=tool_agent, **kwargs)
+        self.underlying_data_packer.setup(
+            config, tokenizer, *args, tool_agent=tool_agent, **kwargs
+        )
 
     def get_rollout_input(self, item: Any) -> Any:
         """

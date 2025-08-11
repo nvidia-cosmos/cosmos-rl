@@ -43,11 +43,10 @@ class HermesToolParser(ToolParser):
                 function_call = json.loads(match)
                 name, arguments = function_call["name"], function_call["arguments"]
                 function_calls.append(
-                    OpenAIFunctionCallSchema(
-                        name=name, arguments=arguments
-                    )
+                    OpenAIFunctionCallSchema(name=name, arguments=arguments)
                 )
             except Exception as e:
+                # Take it easy, due to the generation noise, we may have some invalid tool calls
                 logger.error(f"Failed to decode tool call: {e}")
 
         # remaing text exclude tool call tokens

@@ -26,7 +26,9 @@ class ToolAgent:
         self.tool_parser = tool_parser
         self.tools = tools
 
-    def __call__(self, text: str, groud_truth: Optional[str] = None) -> ToolResponse | None:
+    def __call__(
+        self, text: str, groud_truth: Optional[str] = None
+    ) -> ToolResponse | None:
         """Call tool and return tool response"""
         _, tool_calls = self.tool_parser.extract_tool_calls(text)
 

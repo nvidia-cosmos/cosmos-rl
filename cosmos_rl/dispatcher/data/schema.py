@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, model_validator
 
 ConversationType = List["ChatMessage"]
 
+
 class ChatMessage(BaseModel):
     """
     A chat message item of a conversation.
@@ -49,7 +50,9 @@ class RLPayload(BaseModel):
     The payload schema of RL sample.
     """
 
-    prompt: Optional[str] = Field(default=None, description="The prompt for the rollout.")
+    prompt: Optional[str] = Field(
+        default=None, description="The prompt for the rollout."
+    )
 
     conversation: Optional[List[ChatMessage]] = Field(
         default=None, description="The conversation for the rollout."

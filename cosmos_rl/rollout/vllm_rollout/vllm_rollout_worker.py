@@ -1348,6 +1348,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 if self.rollout.rollout_config.multi_turn_config.enable:
                     # HACK(zjx): always report the multi-turn completions to the controller
                     should_report = True
+                    # TODO(zjx): write completions for statistics the completion token counts
                     valid_completions = [[""] for _ in range(len(completions))]
                 else:
                     # Remove empty completions
@@ -1411,7 +1412,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         )
                         and len(valid_completions) > 0
                     )
-
 
                 if should_report:
                     url_suffix = COSMOS_API_ROLLOUT_SUFFIX

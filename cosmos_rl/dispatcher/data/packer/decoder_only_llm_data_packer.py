@@ -199,7 +199,6 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             label_ids = token_ids.copy()
         # 2. if item is a list, then assume it is in conversation format:
         else:
-
             original_sample = copy.deepcopy(sample)
 
             try:
