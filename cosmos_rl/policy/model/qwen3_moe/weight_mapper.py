@@ -15,7 +15,7 @@
 
 import re
 import torch
-from typing import List, Tuple, Dict, Union
+from typing import List, Tuple, Dict
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
@@ -23,12 +23,6 @@ from cosmos_rl.utils.parallelism_registry import (
 )
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from vllm.model_executor.models.qwen3_moe import (
-    Qwen3MoeForCausalLM as VllmQwen3MoeForCausalLM,
-)
-from tensorrt_llm._torch.models.modeling_qwen3_moe import (
-    Qwen3MoeForCausalLM as TrtLLMQwen3MoeForCausalLM,
-)
 
 
 class Qwen3MoeWeightMapper(WeightMapper):
@@ -90,14 +84,11 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def rollout_prepare_recv(
         self,
-        vllm_model: Union[VllmQwen3MoeForCausalLM, TrtLLMQwen3MoeForCausalLM],
+        vllm_model,
     ) -> Tuple[
         Dict[str, torch.Tensor],
         List[List[Tuple[str, torch.Size]]],
     ]:
-        assert isinstance(
-            vllm_model, (VllmQwen3MoeForCausalLM, TrtLLMQwen3MoeForCausalLM)
-        ), f"vllm_model must be a Qwen3MoeForCausalLM or TrtLLMQwen3MoeForCausalLM, but got {type(vllm_model)}"
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():

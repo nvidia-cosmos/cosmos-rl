@@ -80,6 +80,7 @@ class TRTLLM_Rollout(RolloutBase):
         tp_size = rollout_parallelism.tp_size
         pp_size = rollout_parallelism.pp_size
         assert pp_size == 1, "TRTLLM only support pipeline parallelism 1 now."
+        assert quantization is None, "TRTLLM Rollout does not support quantization now."
 
         moe_tensor_parallel_size = -1  # by default, trtllm uses tp for MoE.
 
@@ -98,12 +99,19 @@ class TRTLLM_Rollout(RolloutBase):
             )
         elif trtllm_version == "1.0.0rc6":
             kwargs["disable_overlap_scheduler"] = True
+        policy_config = self.config.policy
         # Check the prefix_caching like arguments default enabled?
         self.rollout_engine = LLM(
             model=model_path,
             tensor_parallel_size=tp_size,
             pipeline_parallel_size=pp_size,
             backend="pytorch",
+            skip_tokenizer_init=False,
+            max_seq_len=policy_config.model_max_length,
+            max_num_tokens=2048
+            if 2048 >= policy_config.model_max_length
+            else policy_config.model_max_length,
+            enable_chunked_prefill=self.rollout_config.enable_chunked_prefill,
             load_format=load_format,
             trust_remote_code=True,
             moe_expert_parallel_size=moe_tensor_parallel_size,
@@ -111,6 +119,7 @@ class TRTLLM_Rollout(RolloutBase):
             cosmos_config=self.config,
             **kwargs,
         )
+        logger.info("[Rollout] TRTLLM Engine initialized.")
 
     def rollout_generation(
         self,

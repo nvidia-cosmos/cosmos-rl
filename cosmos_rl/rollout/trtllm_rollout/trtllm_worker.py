@@ -400,7 +400,6 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         This is Policy -> Rollout replica. Will only happen between
         a pair of policy and rollout replica.
         """
-        logger.info("LMS: in TRTLLM!!!")
         if not self._engine_initialized:
             self.prepare_shard_infos_for_weight_sync_insts()
             self._engine_initialized = True
