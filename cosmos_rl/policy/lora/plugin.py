@@ -183,9 +183,9 @@ def inject_lora_adapters(
         return child in modules_to_save or _name_matches(qualified, modules_to_save)
 
     lm_head_module_name = "lm_head"
-    from cosmos_rl.policy.model.hf_llm import HFLLMModel
+    from cosmos_rl.policy.model.hf_models import HFModel
 
-    if isinstance(model, HFLLMModel):
+    if isinstance(model, HFModel):
         output_layer = model.model.get_output_embeddings()
         lm_head_module_name = [
             name for name, module in model.named_modules() if module is output_layer
