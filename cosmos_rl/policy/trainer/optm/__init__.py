@@ -107,7 +107,7 @@ class OptimizersContainer(Optimizer, Generic[T]):
                     optimizer = optimizer_cls(params, **optimizer_kwargs_copy)
                     self.optimizers[model_id].append(optimizer)
             else:
-                for p in model.parameters():
+                for name, p in model.named_parameters():
                     if p.requires_grad:
                         optimizer = optimizer_cls([p], **optimizer_kwargs_copy)
                         self.optimizers[model_id].append(optimizer)
