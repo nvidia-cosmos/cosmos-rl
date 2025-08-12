@@ -57,6 +57,11 @@ def parallelize(
     the model must fit on GPU or CPU memory.
     """
     world_mesh = parallel_dims.mesh
+    if torch.distributed.get_rank() == 0:
+        logger.info(
+            f"[vvv] Parallelizing model with {parallel_dims}"
+            f"[vvv] world_mesh {world_mesh}"
+        )
     pipeline_parallelize(model, parallel_dims, config)
     if parallel_dims.tp_enabled:
         apply_tp_ep(

@@ -38,6 +38,10 @@ from cosmos_rl.policy.model.qwen3_moe.weight_converter import (
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.model.qwen3_moe.weight_mapper import Qwen3MoeWeightMapper
 from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
+from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
+    MoEConfig,
+    MoEFlexTokenDispatcher,
+)
 from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
 from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -418,6 +422,48 @@ class FeedForward(nn.Module):
         self.token_gather_buf.grad = None
         return self.token_gather_buf.detach()
 
+    def moe_token_dispatcher(self, x, topk_ids, topk_weight):
+        """
+        x: [batch * local_seq_len, dim]
+        topk_ids: [batch * local_seq_len, topk]
+        topk_weight: [batch * local_seq_len, topk]
+        """
+        (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
+            self.token_dispatcher.token_permutation2(
+                hidden_states=x,
+                num_local_tokens=x.size(0),
+                token_probs=topk_weight,
+                token_indices=topk_ids,
+            )
+        )
+
+        contig_tokens = permuted_local_hidden_states.unsqueeze(-1)
+
+        # group gemm - handle all three group gemms (up, gate, down for all experts)
+        # print(f"m_sizes: {m_sizes}, m_offsets: {m_offsets}")
+        hidden_outputs = self.group_gemm_imp(
+            contig_tokens,
+            tokens_per_expert,
+            None,
+            self.gate_proj.weight.to_local(),
+            self.up_proj.weight.to_local(),
+            self.down_proj.weight.to_local(),
+            self.act_fn,
+        )
+
+        output_tokens = self.token_dispatcher.token_unpermutation(hidden_outputs)
+
+        # TODO(jing): fuse it with WeightedSwiGLUFunction
+        final_out = (
+            output_tokens.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            # .type(returned_tokens.dtype)
+        )
+
+        return final_out
+
     def moe_on_device(self, x, topk_ids, topk_weight):
         """
         x: [batch * local_seq_len, dim]
@@ -475,6 +521,14 @@ class FeedForward(nn.Module):
             input_splits,
             self.ep_group,
         )
+        if dist.get_rank() == 0:
+            logger.info(
+                f"EP group size: {self.ep_size}\n"
+                f"tokens_per_expert: {tokens_per_expert.shape, tokens_per_expert}\n"
+                f"tokens_per_expert_group: {tokens_per_expert_group.shape, tokens_per_expert_group}\n"
+                f"input_splits: {input_splits.shape, input_splits}\n"
+                f"output_splits: {output_splits.shape, output_splits}"
+            )
 
         # We need to permute the received tokens so that tokens for the same expert are contiguous.
         # This part prepares a 1D tensor `permuted_indices` for such permutation.
@@ -487,6 +541,13 @@ class FeedForward(nn.Module):
                 self.ep_size,
                 ALIGN_SIZE_M,
             )
+
+            if dist.get_rank() == 0:
+                logger.info(
+                    f"permuted_indices: {permuted_indices.shape, permuted_indices}\n"
+                    f"m_sizes: {m_sizes.shape, m_sizes}\n"
+                    f"m_offsets: {m_offsets.shape, m_offsets}"
+                )
         # Permute the received tokens so that tokens for the same expert are contiguous.
         contig_tokens = token_gather_buf[permuted_indices]
         # group gemm - handle all three group gemms (up, gate, down for all experts)
@@ -507,6 +568,12 @@ class FeedForward(nn.Module):
         # Move into Symmetric Memory for the return shuffle
         processed_tokens[permuted_indices] = hidden_outputs
 
+        if dist.get_rank() == 0:
+            logger.info(
+                f"hidden_outputs: {hidden_outputs.shape, hidden_outputs}\n"
+                f"processed_tokens: {processed_tokens.shape, processed_tokens}\n"
+            )
+
         # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
         # The input/output splits are just a reverse of the previous shuffle.
         token_return_buf, _ = OnDeviceAllToAllV.apply(
@@ -518,6 +585,12 @@ class FeedForward(nn.Module):
         returned_tokens = token_return_buf[:seqlen_sorted_tokens]
         output_tokens = torch.empty_like(returned_tokens)
         output_tokens[token_indices] = returned_tokens
+
+        if dist.get_rank() == 0:
+            logger.info(
+                f"returned_tokens: {returned_tokens.shape, returned_tokens}\n"
+                f"output_tokens: {output_tokens.shape, output_tokens}\n"
+            )
 
         final_out = (
             output_tokens.view(*topk_ids.shape, -1)
@@ -540,7 +613,10 @@ class FeedForward(nn.Module):
         topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
-        y = self.moe_on_device(hidden_states, topk_idx, topk_weight)
+        if self.enable_deep_ep:
+            y = self.moe_token_dispatcher(hidden_states, topk_idx, topk_weight)
+        else:
+            y = self.moe_on_device(hidden_states, topk_idx, topk_weight)
         y = y.view(*orig_shape)
         return self.reshard_helper_layer(y)
 
@@ -659,6 +735,7 @@ class Qwen3MoE(BaseModel):
         else:
             self.tie_embed_tokens = True
         self.identity_layer = IdentityLayer()
+        self.enable_deep_ep = False
 
     def forward(
         self,
@@ -714,37 +791,65 @@ class Qwen3MoE(BaseModel):
         # so we need to delete it manually
         self.rotary_emb.to(torch.cuda.current_device())
         self.rotary_emb.reset_inv_freq()
-        # Basically, max_seq_len * 2 is enough for all-to-all-v communication.
-        overflow = 2
 
-        # TODO(cjx): max_seq_len * mini_batch is a better choice
-        MAX_BATCH_MUL_SEQ_LEN = (
-            self.model_args.max_seq_len
-            * cosmos_config.train.train_batch_per_replica
-            * self.model_args.hf_config.num_experts_per_tok
-        )
+        FeedForward.enable_deep_ep = cosmos_config.policy.parallelism.enable_deep_ep
+        if FeedForward.enable_deep_ep:
+            self.ep_size = cosmos_config.policy.parallelism.ep_size
+            ep_mesh = None  # TODO(jing) find a way to get ep_mesh
+            ep_rank = ep_mesh.get_local_rank()
 
-        OnDeviceAllToAllV.max_output_len = MAX_BATCH_MUL_SEQ_LEN * overflow
-        # Init MoE kernel related buffers
-        if FeedForward.token_send_buf is None:
-            dtype = self.model_args.hf_config.torch_dtype
-
-            # Input buffer for DP-to-EP shuffle
-            FeedForward.token_send_buf = symm_mem.empty(
-                MAX_BATCH_MUL_SEQ_LEN,
-                self.model_args.dim,  # hidden dim
-                dtype=dtype,
-                device=self.current_device(),
+            # TODO: merge with cosmos_config
+            config = MoEConfig(
+                moe_router_topk=self.model_args.hf_config.num_experts_per_tok,
+                num_moe_experts=self.model_args.n_experts,
+                moe_permute_fusion=True,
             )
-            FeedForward.token_send_buf.zero_()
-            # Input buffer for EP-to-DP shuffle
-            FeedForward.token_gather_buf = symm_mem.empty(
-                MAX_BATCH_MUL_SEQ_LEN * overflow,
-                self.model_args.dim,  # hidden dim
-                dtype=dtype,
-                device=self.current_device(),
+
+            num_local_experts = self.model_args.n_experts // self.ep_size
+
+            local_expert_indices_offset = ep_rank * num_local_experts
+            local_expert_indices = [
+                local_expert_indices_offset + i for i in range(num_local_experts)
+            ]
+
+            FeedForward.token_dispatcher = MoEFlexTokenDispatcher(
+                num_local_experts=num_local_experts,
+                local_expert_indices=local_expert_indices,
+                config=config,
+                ep_group=self.ep_group,
             )
-            FeedForward.token_gather_buf.zero_()
+        else:
+            # Basically, max_seq_len * 2 is enough for all-to-all-v communication.
+            overflow = 2
+
+            # TODO(cjx): max_seq_len * mini_batch is a better choice
+            MAX_BATCH_MUL_SEQ_LEN = (
+                self.model_args.max_seq_len
+                * cosmos_config.train.train_batch_per_replica
+                * self.model_args.hf_config.num_experts_per_tok
+            )
+
+            OnDeviceAllToAllV.max_output_len = MAX_BATCH_MUL_SEQ_LEN * overflow
+            # Init MoE kernel related buffers
+            if FeedForward.token_send_buf is None:
+                dtype = self.model_args.hf_config.torch_dtype
+
+                # Input buffer for DP-to-EP shuffle
+                FeedForward.token_send_buf = symm_mem.empty(
+                    MAX_BATCH_MUL_SEQ_LEN,
+                    self.model_args.dim,  # hidden dim
+                    dtype=dtype,
+                    device=self.current_device(),
+                )
+                FeedForward.token_send_buf.zero_()
+                # Input buffer for EP-to-DP shuffle
+                FeedForward.token_gather_buf = symm_mem.empty(
+                    MAX_BATCH_MUL_SEQ_LEN * overflow,
+                    self.model_args.dim,  # hidden dim
+                    dtype=dtype,
+                    device=self.current_device(),
+                )
+                FeedForward.token_gather_buf.zero_()
 
     @property
     def parallelize_fn(self):
