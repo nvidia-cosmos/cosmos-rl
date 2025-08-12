@@ -108,6 +108,10 @@ class Trainer(CommMixin):
             if not config.train.fsdp_offload:
                 model.to_empty(device=self.device)
             model.post_to_empty_hook(config)
+            if config.policy.lora is not None:
+                from cosmos_rl.policy.lora.plugin import reinitialize_lora_params
+
+                reinitialize_lora_params(model)
             torch.cuda.empty_cache()
             self.model_parts = model.separate_model_parts()
             self.model = model
@@ -192,6 +196,19 @@ class Trainer(CommMixin):
         is_final=False,
         dtype: Optional[torch.dtype] = None,
     ):
+        if self.config.policy.lora is not None and not trainable_only:
+            trainable_only = True
+            logger.info(
+                "Exporting safetensors with param `trainable_only` is overridden to `True` for LoRA."
+            )
+
+        save_hf_config = self.config.policy.lora is None
+        save_lora_config = self.config.policy.lora is not None
+        save_tokenizer = True
+        save_processor = True
+        save_generation_config = True
+        export_weight_index_json = self.config.policy.lora is None
+
         path = os.path.join(output_dir, rel_path)
         if self.parallel_dims.dp_replicate_coord[0] > 0:
             return
@@ -206,7 +223,7 @@ class Trainer(CommMixin):
             """Get the size of the tensor in bytes."""
             return tensor.element_size() * tensor.numel()
 
-        max_file_size_gb = 4
+        max_file_size_gb = 4 if not save_lora_config else float("inf")
         max_size_bytes = max_file_size_gb * 1024**3  # 4 GB in bytes
         current_chunk = {}
         total_chunk_size = 0
@@ -214,11 +231,14 @@ class Trainer(CommMixin):
         file_idx = 0
         manifest = {}  # Record the weight->file name mapping
 
-        def create_file_name(pp_rank, pp_size, file_idx):
-            if pp_size == 1:
-                name = f"{file_idx:05d}.safetensors"
+        def create_file_name(save_lora_config, pp_rank, pp_size, file_idx):
+            if save_lora_config:
+                name = "adapter_model.safetensors"
             else:
-                name = f"model-{pp_rank}-of-{pp_size}-{file_idx:05d}.safetensors"
+                if pp_size == 1:
+                    name = f"{file_idx:05d}.safetensors"
+                else:
+                    name = f"model-{pp_rank}-of-{pp_size}-{file_idx:05d}.safetensors"
             return os.path.join(path, name)
 
         def save_chunked_tensors(
@@ -263,12 +283,18 @@ class Trainer(CommMixin):
                         f"[Policy] Skipping None parameter for {name} in safetensors export."
                     )
                     continue
+                elif save_lora_config and not _name.startswith("base_model"):
+                    # LoRA model needs to add a prefix to the weight name to be consistent with the HF naming convention
+                    _name = f"base_model.model.{_name}"
+
                 _param = _param.to(dtype=dtype) if dtype is not None else _param
                 tensor_size = get_tensor_size(_param)
                 # If adding the current tensor exceeds the size limit, save the current chunk
                 if current_chunk_size + tensor_size > max_size_bytes:
                     # Save the current chunk as a safetensor file
-                    file_name = create_file_name(pp_rank, pp_size, file_idx)
+                    file_name = create_file_name(
+                        save_lora_config, pp_rank, pp_size, file_idx
+                    )
                     save_chunked_tensors(current_chunk, current_chunk_size, file_name)
 
                     # Reset for the next chunk
@@ -282,7 +308,7 @@ class Trainer(CommMixin):
 
         # Save any remaining tensors in the last chunk
         if current_chunk:
-            file_name = create_file_name(pp_rank, pp_size, file_idx)
+            file_name = create_file_name(save_lora_config, pp_rank, pp_size, file_idx)
             save_chunked_tensors(current_chunk, current_chunk_size, file_name)
 
         # Allgather the manifest from all pipeline stages
@@ -364,28 +390,43 @@ class Trainer(CommMixin):
             logger.info(f"\n\nExported safetensors to {path}\n\n")
 
         if self.global_rank == 0:
-            with open(os.path.join(path, "model.safetensors.index.json"), "w") as f:
-                json.dump(
-                    {
-                        "metadata": {
-                            "total_size": total_tensor_size,
+            if export_weight_index_json:
+                with open(os.path.join(path, "model.safetensors.index.json"), "w") as f:
+                    json.dump(
+                        {
+                            "metadata": {
+                                "total_size": total_tensor_size,
+                            },
+                            "weight_map": merged_manifest,
                         },
-                        "weight_map": merged_manifest,
-                    },
-                    f,
-                    indent=4,
-                )
+                        f,
+                        indent=4,
+                    )
+
             # save hf_config and tokenizer_config
-            self.hf_config.save_pretrained(path)
-            self.tokenizer.save_pretrained(path)
-            if self.hf_processor is not None:
-                self.hf_processor.save_pretrained(path)
-            # save the generation config to get the generation aligned with HF.
-            try:
-                generation_config = util.retry(GenerationConfig.from_pretrained)(
+            if save_hf_config:
+                self.hf_config.save_pretrained(path)
+            if save_lora_config:
+                # Save the LoRA config
+                lora_config = self.config.policy.lora.model_dump(mode="json")
+                lora_config["base_model_name_or_path"] = (
                     self.config.policy.model_name_or_path
                 )
-                generation_config.save_pretrained(path)
+                lora_config["peft_type"] = "LORA"
+                with open(os.path.join(path, "adapter_config.json"), "w") as f:
+                    json.dump(lora_config, f, indent=4)
+            if save_tokenizer:
+                self.tokenizer.save_pretrained(path)
+            if save_processor and self.hf_processor is not None:
+                self.hf_processor.save_pretrained(path)
+
+            # save the generation config to get the generation aligned with HF.
+            try:
+                if save_generation_config:
+                    generation_config = util.retry(GenerationConfig.from_pretrained)(
+                        self.config.policy.model_name_or_path
+                    )
+                    generation_config.save_pretrained(path)
             except Exception:
                 logger.warning("[Policy] No generation config found, do not save it.")
 
