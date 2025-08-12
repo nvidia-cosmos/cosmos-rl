@@ -832,7 +832,7 @@ class SFTTrainer(Trainer):
             )
             self.ckpt_manager.save_check(
                 step=self.train_step,
-                val_score=val_score,
+                val_score=val_score if self.config.train.enable_validation else -1,
                 pp_enabled=self.parallel_dims.pp_enabled,
                 pp_last_stage=pp_last_stage,
                 pp_master_rank=self.parallel_dims.world_size
