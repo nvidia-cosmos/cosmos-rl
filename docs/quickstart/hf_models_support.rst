@@ -57,19 +57,10 @@ Note:
 GRPO
 ~~~~
 
-Note:
-
-1. For VLMs, use the provided ``hf_vlm_grpo.py`` script.
-
 .. code-block:: bash
 
     # LLM GRPO
-    cosmos-rl --config configs/gemma/gemma3-1b-p-fsdp4-r-tp1-grpo.toml
-
-    cosmos-rl --config configs/phi/phi4-14b-p-fsdp4-r-tp1-grpo.toml
-
-    # VLM GRPO
-    cosmos-rl --config configs/gemma/gemma3-12b-vlm-p-fsdp4-r-tp4-grpo.toml ./tools/dataset/hf_vlm_grpo.py
+    cosmos-rl --config configs/phi/phi4-14b-p-fsdp4-r-tp2-grpo.toml ./tools/dataset/gsm8k_grpo.py
 
 Supported Models
 ----------------
