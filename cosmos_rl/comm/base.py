@@ -90,9 +90,6 @@ class CommMixin:
 
         self.init_meta()
 
-        self.remote_hosts = [
-            f"http://{remote_ip}:{self.remote_port}" for remote_ip in self.remote_ips
-        ]
         self.register_to_controller()
 
     def init_meta(self):

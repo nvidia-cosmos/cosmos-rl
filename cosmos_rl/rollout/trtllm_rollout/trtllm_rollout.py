@@ -98,7 +98,7 @@ class TRTLLM_Rollout(RolloutBase):
             )
         elif trtllm_version == "1.0.0rc6":
             kwargs["disable_overlap_scheduler"] = True
-
+        # Check the prefix_caching like arguments default enabled?
         self.rollout_engine = LLM(
             model=model_path,
             tensor_parallel_size=tp_size,

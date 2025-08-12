@@ -15,7 +15,7 @@
 
 import re
 import torch
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Union
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism_registry import (
     get_policy_parallelism_strategy,
@@ -26,8 +26,9 @@ from transformers import AutoConfig
 from vllm.model_executor.models.qwen3_moe import (
     Qwen3MoeForCausalLM as VllmQwen3MoeForCausalLM,
 )
-# FIXME: (lms) I don't know why this import will cause process down when backend == vllm.
-# from tensorrt_llm._torch.models.modeling_qwen3_moe import Qwen3MoeForCausalLM as TrtLLMQwen3MoeForCausalLM
+from tensorrt_llm._torch.models.modeling_qwen3_moe import (
+    Qwen3MoeForCausalLM as TrtLLMQwen3MoeForCausalLM,
+)
 
 
 class Qwen3MoeWeightMapper(WeightMapper):
@@ -38,7 +39,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         )
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
-    def _rollout_weight_name_to_hf(self, rollout_weight_name: str) -> str:
+    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
@@ -89,17 +90,19 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def rollout_prepare_recv(
         self,
-        vllm_model: VllmQwen3MoeForCausalLM,
+        vllm_model: Union[VllmQwen3MoeForCausalLM, TrtLLMQwen3MoeForCausalLM],
     ) -> Tuple[
         Dict[str, torch.Tensor],
         List[List[Tuple[str, torch.Size]]],
     ]:
-        # assert isinstance(vllm_model, VllmQwen3MoeForCausalLM), f"vllm_model must be a Qwen3MoeForCausalLM instance, but got {type(vllm_model)}"
+        assert isinstance(
+            vllm_model, (VllmQwen3MoeForCausalLM, TrtLLMQwen3MoeForCausalLM)
+        ), f"vllm_model must be a Qwen3MoeForCausalLM or TrtLLMQwen3MoeForCausalLM, but got {type(vllm_model)}"
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
-            param_name_hf = self._rollout_weight_name_to_hf(param_name)
+            param_name_hf = self._rollout_vllm_name_to_hf(param_name)
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:
                 # must be inplace slicing.

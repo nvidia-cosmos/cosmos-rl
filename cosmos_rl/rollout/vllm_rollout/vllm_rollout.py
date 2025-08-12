@@ -258,7 +258,7 @@ class vLLMRollout(RolloutBase):
         model = self.get_underlying_model()
         param_map = {}
         for name, param in model.named_parameters():
-            compatible_name = weight_mapper._rollout_weight_name_to_hf(name)
+            compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
             param_map[compatible_name] = param
         self._model_param_map = param_map
         return self._model_param_map
