@@ -586,7 +586,10 @@ class LoraConfig(BaseModel):
     r: int = Field(default=8, description="LoRA rank")
     lora_alpha: float = Field(default=8.0, description="LoRA alpha")
     lora_dropout: float = Field(default=0.0, description="LoRA dropout")
-    target_modules: List[str] = Field(default=None, description="LoRA target modules")
+    target_modules: Union[List[str], str] = Field(
+        default=None,
+        description="LoRA target modules, can be a list of strings or 'all-linear'",
+    )
     use_rslora: bool = Field(
         default=False,
         description="When set to True, uses [Rank-Stabilized LoRA](https://huggingface.co/papers/2312.03732)"
@@ -610,6 +613,14 @@ class LoraConfig(BaseModel):
         "Passing ‘gaussian’ results in Gaussian initialization scaled by the LoRA rank for linear and layers. Pass 'loftq' to use LoftQ initialization. Passing 'eva' results in a data-driven initialization of Explained Variance Adaptation."
         "EVA initializes LoRA based on the SVD of layer input activations and achieves SOTA performance due to its ability to adapt to the finetuning data. Pass 'olora' to use OLoRA initialization. Passing 'pissa' results in the initialization of https://huggingface.co/papers/2404.02948",
     )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if isinstance(self.target_modules, str):
+            assert (
+                self.target_modules == "all-linear"
+            ), "target_modules must be a list of strings or 'all-linear'"
+        return self
 
 
 class PolicyConfig(BaseModel):

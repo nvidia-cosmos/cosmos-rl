@@ -155,6 +155,9 @@ def inject_lora_adapters(
     """
     Replace matching nn.Linear modules with LoraInjectedLinear.
     Returns (model, replaced_module_names).
+
+    If a leaf module is listed in config.modules_to_save, it is treated as
+    fully tunable and LoRA will NOT be injected into it.
     """
     if not config.target_modules:
         raise ValueError(
@@ -163,14 +166,21 @@ def inject_lora_adapters(
 
     replaced: List[str] = []
 
-    match_all_linear = False
-    if isinstance(config.target_modules, str) and config.target_modules == "all-linear":
-        match_all_linear = True
-    elif (
-        isinstance(config.target_modules, list)
-        and "all-linear" in config.target_modules
-    ):
-        match_all_linear = True
+    match_all_linear = config.target_modules == "all-linear"
+
+    # Normalize modules_to_save into a list of patterns (or empty list)
+    modules_to_save = getattr(config, "modules_to_save", []) or []
+    if isinstance(modules_to_save, str):
+        modules_to_save = [modules_to_save]
+    # logger.info(f"modules_to_save: {modules_to_save}")
+
+    def _in_modules_to_save(qualified: str, child: str) -> bool:
+        if not modules_to_save:
+            return False
+        # if 'visual' in qualified:
+        #     print(f"qualified: {qualified}, child: {child}, child in modules_to_save: {child in modules_to_save}, {_name_matches(qualified, modules_to_save)}")
+        # Support both exact leaf-name matches and substring/pattern matches
+        return child in modules_to_save or _name_matches(qualified, modules_to_save)
 
     lm_head_module_name = "lm_head"
     from cosmos_rl.policy.model.hf_llm import HFLLMModel
@@ -183,13 +193,22 @@ def inject_lora_adapters(
 
     replaced_names = []
     for module_name, module in list(model.named_modules()):
-        # Only consider leaves that are nn.Linear
-        # We need the parent to set the attribute
         parent: Optional[nn.Module] = _get_parent_by_qualified_name(model, module_name)
         if parent is None:
             continue
 
         child_name = module_name.split(".")[-1]
+
+        # If user asked to fully-tune this module, skip injecting LoRA here.
+        # (Covers Linear/Conv1d; extend tuple if you later support more types.)
+        if isinstance(module, (nn.Linear, nn.Conv1d)) and _in_modules_to_save(
+            module_name, child_name
+        ):
+            logger.info(
+                f"Skipping add lora adapter to {module_name} because it is in modules_to_save (fully tunable)."
+            )
+            continue
+
         if isinstance(module, nn.Linear):
             if match_all_linear or _name_matches(module_name, config.target_modules):
                 # exclude output layer if wildcard match is enabled
@@ -211,6 +230,7 @@ def inject_lora_adapters(
                 setattr(parent, child_name, lora_linear)
                 replaced.append(module_name)
                 replaced_names.append(module_name)
+
     if not replaced:
         raise RuntimeError(
             "inject_lora_adapters found no matching nn.Linear modules. "

@@ -468,10 +468,16 @@ class ModelRegistry:
                     # If we further need finer-grained control over trainable parameters, we need to apply trainable flags after LoRA is applied
                     if config.policy.trainable_map is not None:
                         if config.policy.lora is not None:
-                            raise RuntimeError(
-                                "If LoRA is applied, please do not set trainable_map in config.train.policy."
-                                "Instead, set trainable_map in config.policy.lora.modules_to_save to explicitly specify which modules to train."
-                            )
+                            # Only setting `requires_grad` to `False` can be combined with LoRA
+                            # This can be useful for:
+                            #  lora_config.target_modules is set to ['q_proj', 'k_proj', 'v_proj']
+                            # But there are both `q_proj` and `k_proj` in LLM and vision encoder,
+                            # If we only want to train lora on vision, we can disable grad on LLM by setting `config.policy.trainable_map` to `{"model.llm": False}`
+                            if any(v for v in config.policy.trainable_map.values()):
+                                raise RuntimeError(
+                                    "If LoRA is applied, only setting `requires_grad` to `False` inside `config.policy.trainable_map` can be combined with LoRA."
+                                    "Otherwise, please instead include the trainable modules in `config.policy.lora.modules_to_save`."
+                                )
                         model.apply_trainable(config.policy.trainable_map)
 
                 except Exception as e:
