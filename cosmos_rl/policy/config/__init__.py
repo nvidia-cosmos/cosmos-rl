@@ -631,6 +631,12 @@ class PolicyConfig(BaseModel):
         default=True, description="Whether to use gradient checkpointing"
     )
     lora: LoraConfig | None = Field(default=None, description="LoRA configuration")
+    trainable_map: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description="Mapping of name -> bool. Keys can either be: "
+        "- exact parameter names (from model.named_parameters()) "
+        "- exact module paths (from model.named_modules()) ",
+    )
 
     @model_validator(mode="after")
     def check_params_value(self):

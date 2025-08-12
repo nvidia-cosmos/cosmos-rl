@@ -21,6 +21,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from cosmos_rl.policy.config import LoraConfig
+from cosmos_rl.utils.logging import logger
+import os
 
 
 class WeightWrapper(nn.Module):
@@ -154,13 +156,32 @@ def inject_lora_adapters(
     Replace matching nn.Linear modules with LoraInjectedLinear.
     Returns (model, replaced_module_names).
     """
-    if config.target_modules is None:
+    if not config.target_modules:
         raise ValueError(
             "LoraConfig.target_modules must be set (list of substrings to match)."
         )
 
     replaced: List[str] = []
 
+    match_all_linear = False
+    if isinstance(config.target_modules, str) and config.target_modules == "all-linear":
+        match_all_linear = True
+    elif (
+        isinstance(config.target_modules, list)
+        and "all-linear" in config.target_modules
+    ):
+        match_all_linear = True
+
+    lm_head_module_name = "lm_head"
+    from cosmos_rl.policy.model.hf_llm import HFLLMModel
+
+    if isinstance(model, HFLLMModel):
+        output_layer = model.model.get_output_embeddings()
+        lm_head_module_name = [
+            name for name, module in model.named_modules() if module is output_layer
+        ][0]
+
+    replaced_names = []
     for module_name, module in list(model.named_modules()):
         # Only consider leaves that are nn.Linear
         # We need the parent to set the attribute
@@ -169,23 +190,37 @@ def inject_lora_adapters(
             continue
 
         child_name = module_name.split(".")[-1]
-        if isinstance(module, nn.Linear) and _name_matches(
-            module_name, config.target_modules
-        ):
-            lora_linear = LoraInjectedLinear.from_linear(
-                base=module,
-                r=config.r,
-                lora_alpha=config.lora_alpha,
-                lora_dropout=config.lora_dropout,
-            )
-            setattr(parent, child_name, lora_linear)
-            replaced.append(module_name)
+        if isinstance(module, nn.Linear):
+            if match_all_linear or _name_matches(module_name, config.target_modules):
+                # exclude output layer if wildcard match is enabled
+                if match_all_linear and (
+                    child_name == lm_head_module_name
+                    or _name_matches(module_name, ["lm_head"])
+                ):
+                    logger.info(
+                        f"Skipping {module_name} because it is the output layer"
+                    )
+                    continue
 
+                lora_linear = LoraInjectedLinear.from_linear(
+                    base=module,
+                    r=config.r,
+                    lora_alpha=config.lora_alpha,
+                    lora_dropout=config.lora_dropout,
+                )
+                setattr(parent, child_name, lora_linear)
+                replaced.append(module_name)
+                replaced_names.append(module_name)
     if not replaced:
         raise RuntimeError(
             "inject_lora_adapters found no matching nn.Linear modules. "
             f"target_modules={config.target_modules}"
         )
+    else:
+        if os.environ.get("RANK", "0") == "0":
+            logger.info(
+                f"Replaced {len(replaced_names)} modules with LoRA adapters: {replaced_names}"
+            )
     return model, replaced
 
 
