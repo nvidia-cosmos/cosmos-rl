@@ -67,7 +67,7 @@ class LoraInjectedLinear(nn.Linear):
             nn.Parameter(torch.empty(out_features, self.r, **factory_kwargs))
         )
         # Init as in the LoRA paper: A ~ N(0, 0.02), B = 0 so initial ΔW=0
-        nn.init.normal_(self.lora_A.weight, mean=0.0, std=0.02)
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B.weight)
         self.lora_dropout = (
             nn.Dropout(self.lora_dropout_p)
@@ -81,7 +81,7 @@ class LoraInjectedLinear(nn.Linear):
 
     @torch.no_grad()
     def reinitialize_lora_params(self):
-        nn.init.normal_(self.lora_A.weight, mean=0.0, std=0.02)
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B.weight)
 
     @classmethod
