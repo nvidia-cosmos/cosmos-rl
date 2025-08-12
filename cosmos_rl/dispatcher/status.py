@@ -208,6 +208,9 @@ class PolicyStatusManager:
         """
         Set the ranks of the policies.
         """
+        if self.training_finished():
+            # Training is finished, do not recompute total steps
+            return
         # Update total_steps based on remaining samples and replicas
         num_policy_replicas = len(self.get_all_atoms_arrived_replicas())
         if num_policy_replicas == 0:
