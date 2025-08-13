@@ -27,7 +27,7 @@ class ToolAgent:
         self.tool_parser = tool_parser
         self.tools: Dict[str, BaseTool] = {tool.name: tool for tool in tools}
 
-    def __call__(
+    def call_tools(
         self, text: str, groud_truth: Optional[str] = None
     ) -> ToolResponse | None:
         """Call tool and return tool response. Support multiple tool calls."""

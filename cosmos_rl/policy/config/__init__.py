@@ -746,6 +746,21 @@ class MultiTurnRolloutConfig(BaseModel):
     max_assistant_turns: int = Field(
         default=100, description="Max assistant turn count for multi-turn rollout."
     )
+    add_generation_prompt: bool = Field(
+        default=True,
+        description="Whether to add generation prompt in multi-turn rollout.",
+    )
+    continue_final_message: bool = Field(
+        default=False,
+        description="Whether to continue the final message in multi-turn rollout.",
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if self.enable_tools:
+            if self.add_generation_prompt:
+                assert not self.continue_final_message, "continue_final_message must be False when add_generation_prompt is True"
+        return self
 
 
 class ValidationConfig(BaseModel):

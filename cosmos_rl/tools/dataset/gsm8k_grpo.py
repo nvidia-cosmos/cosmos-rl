@@ -179,7 +179,7 @@ class GSM8kTool(BaseTool):
         yield
         self.groud_truth = None
 
-    def _extract_solution(solution_str, method="strict"):
+    def _extract_solution(self, solution_str, method="strict"):
         assert method in ["strict", "flexible"]
 
         if method == "strict":
@@ -207,14 +207,13 @@ class GSM8kTool(BaseTool):
         return final_answer
 
     def function(self, answer: str) -> ToolResponse:
-        try:
-            final_answer = self._extract_solution(answer)
-            truth_answer = self._extract_solution(self.groud_truth)
-            reward = 1.0 if final_answer == truth_answer else 0.0
-        except Exception:
-            reward = 0.0
+        # model may generate tool call with answer like "### 123" or "123",
+        # so we set flexible method to extract the answer.
+        truth_answer = self._extract_solution(self.groud_truth, method="flexible")
+        if truth_answer is None:
+            truth_answer = ""
 
-        return ToolResponse(text=f"Current parsed {answer=} {reward=}")
+        return ToolResponse(text=f"Current parsed #### {truth_answer}")
 
 
 def custom_logger_fn(data: dict, step: int) -> None:
@@ -334,16 +333,14 @@ class GSM8kDataPacker(DataPacker):
         """
         assert self.tool_agent is not None, "Tool agent is not set"
 
-        real_response = None
+        real_response = ""
         for response in responses:
             if response:
                 real_response = response
                 break
-        if real_response is None:
-            real_response = ""
 
         # 1. check if the response contains tool call
-        tool_responses = self.tool_agent(real_response, ground_truth)
+        tool_responses = self.tool_agent.call_tools(real_response, ground_truth)
         if tool_responses:
             for tr in tool_responses:
                 conversation = add_tool_response_messages(conversation, tr.text)

@@ -20,7 +20,7 @@ from queue import Queue
 import atexit
 import types
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
-from typing import List, Optional, Callable, Any, Union
+from typing import List, Optional, Callable, Any
 from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase, State
@@ -68,6 +68,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
 from cosmos_rl.dispatcher.data import RLPayload, IdxAndRLPayload
+from cosmos_rl.rollout.schema import RolloutResult
 
 from vllm import SamplingParams
 import time
@@ -1336,37 +1337,36 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     for _, payload in prompt_id_and_payload_list
                 ]
 
-                completions: Union[List[List[str]], List[RLPayload]] = (
-                    self.rollout.rollout_generation(
-                        payloads=prompts,
-                        stream=self.inference_stream,
-                        data_packer=self.data_packer,
-                        sampling_params=self.sampling_params,
-                    )
+                rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
+                    payloads=prompts,
+                    stream=self.inference_stream,
+                    data_packer=self.data_packer,
+                    sampling_params=self.sampling_params,
                 )
 
                 if self.rollout.rollout_config.multi_turn_config.enable:
                     # HACK(zjx): always report the multi-turn completions to the controller
                     should_report = True
-                    # TODO(zjx): write completions for statistics the completion token counts
-                    valid_completions = [[""] for _ in range(len(completions))]
+                    valid_completions: List[List[str]] = [
+                        r.completions for r in rollout_results
+                    ]
                 else:
                     # Remove empty completions
                     valid_completions: List[List[str]] = []
                     prompt_indices_to_remove: List[int] = []
-                    if len(completions):
+                    if len(rollout_results):
                         batch_size = len(prompts)
                         assert (
-                            len(completions) == batch_size
-                        ), f"Error: VLLM returned {len(completions)} for {batch_size}"
+                            len(rollout_results) == batch_size
+                        ), f"Error: VLLM returned {len(rollout_results)} for {batch_size}"
                         for i in range(batch_size):
-                            completion = completions[i]
+                            completions = rollout_results[i].completions
                             skip_output = False
-                            total_generation_count = len(completion)
+                            total_generation_count = len(completions)
                             empty_generation_count = 0
                             output_texts = []
                             for j in range(total_generation_count):
-                                output_text = completion[j]
+                                output_text = completions[j]
                                 # if output_text == "":
                                 #     logger.warning(
                                 #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
@@ -1419,7 +1419,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     prompt_idxs = [prompt[0] for prompt in prompt_id_and_payload_list]
                     if self.rollout.rollout_config.multi_turn_config.enable:
                         # because we set generated message in the payload, so we need to return the completions here.
-                        payloads = completions
+                        payloads = [
+                            RLPayload(
+                                prompt=r.prompt,
+                                conversation=r.conversation,
+                            )
+                            for r in rollout_results
+                        ]
                     else:
                         payloads = [prompt[1] for prompt in prompt_id_and_payload_list]
 

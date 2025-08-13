@@ -48,7 +48,8 @@ class DecoderOnlyLLMDataPacker(DataPacker):
                 sample,
                 tools=self.tool_agent.tool_schemas(),
                 tokenize=False,
-                add_generation_prompt=False,
+                add_generation_prompt=self.config.rollout.multi_turn_config.add_generation_prompt,
+                continue_final_message=self.config.rollout.multi_turn_config.continue_final_message,
                 enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
             )
             return prompt
