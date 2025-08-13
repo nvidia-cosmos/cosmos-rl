@@ -226,6 +226,7 @@ def inject_lora_adapters(
                     r=config.r,
                     lora_alpha=config.lora_alpha,
                     lora_dropout=config.lora_dropout,
+                    use_rslora=config.use_rslora,
                 )
                 setattr(parent, child_name, lora_linear)
                 replaced.append(module_name)
