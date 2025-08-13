@@ -354,7 +354,14 @@ def build_lr_schedulers(
         optimizers (OptimizersContainer): The corresponding optimizers for the
             lr_schedulers.
     """
-    warmup_steps = int(config.train.optm_warmup_steps)
+    if (
+        isinstance(config.train.optm_warmup_steps, float)
+        and config.train.optm_warmup_steps <= 1.0
+    ):
+        warmup_steps = int(config.train.optm_warmup_steps * training_steps)
+    else:
+        warmup_steps = int(config.train.optm_warmup_steps)
+
     if warmup_steps > training_steps:
         logger.warning(
             f"Warmup steps ({warmup_steps}) exceed total training steps ({training_steps}). "

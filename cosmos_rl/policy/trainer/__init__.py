@@ -112,6 +112,11 @@ class Trainer(CommMixin):
                 from cosmos_rl.policy.lora.plugin import reinitialize_lora_params
 
                 reinitialize_lora_params(model)
+            # Enable gradient checkpointing for the model
+            model.set_gradient_checkpointing_enabled(
+                config.policy.model_gradient_checkpointing
+            )
+
             torch.cuda.empty_cache()
             self.model_parts = model.separate_model_parts()
             self.model = model

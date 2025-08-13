@@ -30,6 +30,8 @@ from typing import Mapping
 
 
 class BaseModel(torch.nn.Module, ABC):
+    _gradient_checkpointing_enabled = False
+
     def __init__(self, hf_config: AutoConfig):
         super().__init__()
         self.weight_mapper = WeightMapper.get_weight_mapper(
@@ -41,6 +43,17 @@ class BaseModel(torch.nn.Module, ABC):
         Get the current device of the model
         """
         return next(self.parameters()).device
+
+    def set_gradient_checkpointing_enabled(self, enabled: bool):
+        """
+        Set the gradient checkpointing enabled flag.
+        This is used to enable or disable the gradient checkpointing for the model.
+        """
+        self._gradient_checkpointing_enabled = enabled
+        for module in self.modules():
+            if isinstance(module, torch.nn.Module):
+                if not hasattr(module, "_gradient_checkpointing_enabled"):
+                    setattr(module, "_gradient_checkpointing_enabled", enabled)
 
     @cached_property
     def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:

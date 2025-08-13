@@ -490,11 +490,23 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 cu_seqlens_now = cu_seqlens
             else:
                 cu_seqlens_now = cu_window_seqlens
-            hidden_states = blk(
-                hidden_states,
-                cu_seqlens=cu_seqlens_now,
-                position_embeddings=position_embeddings,
-            )
+
+            if (
+                hasattr(blk, "_gradient_checkpointing_enabled")
+                and blk._gradient_checkpointing_enabled
+            ):
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    blk,
+                    hidden_states,
+                    cu_seqlens_now,
+                    position_embeddings,
+                )
+            else:
+                hidden_states = blk(
+                    hidden_states,
+                    cu_seqlens=cu_seqlens_now,
+                    position_embeddings=position_embeddings,
+                )
 
         hidden_states = self.merger(hidden_states)
         reverse_indices = torch.argsort(window_index)
@@ -826,7 +838,17 @@ class Qwen2_5_VLModel(nn.Module):
         position_embeddings = self.rotary_emb(h, position_ids)
 
         for layer in self.layers.values():
-            h = layer(h, position_embeddings=position_embeddings)
+            if (
+                hasattr(layer, "_gradient_checkpointing_enabled")
+                and layer._gradient_checkpointing_enabled
+            ):
+                h = torch.utils.checkpoint.checkpoint(
+                    layer,
+                    h,
+                    position_embeddings,
+                )
+            else:
+                h = layer(h, position_embeddings=position_embeddings)
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:

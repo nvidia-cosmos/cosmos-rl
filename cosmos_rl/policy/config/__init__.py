@@ -449,7 +449,10 @@ class TrainingConfig(BaseModel):
     optm_betas: tuple[float, float] = Field(
         default=(0.9, 0.999), description="Betas for optimizer"
     )
-    optm_warmup_steps: int = Field(default=20, description="Warmup steps for optimizer")
+    optm_warmup_steps: Union[int, float] = Field(
+        default=20,
+        description="Warmup steps for optimizer, can be an integer or a float, if it is a float and range in [0.0, 1.0], it will be multiplied by the total steps",
+    )
     optm_decay_ratio: Optional[float] = Field(
         default=None,
         description="Ratio of total steps for decay, range in [0.0, 1.0], 0 means no decay.",

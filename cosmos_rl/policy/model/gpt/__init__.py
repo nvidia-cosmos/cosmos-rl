@@ -443,7 +443,17 @@ class GPT(BaseModel):
 
         position_embeddings = self.rotary_emb(h, position_ids.to(dtype=torch.long))
         for layer in self.layers.values():
-            h = layer(h, position_embeddings=position_embeddings)
+            if (
+                hasattr(layer, "_gradient_checkpointing_enabled")
+                and layer._gradient_checkpointing_enabled
+            ):
+                h = torch.utils.checkpoint.checkpoint(
+                    layer,
+                    h,
+                    position_embeddings,
+                )
+            else:
+                h = layer(h, position_embeddings=position_embeddings)
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
