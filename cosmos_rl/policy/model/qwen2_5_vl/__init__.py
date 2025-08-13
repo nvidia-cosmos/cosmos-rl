@@ -500,6 +500,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                     hidden_states,
                     cu_seqlens_now,
                     position_embeddings,
+                    use_reentrant=False,
                 )
             else:
                 hidden_states = blk(
@@ -846,6 +847,7 @@ class Qwen2_5_VLModel(nn.Module):
                     layer,
                     h,
                     position_embeddings,
+                    use_reentrant=False,
                 )
             else:
                 h = layer(h, position_embeddings=position_embeddings)

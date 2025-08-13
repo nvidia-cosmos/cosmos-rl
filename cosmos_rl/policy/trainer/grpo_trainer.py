@@ -1305,10 +1305,13 @@ class GRPOTrainer(Trainer):
                                 )
                             )
 
-                            # TP will shard the sequence dimension into n-ranks.
+                            # TP/CP will shard the sequence dimension into n-ranks.
                             # The interested_tokens will be unevenly distributed across ranks.
                             # So do not enable interested_tokens in TP.
-                            if not self.parallel_dims.tp_enabled:
+                            if (
+                                self.parallel_dims.dp_shard_coord[1]
+                                == self.parallel_dims.world_size
+                            ):
                                 user_mini_batch["interested_tokens"] = user_mini_batch[
                                     "logprob_masks"
                                 ]

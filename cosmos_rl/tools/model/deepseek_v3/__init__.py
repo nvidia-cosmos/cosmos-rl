@@ -875,6 +875,7 @@ class DeepseekV3MoEModel(BaseModel):
                     decoder_layer,
                     hidden_states,
                     position_ids,
+                    use_reentrant=False,
                 )
             else:
                 hidden_states = decoder_layer(
