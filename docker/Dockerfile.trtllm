@@ -1,7 +1,6 @@
 FROM nvcr.io/nvidia/tensorrt-llm/release:1.0.0rc6 AS trtllm-base
 
 # trtllm 1.0.0rc6 use cuda 12.9
-ARG PYTHON_VERSION=3.12
 
 ###################################################
 # Base dependencies
@@ -28,13 +27,6 @@ RUN apt-get update -qq && \
 ###################################################
 RUN apt-get install -qq -y software-properties-common
 RUN add-apt-repository ppa:deadsnakes/ppa
-## Install python
-RUN apt-get update -qq && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
-    python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv
-## Create a virtual environment
-RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
-ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
 RUN pip install -U pip setuptools wheel packaging
 
@@ -45,8 +37,7 @@ RUN pip install \
     vllm==0.10.0 \
     flash-attn==2.8.2 \
     https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl \
-    -r /workspace/cosmos_rl/requirements.txt \
-    --no-build-isolation
+    -r /workspace/cosmos_rl/requirements.txt
 
 ###################################################
 
