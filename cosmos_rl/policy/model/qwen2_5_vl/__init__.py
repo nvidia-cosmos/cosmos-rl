@@ -268,6 +268,7 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
         self.attention_dropout = 0.0
+        self.attn_func = modeling_utils.flash_attn_varlen_func
 
     def forward(
         self,
@@ -301,7 +302,7 @@ class Qwen2_5_VLVisionAttention(nn.Module):
             k = k.to(target_dtype)
             v = v.to(target_dtype)
 
-        attn_output = modeling_utils.flash_attn_varlen_func(
+        attn_output = self.attn_func(
             q,
             k,
             v,
@@ -700,6 +701,7 @@ class Qwen2_5_VLAttention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
+        self.attn_func = modeling_utils.flash_attn_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -762,7 +764,7 @@ class Qwen2_5_VLAttention(nn.Module):
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
 
-        output = modeling_utils.flash_attn_func(xq, xk, xv, causal=True)
+        output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
