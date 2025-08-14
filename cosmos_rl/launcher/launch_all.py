@@ -26,6 +26,7 @@ import argparse
 from typing import List, Dict, Optional, Any, Callable
 import toml
 import tempfile
+import cosmos_rl.utils.network_util as network_util
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")
@@ -1100,8 +1101,12 @@ cosmos-rl --config config.toml"""
         )
         subdomain = os.environ.get("LEPTON_SUBDOMAIN", "")
         hostname = f"{prefix}-{cur_work_idx}.{subdomain}"
-        logger.info(f"Setting hostname to {hostname} for worker index {cur_work_idx}")
-        os.system(f"hostname {hostname}")
+        ips = network_util.get_eth_ips()
+        assert len(ips) > 0, "No IPs found for the current machine"
+        logger.info(
+            f"Setting hostname to {hostname} {ips[0]} for worker index {cur_work_idx}"
+        )
+        os.system(f"hostname {ips[0]}")
 
     control_url = None
     if args.url is not None:
