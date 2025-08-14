@@ -88,7 +88,8 @@ class CosmosWorkerCommIpcAddrs(NamedTuple):
 
 
 class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
-    init_count = 0  # FIXME: (lms) handle this elegantly.
+    # Trtllm will init worker twice, only for the second time, cosmos-grpo should begin to work.
+    init_count = 0
     ready = False
 
     def __init__(self, *args, **kwargs) -> None:

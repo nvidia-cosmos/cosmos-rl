@@ -34,7 +34,7 @@ backend="trtllm"
 
 [policy]
 model_name_or_path = "Qwen/Qwen3-30B-A3B"
-model_max_length = 512 
+model_max_length = 4096
 model_gradient_checkpointing = true
 
 [logging]

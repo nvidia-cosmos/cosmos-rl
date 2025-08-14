@@ -292,7 +292,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     )
 
                     logger.debug(
-                        f"[Rollout] completions[0] of trtllm: {completions[0]}"
+                        f"[Rollout] completions[-1][-1] of {len(completions[-1])} completions from trtllm: {completions[-1][-1]}"
                     )
 
                     # Remove empty completions

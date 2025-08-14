@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import (
@@ -28,15 +27,6 @@ import torch
 from cosmos_rl.utils import util
 
 
-def preset_envs(cosmos_config: CosmosConfig):
-    """
-    Preset envs according to config file. All envs-preset could be placed here.
-    """
-    if cosmos_config.rollout.backend == "trtllm":
-        logger.info("[Policy] Preset NCCL_RUNTIME_CONNECT to 0 for trtllm.")
-        os.environ["NCCL_RUNTIME_CONNECT"] = "0"
-
-
 def main(*args, **kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     ctrl_ip, ctrl_port, metadata = get_controller_metadata()
@@ -47,7 +37,6 @@ def main(*args, **kwargs):
         )
 
     cosmos_config = CosmosConfig.from_dict(metadata["config"])
-    preset_envs(cosmos_config)
 
     logger.info(f"[Policy] Loaded configuration: {cosmos_config.model_dump()}")
 

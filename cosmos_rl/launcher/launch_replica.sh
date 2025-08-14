@@ -92,6 +92,7 @@ fi
 
 # NCCL related
 set_env "NCCL_CUMEM_ENABLE" "1"
+set_env "NCCL_RUNTIME_CONNECT" "0"
 # Torch related
 set_env "TORCH_CPP_LOG_LEVEL" "ERROR"
 

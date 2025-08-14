@@ -30,6 +30,7 @@ else:
 
 from tensorrt_llm import SamplingParams
 from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
+from tensorrt_llm.llmapi.llm_args import KvCacheConfig
 
 from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
@@ -101,10 +102,14 @@ class TRTLLM_Rollout(RolloutBase):
             kwargs["disable_overlap_scheduler"] = True
         policy_config = self.config.policy
         # Check the prefix_caching like arguments default enabled?
+        kv_cache_config = KvCacheConfig(
+            free_gpu_memory_fraction=self.rollout_config.gpu_memory_utilization,
+        )
         self.rollout_engine = LLM(
             model=model_path,
             tensor_parallel_size=tp_size,
             pipeline_parallel_size=pp_size,
+            dtype="auto",
             backend="pytorch",
             skip_tokenizer_init=False,
             max_seq_len=policy_config.model_max_length,
@@ -115,6 +120,7 @@ class TRTLLM_Rollout(RolloutBase):
             load_format=load_format,
             trust_remote_code=True,
             moe_expert_parallel_size=moe_tensor_parallel_size,
+            kv_cache_config=kv_cache_config,
             # For cosmos-rl
             cosmos_config=self.config,
             **kwargs,
