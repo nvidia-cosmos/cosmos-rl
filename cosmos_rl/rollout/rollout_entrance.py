@@ -29,8 +29,8 @@ try:
     from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (
         TRTLLMRolloutWrapper,
     )
-except ImportError:
-    logger.error("[Rollout] TRTLLMRolloutWrapper importing failed!")
+except ImportError as e:
+    logger.error(f"[Rollout] TRTLLMRolloutWrapper importing failed! {e}")
     TRTLLMRolloutWrapper = None
 
 
