@@ -1345,11 +1345,20 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 )
 
                 if self.rollout.rollout_config.multi_turn_config.enable:
-                    # HACK(zjx): always report the multi-turn completions to the controller
-                    should_report = True
-                    valid_completions: List[List[str]] = [
-                        r.completions for r in rollout_results
-                    ]
+                    valid_result: List[RLPayload] = []
+                    valid_completions: List[List[str]] = []
+                    for rr in rollout_results:
+                        # remove those result without assistant message
+                        flag = False
+                        for msg in rr.conversation:
+                            if msg.role == "assistant":
+                                flag = True
+                                break
+                        if flag:
+                            valid_result.append(rr)
+                            valid_completions.append(rr.completions)
+                    rollout_results = valid_result
+                    should_report = len(valid_result) > 0
                 else:
                     # Remove empty completions
                     valid_completions: List[List[str]] = []

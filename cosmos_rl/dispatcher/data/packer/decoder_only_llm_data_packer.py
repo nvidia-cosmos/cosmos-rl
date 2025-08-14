@@ -91,8 +91,12 @@ class DecoderOnlyLLMDataPacker(DataPacker):
                 self.tokenizer,
                 sample,
                 enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
-                tools=self.tools,
+                tools=self.tool_agent.tool_schemas(),
             )
+
+            assert any(
+                loss_mask
+            ), "Should not mask all tokens, which means not a valid sample"
 
             full_prompt = self.get_rollout_input(sample)
             full_prompt_ids = self.tokenizer(

@@ -58,15 +58,16 @@ def process_conversation_with_chat_template(
         if msg.role == "system":
             assert i == 0, "System message should be the first message"
 
-        # wait for the next assistant message, or process the full sample
+        # find next assistant message, or process the full sample
         if msg.role != "assistant" and i < len(conversation) - 1:
+            st = i
             continue
 
-        if i == 0:
+        if st == 0:
             prev_applied_text = ""
         else:
             prev_applied_text = tokenizer.apply_chat_template(
-                conversation[:st],
+                conversation[: st + 1],
                 tokenize=False,
                 add_generation_prompt=False,
                 enable_thinking=enable_thinking,
@@ -74,7 +75,7 @@ def process_conversation_with_chat_template(
             )
 
         cur_applied_text = tokenizer.apply_chat_template(
-            conversation[:i],
+            conversation[: i + 1],
             tokenize=False,
             add_generation_prompt=False,
             enable_thinking=enable_thinking,
@@ -84,7 +85,7 @@ def process_conversation_with_chat_template(
         # Get tokens for the current message only
         if msg.role == "assistant":
             prev_applied_text_with_generation_prompt = tokenizer.apply_chat_template(
-                conversation[:st],
+                conversation[: st + 1],
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=enable_thinking,
@@ -106,11 +107,12 @@ def process_conversation_with_chat_template(
                 len(_message_tokens)
             )
         else:
-            concat_tokens += tokenizer.encode(
+            mesage_tokens = tokenizer.encode(
                 cur_applied_text[len(prev_applied_text) :],
                 add_special_tokens=False,
             )
-            concat_loss_mask += [0] * len(concat_tokens)
+            concat_tokens += mesage_tokens
+            concat_loss_mask += [0] * len(mesage_tokens)
         # move the start index to this processed assistant message
         st = i
 
