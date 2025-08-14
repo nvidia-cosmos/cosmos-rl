@@ -201,6 +201,8 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor],
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,
     ):
         """
         Forward pass of the attention module.
@@ -208,6 +210,8 @@ class Attention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor.
             position_embeddings (torch.Tensor): Position embeddings.
+            cu_seqlens (torch.Tensor, optional): Cumulative sequence lengths.
+            max_seqlen (int, optional): Maximum sequence length.
 
         Returns:
             torch.Tensor: Output tensor after attention.
@@ -241,7 +245,23 @@ class Attention(nn.Module):
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
 
-        output = modeling_utils.flash_attn_func(xq, xk, xv, causal=True)
+        if cu_seqlens is not None:
+            # logger.info(f"shapes : {xq.shape}, {xk.shape}, {xv.shape}, cu_seqlens: {cu_seqlens}, max_seqlen: {max_seqlen}")
+            xq = xq.view(seqlen, -1, self.head_dim)
+            xk = xk.view(seqlen, -1, self.head_dim)
+            xv = xv.view(seqlen, -1, self.head_dim)
+            output = modeling_utils.flash_attn_varlen_func(
+                xq,
+                xk,
+                xv,
+                cu_seqlens,
+                cu_seqlens,
+                max_seqlen,
+                max_seqlen,
+                causal=True,
+            )
+        else:
+            output = modeling_utils.flash_attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
@@ -554,6 +574,7 @@ class Qwen3MoEBlock(nn.Module):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # necessary, but kept here for BC
+        **kwargs,
     ):
         """
         Perform a forward pass through the Qwen3MoEBlock.
@@ -561,12 +582,18 @@ class Qwen3MoEBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor.
             position_embeddings (torch.Tensor): Position embeddings.
+            **kwargs: Additional keyword arguments.
 
         Returns:
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.self_attn(self.input_layernorm(x), position_embeddings)
+        h = x + self.self_attn(
+            self.input_layernorm(x),
+            position_embeddings,
+            cu_seqlens=kwargs.get("cu_seqlens", None),
+            max_seqlen=kwargs.get("max_seqlen", None),
+        )
         out = self.mlp(self.post_attention_layernorm(h))
         out = h + out
         return out
@@ -651,10 +678,11 @@ class Qwen3MoE(BaseModel):
                     layer,
                     h,
                     position_embeddings,
+                    **kwargs,
                     use_reentrant=False,
                 )
             else:
-                h = layer(h, position_embeddings=position_embeddings)
+                h = layer(h, position_embeddings=position_embeddings, **kwargs)
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:

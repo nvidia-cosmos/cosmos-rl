@@ -277,6 +277,11 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             x["label_ids"][:computed_max_len] for x in processed_samples
         ]
 
+        from cosmos_rl.utils.logging import logger
+
+        # logger.info(f"input {[len(sublist) for sublist in list_of_input_ids]}")
+        # logger.info(f"label {[len(sublist) for sublist in list_of_label_ids]}")
+
         # Then pad the samples to the computed_max_len
         input_ids = torch.tensor(
             [

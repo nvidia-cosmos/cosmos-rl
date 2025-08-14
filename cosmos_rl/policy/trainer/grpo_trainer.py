@@ -1361,10 +1361,7 @@ class GRPOTrainer(Trainer):
                                 // self.seq_len_multiple
                                 * self.seq_len_multiple
                             )
-                            packing_seq = (
-                                self.config.train.sequence_packing
-                                and not self.parallel_dims.pp_enabled
-                            )
+
                             minibatched_advantages = (
                                 advantages_t[i:end]
                                 .unsqueeze(1)
@@ -1378,6 +1375,15 @@ class GRPOTrainer(Trainer):
                                     computed_max_len=computed_max_len,
                                 )
                             )
+                            packing_seq = self.config.train.sequence_packing
+                            if packing_seq:
+                                if (
+                                    self.parallel_dims.pp_enabled
+                                ):
+                                    packing_seq = False
+                                    logger.debug(
+                                        "[Policy] Packing sequence is disabled due to incompatible dimensions."
+                                    )
 
                             # TP/CP will shard the sequence dimension into n-ranks.
                             # The interested_tokens will be unevenly distributed across ranks.
@@ -1411,6 +1417,7 @@ class GRPOTrainer(Trainer):
                                     pad_token_id=self.tokenizer.pad_token_id,
                                     advantages=advantages_t[i:end],
                                     seq_len_multiple=self.seq_len_multiple,
+                                    batch_sep_among_seq_len_multiple=self.parallel_dims.cp_enabled,
                                 )
                                 user_mini_batch.update(packed_args)
                                 packed_args = pack_sequences_for_inputs(
@@ -1421,6 +1428,8 @@ class GRPOTrainer(Trainer):
                                     interested_tokens=user_mini_batch.get(
                                         "interested_tokens", None
                                     ),
+                                    pos_seq_dim=pos_seq_dim,
+                                    batch_sep_among_seq_len_multiple=self.parallel_dims.cp_enabled,
                                 )
                                 user_mini_batch.update(packed_args)
                                 input_ids = user_mini_batch["input_ids"]
@@ -1442,6 +1451,7 @@ class GRPOTrainer(Trainer):
                                     slice_inputs_for_ulysses(
                                         [input_ids, position_ids, padding_mask],
                                         self.parallel_dims.mesh["cp"],
+                                        seq_dims=[1, pos_seq_dim, 1],
                                     )
                                 )
                                 if "cu_seqlens" in user_mini_batch:
