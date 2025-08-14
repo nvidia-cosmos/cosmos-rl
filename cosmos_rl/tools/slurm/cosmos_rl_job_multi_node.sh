@@ -24,7 +24,7 @@ echo "Using ${NUM_POLICY_NODES} policy nodes and ${NUM_ROLLOUT_NODES} rollout no
 MOUNTS="/lustre:/lustre/,${HOME}/.cache/huggingface:/root/.cache/huggingface,$(dirname [[CONFIG_PATH]]):/opt/tmp_config"
 
 
-export COSMOS_RL_ROOT="/workspace/cosmos_rl"
+export COSMOS_RL_ROOT="/opt/venv/cosmos_rl/lib/python3.12/site-packages"
 if [[ -n "${REPO_ROOT_PATH}" ]]; then
     MOUNTS="${MOUNTS},${REPO_ROOT_PATH}:/opt/cosmos-rl"
     export COSMOS_RL_ROOT="/opt/cosmos-rl"
@@ -91,7 +91,7 @@ srun \
     bash -c \
     '
     cd ${COSMOS_RL_ROOT}
-    python ./tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
+    python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
     ' \
     &
 pid_policy=$!
@@ -112,7 +112,7 @@ if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
         bash -c \
         '
         cd ${COSMOS_RL_ROOT}
-        python ./tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
+        python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
         ' \
         &
     pid_rollout=$!

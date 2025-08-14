@@ -382,6 +382,13 @@ class SFTTrainer(Trainer):
                     )
                 else:
                     max_len = fixed_length
+                if self.seq_len_multiple > 1:
+                    max_len = (
+                        (max_len + self.seq_len_multiple - 1)
+                        // self.seq_len_multiple
+                        * self.seq_len_multiple
+                    )
+
                 val_batch = self.data_packer.sft_collate_fn(
                     val_global_batch,
                     computed_max_len=max_len,
