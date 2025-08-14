@@ -24,10 +24,8 @@ echo "Using ${NUM_POLICY_NODES} policy nodes and ${NUM_ROLLOUT_NODES} rollout no
 MOUNTS="/lustre:/lustre/,${HOME}/.cache/huggingface:/root/.cache/huggingface,$(dirname [[CONFIG_PATH]]):/opt/tmp_config"
 
 
-export COSMOS_RL_ROOT="/opt/venv/cosmos_rl/lib/python3.12/site-packages"
 if [[ -n "${REPO_ROOT_PATH}" ]]; then
     MOUNTS="${MOUNTS},${REPO_ROOT_PATH}:/opt/cosmos-rl"
-    export COSMOS_RL_ROOT="/opt/cosmos-rl"
     export PYTHONPATH="/opt/cosmos-rl:${PYTHONPATH}"
 fi
 
@@ -70,7 +68,7 @@ srun \
     '
     # Start the controller
     export COSMOS_LOG_LEVEL=DEBUG
-    cd ${COSMOS_RL_ROOT}
+    cd $(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))")
     ./cosmos_rl/launcher/launch_controller.sh --port ${CONTROLLER_PORT} --config /opt/tmp_config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]]
     ' \
     &
@@ -90,7 +88,7 @@ srun \
     -e ${OUTDIR}/%j/policy/%t.err \
     bash -c \
     '
-    cd ${COSMOS_RL_ROOT}
+    cd $(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))")
     python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
     ' \
     &
@@ -111,7 +109,7 @@ if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
         -e ${OUTDIR}/%j/rollout/%t.err \
         bash -c \
         '
-        cd ${COSMOS_RL_ROOT}
+        cd $(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))")
         python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
         ' \
         &
