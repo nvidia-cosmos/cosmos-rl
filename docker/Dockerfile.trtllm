@@ -1,0 +1,4 @@
+FROM nvcr.io/nvidia/tensorrt-llm/release:1.0.0rc6
+
+# trtllm 1.0.0rc6 use cuda 12.9
+
