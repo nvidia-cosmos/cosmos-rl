@@ -24,7 +24,14 @@ from cosmos_rl.utils.distributed import (
     get_controller_metadata,
 )
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker import vLLMRolloutWorker
-from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import TRTLLMRolloutWrapper
+
+try:
+    from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (
+        TRTLLMRolloutWrapper,
+    )
+except ImportError:
+    logger.error("[Rollout] TRTLLMRolloutWrapper importing failed!")
+    TRTLLMRolloutWrapper = None
 
 
 def run_rollout(*args, **kwargs):
@@ -65,6 +72,9 @@ def run_rollout(*args, **kwargs):
                 "COSMO_USING_TRTLLM" in os.environ
             ), "[Rollout] COSMO_USING_TRTLLM is not set when using trtllm as the rollout backend."
             # if backend is trtllm, we leave distribution initialization to trtllm executor.
+            assert (
+                TRTLLMRolloutWrapper is not None
+            ), "[Rollout] TRTLLMRolloutWrapper importing failed!"
             rollout_worker = TRTLLMRolloutWrapper(cosmos_rollout_config)
         else:
             raise ValueError(f"Invalid rollout backend: {rollout_backend}")
