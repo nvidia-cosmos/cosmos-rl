@@ -339,15 +339,19 @@ class GSM8kDataPacker(DataPacker):
                 real_response = response
                 break
 
-        # 1. check if the response contains tool call
+        if real_response == "":
+            return conversation
+
+        # 1. add real_response as assistant
+        conversation = add_assistant_message(conversation, real_response)
+
+        # 2. check if the response contains tool call instruction
         tool_responses = self.tool_agent.call_tools(real_response, ground_truth)
         if tool_responses:
             for tr in tool_responses:
                 conversation = add_tool_response_messages(conversation, tr.text)
-            return conversation
 
-        # By default, we add response as assistant message
-        return add_assistant_message(conversation, real_response)
+        return conversation
 
 
 if __name__ == "__main__":

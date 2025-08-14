@@ -27,7 +27,7 @@ class ChatMessage(BaseModel):
     A chat message item of a conversation.
     """
 
-    role: str = Field(default=None, choices=["system", "user", "assistant"])
+    role: str = Field(default=None, choices=["system", "user", "assistant", "tool"])
 
     """
     For text message content,
@@ -57,7 +57,7 @@ class RLPayload(BaseModel):
         default=None, description="The prompt for the rollout."
     )
 
-    conversation: Optional[List[ChatMessage]] = Field(
+    conversation: Optional[ConversationType] = Field(
         default=None, description="The conversation for the rollout."
     )
 
