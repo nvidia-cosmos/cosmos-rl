@@ -1,6 +1,7 @@
 FROM nvcr.io/nvidia/tensorrt-llm/release:1.0.0rc6 AS trtllm-base
 
 # trtllm 1.0.0rc6 use cuda 12.9
+ARG PYTHON_VERSION=3.12
 
 ###################################################
 # Base dependencies
@@ -8,9 +9,6 @@ RUN apt-get update -y && apt-get upgrade -y
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
     curl git gpg lsb-release tzdata wget
-
-RUN apt-get install -qq -y software-properties-common
-RUN add-apt-repository ppa:deadsnakes/ppa
 ###################################################
 
 
@@ -39,10 +37,6 @@ RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
 RUN pip install -U pip setuptools wheel packaging
-
-# even though we don't depend on torchaudio, vllm does. in order to
-# make sure the cuda version matches, we install it here.
-RUN pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
