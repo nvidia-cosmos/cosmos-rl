@@ -41,8 +41,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
-from flash_attn import flash_attn_func, flash_attn_varlen_func
-from flash_attn.layers.rotary import apply_rotary_emb
+import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 
 
 class Qwen2RMSNorm(nn.Module):
@@ -253,8 +252,12 @@ def apply_rotary_pos_emb_vision(
     """
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
-    q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
-    k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
+    q_embed = modeling_utils.apply_rotary_emb(
+        q.float(), cos.float(), sin.float()
+    ).type_as(q)
+    k_embed = modeling_utils.apply_rotary_emb(
+        k.float(), cos.float(), sin.float()
+    ).type_as(k)
     return q_embed, k_embed
 
 
@@ -298,7 +301,7 @@ class Qwen2_5_VLVisionAttention(nn.Module):
             k = k.to(target_dtype)
             v = v.to(target_dtype)
 
-        attn_output = flash_attn_varlen_func(
+        attn_output = modeling_utils.flash_attn_varlen_func(
             q,
             k,
             v,
@@ -697,7 +700,6 @@ class Qwen2_5_VLAttention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
-        self.attn_func = flash_attn_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -760,7 +762,7 @@ class Qwen2_5_VLAttention(nn.Module):
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
 
-        output = self.attn_func(xq, xk, xv, causal=True)
+        output = modeling_utils.flash_attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 

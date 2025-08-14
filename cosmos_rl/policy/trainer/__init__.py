@@ -17,6 +17,8 @@ import json
 import os
 import torch
 import threading
+import random
+import numpy as np
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.checkpoint import (
     upload_folder_to_s3,
@@ -37,11 +39,25 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.api_suffix import COSMOS_API_SET_TRACE_PATH_SUFFIX
 from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
+from cosmos_rl.policy.kernel.modeling_utils import set_flash_attn_deterministic
 
 
 class Trainer(CommMixin):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
         super().__init__()
+        if config.train.seed:
+            torch.manual_seed(config.train.seed)
+            torch.cuda.manual_seed(config.train.seed)
+            torch.cuda.manual_seed_all(config.train.seed)
+            random.seed(config.train.seed)
+            np.random.seed(config.train.seed)
+
+        if config.train.deterministic:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            torch.use_deterministic_algorithms(mode=True, warn_only=True)
+        set_flash_attn_deterministic(config.train.deterministic)
+
         self.config = config
         if self.config.policy.parallelism.dp_shard_size == -1:
             self.config.policy.parallelism.dp_shard_size = parallel_dims.dp_shard

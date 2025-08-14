@@ -36,7 +36,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
-from flash_attn import flash_attn_func
+import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 
 
 class RMSNorm(nn.Module):
@@ -193,7 +193,6 @@ class Attention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
-        self.attn_func = flash_attn_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -272,7 +271,7 @@ class Attention(nn.Module):
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
 
-        output = self.attn_func(xq, xk, xv, causal=True)
+        output = modeling_utils.flash_attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
