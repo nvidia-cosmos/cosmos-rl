@@ -289,7 +289,7 @@ class SFTTrainer(Trainer):
             train_dataset,
             num_replicas=self.dp_world_size,
             rank=self.dp_rank,
-            shuffle=True,
+            shuffle=False,
             drop_last=False,
         )
 
@@ -434,6 +434,7 @@ class SFTTrainer(Trainer):
                         slice_inputs_for_ulysses(
                             [val_inputs, val_position_ids, val_padding_mask],
                             self.parallel_dims.mesh["cp"],
+                            seq_dims=[1, val_pos_seq_dim, 1],
                         )
                     )
 
@@ -595,6 +596,7 @@ class SFTTrainer(Trainer):
                             seq_len_multiple=self.seq_len_multiple,
                             input_ids=batch["input_ids"],
                             pad_token_id=self.tokenizer.pad_token_id,
+                            batch_sep_among_seq_len_multiple=self.parallel_dims.cp_enabled,
                         )
                         batch.update(packed_args)
                         packed_args = pack_sequences_for_inputs(
@@ -602,12 +604,15 @@ class SFTTrainer(Trainer):
                             position_ids,
                             pad_token_id=self.tokenizer.pad_token_id,
                             seq_len_multiple=self.seq_len_multiple,
+                            pos_seq_dim=pos_seq_dim,
+                            batch_sep_among_seq_len_multiple=self.parallel_dims.cp_enabled,
                         )
                         packed_args.pop("label_packing_mask", None)
                         batch.update(packed_args)
                         labels = batch.pop("label_ids")
                         input_ids = batch["input_ids"]
                         position_ids = batch["position_ids"]
+                    # logger.info(f"shapes : input_ids {input_ids.shape}, position_ids: {position_ids.shape}, labels {labels.shape}")
 
                     if self.parallel_dims.cp_enabled:
                         input_ids_before_cp = input_ids
@@ -618,6 +623,7 @@ class SFTTrainer(Trainer):
                             slice_inputs_for_ulysses(
                                 [input_ids, position_ids, padding_mask],
                                 self.parallel_dims.mesh["cp"],
+                                seq_dims=[1, pos_seq_dim, 1],
                             )
                         )
                         if "cu_seqlens" in batch:

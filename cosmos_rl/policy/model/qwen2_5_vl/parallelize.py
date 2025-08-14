@@ -276,14 +276,7 @@ def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
         transformer_block.self_attn.attn_func = ulysses_attn_func(
             original_attn_func, cp_mesh
         )
-    # For visual model
-    if model.visual is not None:
-        for _, transformer_block in model.visual.blocks.items():
-            original_attn_func = transformer_block.attn.attn_func
-            transformer_block.attn.attn_func = ulysses_attn_func(
-                original_attn_func, cp_mesh
-            )
-
+    # For visual model since we merge cp into fsdp, no need handling.
     swizzle_cp_forward(model, parallel_dims)
 
 

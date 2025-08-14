@@ -222,7 +222,9 @@ def slice_input_tensor(
 
 
 def slice_inputs_for_ulysses(
-    input_tensors: list[torch.Tensor | None], cp_mesh: DeviceMesh
+    input_tensors: list[torch.Tensor | None],
+    cp_mesh: DeviceMesh,
+    seq_dims: list[int] | None = None,
 ) -> list[torch.Tensor]:
     """
     The input tensors are already padded by cosmos-rl datapacker.
@@ -234,9 +236,11 @@ def slice_inputs_for_ulysses(
         list[torch.Tensor]: Input tensors for current CP rank.
         torch.Tensor: position_ids for current rank
     """
+    if seq_dims is None:
+        seq_dims = [1] * len(input_tensors)
     return [
-        slice_input_tensor(t, dim=1, cp_mesh=cp_mesh) if t is not None else None
-        for t in input_tensors
+        slice_input_tensor(t, dim=dim, cp_mesh=cp_mesh) if t is not None else None
+        for t, dim in zip(input_tensors, seq_dims)
     ]
 
 
@@ -378,6 +382,81 @@ def ulysses_wrapper_of_attn_func(
     return attn_output
 
 
+def ulysses_wrapper_of_attn_func_varlen(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    value_states: torch.Tensor,
+    cu_seqlens_q, 
+    cu_seqlens_k,
+    max_seqlen_q, 
+    max_seqlen_k,
+    cp_mesh: DeviceMesh,
+    original_attn_func: Callable,
+    *args,
+    **kwargs,
+):
+    """Insert all-to-all before and after flash attention.
+    DeepSpeed-Ulysses: https://arxiv.org/pdf/2309.14509
+
+    Args:
+        query_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads, head_dim]
+        key_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads_k, head_dim]
+        value_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads_k, head_dim]
+        cp_mesh (DeviceMesh): ulysses sequence parallelism device mesh
+        original_attn_func: the original attention function
+
+    Returns:
+        torch.Tensor: [batch_size, seqlen/cp_size, nheads, head_dim]
+    """
+    cp_world_size = cp_mesh.size()
+    assert cp_world_size > 1, "CP world size must be greater than 1"
+
+    # AlltoAll for Ulysses
+    # NOTE: repeat kv heads to be divided by sequence parallel. Instead of repeating nheads_q//nheads_k,
+    # we choose to repeat cp_size//nheads_k, since flash_attention supports MQA/GQA.
+    # For example:
+    # - nheads_k=4, sp=8, repeats=2
+    # - nheads_k=8, sp=8, repeats=1
+    # - nheads_k=16, sp=8, repeats=1
+    repeats = max(cp_world_size // key_states.size(2), 1)
+    key_states = key_states.unsqueeze(0)  # [1, bsz, seqlen/cp_size, nheads_k, head_dim]
+    value_states = value_states.unsqueeze(0)  # [1, bsz, seqlen/cp_size, nheads_k, head_dim]
+    query_states = query_states.unsqueeze(0)  # [1, bsz, seqlen/cp_size, nheads, head_dim]
+    key_states = repeat_kv(key_states, repeats)
+    value_states = repeat_kv(value_states, repeats)
+
+    # (bsz, seq_len/n, n_head, head_dim) -> (bsz, seq_len, n_head/n, head_dim)
+    query_states = gather_seq_scatter_heads(
+        query_states, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
+    )
+    key_states = gather_seq_scatter_heads(
+        key_states, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
+    )
+    value_states = gather_seq_scatter_heads(
+        value_states, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
+    )
+
+    query_states = query_states.squeeze(0)  # [bsz, seqlen, nheads, head_dim]
+    key_states = key_states.squeeze(0)
+    value_states = value_states.squeeze(0)
+    # (bsz, seq_len, n_head/n, head_dim)
+    attn_output = original_attn_func(
+        query_states, key_states, value_states, 
+        cu_seqlens_q, cu_seqlens_k,
+        max_seqlen_q, max_seqlen_k,
+        *args, **kwargs
+    )
+    attn_output = attn_output.unsqueeze(0)  # [1, bsz, seqlen/cp_size, nheads, head_dim]
+    # AlltoAll for Ulysses
+    # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
+    attn_output = gather_heads_scatter_seq(
+        attn_output, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
+    )
+    attn_output = attn_output.squeeze(0)  # [bsz, seqlen/cp_size, nheads, head_dim]
+    return attn_output
+
+
+
 def ulysses_attn_func(
     original_attn_func: Callable,
     cp_mesh: DeviceMesh,
@@ -387,6 +466,17 @@ def ulysses_attn_func(
         original_attn_func=original_attn_func,
         cp_mesh=cp_mesh,
     )
+
+def ulysses_attn_func_varlen(
+    original_attn_func: Callable,
+    cp_mesh: DeviceMesh,
+):
+    return partial(
+        ulysses_wrapper_of_attn_func_varlen,
+        original_attn_func=original_attn_func,
+        cp_mesh=cp_mesh,
+    )
+    
 
 
 def swizzle_cp_forward(model: nn.Module, parallel_dims: ParallelDims):
