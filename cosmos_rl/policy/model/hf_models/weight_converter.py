@@ -36,5 +36,13 @@ def convert_weight_from_hf(
     shard = tensor
     # Do FSDP sharding
     shard = shard.contiguous()
-    shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
-    return dest_name, shard.contiguous()
+    row_size = shard.shape[0]
+    if row_size % dp_shard_size != 0:
+        average_row_size = (row_size + dp_shard_size - 1) // dp_shard_size
+        start_idx = dp_shard_rank * average_row_size
+        end_idx = min(start_idx + average_row_size, row_size)
+        shard = shard[start_idx:end_idx]
+        return dest_name, shard
+    else:
+        shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
+        return dest_name, shard.contiguous()

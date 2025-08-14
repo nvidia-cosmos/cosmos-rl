@@ -416,19 +416,9 @@ class TrainingConfig(BaseModel):
     train_policy: Union[SFTDataConfig, GrpoConfig] = Field(
         discriminator="type", default=GrpoConfig(type="grpo")
     )
-    fp8: FP8Config = Field(default_factory=FP8Config)
-    ckpt: CheckpointConfig = Field(default_factory=CheckpointConfig)
-    resume: Union[bool, str] = Field(
-        default=False,
-        description="Resume training from a checkpoint. If True, will resume from the latest checkpoint of the `output_dir`. If a string, will resume from the specified checkpoint path.",
-    )
-    epoch: int = Field(default=1, description="Number of epochs for training")
-    output_dir: str = Field(default="./outputs", description="Output directory")
-    timestamp: str = Field(
-        default="",
-        description="Timestamp for the output directory and wandb ID, if not set, will be generated automatically",
-    )
-    epsilon: float = Field(default=1e-6, description="Epsilon for optimizer")
+
+    # --------- Optimizer ---------
+
     optm_name: str = Field(
         default="AdamW",
         description="Optimizer name",
@@ -449,7 +439,10 @@ class TrainingConfig(BaseModel):
     optm_betas: tuple[float, float] = Field(
         default=(0.9, 0.999), description="Betas for optimizer"
     )
-    optm_warmup_steps: int = Field(default=20, description="Warmup steps for optimizer")
+    optm_warmup_steps: Union[int, float] = Field(
+        default=20,
+        description="Warmup steps for optimizer, can be an integer or a float, if it is a float and range in [0.0, 1.0], it will be multiplied by the total steps",
+    )
     optm_decay_ratio: Optional[float] = Field(
         default=None,
         description="Ratio of total steps for decay, range in [0.0, 1.0], 0 means no decay.",
@@ -466,17 +459,7 @@ class TrainingConfig(BaseModel):
         default=1.0, description="Gradient norm clip for optimizer"
     )
 
-    # --------- smoke-test helpers ---------
-    max_num_steps: Optional[int] = Field(
-        default=None,
-        description="Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.",
-    )
-
-    async_tp_enabled: bool = Field(
-        default=False, description="Whether to use async tensor parallelism"
-    )
-
-    compile: bool = Field(default=True, description="Whether to use torch.compile")
+    # --------- FSDP ---------
 
     master_dtype: Optional[str] = Field(
         default="float32",
@@ -510,6 +493,8 @@ class TrainingConfig(BaseModel):
         description="The batch size for training per iteration in one replica, this is the local batch size for each gradient accumulation step",
     )
 
+    # --------- Validation ---------
+
     enable_validation: bool = Field(
         default=False,
         description="Enable validation during training.",
@@ -523,9 +508,44 @@ class TrainingConfig(BaseModel):
         description="The batch size for validation per iteration in one replica.",
     )
 
+    # --------- Engineering ---------
+
+    fp8: FP8Config = Field(default_factory=FP8Config)
+    ckpt: CheckpointConfig = Field(default_factory=CheckpointConfig)
+    resume: Union[bool, str] = Field(
+        default=False,
+        description="Resume training from a checkpoint. If True, will resume from the latest checkpoint of the `output_dir`. If a string, will resume from the specified checkpoint path.",
+    )
+    epoch: int = Field(default=1, description="Number of epochs for training")
+    output_dir: str = Field(default="./outputs", description="Output directory")
+    timestamp: str = Field(
+        default="",
+        description="Timestamp for the output directory and wandb ID, if not set, will be generated automatically",
+    )
+    epsilon: float = Field(default=1e-6, description="Epsilon for optimizer")
+    async_tp_enabled: bool = Field(
+        default=False, description="Whether to use async tensor parallelism"
+    )
+    compile: bool = Field(default=True, description="Whether to use torch.compile")
     sync_weight_interval: int = Field(
         default=1,
         description="The interval of train step for synchronizing weights between replicas.",
+    )
+    deterministic: bool = Field(
+        default=False,
+        description="Whether to use deterministic training. If set to True, will use deterministic training, which is expected to be slower.",
+    )
+
+    seed: Optional[int] = Field(
+        default=None,
+        description="Random seed for training. If deterministic is set to True, will by default be set to 42.",
+    )
+
+    # --------- smoke-test helpers ---------
+
+    max_num_steps: Optional[int] = Field(
+        default=None,
+        description="Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.",
     )
 
     @model_validator(mode="after")
@@ -542,6 +562,9 @@ class TrainingConfig(BaseModel):
                 assert (
                     self.sync_weight_interval == 1
                 ), "sync_weight_interval must be 1 when on_policy is enabled"
+
+        if self.deterministic and self.seed is None:
+            self.seed = 42
 
         return self
 
@@ -586,7 +609,10 @@ class LoraConfig(BaseModel):
     r: int = Field(default=8, description="LoRA rank")
     lora_alpha: float = Field(default=8.0, description="LoRA alpha")
     lora_dropout: float = Field(default=0.0, description="LoRA dropout")
-    target_modules: List[str] = Field(default=None, description="LoRA target modules")
+    target_modules: Union[List[str], str] = Field(
+        default=None,
+        description="LoRA target modules, can be a list of strings or 'all-linear'",
+    )
     use_rslora: bool = Field(
         default=False,
         description="When set to True, uses [Rank-Stabilized LoRA](https://huggingface.co/papers/2312.03732)"
@@ -611,6 +637,14 @@ class LoraConfig(BaseModel):
         "EVA initializes LoRA based on the SVD of layer input activations and achieves SOTA performance due to its ability to adapt to the finetuning data. Pass 'olora' to use OLoRA initialization. Passing 'pissa' results in the initialization of https://huggingface.co/papers/2404.02948",
     )
 
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if isinstance(self.target_modules, str):
+            assert (
+                self.target_modules == "all-linear"
+            ), "target_modules must be a list of strings or 'all-linear'"
+        return self
+
 
 class PolicyConfig(BaseModel):
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
@@ -631,6 +665,12 @@ class PolicyConfig(BaseModel):
         default=True, description="Whether to use gradient checkpointing"
     )
     lora: LoraConfig | None = Field(default=None, description="LoRA configuration")
+    trainable_map: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description="Mapping of name -> bool. Keys can either be: "
+        "- exact parameter names (from model.named_parameters()) "
+        "- exact module paths (from model.named_modules()) ",
+    )
 
     @model_validator(mode="after")
     def check_params_value(self):

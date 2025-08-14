@@ -1,50 +1,92 @@
-Hugging Face Model Type Support
-===============================
+Hugging Face Model Support
+==========================
 
-Design of HF Model Type
-------------------------------------
+Overview
+--------
 
-The HF Model Type (``HFLLMModel``) in cosmos-rl is designed to provide a generic and flexible interface for integrating HF models into the training and inference pipeline. The core implementation is located in ``cosmos_rl/policy/model/hf_llm/__init__.py``, where the ``HFLLMModel`` class acts as a universal wrapper for any model supported by Hugging Face's ``AutoModelForCausalLM``.
-Key design points:
+Cosmos-RL provides comprehensive support for Hugging Face models through its generic ``HFModel`` wrapper. This design enables seamless integration of any LLMs or VLMs compatible with HF Transformers into the training and inference pipeline.
 
-- **Generic Wrapper:** ``HFLLMModel`` can load any model architecture supported by Hugging Face, as long as it is compatible with ``AutoModelForCausalLM``.
-- **Automatic Fallback:** If a model is not custom-defined in the ``cosmos_rl/policy/model`` directory, the system will automatically use the HF Models Type, ensuring broad compatibility and reducing the need for custom code.
-- **Config and Weight Loading:** The model configuration is loaded using ``AutoConfig.from_pretrained``, and model weights are loaded via ``AutoModelForCausalLM.from_pretrained``. This allows seamless integration with models from the Hugging Face Hub or local checkpoints.
-- **Distributed Training Support:** The wrapper is designed to work with distributed training strategies such as FSDP, and includes logic for weight synchronization, rotary embedding handling, and compatibility checks for parallelism.
-- **Extensibility:** By using the HF Models Type, users can quickly experiment with new or custom Hugging Face models without waiting for explicit support in cosmos-rl.
-
-This design ensures that cosmos-rl remains extensible and up-to-date with the rapidly evolving Hugging Face ecosystem, while still allowing for custom optimizations and model-specific logic when needed.
-
-
-Policy Parallelism Support
---------------------------
-
-Currently, the Policy module only supports Fully Sharded Data Parallel (FSDP) for distributed training and inference.
-
-Special Case: Mistral SFT with Custom Dataset Loader
-----------------------------------------------------
-
-For certain models like Mistral, SFT requires a custom dataset loader to avoid role alternation errors. Use the provided `raw_text_sft.py` script for this purpose.
-
-Example command:
-
-.. code-block:: bash
-
-    cosmos-rl --config configs/mistral/mistral-7b-fsdp4-sft.toml cosmos_rl.tools.dataset.dummy_sft.py
-
-Another example for different configuration:
-
-.. code-block:: bash
-
-    cosmos-rl --config configs/mistral/mistral-7b-p-fsdp1-r-tp1-grpo.toml
-
-Supported HF Models
+Architecture Design
 -------------------
 
-- Mistral
-- Gemma
-- Phi
+The ``HFModel`` class, implemented in ``cosmos_rl/policy/model/hf_models/__init__.py``, serves as a universal adapter for Hugging Face models. Key design principles include:
+
+**Universal Compatibility**
+    The wrapper supports any LLM or VLM architecture available through Hugging Face's model ecosystem.
+
+**Automatic Fallback Mechanism**
+    When a model lacks custom implementation in the ``cosmos_rl/policy/model`` directory, the system automatically defaults to the HF Model wrapper, ensuring broad compatibility without requiring custom code.
+
+**Seamless Integration**
+    - Model configuration loading via ``AutoConfig.from_pretrained``
+    - Weight loading through ``model_class.from_pretrained`` (``model_class`` is defined in "architectures" of config.json)
+
+**Distributed Training Ready**
+    The wrapper is optimized for distributed training strategies, particularly FSDP (Fully Sharded Data Parallel), with built-in support for:
+    - Weight synchronization
+    - Rotary embedding handling
+    - Parallelism compatibility checks
+
+**Extensibility**
+    Users can rapidly experiment with new or custom Hugging Face models without waiting for explicit cosmos-rl support, making the framework future-proof and adaptable to the evolving AI model landscape.
+
+Distributed Training Support
+----------------------------
+
+Currently, the Policy module exclusively supports **Fully Sharded Data Parallel (FSDP)** for distributed training and inference operations.
+
+Training Examples
+-----------------
+
+SFT
+~~~
+
+Note:
+
+1. For LLMs like Mistral that require special handling to avoid role alternation errors, use the provided ``dummy_sft.py`` script.
+2. For VLMs, use the provided ``hf_vlm_sft.py`` script.
+
+.. code-block:: bash
+
+    # LLM SFT
+    cosmos-rl --config configs/mistral/mistral-7b-fsdp4-sft.toml ./tools/dataset/dummy_sft.py
+
+    # VLM SFT
+    cosmos-rl --config configs/gemma/gemma3-12b-vlm-fsdp4-sft.toml ./tools/dataset/hf_vlm_sft.py
+
+GRPO
+~~~~
+
+.. code-block:: bash
+
+    # LLM GRPO
+    cosmos-rl --config configs/phi/phi4-14b-p-fsdp4-r-tp2-grpo.toml ./tools/dataset/gsm8k_grpo.py
+
+Supported Models
+----------------
+
+The following models have been thoroughly tested and validated:
+
+LLMs
+~~~~
+
+- **Mistral**
+- **Gemma**
+- **Phi**
+- **GPT-OSS**
+
+VLMs
+~~~~
+
+- **Gemma VLM**
+- **Llama VLM**
+- **LLava**
+
+- Currently under active development
 
 .. note::
-   Mistral, Gemma, Phi have been tested. Other HF models may also be supported. If you encounter any issues when training other models, please feel free to open an issue and let us know.
+   While models above have been extensively tested, other Hugging Face models should also be compatible. If you encounter issues with untested models, please report them by opening an issue in our repository.
+
+.. tip::
+   The generic HF Model wrapper enables support for most Hugging Face models without additional configuration. For optimal performance, consider using models that have been specifically tested and optimized.
 

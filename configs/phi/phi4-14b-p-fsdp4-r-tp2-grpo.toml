@@ -2,7 +2,7 @@ redis = "12800"
 
 [train]
 resume = false
-epoch = 10
+epoch = 2
 output_dir = "./outputs/phi4-14b-p-fsdp4-r-tp2-grpo"
 epsilon = 1e-6
 optm_name = "AdamW"
@@ -16,6 +16,7 @@ async_tp_enabled = false
 compile = false
 param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
+master_dtype = "bfloat16"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 384
@@ -62,7 +63,7 @@ save_freq = 100
 save_mode = "async"
 
 [rollout.parallelism]
-n_init_replicas = 4
+n_init_replicas = 2
 tp_size = 2
 pp_size = 1
 
@@ -72,7 +73,7 @@ top_p = 1.0
 top_k = 10
 
 [policy.parallelism]
-n_init_replicas = 2
+n_init_replicas = 1
 tp_size = 1
 cp_size = 1
 dp_shard_size = 4

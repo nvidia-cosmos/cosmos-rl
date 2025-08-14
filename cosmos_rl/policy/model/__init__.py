@@ -16,14 +16,14 @@
 from cosmos_rl.policy.model.gpt import GPT
 from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
 from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
-from cosmos_rl.policy.model.hf_llm import HFLLMModel
+from cosmos_rl.policy.model.hf_models import HFModel
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, WeightMapper
 
 __all__ = [
     "GPT",
     "Qwen2_5_VLConditionalModel",
     "Qwen3MoE",
-    "HFLLMModel",
+    "HFModel",
     "BaseModel",
     "WeightMapper",
     "ModelRegistry",

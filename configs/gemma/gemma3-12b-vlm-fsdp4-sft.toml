@@ -3,7 +3,7 @@ redis = "12800"
 [train]
 resume = false
 epoch = 1
-output_dir = "./outputs/phi4-14b-fsdp4-sft"
+output_dir = "./outputs/gemma3-12b-vlm-fsdp4-sft"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 1e-6
@@ -18,26 +18,32 @@ param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 8
+train_batch_per_replica = 32
 sync_weight_interval = 1
+enable_validation = true
+validation_step = 30
+validation_batch_per_replica = 2
 
 [policy]
-model_name_or_path = "microsoft/phi-4"
-model_max_length = 1024
+model_name_or_path = "google/gemma-3-12b-it"
+model_max_length = 4096
 model_gradient_checkpointing = true
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "cosmos_rl"
-experiment_name = "None"
+project_name = "cosmos_reason1"
+experiment_name = "cosmos-reason1-sft"
 
 [train.train_policy]
 type = "sft"
-dataset.name = "LNTANOooo/sharegpt52k"
+dataset.name = "HuggingFaceH4/llava-instruct-mix-vsft"
 dataset.subset = ""
 dataset.split = "train"
-conversation_column_name = "conversation"
-
+dataset.test_size = 100
+enable_dataset_cache = false
+dataloader_num_workers = 4
+dataloader_prefetch_factor = 4
+conversation_column_name = "messages"
 
 [train.ckpt]
 enable_checkpoint = true
@@ -51,3 +57,4 @@ cp_size = 1
 dp_shard_size = 4
 pp_size = 1
 dp_replicate_size = 1
+cp_rotate_method = "allgather"

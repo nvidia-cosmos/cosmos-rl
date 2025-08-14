@@ -867,10 +867,21 @@ class DeepseekV3MoEModel(BaseModel):
             hidden_states = input_ids
 
         for decoder_layer in self.layers:
-            hidden_states = decoder_layer(
-                hidden_states,
-                position_ids=position_ids,
-            )
+            if (
+                hasattr(decoder_layer, "_gradient_checkpointing_enabled")
+                and decoder_layer._gradient_checkpointing_enabled
+            ):
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    decoder_layer,
+                    hidden_states,
+                    position_ids,
+                    use_reentrant=False,
+                )
+            else:
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    position_ids=position_ids,
+                )
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:

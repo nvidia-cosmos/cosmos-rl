@@ -48,6 +48,7 @@ jobs:
           ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
 
           # run tests
+          ${DOCKER_RUN} python tests/test_cosmos_hf_precision.py
           ${DOCKER_RUN} /bin/bash -c "CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 tests/test_context_parallel.py"
           ${DOCKER_RUN} python tests/test_cache.py
           ${DOCKER_RUN} python tests/test_comm.py

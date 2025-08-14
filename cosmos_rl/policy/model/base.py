@@ -26,9 +26,12 @@ from transformers import AutoConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import collections
 from functools import partial
+from typing import Mapping
 
 
 class BaseModel(torch.nn.Module, ABC):
+    _gradient_checkpointing_enabled = False
+
     def __init__(self, hf_config: AutoConfig):
         super().__init__()
         self.weight_mapper = WeightMapper.get_weight_mapper(
@@ -41,10 +44,19 @@ class BaseModel(torch.nn.Module, ABC):
         """
         return next(self.parameters()).device
 
+    def set_gradient_checkpointing_enabled(self, enabled: bool):
+        """
+        Set the gradient checkpointing enabled flag.
+        This is used to enable or disable the gradient checkpointing for the model.
+        """
+        self._gradient_checkpointing_enabled = enabled
+        for module in self.modules():
+            if isinstance(module, torch.nn.Module):
+                if not hasattr(module, "_gradient_checkpointing_enabled"):
+                    setattr(module, "_gradient_checkpointing_enabled", enabled)
+
     @cached_property
-    def weight_sync_transforms(
-        self,
-    ) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
         from cosmos_rl.utils.parallelism_map import DimSliceInfo, ParallelTopoMapper
 
         # 1. get all parameters, but not buffers
@@ -230,6 +242,55 @@ class BaseModel(torch.nn.Module, ABC):
                 weight_sync_transforms.append((name, transforms[name]))
         return weight_sync_transforms
 
+    def apply_trainable(self, trainable_map: Mapping[str, bool]) -> dict:
+        """
+        Apply trainable flags to modules and parameters.
+
+        Args:
+            trainable_map: mapping of name -> bool.
+                    Keys may be:
+                    - exact parameter names (from model.named_parameters())
+                    - exact module paths (from model.named_modules())
+
+        Returns:
+            A dict with lists of which params/modules were touched.
+
+        Raises:
+            TypeError: for non-bool values.
+            TrainablePathError: if a key matches neither a param nor a module.
+        """
+        if not isinstance(trainable_map, Mapping):
+            raise TypeError("trainable_map must be a mapping[str, bool]")
+
+        # Build lookup tables
+        param_map = dict(self.named_parameters())
+        module_map = dict(self.named_modules())
+        module_map.pop("", None)  # drop root entry to avoid confusion
+
+        touched_params, touched_modules = [], []
+
+        # Process in the insertion order of `config`.
+        for name, flag in trainable_map.items():
+            if not isinstance(flag, bool):
+                raise TypeError(
+                    f"value for '{name}' must be bool, got {type(flag).__name__}"
+                )
+
+            if name in param_map:
+                param_map[name].requires_grad = flag
+                touched_params.append(name)
+                continue
+
+            if name in module_map:
+                for p in module_map[name].parameters(recurse=True):
+                    p.requires_grad = flag
+                touched_modules.append(name)
+                continue
+
+            # Not found: raise with fuzzy suggestions
+            raise KeyError(f"Path '{name}' not found among parameters or modules.")
+        return {"touched_params": touched_params, "touched_modules": touched_modules}
+
     """
     Abstract methods
     """
@@ -406,6 +467,7 @@ class ModelRegistry:
                         model_name_or_path,
                         max_position_embeddings=config.policy.model_max_length,
                     )
+                    # Apply LoRA to the model
                     if config.policy.lora is not None:
                         logger.info(f"Applying LoRA to the model: {config.policy.lora}")
                         from cosmos_rl.policy.lora.plugin import (
@@ -415,6 +477,22 @@ class ModelRegistry:
 
                         model, _ = inject_lora_adapters(model, config.policy.lora)
                         mark_only_lora_as_trainable(model, config.policy.lora)
+
+                    # If we further need finer-grained control over trainable parameters, we need to apply trainable flags after LoRA is applied
+                    if config.policy.trainable_map is not None:
+                        if config.policy.lora is not None:
+                            # Only setting `requires_grad` to `False` can be combined with LoRA
+                            # This can be useful for:
+                            #  lora_config.target_modules is set to ['q_proj', 'k_proj', 'v_proj']
+                            # But there are both `q_proj` and `k_proj` in LLM and vision encoder,
+                            # If we only want to train lora on vision, we can disable grad on LLM by setting `config.policy.trainable_map` to `{"model.llm": False}`
+                            if any(v for v in config.policy.trainable_map.values()):
+                                raise RuntimeError(
+                                    "If LoRA is applied, only setting `requires_grad` to `False` inside `config.policy.trainable_map` can be combined with LoRA."
+                                    "Otherwise, please instead include the trainable modules in `config.policy.lora.modules_to_save`."
+                                )
+                        model.apply_trainable(config.policy.trainable_map)
+
                 except Exception as e:
                     logger.error(
                         f"Failed to load model {model_name_or_path} with error: {e}"

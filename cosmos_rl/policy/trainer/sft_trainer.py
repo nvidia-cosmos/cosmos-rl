@@ -382,6 +382,13 @@ class SFTTrainer(Trainer):
                     )
                 else:
                     max_len = fixed_length
+                if self.seq_len_multiple > 1:
+                    max_len = (
+                        (max_len + self.seq_len_multiple - 1)
+                        // self.seq_len_multiple
+                        * self.seq_len_multiple
+                    )
+
                 val_batch = self.data_packer.sft_collate_fn(
                     val_global_batch,
                     computed_max_len=max_len,
@@ -832,7 +839,7 @@ class SFTTrainer(Trainer):
             )
             self.ckpt_manager.save_check(
                 step=self.train_step,
-                val_score=val_score,
+                val_score=val_score if self.config.train.enable_validation else -1,
                 pp_enabled=self.parallel_dims.pp_enabled,
                 pp_last_stage=pp_last_stage,
                 pp_master_rank=self.parallel_dims.world_size

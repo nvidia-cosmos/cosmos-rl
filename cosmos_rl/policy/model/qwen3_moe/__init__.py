@@ -44,7 +44,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
-from flash_attn import flash_attn_func
+import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 
 
 class RMSNorm(nn.Module):
@@ -202,7 +202,6 @@ class Attention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
-        self.attn_func = flash_attn_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -281,11 +280,7 @@ class Attention(nn.Module):
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
 
-        output = self.attn_func(xq, xk, xv, causal=True)
-        # output = F.scaled_dot_product_attention(xq, xk, xv, is_causal=True)
-        # output = output.transpose(
-        #     1, 2
-        # ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        output = modeling_utils.flash_attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
@@ -678,7 +673,18 @@ class Qwen3MoE(BaseModel):
 
         position_embeddings = self.rotary_emb(h, position_ids.to(dtype=torch.long))
         for layer in self.layers.values():
-            h = layer(h, position_embeddings=position_embeddings)
+            if (
+                hasattr(layer, "_gradient_checkpointing_enabled")
+                and layer._gradient_checkpointing_enabled
+            ):
+                h = torch.utils.checkpoint.checkpoint(
+                    layer,
+                    h,
+                    position_embeddings,
+                    use_reentrant=False,
+                )
+            else:
+                h = layer(h, position_embeddings=position_embeddings)
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:

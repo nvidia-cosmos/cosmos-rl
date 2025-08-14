@@ -11,26 +11,17 @@ Cosmos-RL is a flexible and scalable Reinforcement Learning framework specialize
 
 ## System Architecture
 Cosmos-RL provides toolchain to enable large scale RL training workload with following features:
-1. **HuggingFace Integration**
-    - Llama-2
-    - Llama-3
-    - Qwen-2.5
-    - Qwen-2.5-VL
-    - Qwen-3
-    - Qwen-3-MoE
-    - Moonlight-MoE
-    - All HF LLMs
-2. **Parallelism**
+1. **Parallelism**
     - Tensor Parallelism
     - Sequence Parallelism
     - Context Parallelism
     - FSDP Parallelism
     - Pipeline Parallelism
-3. **Fully asynchronous (replicas specialization)**
+2. **Fully asynchronous (replicas specialization)**
     - Policy (Consumer): Replicas of training instances
     - Rollout (Producer): Replicas of generation engines
     - Low-precision training (FP8) and rollout (FP8 & FP4) support
-4. **Single-Controller Architecture**
+3. **Single-Controller Architecture**
     - Efficient messaging system (e.g., `weight-sync`, `rollout`, `evaluate`) to coordinate policy and rollout replicas
     - Dynamic NCCL Process Groups for on-the-fly GPU [un]registration to enable fault-tolerant and elastic large-scale RL training
 
