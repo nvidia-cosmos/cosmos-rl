@@ -240,6 +240,30 @@ def slice_inputs_for_ulysses(
     ]
 
 
+def slice_cu_seqlens_for_ulysses(
+    cu_seqlens: torch.Tensor, cp_mesh: DeviceMesh
+) -> torch.Tensor:
+    """
+    Slice the cu_seqlens tensor for Ulysses sequence parallelism.
+    Args:
+        cu_seqlens: Cumulative sequence lengths tensor.
+        cp_mesh: Ulysses sequence parallelism size.
+
+    Returns:
+
+        torch.Tensor: Sliced cu_seqlens tensor for the current CP rank.
+    """
+    cp_world_size, cp_rank = cp_mesh.size(), cp_mesh.get_local_rank()
+    partial_size = (cu_seqlens.size(0) - 1) // cp_world_size
+    start = cp_rank * partial_size
+    end = (
+        (cp_rank + 1) * partial_size + 1
+        if cp_rank < cp_world_size - 1
+        else cu_seqlens.size(0)
+    )
+    return cu_seqlens[start:end] - cu_seqlens[start]  # Adjust the start index
+
+
 def gather_outputs_for_ulysses(
     output: torch.Tensor,
     gather_dim: int,
