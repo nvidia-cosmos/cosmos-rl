@@ -42,31 +42,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
-
-
-class Qwen2RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        Qwen2RMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
-
-
-def build_norm(norm_type: str, dim: int, eps: float):
-    assert norm_type == "rmsnorm", f"Unknown norm_type: '{norm_type}'"
-    return Qwen2RMSNorm(dim, eps)
+from cosmos_rl.policy.kernel.norm import RMSNorm
 
 
 @dataclass
@@ -210,7 +186,7 @@ class Qwen2_5_VLPatchMerger(nn.Module):
     def __init__(self, config: Qwen2_5_VL_Encoder_Args) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size * (config.spatial_merge_size**2)
-        self.ln_q = Qwen2RMSNorm(config.hidden_size, config.norm_eps)
+        self.ln_q = RMSNorm(config.hidden_size, config.norm_eps)
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.GELU(),  # This is fixed to GELU according to the original implementation
@@ -320,8 +296,8 @@ class Qwen2_5_VLVisionAttention(nn.Module):
 class Qwen2_5_VLVisionBlock(nn.Module):
     def __init__(self, config: Qwen2_5_VL_Encoder_Args) -> None:
         super().__init__()
-        self.norm1 = build_norm(config.norm_type, config.hidden_size, config.norm_eps)
-        self.norm2 = build_norm(config.norm_type, config.hidden_size, config.norm_eps)
+        self.norm1 = RMSNorm(config.hidden_size, config.norm_eps)
+        self.norm2 = RMSNorm(config.hidden_size, config.norm_eps)
         self.attn = Qwen2_5_VLVisionAttention(
             config.hidden_size, num_heads=config.n_heads
         )
@@ -777,10 +753,8 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
 
         self.self_attn = Qwen2_5_VLAttention(config)
         self.mlp = Qwen2MLP(config)
-        self.input_layernorm = build_norm(config.norm_type, config.dim, config.norm_eps)
-        self.post_attention_layernorm = build_norm(
-            config.norm_type, config.dim, config.norm_eps
-        )
+        self.input_layernorm = RMSNorm(config.dim, config.norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.dim, config.norm_eps)
 
     def forward(
         self,
@@ -828,7 +802,7 @@ class Qwen2_5_VLModel(nn.Module):
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(config.n_layers):
             self.layers[str(layer_id)] = Qwen2_5_VLDecoderLayer(config, layer_id)
-        self.norm = build_norm(config.norm_type, config.dim, config.norm_eps)
+        self.norm = RMSNorm(config.dim, config.norm_eps)
         self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
         self.identity_layer = IdentityLayer()
