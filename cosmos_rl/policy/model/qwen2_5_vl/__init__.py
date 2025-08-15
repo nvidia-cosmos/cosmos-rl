@@ -210,18 +210,37 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb_vision(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    orig_q_dtype = q.dtype
-    orig_k_dtype = k.dtype
-    q, k = q.float(), k.float()
-    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    q_embed = q_embed.to(orig_q_dtype)
-    k_embed = k_embed.to(orig_k_dtype)
-    return q_embed, k_embed
+if os.environ.get("COSMOS_USE_HF_IMPL", "0").lower() in ["1", "true"]:
+
+    def apply_rotary_pos_emb_vision(
+        q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        orig_q_dtype = q.dtype
+        orig_k_dtype = k.dtype
+        q, k = q.float(), k.float()
+        cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
+        q_embed = (q * cos) + (rotate_half(q) * sin)
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+        q_embed = q_embed.to(orig_q_dtype)
+        k_embed = k_embed.to(orig_k_dtype)
+        return q_embed, k_embed
+else:
+
+    def apply_rotary_pos_emb_vision(
+        q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply rotary position embedding to the query and key tensors.
+        """
+        cos = cos.chunk(2, dim=-1)[0].contiguous()
+        sin = sin.chunk(2, dim=-1)[0].contiguous()
+        q_embed = modeling_utils.apply_rotary_emb(
+            q.float(), cos.float(), sin.float()
+        ).type_as(q)
+        k_embed = modeling_utils.apply_rotary_emb(
+            k.float(), cos.float(), sin.float()
+        ).type_as(k)
+        return q_embed, k_embed
 
 
 class Qwen2_5_VLVisionAttention(nn.Module):
