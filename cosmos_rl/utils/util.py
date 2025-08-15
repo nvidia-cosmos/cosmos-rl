@@ -1142,6 +1142,11 @@ def decode_vision_info(prompts):
     return new_prompts
 
 
+def rank0_print(msg, *args, **kwargs):
+    if os.environ.get("RANK", "0") == "0":
+        logger.info(msg, *args, **kwargs)
+
+
 def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
     # Walk children first so we can safely replace in-place.
     for name, child in list(root.named_children()):
@@ -1172,8 +1177,6 @@ def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
                     new_child.to(device=ref.device)
             except Exception:
                 pass
-            finally:
-                logger.info(f"Replaced {name} with liger equivalent")
-
+        rank0_print(f"Replaced {name} with liger equivalent")
         # Swap it in.
         setattr(root, name, new_child)

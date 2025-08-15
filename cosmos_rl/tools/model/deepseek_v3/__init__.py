@@ -45,6 +45,7 @@ from cosmos_rl.policy.model.base import BaseModel
 from transformers.activations import ACT2FN
 from functools import cached_property
 from cosmos_rl.policy.kernel.norm import RMSNorm
+from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 
 
 @dataclass
@@ -389,10 +390,10 @@ class DeepseekV3MLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.act_mul_func = MLPActMulFunc(ACT2FN[config.hidden_act])
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self.act_mul_func(self.gate_proj(x), self.up_proj(x)))
 
 
 class DeepseekV3MLPWithEP(nn.Module):

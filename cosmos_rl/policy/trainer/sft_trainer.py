@@ -40,7 +40,7 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from functools import partial
@@ -53,14 +53,16 @@ def async_safe_ce(
     loss_scaling_factor: float = 1.0,
     dp_group: Optional[torch.distributed.ProcessGroup] = None,
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
+    cross_entropy_fn: Optional[Callable] = None,
 ) -> torch.Tensor:
     target = target[:, 1:].contiguous().view(-1)
     output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+    cross_entropy_fn = cross_entropy_fn or torch.nn.functional.cross_entropy
 
     if cp_group is not None and cp_group.size() > 1:
         # Fallback to unbalance loss
         loss = (
-            torch.nn.functional.cross_entropy(
+            cross_entropy_fn(
                 output,
                 target,
                 ignore_index=ignore_index,
@@ -72,7 +74,7 @@ def async_safe_ce(
         loss = torch.nan_to_num(loss, nan=0.0)
         return loss
     else:
-        loss = torch.nn.functional.cross_entropy(
+        loss = cross_entropy_fn(
             output,
             target,
             ignore_index=ignore_index,
@@ -361,7 +363,23 @@ class SFTTrainer(Trainer):
         else:
             cp_group = None
 
-        self.loss_fn = partial(async_safe_ce, dp_group=dp_group, cp_group=cp_group)
+        custom_cross_entropy_fn = None
+        try:
+            if self.config.train.enable_liger_kernel:
+                # This is a torch.autograd.Function, so we can use it as a cross_entropy_fn
+                from liger_kernel.ops.cross_entropy import LigerCrossEntropyFunction
+
+                custom_cross_entropy_fn = LigerCrossEntropyFunction.apply
+        except Exception as e:
+            logger.warning(f"Failed to import LigerCrossEntropyFunction: {e}")
+            custom_cross_entropy_fn = None
+
+        self.loss_fn = partial(
+            async_safe_ce,
+            dp_group=dp_group,
+            cp_group=cp_group,
+            cross_entropy_fn=custom_cross_entropy_fn,
+        )
 
     def validate(self):
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")

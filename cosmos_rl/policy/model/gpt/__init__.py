@@ -16,7 +16,6 @@
 import os
 import torch
 from torch import nn
-import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Callable
 from transformers import AutoConfig
@@ -39,6 +38,7 @@ from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
+from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 
 
 def build_norm(
@@ -267,9 +267,10 @@ class FeedForward(nn.Module):
         self.gate_proj = nn.Linear(
             dim, hidden_dim, bias="gate_proj" in model_args.biases
         )
+        self.act_mul_func = MLPActMulFunc(nn.SiLU())
 
     def forward(self, x):
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self.act_mul_func(self.gate_proj(x), self.up_proj(x)))
 
 
 class GPTBlock(nn.Module):

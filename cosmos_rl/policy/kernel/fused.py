@@ -16,6 +16,7 @@
 import torch
 import torch.nn as nn
 from cosmos_rl.utils.logging import logger
+from transformers.activations import ACT2CLS
 
 
 class MLPFusedActMul(nn.Module):
@@ -36,11 +37,11 @@ class MLPActMulFunc(nn.Module):
         return self.act_fn(a) * b
 
     def liger_equivalent(self):
-        if isinstance(self.act_fn, nn.SiLU):
+        if isinstance(self.act_fn, ACT2CLS["silu"]):
             from liger_kernel.ops.swiglu import LigerSiLUMulFunction
 
             return MLPFusedActMul(LigerSiLUMulFunction)
-        elif isinstance(self.act_fn, nn.GELU):
+        elif isinstance(self.act_fn, ACT2CLS["gelu"]):
             from liger_kernel.ops.geglu import LigerGELUMulFunction
 
             return MLPFusedActMul(LigerGELUMulFunction)

@@ -43,6 +43,7 @@ from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 from cosmos_rl.policy.kernel.norm import RMSNorm
+from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 
 
 @dataclass
@@ -104,11 +105,11 @@ class Qwen2_5_VLMLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.act_mul_func = MLPActMulFunc(ACT2FN[config.hidden_act])
 
     def forward(self, hidden_state):
         return self.down_proj(
-            self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
+            self.act_mul_func(self.gate_proj(hidden_state), self.up_proj(hidden_state))
         )
 
 
@@ -607,12 +608,12 @@ class Qwen2MLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.act_mul_func = MLPActMulFunc(ACT2FN[config.hidden_act])
 
     def forward(self, x):
-        # in llama self.w2(F.silu(self.w1(x)) * self.w3(x))
-        # i.e. w2 is self.down_proj, w1 is self.gate_proj, w3 is self.up_proj
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        down_proj = self.down_proj(
+            self.act_mul_func(self.gate_proj(x), self.up_proj(x))
+        )
         return down_proj
 
 
