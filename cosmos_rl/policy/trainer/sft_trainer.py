@@ -365,7 +365,7 @@ class SFTTrainer(Trainer):
 
         custom_cross_entropy_fn = None
         try:
-            if self.config.train.enable_liger_kernel:
+            if self.config.policy.enable_liger_kernel:
                 # This is a torch.autograd.Function, so we can use it as a cross_entropy_fn
                 from liger_kernel.ops.cross_entropy import LigerCrossEntropyFunction
 
@@ -887,7 +887,7 @@ class SFTTrainer(Trainer):
 
         custom_cross_entropy_fn = None
         try:
-            if self.config.train.enable_liger_kernel:
+            if self.config.policy.enable_liger_kernel:
                 # This is a torch.autograd.Function, so we can use it as a cross_entropy_fn
                 from liger_kernel.ops.cross_entropy import LigerCrossEntropyFunction
 
