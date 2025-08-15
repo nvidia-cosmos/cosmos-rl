@@ -885,11 +885,23 @@ class SFTTrainer(Trainer):
         else:
             cp_group = None
 
+        custom_cross_entropy_fn = None
+        try:
+            if self.config.train.enable_liger_kernel:
+                # This is a torch.autograd.Function, so we can use it as a cross_entropy_fn
+                from liger_kernel.ops.cross_entropy import LigerCrossEntropyFunction
+
+                custom_cross_entropy_fn = LigerCrossEntropyFunction.apply
+        except Exception as e:
+            logger.warning(f"Failed to import LigerCrossEntropyFunction: {e}")
+            custom_cross_entropy_fn = None
+
         return torch.compile(
             partial(
                 async_safe_ce,
                 loss_scaling_factor=loss_scaling_factor,
                 dp_group=dp_group,
                 cp_group=cp_group,
+                cross_entropy_fn=custom_cross_entropy_fn,
             )
         )
