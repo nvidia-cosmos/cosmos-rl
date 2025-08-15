@@ -2,10 +2,9 @@ from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from typing import List, Any, Dict, Union
 import torch
 import copy
-from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
-    process_conversation_with_chat_template,
+    get_token_ids_and_loss_mask_from_conversation,
 )
 
 IGNORE_LABEL_ID = -100
@@ -87,7 +86,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             )
         else:
             # ignore completion for multi-turn rollout, it already in the conversation
-            input_ids, loss_mask = process_conversation_with_chat_template(
+            input_ids, loss_mask = get_token_ids_and_loss_mask_from_conversation(
                 self.tokenizer,
                 sample,
                 enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
@@ -96,21 +95,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
 
             assert any(
                 loss_mask
-            ), "Should not mask all tokens, which means not a valid sample"
-
-            full_prompt = self.get_rollout_input(sample)
-            full_prompt_ids = self.tokenizer(
-                full_prompt, add_special_tokens=False
-            ).input_ids
-
-            if len(full_prompt_ids) != len(input_ids) or not all(
-                a == b for a, b in zip(full_prompt_ids, input_ids, strict=True)
-            ):
-                logger.error(
-                    "Token mismatch detected! Full tokenization length: {}, Concatenated tokens length: {}. Using concatenated version.".format(
-                        len(full_prompt_ids), len(input_ids)
-                    )
-                )
+            ), "Should not mask all tokens, this sample is not valid"
 
             return DecoderOnlyLLMDataPacker.RLPolicyInput(
                 input_ids=input_ids, logprob_masks=loss_mask
