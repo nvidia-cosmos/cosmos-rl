@@ -36,7 +36,7 @@ COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 RUN apt purge -y libnccl2 libnccl-dev
 
 # install grouped-gemm
-RUN pip install --verbose git+https://github.com/fanshiqing/grouped_gemm@main
+RUN pip install --verbose git+https://github.com/fanshiqing/grouped_gemm@main nvidia-nccl-cu12==2.26.2
 
 RUN pip install \
     torchao==0.12.0 \
