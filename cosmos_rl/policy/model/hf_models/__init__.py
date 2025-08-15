@@ -425,6 +425,11 @@ class HFModel(BaseModel):
                     local_view.data.copy_(shared_weight.to(device))
         del model_with_weights
 
+        # Enable gradient checkpointing
+        if self._gradient_checkpointing_enabled:
+            logger.info("Enable gradient checkpointing for HFModel")
+            self.model.gradient_checkpointing_enable()
+
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         position_ids = None
         inputs = kwargs["input_ids"]
