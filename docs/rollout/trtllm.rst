@@ -5,7 +5,7 @@ Cosmos-RL supports `TensorRT-LLM <https://github.com/NVIDIA/TensorRT-LLM>`_ as t
 
 .. note::
 
-    To use TensorRT-LLM as the rollout backend, you have to build docker image with the file ``docker/Dockerfile.trtllm`` in the root directory of the project.
+    To use TensorRT-LLM as the rollout backend, you have to build docker image with the file ``docker/Dockerfile.trtllm`` in the root directory of ``cosmos-rl`` project.
 
 
 
