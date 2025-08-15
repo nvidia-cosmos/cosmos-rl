@@ -708,10 +708,12 @@ def main():
         min_n_gpus_rollout = min_n_gpus_rollout * rollout_parallelism.get(
             "dp_shard_size", 1
         )
-    if hasattr(cosmos_config, "rollout"):
+    if "rollout" in cosmos_config:
         backend = cosmos_config["rollout"].get("backend", "vllm")  # default is vllm
     else:
         backend = "vllm"
+
+    logger.info(f"LMS: Using backend: {backend}")
 
     if args.p2r_ratio is not None:
         assert (
