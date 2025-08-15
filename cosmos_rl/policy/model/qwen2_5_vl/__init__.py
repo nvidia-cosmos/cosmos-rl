@@ -210,39 +210,18 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-# Note: Just use these two implementations for now.
-# Do not try swizzling with the liger implementation.
-if os.environ.get("COSMOS_USE_HF_IMPL", "0").lower() in ["1", "true"]:
-
-    def apply_rotary_pos_emb_vision(
-        q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        orig_q_dtype = q.dtype
-        orig_k_dtype = k.dtype
-        q, k = q.float(), k.float()
-        cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
-        q_embed = (q * cos) + (rotate_half(q) * sin)
-        k_embed = (k * cos) + (rotate_half(k) * sin)
-        q_embed = q_embed.to(orig_q_dtype)
-        k_embed = k_embed.to(orig_k_dtype)
-        return q_embed, k_embed
-else:
-
-    def apply_rotary_pos_emb_vision(
-        q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Apply rotary position embedding to the query and key tensors.
-        """
-        cos = cos.chunk(2, dim=-1)[0].contiguous()
-        sin = sin.chunk(2, dim=-1)[0].contiguous()
-        q_embed = modeling_utils.apply_rotary_emb(
-            q.float(), cos.float(), sin.float()
-        ).type_as(q)
-        k_embed = modeling_utils.apply_rotary_emb(
-            k.float(), cos.float(), sin.float()
-        ).type_as(k)
-        return q_embed, k_embed
+def apply_rotary_pos_emb_vision(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    orig_q_dtype = q.dtype
+    orig_k_dtype = k.dtype
+    q, k = q.float(), k.float()
+    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = q_embed.to(orig_q_dtype)
+    k_embed = k_embed.to(orig_k_dtype)
+    return q_embed, k_embed
 
 
 class Qwen2_5_VLVisionAttention(nn.Module):
@@ -259,6 +238,7 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         position_embeddings: torch.Tensor,
+        max_seqlen: int,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -272,9 +252,6 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         q, k = apply_rotary_pos_emb_vision(q.unsqueeze(0), k.unsqueeze(0), cos, sin)
         q = q.squeeze(0)
         k = k.squeeze(0)
-
-        with torch.no_grad():
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
 
         input_dtype = q.dtype
         if input_dtype == torch.float32:
@@ -321,11 +298,14 @@ class Qwen2_5_VLVisionBlock(nn.Module):
             bias=True,  # This is fixed to True according to the original implementation
         )
 
-    def forward(self, hidden_states, cu_seqlens, position_embeddings) -> torch.Tensor:
+    def forward(
+        self, hidden_states, cu_seqlens, position_embeddings, max_seqlen
+    ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
             position_embeddings=position_embeddings,
+            max_seqlen=max_seqlen,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -481,11 +461,19 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        with torch.no_grad():
+            max_window_seqlen = (
+                (cu_window_seqlens[1:] - cu_window_seqlens[:-1]).max().item()
+            )
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+
         for layer_num, blk in self.blocks.items():
             if int(layer_num) in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
+                max_seqlen_now = max_seqlen
             else:
                 cu_seqlens_now = cu_window_seqlens
+                max_seqlen_now = max_window_seqlen
 
             if (
                 hasattr(blk, "_gradient_checkpointing_enabled")
@@ -496,6 +484,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                     hidden_states,
                     cu_seqlens_now,
                     position_embeddings,
+                    max_seqlen_now,
                     use_reentrant=False,
                 )
             else:
@@ -503,6 +492,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                     hidden_states,
                     cu_seqlens=cu_seqlens_now,
                     position_embeddings=position_embeddings,
+                    max_seqlen=max_seqlen_now,
                 )
 
         hidden_states = self.merger(hidden_states)
