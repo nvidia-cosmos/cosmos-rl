@@ -427,8 +427,11 @@ class HFModel(BaseModel):
 
         # Enable gradient checkpointing
         if self._gradient_checkpointing_enabled:
-            logger.info("Enable gradient checkpointing for HFModel")
             self.model.gradient_checkpointing_enable()
+            assert (
+                self.model.is_gradient_checkpointing
+            ), "Gradient checkpointing is not enabled"
+            logger.info("Enabled gradient checkpointing for HFModel")
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         position_ids = None
