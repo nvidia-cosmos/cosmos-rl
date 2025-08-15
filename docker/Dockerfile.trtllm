@@ -32,6 +32,12 @@ RUN pip install -U pip setuptools wheel packaging
 
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
+# Remove existing nccl debian package
+RUN apt purge -y libnccl2 libnccl-dev
+
+# install grouped-gemm
+RUN pip install --verbose git+https://github.com/fanshiqing/grouped_gemm@main
+
 RUN pip install \
     torchao==0.12.0 \
     vllm==0.10.0 \
