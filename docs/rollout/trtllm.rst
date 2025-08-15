@@ -3,6 +3,11 @@
 
 Cosmos-RL supports `TensorRT-LLM <https://github.com/NVIDIA/TensorRT-LLM>`_ as the backend of rollout generation.
 
+.. note::
+
+    To use TensorRT-LLM as the rollout backend, you have to build docker image with the file ``docker/Dockerfile.trtllm`` in the root directory of the project.
+
+
 
 Enable TensorRT-LLM
 -------------------
@@ -19,6 +24,7 @@ For now, tested models are:
 
 - Qwen3-moe
 
+We support replica within a single node now.
 
 
 
