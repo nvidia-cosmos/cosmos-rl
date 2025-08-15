@@ -205,6 +205,8 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+# Note: Just use these two implementations for now.
+# Do not try swizzling with the liger implementation.
 if os.environ.get("COSMOS_USE_HF_IMPL", "0").lower() in ["1", "true"]:
 
     def apply_rotary_pos_emb_vision(
