@@ -21,7 +21,7 @@ from queue import Queue
 import atexit
 import types
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
-from typing import List, Tuple, Optional, Callable, Any
+from typing import List, Optional, Callable, Any
 from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase
@@ -75,6 +75,8 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
     replace_weight_of_quantized_module,
     post_process_view_map_for_fp8,
 )
+from cosmos_rl.dispatcher.data import RLPayload, IdxAndRLPayload
+from cosmos_rl.rollout.schema import RolloutResult
 
 from vllm import SamplingParams
 import time
@@ -165,7 +167,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         # CommandQueue queried from controller.
         self._command_queue: Queue[Command] = Queue()
-        self._prompt_queue: Queue[List[List[int, str]]] = Queue()
+        self._prompt_queue: Queue[List[IdxAndRLPayload]] = Queue()
         self.current_weight_version = 0
 
         # if flashinfer config is not enabled, avoid importing flashinfer
@@ -854,7 +856,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
                         prompts = [(prompt[0], prompt[1]) for prompt in prompts]
                         completions: List[List[str]] = self.rollout.rollout_generation(
-                            prompt_id_and_payload_list=prompts,
+                            payloads=prompts,
                             stream=self.inference_stream,
                             data_packer=self.val_data_packer,
                             sampling_params=self.val_sampling_params,
@@ -1057,91 +1059,124 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
 
                 # Check if the prompt is valid for the current weight version
+                first_payload = RLPayload.model_validate(
+                    self._prompt_queue.queue[0][0][1]
+                )
                 is_valid_prompt_for_current_weight_version = (
-                    self._prompt_queue.queue[0][0][2] <= self.current_weight_version
+                    first_payload.weight_version <= self.current_weight_version
                 )
                 if not is_valid_prompt_for_current_weight_version:
                     # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
                     continue
-                prompts: List[Tuple[int, str, int]] = self._prompt_queue.get()
 
-                # Remove the weight version from the prompts
-                # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
-                prompts = [(prompt[0], prompt[1]) for prompt in prompts]
+                prompt_id_and_payload_list: List[IdxAndRLPayload] = (
+                    self._prompt_queue.get()
+                )
+                prompts: List[RLPayload] = [
+                    RLPayload.model_validate(payload)
+                    for _, payload in prompt_id_and_payload_list
+                ]
 
-                completions: List[List[str]] = self.rollout.rollout_generation(
-                    prompt_id_and_payload_list=prompts,
+                rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
+                    payloads=prompts,
                     stream=self.inference_stream,
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
-                # Remove empty completions
-                valid_completions: List[List[str]] = []
-                prompt_indices_to_remove: List[int] = []
-                if len(completions):
-                    batch_size = len(prompts)
-                    assert (
-                        len(completions) == batch_size
-                    ), f"Error: VLLM returned {len(completions)} for {batch_size}"
-                    for i in range(batch_size):
-                        completion = completions[i]
-                        skip_output = False
-                        total_generation_count = len(completion)
-                        empty_generation_count = 0
-                        output_texts = []
-                        for j in range(total_generation_count):
-                            output_text = completion[j]
-                            # if output_text == "":
-                            #     logger.warning(
-                            #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
-                            #     )
-                            #     empty_generation_count += 1
-                            # else:
-                            #     output_texts.append(output_text)
 
-                            # Note: (jiaxinc)
-                            # We still need to upload the output text, even if it is empty. (replace empty with eos_token)
-                            # Because if fully synchronized mode is enabled, we need to make sure the expected
-                            # number of global_batch_size is reached at exact time.
-                            output_texts.append(
-                                output_text
-                                if output_text != ""
-                                else self.tokenizer.eos_token
-                            )
-                        # Skip the output if there is one or zero non-empty completions
-                        skip_output = (
-                            total_generation_count - empty_generation_count
-                        ) <= 1
-                        if not skip_output:
-                            valid_completions.append(output_texts)
-                        else:
-                            prompt_indices_to_remove.append(i)
-                if len(prompt_indices_to_remove):
-                    prompts = [
-                        prompt
-                        for i, prompt in enumerate(prompts)
-                        if i not in prompt_indices_to_remove
-                    ]
-                    assert (
-                        len(prompts) == len(valid_completions)
-                    ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+                if self.rollout.rollout_config.multi_turn_config.enable:
+                    valid_result: List[RLPayload] = []
+                    valid_completions: List[List[str]] = []
+                    for rr in rollout_results:
+                        # remove those result without assistant message
+                        flag = False
+                        for msg in rr.conversation:
+                            if msg.role == "assistant":
+                                flag = True
+                                break
+                        if flag:
+                            valid_result.append(rr)
+                            valid_completions.append(rr.completions)
+                    rollout_results = valid_result
+                    should_report = len(valid_result) > 0
+                else:
+                    # Remove empty completions
+                    valid_completions: List[List[str]] = []
+                    prompt_indices_to_remove: List[int] = []
+                    if len(rollout_results):
+                        batch_size = len(prompts)
+                        assert (
+                            len(rollout_results) == batch_size
+                        ), f"Error: VLLM returned {len(rollout_results)} for {batch_size}"
+                        for i in range(batch_size):
+                            completions = rollout_results[i].completions
+                            skip_output = False
+                            total_generation_count = len(completions)
+                            empty_generation_count = 0
+                            output_texts = []
+                            for j in range(total_generation_count):
+                                output_text = completions[j]
+                                # if output_text == "":
+                                #     logger.warning(
+                                #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                                #     )
+                                #     empty_generation_count += 1
+                                # else:
+                                #     output_texts.append(output_text)
 
-                logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
+                                # Note: (jiaxinc)
+                                # We still need to upload the output text, even if it is empty. (replace empty with eos_token)
+                                # Because if fully synchronized mode is enabled, we need to make sure the expected
+                                # number of global_batch_size is reached at exact time.
+                                output_texts.append(
+                                    output_text
+                                    if output_text != ""
+                                    else self.tokenizer.eos_token
+                                )
+                            # Skip the output if there is one or zero non-empty completions
+                            skip_output = (
+                                total_generation_count - empty_generation_count
+                            ) <= 1
+                            if not skip_output:
+                                valid_completions.append(output_texts)
+                            else:
+                                prompt_indices_to_remove.append(i)
+                    if len(prompt_indices_to_remove):
+                        prompts = [
+                            prompt
+                            for i, prompt in enumerate(prompt_id_and_payload_list)
+                            if i not in prompt_indices_to_remove
+                        ]
+                        assert (
+                            len(prompts) == len(valid_completions)
+                        ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
 
-                should_report = (
-                    self.parallel_dims.tp_coord[0] == 0
-                    and (
-                        self.parallel_dims.pp_coord[0]
-                        == self.parallel_dims.pp_coord[1] - 1
+                    logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
+
+                    should_report = (
+                        self.parallel_dims.tp_coord[0] == 0
+                        and (
+                            self.parallel_dims.pp_coord[0]
+                            == self.parallel_dims.pp_coord[1] - 1
+                        )
+                        and len(valid_completions) > 0
                     )
-                    and len(valid_completions) > 0
-                )
 
                 if should_report:
                     url_suffix = COSMOS_API_ROLLOUT_SUFFIX
                     # only the first tp rank in the rollout replica will post the completion to the controller.
-                    prompt_idxs = [prompt[0] for prompt in prompts]
-                    payloads = [prompt[1] for prompt in prompts]
+                    prompt_idxs = [prompt[0] for prompt in prompt_id_and_payload_list]
+                    if self.rollout.rollout_config.multi_turn_config.enable:
+                        # because we set generated message in the payload, so we need to return the completions here.
+                        payloads = [
+                            RLPayload(
+                                prompt=r.prompt,
+                                conversation=r.conversation,
+                            )
+                            for r in rollout_results
+                        ]
+                    else:
+                        payloads = [prompt[1] for prompt in prompt_id_and_payload_list]
 
                     response = RolloutRequest(
                         src_replica_name=self.replica_name,

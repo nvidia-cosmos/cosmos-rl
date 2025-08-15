@@ -64,6 +64,7 @@ from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.dispatcher.replica import Rollout
+from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
     COSMOS_API_POLICY_TRAIN_ACK_SUFFIX,
@@ -1198,7 +1199,14 @@ class GRPOTrainer(Trainer):
         logger.debug("[Policy] Prepare training data.")
         rollouts: List[Rollout] = self.dispatch_rollouts()
 
-        payloads_list = [rollout.payload for rollout in rollouts]
+        if self.config.rollout.multi_turn_config.enable:
+            payloads_list = [
+                RLPayload.model_validate(rollout.payload).conversation
+                for rollout in rollouts
+            ]
+        else:
+            payloads_list = [rollout.payload for rollout in rollouts]
+
         completions_list = [rollout.completion for rollout in rollouts]
         advantages_list = [rollout.advantage for rollout in rollouts]
         # Optional Positive-NLL support: only compute flags when coefficient > 0
@@ -1315,6 +1323,11 @@ class GRPOTrainer(Trainer):
                                 user_mini_batch["interested_tokens"] = user_mini_batch[
                                     "logprob_masks"
                                 ]
+
+                            if not torch.any(user_mini_batch["interested_tokens"]):
+                                logger.warning(
+                                    "No interested tokens, may cause 'compute_logprobs()' failed"
+                                )
 
                             # Move all tensor to device
                             for k in user_mini_batch.keys():

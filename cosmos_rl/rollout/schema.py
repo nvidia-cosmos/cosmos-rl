@@ -13,22 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
+from pydantic import BaseModel
+from cosmos_rl.dispatcher.data.schema import ChatMessage
 
-from cosmos_rl.rollout.schema import RolloutResult
 
+class RolloutResult(BaseModel):
+    # the prompt for the result
+    prompt: Optional[str] = None
 
-class RolloutBase(ABC):
-    def __init__(self):
-        pass
+    # the generated completions for the prompt
+    completions: Optional[List[str]] = None
 
-    @abstractmethod
-    def rollout_generation(self, prompts, *args, **kwargs) -> List[RolloutResult]:
-        """Generate sequences"""
-        pass
-
-    @abstractmethod
-    def init_engine(self, quantization: str, seed: int, load_format: str):
-        """Initialize the engine"""
-        pass
+    # the conversation history, usualy for multi-turn conversation
+    conversation: Optional[List[ChatMessage]] = None
