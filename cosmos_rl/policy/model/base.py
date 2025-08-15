@@ -478,6 +478,9 @@ class ModelRegistry:
                         model, _ = inject_lora_adapters(model, config.policy.lora)
                         mark_only_lora_as_trainable(model, config.policy.lora)
 
+                    if config.policy.enable_liger_kernel:
+                        util.replace_with_liger_equivalents(model)
+
                     # If we further need finer-grained control over trainable parameters, we need to apply trainable flags after LoRA is applied
                     if config.policy.trainable_map is not None:
                         if config.policy.lora is not None:

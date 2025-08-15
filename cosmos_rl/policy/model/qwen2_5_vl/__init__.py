@@ -186,7 +186,11 @@ class Qwen2_5_VLPatchMerger(nn.Module):
     def __init__(self, config: Qwen2_5_VL_Encoder_Args) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size * (config.spatial_merge_size**2)
-        self.ln_q = RMSNorm(config.hidden_size, config.norm_eps)
+        self.ln_q = RMSNorm(
+            config.hidden_size,
+            config.norm_eps,
+            casting_mode=config.hf_config.model_type,
+        )
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.GELU(),  # This is fixed to GELU according to the original implementation
@@ -298,8 +302,16 @@ class Qwen2_5_VLVisionAttention(nn.Module):
 class Qwen2_5_VLVisionBlock(nn.Module):
     def __init__(self, config: Qwen2_5_VL_Encoder_Args) -> None:
         super().__init__()
-        self.norm1 = RMSNorm(config.hidden_size, config.norm_eps)
-        self.norm2 = RMSNorm(config.hidden_size, config.norm_eps)
+        self.norm1 = RMSNorm(
+            config.hidden_size,
+            config.norm_eps,
+            casting_mode=config.hf_config.model_type,
+        )
+        self.norm2 = RMSNorm(
+            config.hidden_size,
+            config.norm_eps,
+            casting_mode=config.hf_config.model_type,
+        )
         self.attn = Qwen2_5_VLVisionAttention(
             config.hidden_size, num_heads=config.n_heads
         )
@@ -755,8 +767,12 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
 
         self.self_attn = Qwen2_5_VLAttention(config)
         self.mlp = Qwen2MLP(config)
-        self.input_layernorm = RMSNorm(config.dim, config.norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.dim, config.norm_eps)
+        self.input_layernorm = RMSNorm(
+            config.dim, config.norm_eps, casting_mode=config.hf_config.model_type
+        )
+        self.post_attention_layernorm = RMSNorm(
+            config.dim, config.norm_eps, casting_mode=config.hf_config.model_type
+        )
 
     def forward(
         self,
@@ -804,7 +820,9 @@ class Qwen2_5_VLModel(nn.Module):
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(config.n_layers):
             self.layers[str(layer_id)] = Qwen2_5_VLDecoderLayer(config, layer_id)
-        self.norm = RMSNorm(config.dim, config.norm_eps)
+        self.norm = RMSNorm(
+            config.dim, config.norm_eps, casting_mode=config.hf_config.model_type
+        )
         self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
         self.identity_layer = IdentityLayer()

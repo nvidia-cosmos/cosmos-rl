@@ -14,6 +14,13 @@
 # limitations under the License.
 
 import torch
+import torch.nn as nn
+from cosmos_rl.utils.logging import logger
+
+try:
+    from liger_kernel.transformers.rope import liger_rotary_pos_emb
+except ImportError:
+    liger_rotary_pos_emb = None
 
 
 def rotate_half(x):
@@ -48,3 +55,30 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=2):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
+
+
+class RotaryPositionEmbedding(nn.Module):
+    def __init__(self, use_liger: bool = False):
+        super().__init__()
+        if use_liger and liger_rotary_pos_emb is None:
+            logger.warning(
+                "`liger_kernel` is not installed. Will fallback to the default implementation of `apply_rotary_pos_emb`."
+            )
+            use_liger = False
+        self.use_liger = use_liger
+        self.func = liger_rotary_pos_emb if use_liger else apply_rotary_pos_emb
+
+    def forward(self, q, k, cos, sin, position_ids=None, unsqueeze_dim=2):
+        if self.use_liger:
+            return liger_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim)
+        else:
+            return apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim)
+
+    def liger_equivalent(self):
+        self.func = (
+            liger_rotary_pos_emb
+            if liger_rotary_pos_emb is not None
+            else apply_rotary_pos_emb
+        )
+        # Note: this is a module without parameters, so we can return it directly
+        return self

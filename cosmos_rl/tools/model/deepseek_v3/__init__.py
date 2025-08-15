@@ -234,7 +234,9 @@ class DeepseekV3Attention(nn.Module):
             self.q_a_proj = nn.Linear(
                 self.hidden_size, config.q_lora_rank, bias=config.attention_bias
             )
-            self.q_a_layernorm = RMSNorm(config.q_lora_rank)
+            self.q_a_layernorm = RMSNorm(
+                config.q_lora_rank, casting_mode=config.hf_config.model_type
+            )
             self.q_b_proj = nn.Linear(
                 config.q_lora_rank, self.num_heads * self.q_head_dim, bias=False
             )
@@ -244,7 +246,9 @@ class DeepseekV3Attention(nn.Module):
             config.kv_lora_rank + config.qk_rope_head_dim,
             bias=config.attention_bias,
         )
-        self.kv_a_layernorm = RMSNorm(config.kv_lora_rank)
+        self.kv_a_layernorm = RMSNorm(
+            config.kv_lora_rank, casting_mode=config.hf_config.model_type
+        )
         self.kv_b_proj = nn.Linear(
             config.kv_lora_rank,
             self.num_heads
@@ -753,8 +757,12 @@ class DeepseekV3DecoderLayer(nn.Module):
 
         self.mlp = DeepseekV3MoE(config) if self.use_moe else DeepseekV3MLP(config)
 
-        self.input_layernorm = RMSNorm(config.dim, eps=config.norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.input_layernorm = RMSNorm(
+            config.dim, eps=config.norm_eps, casting_mode=config.hf_config.model_type
+        )
+        self.post_attention_layernorm = RMSNorm(
+            config.dim, eps=config.norm_eps, casting_mode=config.hf_config.model_type
+        )
 
     def forward(
         self,
@@ -810,7 +818,11 @@ class DeepseekV3MoEModel(BaseModel):
                 for layer_idx in range(model_args.n_layers)
             ]
         )
-        self.norm = RMSNorm(model_args.dim, model_args.norm_eps)
+        self.norm = RMSNorm(
+            model_args.dim,
+            model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
+        )
 
         if not model_args.hf_config.tie_word_embeddings:
             self.tie_embed_tokens = False

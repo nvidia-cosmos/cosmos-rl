@@ -41,9 +41,11 @@ from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 
 
-def build_norm(norm_type: str, dim: int, eps: float):
+def build_norm(
+    norm_type: str, dim: int, eps: float, casting_mode: Optional[str] = None
+):
     assert norm_type == "rmsnorm", f"Unknown norm_type: '{norm_type}'"
-    return RMSNorm(dim, eps)
+    return RMSNorm(dim, eps, casting_mode=casting_mode)
 
 
 @dataclass
@@ -149,7 +151,12 @@ class Attention(nn.Module):
             bias="q_proj" in model_args.biases,
         )
         self.q_norm = (
-            build_norm(model_args.norm_type, dim=self.head_dim, eps=model_args.norm_eps)
+            build_norm(
+                model_args.norm_type,
+                dim=self.head_dim,
+                eps=model_args.norm_eps,
+                casting_mode=model_args.hf_config.model_type,
+            )
             if model_args.q_k_norm_enabled
             else None
         )
@@ -160,7 +167,12 @@ class Attention(nn.Module):
             bias="k_proj" in model_args.biases,
         )
         self.k_norm = (
-            build_norm(model_args.norm_type, dim=self.head_dim, eps=model_args.norm_eps)
+            build_norm(
+                model_args.norm_type,
+                dim=self.head_dim,
+                eps=model_args.norm_eps,
+                casting_mode=model_args.hf_config.model_type,
+            )
             if model_args.q_k_norm_enabled
             else None
         )
@@ -175,6 +187,7 @@ class Attention(nn.Module):
             model_args.dim,
             bias="o_proj" in model_args.biases,
         )
+        self.rope_func = rope.RotaryPositionEmbedding()
 
     def forward(
         self,
@@ -208,7 +221,7 @@ class Attention(nn.Module):
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         cos, sin = position_embeddings
-        xq, xk = rope.apply_rotary_pos_emb(xq, xk, cos, sin, unsqueeze_dim=2)
+        xq, xk = self.rope_func(xq, xk, cos, sin, unsqueeze_dim=2)
 
         input_dtype = xq.dtype
         if input_dtype == torch.float32:
@@ -293,10 +306,16 @@ class GPTBlock(nn.Module):
         self.num_layers = model_args.n_layers
 
         self.input_layernorm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
         )
         self.post_attention_layernorm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
         )
 
     def forward(
@@ -359,7 +378,10 @@ class GPT(BaseModel):
             self.layers[str(layer_id)] = GPTBlock(layer_id, model_args)
 
         self.norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
         )
 
         if not model_args.hf_config.tie_word_embeddings:
