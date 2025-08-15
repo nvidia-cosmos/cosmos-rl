@@ -36,7 +36,11 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
 from typing import Callable, Optional
 from cosmos_rl.utils.distributed import ReplicateParallel
-from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward, ulysses_attn_func_varlen
+from cosmos_rl.utils.ulysses import (
+    ulysses_attn_func,
+    swizzle_cp_forward,
+    ulysses_attn_func_varlen,
+)
 
 
 def parallelize(
@@ -223,11 +227,11 @@ def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
         transformer_block.self_attn.attn_func = ulysses_attn_func(
             original_attn_func, cp_mesh
         )
-    # for _, transformer_block in model.layers.items():
-    #     original_attn_func_varlen = transformer_block.self_attn.attn_func_varlen
-    #     transformer_block.self_attn.attn_func_varlen = ulysses_attn_func_varlen(
-    #         original_attn_func_varlen, cp_mesh
-    #     )
+    for _, transformer_block in model.layers.items():
+        original_attn_func_varlen = transformer_block.self_attn.attn_func_varlen
+        transformer_block.self_attn.attn_func_varlen = ulysses_attn_func_varlen(
+            original_attn_func_varlen, cp_mesh
+        )
     swizzle_cp_forward(model, parallel_dims)
 
 

@@ -44,6 +44,7 @@ from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 from cosmos_rl.policy.kernel.norm import RMSNorm
 from cosmos_rl.policy.kernel.fused import MLPActMulFunc
+from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
 
 
 @dataclass
@@ -871,6 +872,28 @@ class Qwen2_5_VLModel(nn.Module):
 
         position_embeddings = self.rotary_emb(h, position_ids)
 
+        if "valid_input_len" in kwargs:
+            valid_input_len = kwargs["valid_input_len"]
+            updated_kwargs = pack_sequences_for_inputs(
+                inputs_embeds,
+                valid_input_len,
+                list(position_embeddings),
+                interested_tokens,
+                inputs_seq_dim=1,
+                inputs_batch_dim=0,
+                position_ids_seq_dim=2,
+                position_ids_batch_dim=1,
+                interested_tokens_seq_dim=1,
+                interested_tokens_batch_dim=0,
+                padding_mask=kwargs.get("padding_mask", None),
+                cp_mesh=kwargs.get("cp_mesh", None),
+            )
+            position_embeddings = tuple(updated_kwargs.pop("position_ids"))
+            interested_tokens = updated_kwargs.pop("interested_tokens")
+            h = updated_kwargs.pop("inputs")
+            h = self.identity_layer(h)
+            kwargs.update(updated_kwargs)
+
         for layer in self.layers.values():
             if (
                 hasattr(layer, "_gradient_checkpointing_enabled")
@@ -973,6 +996,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             n_image_tokens = (input_ids == self.image_token_id).sum().item()
             n_video_tokens = (input_ids == self.video_token_id).sum().item()
 
+            # print(f"inputs_embeds: {inputs_embeds.shape}, input_ids: {input_ids.shape}, n_image_tokens: {n_image_tokens}, n_video_tokens: {n_video_tokens}")
             # get vision embeddings as tokens for next phase
             if n_image_tokens > 0:
                 assert (

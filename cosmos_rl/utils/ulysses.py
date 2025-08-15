@@ -244,30 +244,6 @@ def slice_inputs_for_ulysses(
     ]
 
 
-def slice_cu_seqlens_for_ulysses(
-    cu_seqlens: torch.Tensor, cp_mesh: DeviceMesh
-) -> torch.Tensor:
-    """
-    Slice the cu_seqlens tensor for Ulysses sequence parallelism.
-    Args:
-        cu_seqlens: Cumulative sequence lengths tensor.
-        cp_mesh: Ulysses sequence parallelism size.
-
-    Returns:
-
-        torch.Tensor: Sliced cu_seqlens tensor for the current CP rank.
-    """
-    cp_world_size, cp_rank = cp_mesh.size(), cp_mesh.get_local_rank()
-    partial_size = (cu_seqlens.size(0) - 1) // cp_world_size
-    start = cp_rank * partial_size
-    end = (
-        (cp_rank + 1) * partial_size + 1
-        if cp_rank < cp_world_size - 1
-        else cu_seqlens.size(0)
-    )
-    return cu_seqlens[start:end] - cu_seqlens[start]  # Adjust the start index
-
-
 def gather_outputs_for_ulysses(
     output: torch.Tensor,
     gather_dim: int,
@@ -386,22 +362,26 @@ def ulysses_wrapper_of_attn_func_varlen(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
     value_states: torch.Tensor,
-    cu_seqlens_q, 
+    cu_seqlens_q,
     cu_seqlens_k,
-    max_seqlen_q, 
+    max_seqlen_q,
     max_seqlen_k,
     cp_mesh: DeviceMesh,
     original_attn_func: Callable,
     *args,
     **kwargs,
 ):
-    """Insert all-to-all before and after flash attention.
+    """Insert all-to-all before and after flash attention with variable length.
     DeepSpeed-Ulysses: https://arxiv.org/pdf/2309.14509
 
     Args:
         query_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads, head_dim]
         key_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads_k, head_dim]
         value_states (torch.Tensor): [batch_size, seqlen/cp_size, nheads_k, head_dim]
+        cu_seqlens_q (torch.Tensor): cumulative sequence lengths for query
+        cu_seqlens_k (torch.Tensor): cumulative sequence lengths for key
+        max_seqlen_q (int): maximum sequence length for query
+        max_seqlen_k (int): maximum sequence length for key
         cp_mesh (DeviceMesh): ulysses sequence parallelism device mesh
         original_attn_func: the original attention function
 
@@ -418,14 +398,13 @@ def ulysses_wrapper_of_attn_func_varlen(
     # - nheads_k=4, sp=8, repeats=2
     # - nheads_k=8, sp=8, repeats=1
     # - nheads_k=16, sp=8, repeats=1
+    key_states = key_states.unsqueeze(0)  # [1, seqlen/cp_size, nheads_k, head_dim]
+    value_states = value_states.unsqueeze(0)  # [1, seqlen/cp_size, nheads_k, head_dim]
+    query_states = query_states.unsqueeze(0)  # [1, seqlen/cp_size, nheads, head_dim]
     repeats = max(cp_world_size // key_states.size(2), 1)
-    key_states = key_states.unsqueeze(0)  # [1, bsz, seqlen/cp_size, nheads_k, head_dim]
-    value_states = value_states.unsqueeze(0)  # [1, bsz, seqlen/cp_size, nheads_k, head_dim]
-    query_states = query_states.unsqueeze(0)  # [1, bsz, seqlen/cp_size, nheads, head_dim]
     key_states = repeat_kv(key_states, repeats)
     value_states = repeat_kv(value_states, repeats)
-
-    # (bsz, seq_len/n, n_head, head_dim) -> (bsz, seq_len, n_head/n, head_dim)
+    # (1, seq_len/n, n_head, head_dim) -> (1, seq_len, n_head/n, head_dim)
     query_states = gather_seq_scatter_heads(
         query_states, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
     )
@@ -435,26 +414,28 @@ def ulysses_wrapper_of_attn_func_varlen(
     value_states = gather_seq_scatter_heads(
         value_states, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
     )
-
-    query_states = query_states.squeeze(0)  # [bsz, seqlen, nheads, head_dim]
+    query_states = query_states.squeeze(0)
     key_states = key_states.squeeze(0)
     value_states = value_states.squeeze(0)
-    # (bsz, seq_len, n_head/n, head_dim)
     attn_output = original_attn_func(
-        query_states, key_states, value_states, 
-        cu_seqlens_q, cu_seqlens_k,
-        max_seqlen_q, max_seqlen_k,
-        *args, **kwargs
+        query_states,
+        key_states,
+        value_states,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        *args,
+        **kwargs,
     )
-    attn_output = attn_output.unsqueeze(0)  # [1, bsz, seqlen/cp_size, nheads, head_dim]
+    attn_output = attn_output.unsqueeze(0)  # [1, seq_len, nheads/n, head_dim]
     # AlltoAll for Ulysses
-    # (bsz, seq_len, n_head/n, head_dim) -> (bsz, seq_len/n, n_head, head_dim)
+    # (1, seq_len, n_head/n, head_dim) -> (1, seq_len/n, n_head, head_dim)
     attn_output = gather_heads_scatter_seq(
         attn_output, seq_dim=1, head_dim=2, cp_mesh=cp_mesh
     )
-    attn_output = attn_output.squeeze(0)  # [bsz, seqlen/cp_size, nheads, head_dim]
+    attn_output = attn_output.squeeze(0)  # [1, seqlen/cp_size, nheads, head_dim]
     return attn_output
-
 
 
 def ulysses_attn_func(
@@ -467,6 +448,7 @@ def ulysses_attn_func(
         cp_mesh=cp_mesh,
     )
 
+
 def ulysses_attn_func_varlen(
     original_attn_func: Callable,
     cp_mesh: DeviceMesh,
@@ -476,7 +458,6 @@ def ulysses_attn_func_varlen(
         original_attn_func=original_attn_func,
         cp_mesh=cp_mesh,
     )
-    
 
 
 def swizzle_cp_forward(model: nn.Module, parallel_dims: ParallelDims):
