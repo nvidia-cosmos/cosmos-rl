@@ -31,8 +31,7 @@ from cosmos_rl.utils.wandb_logger import (
 )
 import torch
 import numpy as np
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import Dataset, DataLoader, DistributedSampler, Sampler
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.cache as cache
@@ -40,7 +39,7 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Iterator
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from functools import partial
@@ -184,6 +183,35 @@ def construct_dataset(
     return train_sft_dataset, test_sft_dataset
 
 
+class SkipSampler(Sampler[int]):
+    """
+    Wrap a sampler (e.g., DistributedSampler) and skip the first N indices.
+    This is useful for resuming training from a checkpoint.
+    """
+
+    def __init__(self, base_sampler: Sampler[int], skip_samples: int = 0):
+        self.base_sampler = base_sampler
+        self.skip_samples = max(int(skip_samples), 0)
+
+    def __iter__(self) -> Iterator[int]:
+        it = iter(self.base_sampler)
+        # Drop the first N indices without touching the dataset (__getitem__ not called)
+        for _ in range(self.skip_samples):
+            try:
+                next(it)
+            except StopIteration:
+                return
+        yield from it
+
+    def __len__(self) -> int:
+        return max(len(self.base_sampler) - self.skip_samples, 0)
+
+    # Preserve epoch-based shuffling
+    def set_epoch(self, epoch: int):
+        if hasattr(self.base_sampler, "set_epoch"):
+            self.base_sampler.set_epoch(epoch)
+
+
 class SFTDataset(Dataset):
     def __init__(
         self,
@@ -260,6 +288,41 @@ class SFTTrainer(Trainer):
                 "Wandb is not available. Please install it to use wandb logging features."
             )
 
+        self.train_step = 0
+        # Load model
+        if config.train.resume:
+            try:
+                ckpt_extra_vars = self.ckpt_manager.load_checkpoint(
+                    model=self.model,
+                    optimizer=self.optimizers,
+                    scheduler=self.lr_schedulers,
+                )
+                ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
+                if ckpt_total_steps != self.total_steps:
+                    logger.warning(
+                        f"Checkpoint total steps {ckpt_total_steps} does not match expected {self.total_steps}. Start training from step 0"
+                    )
+                else:
+                    self.train_step = ckpt_extra_vars.get("step", 0)
+            except Exception as e:
+                logger.error(
+                    f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
+                )
+                self.model.load_hf_weights(
+                    config.policy.model_name_or_path,
+                    parallel_dims,
+                    self.device,
+                    revision=config.policy.model_revision,
+                )
+        else:
+            self.model.load_hf_weights(
+                config.policy.model_name_or_path,
+                parallel_dims,
+                self.device,
+                revision=config.policy.model_revision,
+            )
+        self.model.train()
+
         # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
             config.train.train_policy,
@@ -274,6 +337,19 @@ class SFTTrainer(Trainer):
             shuffle=True,
             drop_last=False,
         )
+
+        if config.train.resume and self.train_step > 0:
+            """
+            Note: Here we assume there is no data shuffling across epochs.
+            Otherwise, we need to call `set_epoch` on the sampler after each epoch.
+            """
+            data_loader_bias = 0
+            # Resume training from the last checkpoint if needed
+            logger.info(
+                f"Resuming training from step {self.train_step}/{self.total_steps}..."
+            )
+            data_loader_bias = self.train_step % len(self.train_data_loader)
+            train_sampler = SkipSampler(train_sampler, skip_samples=data_loader_bias)
 
         val_sampler = DistributedSampler(
             val_dataset,
@@ -315,41 +391,6 @@ class SFTTrainer(Trainer):
         self.lr_schedulers = build_lr_schedulers(
             self.optimizers, self.config, self.total_steps
         )
-        self.train_step = 0
-
-        # Load model
-        if config.train.resume:
-            try:
-                ckpt_extra_vars = self.ckpt_manager.load_checkpoint(
-                    model=self.model,
-                    optimizer=self.optimizers,
-                    scheduler=self.lr_schedulers,
-                )
-                ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
-                if ckpt_total_steps != self.total_steps:
-                    logger.warning(
-                        f"Checkpoint total steps {ckpt_total_steps} does not match expected {self.total_steps}. Start training from step 0"
-                    )
-                else:
-                    self.train_step = ckpt_extra_vars.get("step", 0)
-            except Exception as e:
-                logger.error(
-                    f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
-                )
-                self.model.load_hf_weights(
-                    config.policy.model_name_or_path,
-                    parallel_dims,
-                    self.device,
-                    revision=config.policy.model_revision,
-                )
-        else:
-            self.model.load_hf_weights(
-                config.policy.model_name_or_path,
-                parallel_dims,
-                self.device,
-                revision=config.policy.model_revision,
-            )
-        self.model.train()
 
         if self.parallel_dims.dp_enabled:
             dp_group = self.parallel_dims.mesh["dp"].get_group()
@@ -474,22 +515,13 @@ class SFTTrainer(Trainer):
         pp_last_stage = False
 
         start_epoch = 0
-        data_loader_bias = 0
         # Resume training from the last checkpoint if needed
         if self.config.train.resume and self.train_step > 0:
-            logger.info(
-                f"Resuming training from step {self.train_step}/{self.total_steps}..."
-            )
             start_epoch = self.train_step // len(self.train_data_loader)
-            data_loader_bias = self.train_step % len(self.train_data_loader)
 
         for cur_epoch in range(start_epoch, self.epoch):
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:
-                if data_loader_bias > 0:
-                    data_loader_bias -= 1
-                    continue
-
                 acc_loss = torch.zeros(1, device=self.device)
                 self.optimizers.zero_grad()
                 global_batch_size = len(global_batch)
