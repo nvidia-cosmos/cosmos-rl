@@ -15,7 +15,7 @@
 
 import torch.distributed as dist
 import uuid
-from typing import Dict, Callable, Type, Optional
+from typing import Dict, Callable, Type, Optional, Any
 import copy
 import requests
 import time
@@ -25,12 +25,16 @@ import threading
 from urllib.parse import urljoin
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 from cosmos_rl.utils.network_util import make_request_with_retry, get_local_ip
-from cosmos_rl.dispatcher.command import CommandRegistry, Command
+from cosmos_rl.dispatcher.command import (
+    PolicyCommandRegistry,
+    RolloutCommandRegistry,
+    Command,
+)
+from cosmos_rl.dispatcher.data.packer import DataPacker, DecoderOnlyLLMDataPacker
 from cosmos_rl.dispatcher.data.packer import (
-    DataPacker,
-    DecoderOnlyLLMDataPacker,
     HFVLMDataPacker,
 )
+
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
@@ -47,8 +51,8 @@ from transformers import AutoConfig
 
 
 class CommMixin:
-    policy_command_handler_registry = CommandRegistry()
-    rollout_command_handler_registry = CommandRegistry()
+    policy_command_handler_registry = PolicyCommandRegistry()
+    rollout_command_handler_registry = RolloutCommandRegistry()
 
     @classmethod
     def register_policy_command_handler(cls, command_type: Type[Command]):
@@ -59,9 +63,11 @@ class CommMixin:
         return decorator
 
     @classmethod
-    def register_rollout_command_handler(cls, command_type: Type[Command]):
+    def register_rollout_command_handler(
+        cls, command_type: Type[Command], backend: str = "vllm"
+    ):
         def decorator(func):
-            cls.rollout_command_handler_registry.register(command_type, func)
+            cls.rollout_command_handler_registry.register(command_type, func, backend)
             return func
 
         return decorator
@@ -74,20 +80,34 @@ class CommMixin:
 
     @classmethod
     def get_rollout_command_handler(
-        cls, command_type: Type[Command]
+        cls, command_type: Type[Command], backend: str = "vllm"
     ) -> Optional[Callable]:
-        return cls.rollout_command_handler_registry.get_command_handler(command_type)
+        return cls.rollout_command_handler_registry.get_command_handler(
+            command_type, backend
+        )
 
     def init_comm(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
         logger.info(
             f"{self.role} Replica started at global rank {self.global_rank}, with replica name: {self.replica_name}"
         )
+
+        self.init_meta()
+
+        self.register_to_controller()
+
+    def init_meta(self):
         # Fetch metadata from the controller
         # Get list of remote IPs and port
         self.remote_ips, self.remote_port, metadata = (
             dist_utils.get_controller_metadata()
         )
+        self.remote_hosts = [
+            f"http://{remote_ip}:{self.remote_port}" for remote_ip in self.remote_ips
+        ]
+        self.init_data_packer(metadata)
+
+    def init_data_packer(self, metadata: Dict[str, Any]):
         # `sft_user_dataset` is only used in SFT mode when the user provides a dataset
         self.sft_user_dataset = None
         sft_user_dataset = metadata.get("sft_user_dataset", None)
@@ -147,11 +167,6 @@ class CommMixin:
                 )
 
         self.val_data_packer.setup(self.config, self.tokenizer)
-
-        self.remote_hosts = [
-            f"http://{remote_ip}:{self.remote_port}" for remote_ip in self.remote_ips
-        ]
-        self.register_to_controller()
 
     def register_to_controller(self):
         if hasattr(self, "_is_registered"):

@@ -808,6 +808,12 @@ class RolloutConfig(BaseModel):
         default=False, description="Use flashinfer for vllm rollout."
     )
 
+    backend: str = Field(
+        default="vllm",
+        description="Backend for rollout. Currently support `vllm` and `trtllm`.",
+        choices=["vllm", "trtllm"],
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if isinstance(self.parallelism, dict):

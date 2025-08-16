@@ -33,6 +33,7 @@ from cosmos_rl.policy.trainer import Trainer
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker import vLLMRolloutWorker
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
+from cosmos_rl.rollout import State
 import types
 from cosmos_rl.dispatcher.command import (
     PolicyToRolloutUnicastCommand,
@@ -219,7 +220,7 @@ class TestRollout:
 
         self.operate_compatibale_map = operate_compatibale_map
         self.inference_stream = torch.cuda.Stream()
-        self.state = vLLMRolloutWorker.State()
+        self.state = State()
 
         self.recv_weight_shard = types.MethodType(
             vLLMRolloutWorker.recv_weight_shard, self

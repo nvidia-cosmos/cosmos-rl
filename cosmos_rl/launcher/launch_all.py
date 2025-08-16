@@ -473,6 +473,7 @@ def replica_placement(
     get_worker_ip: Optional[Callable] = None,
     rdzv_port: Optional[int] = None,
     script: Optional[str] = None,
+    backend: str = "vllm",
     config_path: Optional[str] = None,
 ) -> List[List[str]]:
     commands = []
@@ -598,7 +599,7 @@ def replica_placement(
                     ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
                 )
                 commands.append(
-                    f"{replica_script} --type rollout --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --config {config_path}"
+                    f"{replica_script} --type rollout --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
                 )
                 if script is not None:
                     commands[-1] += f" --script {script}"
@@ -648,7 +649,7 @@ def replica_placement(
                 )
             )
             commands.append(
-                f"{replica_script} --type rollout --ngpus {min_n_gpus_rollout} --config {config_path}"
+                f"{replica_script} --type rollout --ngpus {min_n_gpus_rollout} --backend {backend} --config {config_path}"
             )
             if script is not None:
                 commands[-1] += f" --script {script}"
@@ -708,6 +709,13 @@ def main():
         min_n_gpus_rollout = min_n_gpus_rollout * rollout_parallelism.get(
             "dp_shard_size", 1
         )
+    if "rollout" in cosmos_config:
+        backend = cosmos_config["rollout"].get("backend", "vllm")  # default is vllm
+    else:
+        backend = "vllm"
+
+    logger.info(f"LMS: Using backend: {backend}")
+
     if args.p2r_ratio is not None:
         assert (
             args.num_workers is not None
@@ -918,10 +926,11 @@ cosmos-rl --config config.toml"""
             n_rollouts,
             min_n_gpus_policy,
             min_n_gpus_rollout,
-            "",
-            "",
-            None,
+            replica_script="",
+            control_url="",
+            output_dir=None,
             script=script,
+            backend=backend,
         )
         if args.num_workers is not None:
             assert args.num_workers >= len(global_launch_settings)
@@ -1221,6 +1230,7 @@ cosmos-rl --config config.toml"""
         get_worker_ip=get_worker_ip,
         rdzv_port=args.rdzv_port,
         script=script,
+        backend=backend,
         config_path=tmpfile_toml,
     )
 

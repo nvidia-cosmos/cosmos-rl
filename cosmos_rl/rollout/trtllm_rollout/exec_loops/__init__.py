@@ -12,25 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from abc import ABC, abstractmethod
-
-from cosmos_rl.policy.config import Config as CosmosConfig
-from transformers import AutoTokenizer
-
-
-class RolloutBase(ABC):
-    def __init__(self, config: CosmosConfig, tokenizer: AutoTokenizer):
-        self.config = config
-        self.tokenizer = tokenizer
-        self.pad_token_id = self.tokenizer.pad_token_id
-
-    @abstractmethod
-    def rollout_generation(self, prompts, *args, **kwargs):
-        """Generate sequences"""
-        pass
-
-    @abstractmethod
-    def init_engine(self, quantization: str, seed: int, load_format: str):
-        """Initialize the engine"""
-        pass

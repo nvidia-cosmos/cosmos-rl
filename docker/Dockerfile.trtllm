@@ -1,0 +1,55 @@
+FROM nvcr.io/nvidia/tensorrt-llm/release:1.0.0rc6 AS trtllm-base
+
+# trtllm 1.0.0rc6 use cuda 12.9
+
+###################################################
+# Base dependencies
+RUN apt-get update -y && apt-get upgrade -y
+
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
+    curl git gpg lsb-release tzdata wget
+###################################################
+
+
+###################################################
+## Install redis
+# Download and add Redis GPG key, Redis APT repository
+RUN curl -fsSL https://packages.redis.io/gpg  | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg && \
+    chmod 644 /usr/share/keyrings/redis-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb  $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list
+
+# Update package list
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -qq -y redis-server
+
+###################################################
+
+###################################################
+RUN apt-get install -qq -y software-properties-common
+RUN add-apt-repository ppa:deadsnakes/ppa
+
+RUN pip install -U pip setuptools wheel packaging
+
+COPY requirements.txt /workspace/cosmos_rl/requirements.txt
+
+RUN pip install \
+    torchao==0.12.0 \
+    vllm==0.10.0 \
+    flash-attn==2.8.2 \
+    https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl \
+    -r /workspace/cosmos_rl/requirements.txt
+
+###################################################
+
+FROM trtllm-base AS trtllm-base-with-cosmos-rl
+
+# Remove existing nccl debian package
+RUN apt purge -y libnccl2 libnccl-dev
+# install grouped-gemm
+RUN pip install --verbose git+https://github.com/fanshiqing/grouped_gemm@main
+
+
+FROM trtllm-base-with-cosmos-rl AS release
+
+COPY . /workspace/cosmos_rl
+RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl

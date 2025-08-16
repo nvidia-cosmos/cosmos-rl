@@ -13,24 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABC, abstractmethod
 
-from cosmos_rl.policy.config import Config as CosmosConfig
-from transformers import AutoTokenizer
+# patch trtllm according to trtllm version
+import tensorrt_llm
 
+trtllm_version = tensorrt_llm.__version__
 
-class RolloutBase(ABC):
-    def __init__(self, config: CosmosConfig, tokenizer: AutoTokenizer):
-        self.config = config
-        self.tokenizer = tokenizer
-        self.pad_token_id = self.tokenizer.pad_token_id
-
-    @abstractmethod
-    def rollout_generation(self, prompts, *args, **kwargs):
-        """Generate sequences"""
-        pass
-
-    @abstractmethod
-    def init_engine(self, quantization: str, seed: int, load_format: str):
-        """Initialize the engine"""
-        pass
+if trtllm_version == "1.0.0rc6":
+    from cosmos_rl.rollout.trtllm_rollout.patches_for_trtllm import trtllm_1_0_0_rc6  # noqa: F401
+else:
+    raise NotImplementedError(
+        f"[Rollout] Unsupported trtllm version: {trtllm_version}."
+    )

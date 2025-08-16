@@ -28,7 +28,6 @@ import tarfile
 import ctypes
 import asyncio
 import importlib
-import importlib.util
 import sys
 import glob
 import io

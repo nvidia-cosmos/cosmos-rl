@@ -71,6 +71,7 @@ RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
 RUN pip install -U pip setuptools wheel packaging
+
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
 RUN pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128

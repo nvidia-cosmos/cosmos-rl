@@ -48,6 +48,13 @@ Main Features
    quickstart/hf_models_support
 
 .. toctree::
+   :caption: Rollout
+
+   rollout/overview
+   rollout/vllm
+   rollout/trtllm
+
+.. toctree::
    :caption: Multi nodes training
 
    multinodes/overview

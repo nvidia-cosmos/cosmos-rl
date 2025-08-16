@@ -13,24 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABC, abstractmethod
 
-from cosmos_rl.policy.config import Config as CosmosConfig
-from transformers import AutoTokenizer
+import abc
+from typing import Optional
 
 
-class RolloutBase(ABC):
-    def __init__(self, config: CosmosConfig, tokenizer: AutoTokenizer):
-        self.config = config
-        self.tokenizer = tokenizer
-        self.pad_token_id = self.tokenizer.pad_token_id
+"""
+Customized for trtllm backend interaction with main process.
+"""
 
-    @abstractmethod
-    def rollout_generation(self, prompts, *args, **kwargs):
-        """Generate sequences"""
-        pass
 
-    @abstractmethod
-    def init_engine(self, quantization: str, seed: int, load_format: str):
-        """Initialize the engine"""
-        pass
+class InternalInstruction(abc.ABC):
+    pass
+
+
+class ShutdownInstruction(InternalInstruction):
+    pass
+
+
+class ValidationInstruction(InternalInstruction):
+    def __init__(
+        self, validation_step: Optional[int] = None, total_steps: Optional[int] = None
+    ):
+        self.validation_step = validation_step
+        self.total_steps = total_steps
