@@ -221,7 +221,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                             completions: List[List[str]] = (
                                 self.rollout.rollout_generation(
                                     prompt_id_and_payload_list=prompts,
-                                    stream=self.inference_stream,
                                     data_packer=self.val_data_packer,
                                     sampling_params=self.val_sampling_params,
                                 )
