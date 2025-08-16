@@ -26,64 +26,17 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     MergedColumnParallelLinear,
 )
+from vllm.model_executor import models as vllm_model_classes
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 
 from torch.nn.parameter import Parameter
-from math import gcd
-from functools import reduce
 import asyncio
 from cosmos_rl.utils import util
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from cosmos_rl.policy.config import Config as CosmosConfig
-
-
-class DimSliceInfo:
-    """
-    A class to represent the slice information of a tensor along a specific dimension.
-    This class contains the offset, total size, dimension name, and length of the slice.
-    """
-
-    offset: int
-    total_size: int
-    dim: str
-    length: int = 1
-
-    def __init__(self, offset: int, total_size: int, dim: str = "", length: int = 1):
-        """
-        Initialize the DimSliceInfo with the given offset, total size, dimension name, and length.
-        """
-        self.offset = offset
-        self.total_size = total_size
-        self.dim = dim
-        self.length = length
-
-    def __repr__(self):
-        # Returning a dictionary representation
-        return f"{self.__dict__}"
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        """
-        Create a DimSliceInfo object from a dictionary.
-        :param data: A dictionary containing the keys 'offset', 'total_size', 'dim', and 'length'.
-        :return: A DimSliceInfo object.
-        """
-        return DimSliceInfo(
-            offset=data["offset"],
-            total_size=data["total_size"],
-            dim=data.get("dim", ""),
-            length=data.get("length", 1),
-        )
-
-    def simplify(self):
-        common = reduce(gcd, [self.offset, self.total_size, self.length])  # noqa: E741
-        return DimSliceInfo(
-            offset=self.offset // common,
-            total_size=self.total_size // common,
-            dim=self.dim,
-            length=self.length // common,
-        )
+from cosmos_rl.utils.dim_slice_info import DimSliceInfo
 
 
 def slice_tensor_with_strategy(
@@ -823,6 +776,17 @@ class ParallelTopoMapper:
                             is_bias = True
                         elif part_name == "weight":
                             is_bias = False
+                        elif part_name == "w13_weight":
+                            is_bias = False
+                        elif part_name == "w2_weight":
+                            is_bias = False
+                        elif part_name == "w13_bias":
+                            is_bias = False
+                        elif part_name == "w2_bias":
+                            is_bias = False
+                        elif part_name == "sinks":
+                            is_bias = False
+                        # FIXME: (lms) bias could also tp-ed?
                         elif part_name == "class_embedding":
                             # class_embedding is a parameter in vision encoder
                             is_bias = True
@@ -843,6 +807,9 @@ class ParallelTopoMapper:
             if should_skip:
                 continue
             dims_map = {}
+            packed_modules_mapping = self.weight_mapper.packed_modules_mapping
+            dims_rank_info = None
+
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
                 dims_map["tp"] = output_dim
@@ -877,6 +844,24 @@ class ParallelTopoMapper:
                     not is_bias
                 ), f"VocabParallelEmbedding {param_name} should not have bias."
                 dims_map["tp"] = output_dim
+            elif "gpt_oss" in self.hf_config.model_type:
+                # special cases for gpt-oss model.
+                assert hasattr(
+                    vllm_model_classes, "gpt_oss"
+                ), "gpt-oss is not supported for this version of vllm."
+                from cosmos_rl.utils.mxfp4.quantizer import genereate_dim_rank_info
+
+                if isinstance(part, vllm_model_classes.gpt_oss.OAIAttention):
+                    if "sinks" in param_name:
+                        dims_map["tp"] = 0  # sinks has shape [num_heads]
+                elif isinstance(part, FusedMoE):
+                    # This temporarily for mxfp4 gpt-oss model. un-even sharding.
+                    dims_rank_info, tp_dim = genereate_dim_rank_info(
+                        part, param_name, param, self.hf_config, self.parallelism
+                    )
+                    if tp_dim > 0:
+                        dims_map["tp"] = tp_dim
+                    packed_modules_mapping = {}
             else:
                 assert (
                     "Parallel" not in part.__class__.__name__
@@ -886,7 +871,8 @@ class ParallelTopoMapper:
                 param_name,
                 dims_map,
                 self.weight_mapper._rollout_vllm_name_to_hf,
-                self.weight_mapper.packed_modules_mapping,
+                packed_modules_mapping=packed_modules_mapping,
+                dims_rank_info=dims_rank_info,
             )
 
 

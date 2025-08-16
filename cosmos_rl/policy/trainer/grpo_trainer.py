@@ -70,6 +70,8 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_POLICY_SHARD_INFOS_SUFFIX,
     COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
 )
+from cosmos_rl.utils.constant import COSMOS_P2R_TRANSFER_GROUP_SIZE
+
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
@@ -761,7 +763,7 @@ class GRPOTrainer(Trainer):
 
                 def grouped_send(grouped_send_ops):
                     nccl_group_start(comm_id)
-                    for view, r_rank in grouped_send_ops:
+                    for view, r_rank, name in grouped_send_ops:
                         nccl_send(
                             view,
                             self.world_size + r_rank,
@@ -773,7 +775,6 @@ class GRPOTrainer(Trainer):
                 grouped_send_ops = []
                 num_groups = 0
 
-                TRANSFER_GROUP_SIZE = 4
                 for insts_group in self.policy_to_rollout_insts:
                     for insts_for_per_param in insts_group.param_instructions:
                         dest_name = insts_for_per_param.param_name
@@ -804,10 +805,10 @@ class GRPOTrainer(Trainer):
                             logger.debug(
                                 f"Sending {dest_name} to rollout rank {r_rank}, {view.shape}"
                             )
-                            grouped_send_ops.append((view, r_rank))
+                            grouped_send_ops.append((view, r_rank, dest_name))
                             total_bytes_sent += view.numel() * view.element_size()
                     num_groups += 1
-                    if num_groups == TRANSFER_GROUP_SIZE:
+                    if num_groups == COSMOS_P2R_TRANSFER_GROUP_SIZE:
                         grouped_send(grouped_send_ops)
                         num_groups = 0
 

@@ -211,6 +211,7 @@ class TestRollout:
         self.ref_compatibale_map = compatibale_map
         self.quantization_type = None
         self.config = CosmosConfig()
+        self.config.train.param_dtype = "float32"  # keep the same as policy above.
 
         self.vllm_weight_inplace_view_map = compatibale_map
         self.recv_key_n_rank_list = compatibale_list
