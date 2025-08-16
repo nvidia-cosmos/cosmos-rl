@@ -15,6 +15,7 @@
 
 import boto3
 import os
+import re
 import json
 import heapq
 import torch
@@ -113,6 +114,11 @@ class CheckpointMananger:
         return os.path.exists(os.path.join(ckpt_path, "cosmos_config"))
 
     def get_ckpt_path(self) -> List[str]:
+        def digit_ascending_key(name: str):
+            # grab the last integer found in the folder name; put non-numeric names at the end (sorted by name)
+            nums = re.findall(r"\d+", name)
+            return (1, name) if not nums else (0, int(nums[-1]))
+
         # find the latest checkpoint under output_dir
         if self.config.train.resume == True:  # noqa: E712
             root_output_dir = os.path.dirname(os.path.dirname(self.ckpt_output_dir))
@@ -123,7 +129,7 @@ class CheckpointMananger:
                 if timestamp < cur_timestamp:
                     break
             steps = os.listdir(os.path.join(root_output_dir, timestamp, "checkpoints"))
-            steps.sort()
+            steps = sorted(steps, key=digit_ascending_key)
             return [
                 os.path.join(root_output_dir, timestamp, "checkpoints", step, "policy")
                 for step in reversed(steps)
