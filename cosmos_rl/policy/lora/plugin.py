@@ -124,16 +124,61 @@ class LoraInjectedLinear(nn.Linear):
     def merge_adapters_(self) -> None:
         if self.r == 0 or self.merged:
             return
-        delta_w = self.lora_B.weight @ self.lora_A.weight  # [out, in]
-        self.weight.add_(self.scaling * delta_w)
+        lora_A = (
+            self.lora_A.weight.full_tensor()
+            if isinstance(self.lora_A.weight, torch.distributed.tensor.DTensor)
+            else self.lora_A.weight
+        )
+        lora_B = (
+            self.lora_B.weight.full_tensor()
+            if isinstance(self.lora_B.weight, torch.distributed.tensor.DTensor)
+            else self.lora_B.weight
+        )
+        delta_w = self.scaling * (lora_B @ lora_A)  # [out, in]
+
+        assert not isinstance(delta_w, torch.distributed.tensor.DTensor)
+
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):
+            self.weight.add_(
+                torch.distributed.tensor.DTensor.from_local(
+                    delta_w,
+                    device_mesh=self.weight.device_mesh,
+                    placements=[torch.distributed.tensor.Replicate()],
+                    run_check=False,
+                )
+            )
+        else:
+            self.weight.add_(delta_w)
         self.merged = True
 
     @torch.no_grad()
     def unmerge_adapters_(self) -> None:
         if self.r == 0 or not self.merged:
             return
-        delta_w = self.lora_B.weight @ self.lora_A.weight
-        self.weight.sub_(self.scaling * delta_w)
+
+        lora_A = (
+            self.lora_A.weight.full_tensor()
+            if isinstance(self.lora_A.weight, torch.distributed.tensor.DTensor)
+            else self.lora_A.weight
+        )
+        lora_B = (
+            self.lora_B.weight.full_tensor()
+            if isinstance(self.lora_B.weight, torch.distributed.tensor.DTensor)
+            else self.lora_B.weight
+        )
+        delta_w = self.scaling * (lora_B @ lora_A)  # [out, in]
+        assert not isinstance(delta_w, torch.distributed.tensor.DTensor)
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):
+            self.weight.sub_(
+                torch.distributed.tensor.DTensor.from_local(
+                    delta_w,
+                    device_mesh=self.weight.device_mesh,
+                    placements=[torch.distributed.tensor.Replicate()],
+                    run_check=False,
+                )
+            )
+        else:
+            self.weight.sub_(delta_w)
         self.merged = False
 
     def lora_parameters(self) -> Iterable[nn.Parameter]:
