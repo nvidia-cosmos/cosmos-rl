@@ -802,7 +802,7 @@ class GRPOTrainer(Trainer):
                             )
                             assert self.global_rank == p_rank
                             logger.debug(
-                                f"Sending {dest_name} to rollout rank {r_rank}, {view.shape}"
+                                f"Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
                             )
                             grouped_send_ops.append((view, r_rank))
                             total_bytes_sent += view.numel() * view.element_size()

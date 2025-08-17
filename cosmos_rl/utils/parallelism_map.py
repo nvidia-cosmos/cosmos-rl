@@ -28,6 +28,17 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 
+# trtllm
+COSMOS_TRTLLM_IMPORTED = False
+try:
+    from tensorrt_llm._torch.modules.linear import TensorParallelMode
+    from tensorrt_llm._torch.modules.linear import Linear as TRTLLMLinear
+
+    COSMOS_TRTLLM_IMPORTED = True
+except ImportError as e:
+    logger.error(f"Failed to import modules from tensorrt_llm: {e}")
+    COSMOS_TRTLLM_IMPORTED = False
+
 from torch.nn.parameter import Parameter
 from math import gcd
 from functools import reduce
@@ -830,6 +841,7 @@ class ParallelTopoMapper:
                 output_dim = getattr(param, "output_dim", 0)
                 return output_dim
             elif isinstance(part, VocabParallelEmbedding):
+                # lm_head and embed_tokens
                 output_dim = getattr(param, "output_dim", 0)
                 assert (
                     not is_bias
@@ -841,7 +853,21 @@ class ParallelTopoMapper:
                 ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
         elif self.backend == "trtllm":
             # for trtllm
-            pass
+            assert COSMOS_TRTLLM_IMPORTED, "TensorRT-LLM is not imported."
+            if isinstance(part, TRTLLMLinear):
+                # For lm_head and embed_tokens: LMHead is children class of Linear
+                # For mlp and attention, they both use Linear, too.
+                if part.tp_mode == TensorParallelMode.COLUMN:
+                    return 0
+                elif part.tp_mode == TensorParallelMode.ROW:
+                    return 1
+                else:
+                    return None
+            else:
+                logger.warning(
+                    f"Class {part.__class__.__name__} is not supported by auto parallelism, treat it as non-parallel Lyaer. If issues happened, please contact the maintainer."
+                )
+                return None
         else:
             raise ValueError(f"Backend {self.backend} is not supported.")
 

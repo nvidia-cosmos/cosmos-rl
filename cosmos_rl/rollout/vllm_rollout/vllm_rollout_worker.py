@@ -489,11 +489,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 else:
                     # new a temp tensor
                     recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
-
                 logger.debug(
-                    f"Recving tensor {inst_dest_name} from policy rank {p_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape}."
+                    f"Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape}."
                 )
-
                 nccl_recv(recv_tensor, p_rank, communicator_index)
                 # inplace copy
                 if not vllm_tensor_view.is_contiguous():

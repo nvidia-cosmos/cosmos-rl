@@ -44,6 +44,8 @@ from cosmos_rl.utils.pynccl import (
     create_nccl_comm,
     nccl_broadcast,
     nccl_recv,
+    nccl_group_start,
+    nccl_group_end,
 )
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
@@ -352,6 +354,9 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
         total_bytes_received = 0
 
+        all_cloned_target_tensors = []
+        tensors_to_check = []
+
         for insts_for_per_param in insts_group.param_instructions:
             # insts_for_per_param: WeightSyncInstructionsPerParam -> inst collection for a single tensor
             insts = insts_for_per_param.instructions
@@ -376,20 +381,43 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 else:
                     # new a temp tensor
                     recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
-
+                logger.debug(
+                    f"Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape}."
+                )
                 nccl_recv(recv_tensor, p_rank, communicator_index)
                 # inplace copy
                 if not vllm_tensor_view.is_contiguous():
-                    vllm_tensor_view.copy_(recv_tensor)
+                    all_cloned_target_tensors.append((vllm_tensor_view, recv_tensor))
 
                 total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
 
             if check_inside_group:
+                tensors_to_check.append(
+                    (cloned_target_tensor, target_tensor, insts, inst_dest_name)
+                )
+
+        def completion_lambda(all_cloned_target_tensors, tensors_to_check):
+            for view, recv_tensor in all_cloned_target_tensors:
+                view.copy_(
+                    recv_tensor,
+                )
+            all_cloned_target_tensors.clear()
+
+            for (
+                cloned_target_tensor,
+                target_tensor,
+                insts,
+                inst_dest_name,
+            ) in tensors_to_check:
                 if not torch.allclose(cloned_target_tensor, target_tensor):
                     raise ValueError(
                         f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
                     )
-        return total_bytes_received
+            tensors_to_check.clear()
+
+        return total_bytes_received, partial(
+            completion_lambda, all_cloned_target_tensors, tensors_to_check
+        )
 
     @TRTLLMRolloutWorkerBase.register_rollout_command_handler(
         PolicyToRolloutUnicastCommand, backend="trtllm"
@@ -462,19 +490,76 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 raise RuntimeError(
                     f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
                 )
+            logger.info(
+                "[Rollout] Finished policy_to_rollout_recv_insts from controller."
+            )
+        total_recvs = 0
+        total_params = 0
+        for insts_group in self.policy_to_rollout_recv_insts:
+            for insts_for_per_param in insts_group.param_instructions:
+                total_params += 1
+                total_recvs += len(insts_for_per_param.instructions)
+
+        copy_stream = torch.cuda.Stream()
+
         with torch.cuda.stream(self.inference_stream):
+            logger.debug(
+                f"Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
+            )
             # recv the weight from policy
             st = time.time()
             total_bytes_received = 0
+
+            pending_bytes = [0]
+            pending_completions = []
+            pending_groups = 0
+
+            def flush_completions(pending_bytes, pending_completions):
+                recv_ready = torch.cuda.Event()
+                recv_ready.record()
+                with torch.cuda.stream(copy_stream):
+                    recv_ready.wait()
+                    logger.debug(
+                        f"Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024}"
+                    )
+                    for completion in pending_completions:
+                        completion()
+                    pending_bytes[0] = 0
+                    pending_completions.clear()
+
+            nccl_group_start(communicator_index)
+
+            TRANSFER_GROUP_SIZE = 4
             for insts_group in self.policy_to_rollout_recv_insts:
                 # insts_group: WeightSyncInstructionsGroup -> inst collection for a full weight tensor
                 # handle inst group
-                total_bytes_received += self.recv_weight_shard(
+                bytes_received, completion_fn = self.recv_weight_shard(
                     self.global_rank,
                     insts_group,
                     communicator_index,
                     command.do_weight_sync_check,
                 )
+                pending_bytes[0] += bytes_received
+                pending_completions.append(completion_fn)
+                total_bytes_received += bytes_received
+
+                pending_groups += 1
+                if pending_groups == TRANSFER_GROUP_SIZE:
+                    nccl_group_end(communicator_index)
+                    flush_completions(pending_bytes, pending_completions)
+                    nccl_group_start(communicator_index)
+                    pending_groups = 0
+
+            nccl_group_end(communicator_index)
+            flush_completions(pending_bytes, pending_completions)
+
+            with torch.cuda.stream(copy_stream):
+                copy_finished = torch.cuda.Event()
+                copy_finished.record()
+
+            copy_finished.wait()
+            torch.cuda.synchronize()
+
             time_eclapsed = time.time() - st
             logger.debug(
                 f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."

@@ -710,10 +710,9 @@ def main():
         )
     if "rollout" in cosmos_config:
         backend = cosmos_config["rollout"].get("backend", "vllm")  # default is vllm
+        logger.info(f"Using rollout backend: {backend}")
     else:
         backend = "vllm"
-
-    logger.info(f"LMS: Using backend: {backend}")
 
     if args.p2r_ratio is not None:
         assert (
