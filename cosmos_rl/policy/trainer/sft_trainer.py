@@ -183,33 +183,40 @@ def construct_dataset(
     return train_sft_dataset, test_sft_dataset
 
 
-class SkipSampler(Sampler[int]):
+class SkippingSampler(Sampler[int]):
     """
-    Wrap a sampler (e.g., DistributedSampler) and skip the first N indices.
-    This is useful for resuming training from a checkpoint.
+    One-shot wrapper around an index-level Sampler that skips `skip_samples`
+    indices once, then behaves like the base sampler thereafter.
     """
 
     def __init__(self, base_sampler: Sampler[int], skip_samples: int = 0):
-        self.base_sampler = base_sampler
-        self.skip_samples = max(int(skip_samples), 0)
+        self.base = base_sampler
+        self._initial_skip = max(0, int(skip_samples))
+        self._remaining_skip = self._initial_skip
+        self._used_once = False
 
     def __iter__(self) -> Iterator[int]:
-        it = iter(self.base_sampler)
-        # Drop the first N indices without touching the dataset (__getitem__ not called)
-        for _ in range(self.skip_samples):
-            try:
-                next(it)
-            except StopIteration:
-                return
-        yield from it
+        it = iter(self.base)
+        if self._remaining_skip > 0:
+            for _ in range(self._remaining_skip):
+                try:
+                    next(it)
+                except StopIteration:
+                    self._remaining_skip = 0
+                    self._used_once = True
+                    return iter(())
+            self._remaining_skip = 0
+        self._used_once = True
+        return it
 
     def __len__(self) -> int:
-        return max(len(self.base_sampler) - self.skip_samples, 0)
+        base_len = len(self.base)
+        if not self._used_once:
+            return max(0, base_len - self._initial_skip)
+        return base_len
 
-    # Preserve epoch-based shuffling
     def set_epoch(self, epoch: int):
-        if hasattr(self.base_sampler, "set_epoch"):
-            self.base_sampler.set_epoch(epoch)
+        self.base.set_epoch(epoch)
 
 
 class SFTDataset(Dataset):
@@ -289,21 +296,21 @@ class SFTTrainer(Trainer):
             )
 
         self.train_step = 0
+        ckpt_total_steps = 0
+        self.lr_schedulers = None
         # Load model
         if config.train.resume:
             try:
-                ckpt_extra_vars = self.ckpt_manager.load_checkpoint(
+                # early init the lr_schedulers to avoid it is not initialized when loading the checkpoint
+                ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
                     model=self.model,
                     optimizer=self.optimizers,
-                    scheduler=self.lr_schedulers,
+                    scheduler=partial(
+                        build_lr_schedulers, self.optimizers, self.config
+                    ),
                 )
                 ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
-                if ckpt_total_steps != self.total_steps:
-                    logger.warning(
-                        f"Checkpoint total steps {ckpt_total_steps} does not match expected {self.total_steps}. Start training from step 0"
-                    )
-                else:
-                    self.train_step = ckpt_extra_vars.get("step", 0)
+                self.train_step = ckpt_extra_vars.get("step", 0)
             except Exception as e:
                 logger.error(
                     f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
@@ -338,18 +345,34 @@ class SFTTrainer(Trainer):
             drop_last=False,
         )
 
+        def get_train_data_loader(sampler: Sampler[int]):
+            return DataLoader(
+                train_dataset,
+                batch_size=config.train.train_batch_per_replica,
+                shuffle=False,
+                num_workers=config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                sampler=sampler,
+                collate_fn=collate_fn,
+                drop_last=False,
+            )
+
         if config.train.resume and self.train_step > 0:
             """
             Note: Here we assume there is no data shuffling across epochs.
             Otherwise, we need to call `set_epoch` on the sampler after each epoch.
             """
-            data_loader_bias = 0
             # Resume training from the last checkpoint if needed
-            logger.info(
-                f"Resuming training from step {self.train_step}/{self.total_steps}..."
+            data_loader_bias = self.train_step % len(
+                get_train_data_loader(train_sampler)
             )
-            data_loader_bias = self.train_step % len(self.train_data_loader)
-            train_sampler = SkipSampler(train_sampler, skip_samples=data_loader_bias)
+            data_loader_bias *= config.train.train_batch_per_replica
+            logger.info(
+                f"Resuming training from step {self.train_step}/{ckpt_total_steps}"
+            )
+            train_sampler = SkippingSampler(
+                train_sampler, skip_samples=data_loader_bias
+            )
 
         val_sampler = DistributedSampler(
             val_dataset,
@@ -363,16 +386,7 @@ class SFTTrainer(Trainer):
         assert (
             self.tokenizer.pad_token_id is not None
         ), "Tokenizer must have a pad token id"
-        self.train_data_loader = DataLoader(
-            train_dataset,
-            batch_size=config.train.train_batch_per_replica,
-            shuffle=False,
-            num_workers=config.train.train_policy.dataloader_num_workers,
-            prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-            sampler=train_sampler,
-            collate_fn=collate_fn,
-            drop_last=False,
-        )
+        self.train_data_loader = get_train_data_loader(train_sampler)
         self.val_data_loader = DataLoader(
             val_dataset,
             batch_size=config.train.validation_batch_per_replica,
@@ -382,15 +396,24 @@ class SFTTrainer(Trainer):
             collate_fn=collate_fn,
             drop_last=False,
         )
-        steps_by_dataset = len(self.train_data_loader) * self.epoch
+
+        steps_by_dataset = (
+            ckpt_total_steps
+            if ckpt_total_steps > 0
+            else len(self.train_data_loader) * self.epoch
+        )
         if config.train.max_num_steps is not None:
             self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
         else:
             self.total_steps = steps_by_dataset
 
-        self.lr_schedulers = build_lr_schedulers(
-            self.optimizers, self.config, self.total_steps
-        )
+        if self.lr_schedulers is None:
+            assert (
+                self.train_step == 0
+            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            self.lr_schedulers = build_lr_schedulers(
+                self.optimizers, self.config, self.total_steps
+            )
 
         if self.parallel_dims.dp_enabled:
             dp_group = self.parallel_dims.mesh["dp"].get_group()
