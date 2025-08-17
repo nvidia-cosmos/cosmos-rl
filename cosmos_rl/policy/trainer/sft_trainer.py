@@ -298,6 +298,7 @@ class SFTTrainer(Trainer):
         self.train_step = 0
         ckpt_total_steps = 0
         self.lr_schedulers = None
+        self.start_epoch = 0
         # Load model
         if config.train.resume:
             try:
@@ -363,9 +364,8 @@ class SFTTrainer(Trainer):
             Otherwise, we need to call `set_epoch` on the sampler after each epoch.
             """
             # Resume training from the last checkpoint if needed
-            data_loader_bias = self.train_step % len(
-                get_train_data_loader(train_sampler)
-            )
+            total_steps_per_epoch = len(get_train_data_loader(train_sampler))
+            data_loader_bias = self.train_step % total_steps_per_epoch
             data_loader_bias *= config.train.train_batch_per_replica
             logger.info(
                 f"Resuming training from step {self.train_step}/{ckpt_total_steps}"
@@ -373,6 +373,7 @@ class SFTTrainer(Trainer):
             train_sampler = SkippingSampler(
                 train_sampler, skip_samples=data_loader_bias
             )
+            self.start_epoch = self.train_step // total_steps_per_epoch
 
         val_sampler = DistributedSampler(
             val_dataset,
@@ -537,12 +538,7 @@ class SFTTrainer(Trainer):
         self.profiler.start()
         pp_last_stage = False
 
-        start_epoch = 0
-        # Resume training from the last checkpoint if needed
-        if self.config.train.resume and self.train_step > 0:
-            start_epoch = self.train_step // len(self.train_data_loader)
-
-        for cur_epoch in range(start_epoch, self.epoch):
+        for cur_epoch in range(self.start_epoch, self.epoch):
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:
                 acc_loss = torch.zeros(1, device=self.device)
