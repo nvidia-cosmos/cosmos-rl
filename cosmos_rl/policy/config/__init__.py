@@ -721,6 +721,36 @@ class SamplingConfig(BaseModel):
     )
 
 
+class MultiTurnRolloutConfig(BaseModel):
+    enable: bool = Field(
+        default=False, description="Whether to enable multi-turn rollout."
+    )
+    enable_tools: bool = Field(
+        default=False, description="Whether to enable tools in multi-turn rollout."
+    )
+    enable_thinking: bool = Field(
+        default=False, description="Whether to enable thinking in multi-turn rollout."
+    )
+    max_assistant_turns: int = Field(
+        default=100, description="Max assistant turn count for multi-turn rollout."
+    )
+    add_generation_prompt: bool = Field(
+        default=True,
+        description="Whether to add generation prompt in multi-turn rollout.",
+    )
+    continue_final_message: bool = Field(
+        default=False,
+        description="Whether to continue the final message in multi-turn rollout.",
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if self.enable_tools:
+            if self.add_generation_prompt:
+                assert not self.continue_final_message, "continue_final_message must be False when add_generation_prompt is True"
+        return self
+
+
 class ValidationConfig(BaseModel):
     dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
@@ -806,6 +836,11 @@ class RolloutConfig(BaseModel):
 
     vllm_use_flashinfer: bool = Field(
         default=False, description="Use flashinfer for vllm rollout."
+    )
+
+    multi_turn_config: MultiTurnRolloutConfig = Field(
+        default=MultiTurnRolloutConfig,
+        description="Configuration for multi-turn rollout.",
     )
 
     @model_validator(mode="after")
