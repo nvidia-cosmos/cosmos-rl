@@ -68,6 +68,9 @@ class BaseModel(torch.nn.Module, ABC):
             v = named_parameters[k]
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
+            # We must pass the requires_grad attribute
+            # Should pay attention to passing the requires_grad attribute when adding custom transform functions.
+            local_view.requires_grad = v.requires_grad
             transforms[
                 self.weight_mapper.policy_map_local_key_to_hf_key(
                     util.clear_weight_name(k)

@@ -287,6 +287,7 @@ class GRPOTrainer(Trainer):
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
         keys_n_ranks = []
+        trainable_params = []
         for name, tensor_or_callable in self.model.weight_sync_transforms:
             if isinstance(tensor_or_callable, torch.Tensor):
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
@@ -294,6 +295,10 @@ class GRPOTrainer(Trainer):
                 assert isinstance(tensor_or_callable, Callable)
                 tensor_or_callable = tensor_or_callable()
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
+            if tensor_or_callable.requires_grad:
+                trainable_params.append(name)
+            else:
+                logger.debug(f"[Policy] Not trainable for param {name}")
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config=self.hf_config,
@@ -312,11 +317,21 @@ class GRPOTrainer(Trainer):
             for r, x in enumerate(sorted_params_all_rank)
             if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
         ]
+        trainable_params_all_rank = dist_util.all_gather_object_cpu(trainable_params)
+        self.trainable_params = set()
+        for trainable_params_per_rank in trainable_params_all_rank:
+            self.trainable_params.update(trainable_params_per_rank)
+
         if self.global_rank == 0:
+            logger.info(
+                f"[Policy] Parse {len(self.trainable_params)} trainable params to controller."
+            )
+
             body = {
                 "shard_infos": self.all_rank_local_shard_infos,
                 "param_groups": [],
                 "sorted_params": sorted_params_all_rank,
+                "trainable_params": list(self.trainable_params),
             }
             data = msgpack.packb(body)
             try:
@@ -785,9 +800,19 @@ class GRPOTrainer(Trainer):
                     grouped_send_ops = []
                     num_groups = 0
 
+                    transferred_params_cnt = 0
+                    skipped_params_cnt = 0
                     for insts_group in self.policy_to_rollout_insts:
                         for insts_for_per_param in insts_group.param_instructions:
                             dest_name = insts_for_per_param.param_name
+                            if (
+                                dest_name not in self.trainable_params
+                                and command.trainable_only
+                            ):
+                                skipped_params_cnt += 1
+                                continue
+                            transferred_params_cnt += 1
+
                             for inst in insts_for_per_param.instructions:
                                 p_rank = inst.policy_rank
                                 r_rank = inst.rollout_rank
@@ -830,10 +855,18 @@ class GRPOTrainer(Trainer):
                         # Always attempt to unmerge to restore training state
                         unmerge_lora_weights_(self.model)
 
+                if command.trainable_only:
+                    if not hasattr(self, "synced_trainable_params"):
+                        self.synced_trainable_params = transferred_params_cnt
+                    else:
+                        assert (
+                            self.synced_trainable_params == transferred_params_cnt
+                        ), "Trainable synced params count must match at each weight sync."
+
         # make sure all the send operations of all ranks are finished
         time_eclapsed = time.time() - st
         logger.debug(
-            f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent."
+            f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent. While {skipped_params_cnt} non-trainable splitted params skipped and {transferred_params_cnt} splitted params transferred."
         )
         return False
 

@@ -1157,6 +1157,7 @@ class ParallelizedShardMapper:
                 # Each group has already been sorted in replica.
                 self.param_groups.add(tuple(group))
             self.sorted_params_all_rank_policy = policy_info["sorted_params"]
+            self.trainable_params = policy_info["trainable_params"]
             self.rollout_all_rank_shard_infos = rollout_info["shard_infos"]
             for group in rollout_info["param_groups"]:
                 for param_name in group:

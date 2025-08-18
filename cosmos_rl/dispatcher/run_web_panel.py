@@ -73,6 +73,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
     COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
+    COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from fastapi.responses import Response
@@ -314,6 +315,22 @@ async def rollout_shard_recv_insts(request: GetShardSendRecvInstsRequest):
     )
 
     return Response(content=recv_insts, media_type="application/msgpack")
+
+
+@app.get(COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX)
+async def get_trainable_params():
+    try:
+        return {
+            "trainable_params": list(
+                controller.policy_to_rollout_shard_mapper.trainable_params
+            )
+        }
+    except Exception as e:
+        logger.error(f"[Controller] Error getting trainable params: {e}")
+        return create_error_response(
+            constant.ErrorCode.INTERNAL_ERROR,
+            "Error getting trainable params",
+        )
 
 
 """
