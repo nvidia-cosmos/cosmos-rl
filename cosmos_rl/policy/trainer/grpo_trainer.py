@@ -886,9 +886,19 @@ class GRPOTrainer(Trainer):
                 logger.info(
                     f"[Policy] Building lr schedulers for total steps {command.total_steps}"
                 )
-                self.lr_schedulers = build_lr_schedulers(
+
+                # TODO(jiaxinc): This is a tricky part:
+                # Rebuild lr schedulers for the very first step because
+                # only until the first step, we can know the exact total steps from the controller
+                new_lr_schedulers = build_lr_schedulers(
                     self.optimizers, self.config, command.total_steps
                 )
+                with torch.no_grad():
+                    # Note: we need to load the state dict of the old lr schedulers
+                    # in case it is resumed from a checkpoint,
+                    # otherwise, the lr scheduler will be reset to the initial value
+                    new_lr_schedulers.load_state_dict(self.lr_schedulers.state_dict())
+                self.lr_schedulers = new_lr_schedulers
                 self.lr_schedulers_updated = True
             report_data = self.train(
                 current_step=command.global_step,

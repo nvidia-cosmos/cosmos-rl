@@ -32,6 +32,7 @@ from cosmos_rl.utils.wandb_logger import (
 import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, Sampler
+from cosmos_rl.policy.trainer.sampler import SkippingSampler
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.cache as cache
@@ -39,7 +40,7 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
-from typing import Optional, Dict, Any, Iterator
+from typing import Optional, Dict, Any
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from functools import partial
@@ -181,42 +182,6 @@ def construct_dataset(
     )
 
     return train_sft_dataset, test_sft_dataset
-
-
-class SkippingSampler(Sampler[int]):
-    """
-    One-shot wrapper around an index-level Sampler that skips `skip_samples`
-    indices once, then behaves like the base sampler thereafter.
-    """
-
-    def __init__(self, base_sampler: Sampler[int], skip_samples: int = 0):
-        self.base = base_sampler
-        self._initial_skip = max(0, int(skip_samples))
-        self._remaining_skip = self._initial_skip
-        self._used_once = False
-
-    def __iter__(self) -> Iterator[int]:
-        it = iter(self.base)
-        if self._remaining_skip > 0:
-            for _ in range(self._remaining_skip):
-                try:
-                    next(it)
-                except StopIteration:
-                    self._remaining_skip = 0
-                    self._used_once = True
-                    return iter(())
-            self._remaining_skip = 0
-        self._used_once = True
-        return it
-
-    def __len__(self) -> int:
-        base_len = len(self.base)
-        if not self._used_once:
-            return max(0, base_len - self._initial_skip)
-        return base_len
-
-    def set_epoch(self, epoch: int):
-        self.base.set_epoch(epoch)
 
 
 class SFTDataset(Dataset):

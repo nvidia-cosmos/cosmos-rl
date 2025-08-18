@@ -340,9 +340,7 @@ class CheckpointMananger:
 
                     outputs = [extra_vars]
                     # Create a new scheduler upon ``training_steps``
-                    if isinstance(scheduler, torch.optim.lr_scheduler._LRScheduler):
-                        pass
-                    else:
+                    if isinstance(scheduler, Callable):
                         scheduler = scheduler(training_steps=extra_vars["total_steps"])
                         outputs.append(scheduler)
 
@@ -366,28 +364,37 @@ class CheckpointMananger:
 
     def load_extra_info_from_checkpoint(self):
         extra_vars = {}
-        base_path = self.get_ckpt_path()
+        base_paths = self.get_ckpt_path()
         # check whether checkpoint existing
-        is_ckpt_path = self.ckpt_path_check(base_path)
-        if is_ckpt_path:
-            logger.info(
-                f"Cosmos checkpoint found at {self.config.train.resume}. Loading extra info..."
-            )
-            extra_info_path = os.path.join(
-                base_path, f"extra_info_rank_{self.global_rank}.pth"
-            )
-            extra_info = self.load_extra_info(extra_info_path)
-            for key in extra_info:
-                if key == "rng_state":
-                    self.set_rng_state(extra_info["rng_state"])
+
+        for base_path in base_paths:
+            try:
+                is_ckpt_path = self.ckpt_path_check(base_path)
+                if is_ckpt_path:
+                    logger.info(
+                        f"Cosmos checkpoint found at {self.config.train.resume}. Loading extra info..."
+                    )
+                    extra_info_path = os.path.join(
+                        base_path, f"extra_info_rank_{self.global_rank}.pth"
+                    )
+                    extra_info = self.load_extra_info(extra_info_path)
+                    for key in extra_info:
+                        if key == "rng_state":
+                            self.set_rng_state(extra_info["rng_state"])
+                        else:
+                            extra_vars[key] = extra_info[key]
+                    logger.info(
+                        f"[Policy] Checkpoint extra info loaded successfully from {base_path}."
+                    )
+                    return extra_vars
                 else:
-                    extra_vars[key] = extra_info[key]
-            logger.info(
-                f"[Policy] Checkpoint extra info loaded successfully from {base_path}."
-            )
-        else:
-            raise FileNotFoundError(f"No checkpoint found at {base_path}")
-        return extra_vars
+                    raise FileNotFoundError(f"No checkpoint found at {base_path}")
+            except Exception as e:
+                logger.error(
+                    f"Error loading checkpoint from {base_path}: {e}, try next checkpoint..."
+                )
+
+        raise FileNotFoundError(f"No checkpoint found at {base_paths}")
 
     def save_check(self, step: int, **kwargs):
         if is_master_rank(self.parallel_dims, self.global_rank):
