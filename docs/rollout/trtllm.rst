@@ -23,8 +23,11 @@ To enable TensorRT-LLM, you need to set the fields of ``rollout`` section in the
 For now, tested models are:
 
 - Qwen3-moe
+- Qwen2-5
+- Qwen2-5 VL
 
-We support replica within a single node now.
+.. note::
+    We just support rollout replica within a single node now.
 
 
 
