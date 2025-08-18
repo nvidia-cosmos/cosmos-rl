@@ -104,6 +104,7 @@ class TRTLLM_Rollout(RolloutBase):
         # Check the prefix_caching like arguments default enabled?
         kv_cache_config = KvCacheConfig(
             free_gpu_memory_fraction=self.rollout_config.gpu_memory_utilization,
+            enable_block_reuse=False,  # disable KV cacheblock reuse for trtllm
         )
         self.rollout_engine = LLM(
             model=model_path,
