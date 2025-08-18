@@ -30,6 +30,7 @@ from cosmos_rl.utils.wandb_logger import (
     log_wandb,
 )
 import torch
+import torch.distributed as dist
 import numpy as np
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, Sampler
 from cosmos_rl.policy.trainer.sampler import SkippingSampler
@@ -40,10 +41,13 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
+import atexit
 from typing import Optional, Dict, Any
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from functools import partial
+from cosmos_rl.utils.distributed import HighAvailabilitylNccl
+from cosmos_rl.dispatcher.command import Command, BuildMeshCommand
 
 
 def async_safe_ce(
@@ -252,6 +256,18 @@ class SFTTrainer(Trainer):
             self.dp_rank = parallel_dims.mesh["dp"].get_local_rank()
             self.dp_world_size = parallel_dims.mesh["dp"].size()
 
+        # For mesh build
+        self.inter_policy_nccl = HighAvailabilitylNccl(
+            replica_name=self.replica_name,
+            global_rank=self.global_rank,
+            controller_hosts=self.remote_hosts,
+        )
+        self.kv_store = dist_util.DistKVStore(
+            group=dist.distributed_c10d._get_default_group(),
+            master_rank=0,
+            shutdown_event=self.shutdown_signal,
+        )
+
         # Prepare wandb
         if "wandb" in config.logging.logger and is_wandb_available():
             init_wandb(config, parallel_dims)
@@ -396,6 +412,138 @@ class SFTTrainer(Trainer):
             dp_group=dp_group,
             cp_group=cp_group,
         )
+
+        atexit.register(self.handle_shutdown)
+
+    def handle_shutdown(self):
+        """
+        Handle shutdown of the trainer.
+        """
+        self.inter_policy_nccl.shutdown()
+        self.kv_store.shutdown()
+        self.shutdown_signal.set()
+
+    def fetch_command(self):
+        """
+        Fetch command from the controller.
+        For SFT, we only need to process buildmesh command.
+        """
+        while not self.shutdown_signal.is_set():
+            if self.global_rank == 0:
+                commands = []
+                try:
+                    commands = self.redis_controller.subscribe_command(
+                        self.replica_name
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+                    )
+                for x in commands:
+                    command = Command.depack(x)
+                    assert isinstance(command, BuildMeshCommand)
+                    """ directly push the buildmesh command to the nccl comm, will not block main thread """
+                    # broadcast the buildmesh command to all ranks
+                    cmd = self.kv_store.broadcast_command(command, src=0)
+                    self.is_master_replica = (
+                        cmd.replica_name_to_rank[self.replica_name] == 0
+                    )
+                    self.inter_policy_nccl.push_cmd(cmd)
+            else:
+                try:
+                    bmcmd = self.kv_store.broadcast_command(None, src=0)
+                    assert isinstance(
+                        bmcmd, BuildMeshCommand
+                    ), "Only buildmesh command is supported"
+                    self.is_master_replica = (
+                        bmcmd.replica_name_to_rank[self.replica_name] == 0
+                    )
+                    self.inter_policy_nccl.push_cmd(bmcmd)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
+
+    def _sync_weights_between_replicas(self):
+        """
+        Sync weights between replicas. all replicas will get the same weights from replica 0.
+        """
+        is_send = self.inter_policy_nccl.get_replica_rank(self.replica_name) == 0
+        len_params = 0
+        model_state_dict = [self.model.state_dict()]
+
+        # 1. Sync all model states
+        for state_to_sync in model_state_dict:
+            for dest_name in sorted(state_to_sync.keys()):
+                obj = state_to_sync[dest_name]
+                assert isinstance(obj, torch.Tensor)
+                local_view = self.wrap_to_cuda_tensor(dest_name, obj)
+                self.inter_policy_nccl.broadcast(
+                    local_view, src_replica=self.replica_name
+                )
+                len_params += 1
+
+        # 2. Sync optimizer states
+        optimizer_state = self.optimizers.state_dict()
+        for dest_name in sorted(optimizer_state.keys()):
+            obj = optimizer_state[dest_name]
+            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
+            self.inter_policy_nccl.broadcast(local_view, src_replica=self.replica_name)
+            len_params += 1
+        if not is_send:
+            self.optimizers.load_state_dict(optimizer_state)
+
+        # 3. Sync lr_scheduler states
+        lr_sheduler_state = self.lr_schedulers.state_dict()
+        for dest_name in sorted(lr_sheduler_state.keys()):
+            obj = lr_sheduler_state[dest_name]
+            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
+            self.inter_policy_nccl.broadcast(local_view, src_replica=self.replica_name)
+            len_params += 1
+        if not is_send:
+            self.lr_schedulers.load_state_dict(lr_sheduler_state)
+
+        # 4. Sync rng_state
+        rng_state = self.ckpt_manager.get_rng_state()
+        for dest_name in sorted(rng_state.keys()):
+            obj = rng_state[dest_name]
+            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
+            self.inter_policy_nccl.broadcast(local_view, src_replica=self.replica_name)
+            len_params += 1
+        if not is_send:
+            self.ckpt_manager.set_rng_state(rng_state)
+
+        return len_params
+
+    def _allreduce_gradients(self):
+        """
+        Allreduce gradients accross replicas for all parameters and necessary states.
+        """
+        for model_part in self.model_parts:
+            if model_part is not None:
+                dist_util.gradient_reduce_across_dp_replicas_(
+                    [p for p in model_part.parameters()], self.inter_policy_nccl
+                )
+
+    def _clipping_gradients(self) -> torch.Tensor:
+        """
+        Compute the global grad norm on all parameters and then apply
+        gradient clipping using the global grad norm.
+        """
+        all_params = [
+            p
+            for m in [model for model in self.model_parts if model is not None]
+            for p in m.parameters()
+        ]
+
+        grad_norm = dist_util.gradient_norm_clipping(
+            all_params,
+            self.config.train.optm_grad_norm_clip,
+            foreach=True,
+            pp_mesh=self.parallel_dims.mesh["pp"]
+            if self.parallel_dims.pp_enabled
+            else None,
+            return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+        )
+        return grad_norm
 
     def validate(self):
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
@@ -685,27 +833,16 @@ class SFTTrainer(Trainer):
                         loss.backward()
                     acc_loss += loss.detach()
 
-                """
-                Compute the global grad norm on all parameters and then apply
-                gradient clipping using the global grad norm.
-                """
-                all_params = [
-                    p
-                    for m in [model for model in self.model_parts if model is not None]
-                    for p in m.parameters()
-                ]
-                grad_norm = dist_util.gradient_norm_clipping(
-                    all_params,
-                    self.config.train.optm_grad_norm_clip,
-                    foreach=True,
-                    pp_mesh=self.parallel_dims.mesh["pp"]
-                    if self.parallel_dims.pp_enabled
-                    else None,
-                    return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
-                )
-
+                self._allreduce_gradients()
+                grad_norm = self._clipping_gradients()
                 self.optimizers.step()
                 self.lr_schedulers.step()
+
+                if (
+                    self.config.train.sync_weight_interval > 0
+                    and self.train_step % self.config.train.sync_weight_interval == 0
+                ):
+                    self._sync_weights_between_replicas()
 
                 self.train_step += 1
 
