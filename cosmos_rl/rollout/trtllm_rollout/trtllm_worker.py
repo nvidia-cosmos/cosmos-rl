@@ -141,6 +141,8 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
                 self.config.policy.model_name_or_path,
                 trust_remote_code=True,
             )
+            self.hf_config = hf_config
+
             model_type = hf_config.model_type
             if not ModelRegistry.check_model_type_supported(model_type):
                 logger.warning(
@@ -248,6 +250,12 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         """
         Get the underlying parallelized model in vLLM internal.
         """
+        if "qwen2_5_vl" in self.hf_config.model_type:
+            if not hasattr(self.model_engine.model, "visual"):
+                # trick to get visual parameters also iterated.
+                self.model_engine.model.visual = (
+                    self.model_engine.model.mm_encoder.visual
+                )
         return self.model_engine.model
 
     @TRTLLMRolloutWorkerBase.register_rollout_command_handler(

@@ -18,7 +18,6 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig,
 )
 import torch
-from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 from typing import Dict, List, Tuple
@@ -36,8 +35,21 @@ class QwenVL25WeightMapper(WeightMapper):
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
     def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
-        # Happen to be the same as policy name mapping.
-        return self.policy_map_local_key_to_hf_key(rollout_weight_name)
+        if self.backend == "vllm":
+            # Happen to be the same as policy name mapping.
+            return self.policy_map_local_key_to_hf_key(rollout_weight_name)
+        elif self.backend == "trtllm":
+            if rollout_weight_name.startswith("llm.model."):
+                hf_name = rollout_weight_name.replace("llm.model.", "model.")
+            elif rollout_weight_name.startswith("llm.lm_head."):
+                hf_name = rollout_weight_name.replace("llm.lm_head.", "lm_head.")
+            elif rollout_weight_name.startswith("mm_encoder."):
+                hf_name = rollout_weight_name.replace(".", "visual.")
+            else:
+                hf_name = rollout_weight_name
+            return hf_name
+        else:
+            raise ValueError(f"Unsupported backend: {self.backend}")
 
     def __rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         # visual
@@ -77,13 +89,11 @@ class QwenVL25WeightMapper(WeightMapper):
 
     def rollout_prepare_recv(
         self,
-        vllm_model: Qwen2_5_VLForConditionalGeneration,
+        vllm_model,
     ) -> Tuple[
         Dict[str, torch.Tensor],
         List[List[Tuple[str, torch.Size]]],
     ]:
-        assert isinstance(vllm_model, Qwen2_5_VLForConditionalGeneration)
-
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
