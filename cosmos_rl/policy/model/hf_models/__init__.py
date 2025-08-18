@@ -21,7 +21,6 @@ from transformers import AutoConfig
 from cosmos_rl.utils.util import (
     sync_model_vocab,
     clear_weight_name,
-    retry,
     safe_deep_getattr,
     load_model_class_by_config,
     reverse_hf_checkpoint_mapping,
@@ -370,9 +369,9 @@ class HFModel(BaseModel):
             parallel_dims (ParallelDims): Parallel dimensions definition.
             info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
-        model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
+        model_type = self.hf_config.model_type
         model_with_weights = self.model_class.from_pretrained(
-            model_name_or_path=model_name_or_path,
+            model_name_or_path,
             revision=revision,
             trust_remote_code=True,
         ).to("cpu")
