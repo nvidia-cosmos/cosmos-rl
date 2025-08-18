@@ -304,7 +304,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         continue
                     else:
                         prompts: List[Tuple[int, str]] = self._prompt_queue.get()
-                        logger.info(f"[Rollout] generate start for prompts: {prompts}")
+                        logger.debug(f"[Rollout] generate start for prompts: {prompts}")
 
                     completions: List[List[str]] = self.rollout.rollout_generation(
                         prompt_id_and_payload_list=prompts,

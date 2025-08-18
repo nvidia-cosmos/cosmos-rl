@@ -60,9 +60,6 @@ class GPTWeightMapper(WeightMapper):
         Dict[str, torch.Tensor],
         List[List[Tuple[str, torch.Size]]],
     ]:
-        assert (
-            "qwen" in type(vllm_model).__name__.lower()
-        ), f"model is not a QwenForCausalLM: {type(vllm_model).__name__}"
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
