@@ -139,6 +139,7 @@ class Controller:
         self.user_val_data_packer = val_data_packer
         self.dataset = None
         self.ckpt_extra_info = {}
+        remain_samples_num = 0
 
         if self.is_rl:
             if dataset is not None:
