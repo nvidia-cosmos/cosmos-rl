@@ -53,10 +53,12 @@ class HFVLMDataPacker(DataPacker):
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         super().setup(config, tokenizer, *args, **kwargs)
         self.hf_processor = retry(AutoProcessor.from_pretrained)(
-            config.policy.model_name_or_path
+            config.policy.model_name_or_path, trust_remote_code=True
         )
 
-        hf_config = retry(AutoConfig.from_pretrained)(config.policy.model_name_or_path)
+        hf_config = retry(AutoConfig.from_pretrained)(
+            config.policy.model_name_or_path, trust_remote_code=True
+        )
 
         image_token_id = getattr(hf_config, "image_token_id", None) or getattr(
             hf_config.vision_config, "image_token_id", None
@@ -65,6 +67,7 @@ class HFVLMDataPacker(DataPacker):
             image_token_id = getattr(hf_config, "image_token_index", None) or getattr(
                 hf_config.vision_config, "image_token_index", None
             )
+        assert image_token_id is not None, f"Cannot find image token id in {hf_config=}"
         self.image_token_id = image_token_id
         self.image_token = getattr(self.hf_processor, "image_token", None)
 
@@ -78,6 +81,9 @@ class HFVLMDataPacker(DataPacker):
         if video_token_id is None:
             self.video_token = None
             self.video_token_id = None
+        else:
+            self.video_token = self.tokenizer.decode([video_token_id])
+            self.video_token_id = video_token_id
         self.vision_ids = [self.image_token_id, self.video_token_id]
         self.hf_config = hf_config
 
@@ -273,7 +279,6 @@ class HFVLMDataPacker(DataPacker):
                 "return_tensors": "pt",
                 "images": image_inputs,
             }
-
             inputs = self.hf_processor(
                 text=[text],
                 **kwarg,
@@ -341,6 +346,16 @@ class HFVLMDataPacker(DataPacker):
         else:
             result_dict["aspect_ratio_mask"] = None
 
+        if "image_sizes" in inputs:
+            result_dict["image_sizes"] = inputs["image_sizes"]
+        else:
+            result_dict["image_sizes"] = None
+
+        if "batch_num_images" in inputs:
+            result_dict["batch_num_images"] = inputs["batch_num_images"]
+        else:
+            result_dict["batch_num_images"] = None
+
         return result_dict
 
     def _collate_fn(
@@ -359,6 +374,8 @@ class HFVLMDataPacker(DataPacker):
         ]
         aspect_ratio_ids = [x["aspect_ratio_ids"] for x in processed_samples]
         aspect_ratio_mask = [x["aspect_ratio_mask"] for x in processed_samples]
+        image_sizes = [x["image_sizes"] for x in processed_samples]
+        batch_num_images = [x["batch_num_images"] for x in processed_samples]
 
         if all([x is not None for x in pixel_values_videos]):
             assert all(
@@ -414,6 +431,20 @@ class HFVLMDataPacker(DataPacker):
             ), "aspect_ratio_mask should be None"
             aspect_ratio_mask = None
 
+        if all([x is not None for x in image_sizes]):
+            image_sizes = torch.cat(image_sizes, dim=0)
+        else:
+            assert all([x is None for x in image_sizes]), "image_sizes should be None"
+            image_sizes = None
+
+        if all([x is not None for x in batch_num_images]):
+            batch_num_images = torch.cat(batch_num_images, dim=0)
+        else:
+            assert all(
+                [x is None for x in batch_num_images]
+            ), "batch_num_images should be None"
+            batch_num_images = None
+
         # Shape description:
         #
         # pixel_values_[videos/images]: (BATCH_SIZE, N_PATCH, HIDDEN_SIZE)
@@ -441,6 +472,12 @@ class HFVLMDataPacker(DataPacker):
 
         if aspect_ratio_mask is not None:
             batch["aspect_ratio_mask"] = aspect_ratio_mask
+
+        if image_sizes is not None:
+            batch["image_sizes"] = image_sizes
+
+        if batch_num_images is not None:
+            batch["batch_num_images"] = batch_num_images
 
         # Pad the input_ids, logprob_masks
         batch["input_ids"] = torch.tensor(
@@ -526,6 +563,16 @@ class HFVLMDataPacker(DataPacker):
             return_dict["aspect_ratio_mask"] = x["aspect_ratio_mask"]
         else:
             return_dict["aspect_ratio_mask"] = None
+
+        if "image_sizes" in x:
+            return_dict["image_sizes"] = x["image_sizes"]
+        else:
+            return_dict["image_sizes"] = None
+
+        if "batch_num_images" in x:
+            return_dict["batch_num_images"] = x["batch_num_images"]
+        else:
+            return_dict["batch_num_images"] = None
 
         # Common fields
         input_ids = x["input_ids"]

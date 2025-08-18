@@ -50,6 +50,17 @@ class HFVLMSFTDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[str, str]:
         # The dataset is a list of {messages, images} pair
         conversations = self.dataset[idx]
+        # Just for reference
+        # In case your model does not support image in RGBA mode, convert them to RGB mode
+        # if "images" in conversations:
+        #     images = conversations["images"]
+        #     new_images = []
+        #     for image in images:
+        #         if image.mode == "RGB":
+        #             new_images.append(image)
+        #         else:
+        #             new_images.append(image.convert("RGB"))
+        #     conversations["images"] = new_images
         return conversations
 
 
