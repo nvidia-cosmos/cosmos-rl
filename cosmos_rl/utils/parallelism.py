@@ -20,6 +20,7 @@ from cosmos_rl.policy.config import ParallelismConfig
 import contextlib
 from typing import Generator, Optional, List
 import torch
+import math
 import numpy
 import os
 
@@ -115,7 +116,7 @@ class ParallelDims:
         self.build_mesh_info()
 
     def _validate(self):
-        dp_replicate, dp_shard, cp, tp, pp, ep, dp_shard_with_ep = (
+        dp_replicate, dp_shard, cp, tp, pp, ep, dp_shard_with_ep, world_size = (
             self.dp_replicate,
             self.dp_shard,
             self.cp,
@@ -123,11 +124,17 @@ class ParallelDims:
             self.pp,
             self.ep,
             self.dp_shard_with_ep,
+            self.world_size,
         )
         for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
         assert dp_shard == -1 or dp_shard >= 1, " dp_shard must be -1 or >=1."
         if dp_shard < 0:
+            logger.info(
+                "dp_shard is set to -1, will be automatically determined based on "
+                f"world_size {world_size} // {pp * dp_replicate * cp * tp}."
+            )
+
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
         assert (
             dp_shard >= 1
@@ -137,6 +144,11 @@ class ParallelDims:
             f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
+
+        if pp > 1 and dp_replicate > 1:
+            raise ValueError(
+                "dp_replicate must be 1 when pp > 1, since we only support FSDP with pipeline parallelism."
+            )
 
         # Checks for MoE weights. Note that dp_shard is only used for the non-MoE weights.
         if ep > 1:
@@ -172,10 +184,28 @@ class ParallelDims:
                     f"ep({ep}) * tp({tp}) != WORLD_SIZE({self.world_size})"
                 )
 
+    def _build_mesh(
+        self, device_type: str, dims: list[int], names: list[str]
+    ) -> DeviceMesh:
+        valid_dims = []
+        valid_names = []
+        for dim, name in zip(dims, names):
+            if dim > 1:
+                valid_dims.append(dim)
+                valid_names.append(name)
+
+        assert (
+            math.prod(valid_dims) == self.world_size
+        ), f"Invalid parallel dims: prod({valid_dims}) != WORLD_SIZE({self.world_size})"
+
+        logger.info(
+            f"Building {len(valid_dims)}-D device mesh with {valid_names}, {valid_dims}"
+        )
+        return init_device_mesh(device_type, valid_dims, mesh_dim_names=valid_names)
+
     def build_mesh(self, device_type: str) -> DeviceMesh:
-        dims = []
-        names = []
-        for d, name in zip(
+        mesh = self._build_mesh(
+            device_type,
             [self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp],
             [
                 "pp",
@@ -183,22 +213,8 @@ class ParallelDims:
                 "dp_shard",
                 "cp",
                 "tp",
-            ],  # reverse order to apply N-dim prallel.
-        ):
-            if d > 1:
-                dims.append(d)
-                names.append(name)
-        return self._build_mesh(device_type, dims, names)
-
-    def _build_mesh(
-        self,
-        device_type: str,
-        dims: list[int],
-        names: list[str],
-    ) -> DeviceMesh:
-        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        names = tuple(names)
-        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+            ],  # reverse order to apply N-dim parallel.
+        )
 
         # Create all the submesh here to ensure all required process groups are
         # initialized:
@@ -240,6 +256,19 @@ class ParallelDims:
 
         self.mesh = mesh
         return mesh
+
+    def build_meshes_with_ep(self, device_type: str) -> dict[str, DeviceMesh]:
+        meshes = {}
+        meshes["default"] = self.build_mesh(device_type)
+
+        if self.ep > 1:
+            meshes["moe"] = self._build_mesh(
+                device_type,
+                [self.pp, self.dp_shard_with_ep, self.ep],
+                ["pp", "dp_shard_with_ep", "ep"],
+            )
+
+        return meshes
 
     def get_rank_in_dim(self, mesh_dim_name: str, global_rank: int) -> int:
         if hasattr(self, "full_rank_info"):

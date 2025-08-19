@@ -42,31 +42,8 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
-
-
-class Qwen2RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        Qwen2RMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
-
-
-def build_norm(norm_type: str, dim: int, eps: float):
-    assert norm_type == "rmsnorm", f"Unknown norm_type: '{norm_type}'"
-    return Qwen2RMSNorm(dim, eps)
+from cosmos_rl.policy.kernel.norm import RMSNorm
+from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 
 
 @dataclass
@@ -128,11 +105,11 @@ class Qwen2_5_VLMLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.act_mul_func = MLPActMulFunc(ACT2FN[config.hidden_act])
 
     def forward(self, hidden_state):
         return self.down_proj(
-            self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state)
+            self.act_mul_func(self.gate_proj(hidden_state), self.up_proj(hidden_state))
         )
 
 
@@ -210,7 +187,11 @@ class Qwen2_5_VLPatchMerger(nn.Module):
     def __init__(self, config: Qwen2_5_VL_Encoder_Args) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size * (config.spatial_merge_size**2)
-        self.ln_q = Qwen2RMSNorm(config.hidden_size, config.norm_eps)
+        self.ln_q = RMSNorm(
+            config.hidden_size,
+            config.norm_eps,
+            casting_mode=config.hf_config.model_type,
+        )
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.GELU(),  # This is fixed to GELU according to the original implementation
@@ -276,6 +257,7 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         position_embeddings: torch.Tensor,
+        max_seqlen: int,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -289,9 +271,6 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         q, k = apply_rotary_pos_emb_vision(q.unsqueeze(0), k.unsqueeze(0), cos, sin)
         q = q.squeeze(0)
         k = k.squeeze(0)
-
-        with torch.no_grad():
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
 
         input_dtype = q.dtype
         if input_dtype == torch.float32:
@@ -320,8 +299,16 @@ class Qwen2_5_VLVisionAttention(nn.Module):
 class Qwen2_5_VLVisionBlock(nn.Module):
     def __init__(self, config: Qwen2_5_VL_Encoder_Args) -> None:
         super().__init__()
-        self.norm1 = build_norm(config.norm_type, config.hidden_size, config.norm_eps)
-        self.norm2 = build_norm(config.norm_type, config.hidden_size, config.norm_eps)
+        self.norm1 = RMSNorm(
+            config.hidden_size,
+            config.norm_eps,
+            casting_mode=config.hf_config.model_type,
+        )
+        self.norm2 = RMSNorm(
+            config.hidden_size,
+            config.norm_eps,
+            casting_mode=config.hf_config.model_type,
+        )
         self.attn = Qwen2_5_VLVisionAttention(
             config.hidden_size, num_heads=config.n_heads
         )
@@ -330,11 +317,14 @@ class Qwen2_5_VLVisionBlock(nn.Module):
             bias=True,  # This is fixed to True according to the original implementation
         )
 
-    def forward(self, hidden_states, cu_seqlens, position_embeddings) -> torch.Tensor:
+    def forward(
+        self, hidden_states, cu_seqlens, position_embeddings, max_seqlen
+    ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
             position_embeddings=position_embeddings,
+            max_seqlen=max_seqlen,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -490,11 +480,19 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        with torch.no_grad():
+            max_window_seqlen = (
+                (cu_window_seqlens[1:] - cu_window_seqlens[:-1]).max().item()
+            )
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+
         for layer_num, blk in self.blocks.items():
             if int(layer_num) in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
+                max_seqlen_now = max_seqlen
             else:
                 cu_seqlens_now = cu_window_seqlens
+                max_seqlen_now = max_window_seqlen
 
             if (
                 hasattr(blk, "_gradient_checkpointing_enabled")
@@ -505,6 +503,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                     hidden_states,
                     cu_seqlens_now,
                     position_embeddings,
+                    max_seqlen_now,
                     use_reentrant=False,
                 )
             else:
@@ -512,6 +511,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                     hidden_states,
                     cu_seqlens=cu_seqlens_now,
                     position_embeddings=position_embeddings,
+                    max_seqlen=max_seqlen_now,
                 )
 
         hidden_states = self.merger(hidden_states)
@@ -617,12 +617,12 @@ class Qwen2MLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.act_mul_func = MLPActMulFunc(ACT2FN[config.hidden_act])
 
     def forward(self, x):
-        # in llama self.w2(F.silu(self.w1(x)) * self.w3(x))
-        # i.e. w2 is self.down_proj, w1 is self.gate_proj, w3 is self.up_proj
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        down_proj = self.down_proj(
+            self.act_mul_func(self.gate_proj(x), self.up_proj(x))
+        )
         return down_proj
 
 
@@ -777,9 +777,11 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
 
         self.self_attn = Qwen2_5_VLAttention(config)
         self.mlp = Qwen2MLP(config)
-        self.input_layernorm = build_norm(config.norm_type, config.dim, config.norm_eps)
-        self.post_attention_layernorm = build_norm(
-            config.norm_type, config.dim, config.norm_eps
+        self.input_layernorm = RMSNorm(
+            config.dim, config.norm_eps, casting_mode=config.hf_config.model_type
+        )
+        self.post_attention_layernorm = RMSNorm(
+            config.dim, config.norm_eps, casting_mode=config.hf_config.model_type
         )
 
     def forward(
@@ -828,7 +830,9 @@ class Qwen2_5_VLModel(nn.Module):
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(config.n_layers):
             self.layers[str(layer_id)] = Qwen2_5_VLDecoderLayer(config, layer_id)
-        self.norm = build_norm(config.norm_type, config.dim, config.norm_eps)
+        self.norm = RMSNorm(
+            config.dim, config.norm_eps, casting_mode=config.hf_config.model_type
+        )
         self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
         self.identity_layer = IdentityLayer()

@@ -63,6 +63,8 @@ jobs:
           ${DOCKER_RUN} python tests/test_policy_to_rollout.py
           ${DOCKER_RUN} python tests/test_process_flow.py
           ${DOCKER_RUN} python tests/test_math_verify.py
+          ${DOCKER_RUN} python tests/test_policy_overfit.py
+          ${DOCKER_RUN} python tests/test_data_packer.py
           ${LONG_DOCKER_RUN} python tests/test_integration.py --stream
 
       - name: Cleanup

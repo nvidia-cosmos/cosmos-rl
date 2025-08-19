@@ -13,13 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import defaultdict
 import torch
 import torch.nn as nn
 from torch.distributed._composable.replicate import replicate
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
@@ -54,9 +50,6 @@ def parallelize(
     ), "Context parallelism is not supported for HFModel"
     assert pp_size == 1, "Pipeline parallelism is not supported for HFModel"
     assert not config.train.compile, "Compile is not supported for HFModel"
-
-    if config.policy.model_gradient_checkpointing:
-        apply_ac(model)
 
     # apply FSDP or HSDP
     if parallel_dims.dp_shard_enabled:
@@ -105,55 +98,6 @@ _save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
 }
-
-
-def _apply_ac_to_transformer_block(module: nn.Module):
-    from torch.utils.checkpoint import (
-        CheckpointPolicy,
-        create_selective_checkpoint_contexts,
-    )
-
-    def _get_custom_policy(meta):
-        def _custom_policy(ctx, func, *args, **kwargs):
-            mode = "recompute" if ctx.is_recompute else "forward"
-            mm_count_key = f"{mode}_mm_count"
-            if func == torch.ops.aten.mm.default:
-                meta[mm_count_key] += 1
-            # Saves output of all compute ops, except every second mm
-            to_save = func in _save_list and not (
-                func == torch.ops.aten.mm.default and meta[mm_count_key] % 2 == 0
-            )
-            return (
-                CheckpointPolicy.MUST_SAVE
-                if to_save
-                else CheckpointPolicy.PREFER_RECOMPUTE
-            )
-
-        return _custom_policy
-
-    def selective_checkpointing_context_fn():
-        meta = defaultdict(int)
-        return create_selective_checkpoint_contexts(_get_custom_policy(meta))
-
-    return ptd_checkpoint_wrapper(
-        module,
-        context_fn=selective_checkpointing_context_fn,
-        preserve_rng_state=False,
-    )
-
-
-def apply_ac(model: nn.Module):
-    """Apply activation checkpointing to the model."""
-    for layer_id, transformer_block in model.lm_layers.named_children():
-        transformer_block = _apply_ac_to_transformer_block(transformer_block)
-        model.lm_layers.register_module(layer_id, transformer_block)
-
-    if model.vision_model is not None:
-        for layer_id, transformer_block in model.vision_layers.named_children():
-            transformer_block = _apply_ac_to_transformer_block(transformer_block)
-            model.vision_layers.register_module(layer_id, transformer_block)
-
-    logger.info("Applied activation checkpointing to the model")
 
 
 def apply_fsdp(

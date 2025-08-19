@@ -15,6 +15,7 @@
 
 import boto3
 import os
+import re
 import json
 import heapq
 import torch
@@ -28,7 +29,7 @@ from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from typing import List
+from typing import List, Callable, Union
 
 
 def upload_file_to_s3(
@@ -113,6 +114,11 @@ class CheckpointMananger:
         return os.path.exists(os.path.join(ckpt_path, "cosmos_config"))
 
     def get_ckpt_path(self) -> List[str]:
+        def digit_ascending_key(name: str):
+            # grab the last integer found in the folder name; put non-numeric names at the end (sorted by name)
+            nums = re.findall(r"\d+", name)
+            return (1, name) if not nums else (0, int(nums[-1]))
+
         # find the latest checkpoint under output_dir
         if self.config.train.resume == True:  # noqa: E712
             root_output_dir = os.path.dirname(os.path.dirname(self.ckpt_output_dir))
@@ -123,7 +129,7 @@ class CheckpointMananger:
                 if timestamp < cur_timestamp:
                     break
             steps = os.listdir(os.path.join(root_output_dir, timestamp, "checkpoints"))
-            steps.sort()
+            steps = sorted(steps, key=digit_ascending_key)
             return [
                 os.path.join(root_output_dir, timestamp, "checkpoints", step, "policy")
                 for step in reversed(steps)
@@ -301,7 +307,7 @@ class CheckpointMananger:
         self,
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
-        scheduler: torch.optim.lr_scheduler._LRScheduler,
+        scheduler: Union[torch.optim.lr_scheduler._LRScheduler, Callable],
     ):
         extra_vars = {}
         base_paths: List[str] = self.get_ckpt_path()
@@ -325,6 +331,18 @@ class CheckpointMananger:
                     extra_info_path = os.path.join(
                         base_path, f"extra_info_rank_{self.global_rank}.pth"
                     )
+                    extra_info = self.load_extra_info(extra_info_path)
+                    for key in extra_info:
+                        if key == "rng_state":
+                            self.set_rng_state(extra_info["rng_state"])
+                        else:
+                            extra_vars[key] = extra_info[key]
+
+                    outputs = [extra_vars]
+                    # Create a new scheduler upon ``training_steps``
+                    if isinstance(scheduler, Callable):
+                        scheduler = scheduler(training_steps=extra_vars["total_steps"])
+                        outputs.append(scheduler)
 
                     model.load_state_dict(torch.load(model_path, weights_only=False))
                     optimizer.load_state_dict(
@@ -333,16 +351,10 @@ class CheckpointMananger:
                     scheduler.load_state_dict(
                         torch.load(scheduler_path, weights_only=False)
                     )
-                    extra_info = self.load_extra_info(extra_info_path)
-                    for key in extra_info:
-                        if key == "rng_state":
-                            self.set_rng_state(extra_info["rng_state"])
-                        else:
-                            extra_vars[key] = extra_info[key]
                     logger.info(
                         f"[Policy] Checkpoint loaded successfully from {base_path}."
                     )
-                    return extra_vars
+                    return outputs[0] if len(outputs) == 1 else outputs
             except Exception as e:
                 logger.error(
                     f"Error loading checkpoint from {base_path}: {e}, try next checkpoint..."
@@ -352,28 +364,37 @@ class CheckpointMananger:
 
     def load_extra_info_from_checkpoint(self):
         extra_vars = {}
-        base_path = self.get_ckpt_path()
+        base_paths = self.get_ckpt_path()
         # check whether checkpoint existing
-        is_ckpt_path = self.ckpt_path_check(base_path)
-        if is_ckpt_path:
-            logger.info(
-                f"Cosmos checkpoint found at {self.config.train.resume}. Loading extra info..."
-            )
-            extra_info_path = os.path.join(
-                base_path, f"extra_info_rank_{self.global_rank}.pth"
-            )
-            extra_info = self.load_extra_info(extra_info_path)
-            for key in extra_info:
-                if key == "rng_state":
-                    self.set_rng_state(extra_info["rng_state"])
+
+        for base_path in base_paths:
+            try:
+                is_ckpt_path = self.ckpt_path_check(base_path)
+                if is_ckpt_path:
+                    logger.info(
+                        f"Cosmos checkpoint found at {self.config.train.resume}. Loading extra info..."
+                    )
+                    extra_info_path = os.path.join(
+                        base_path, f"extra_info_rank_{self.global_rank}.pth"
+                    )
+                    extra_info = self.load_extra_info(extra_info_path)
+                    for key in extra_info:
+                        if key == "rng_state":
+                            self.set_rng_state(extra_info["rng_state"])
+                        else:
+                            extra_vars[key] = extra_info[key]
+                    logger.info(
+                        f"[Policy] Checkpoint extra info loaded successfully from {base_path}."
+                    )
+                    return extra_vars
                 else:
-                    extra_vars[key] = extra_info[key]
-            logger.info(
-                f"[Policy] Checkpoint extra info loaded successfully from {base_path}."
-            )
-        else:
-            raise FileNotFoundError(f"No checkpoint found at {base_path}")
-        return extra_vars
+                    raise FileNotFoundError(f"No checkpoint found at {base_path}")
+            except Exception as e:
+                logger.error(
+                    f"Error loading checkpoint from {base_path}: {e}, try next checkpoint..."
+                )
+
+        raise FileNotFoundError(f"No checkpoint found at {base_paths}")
 
     def save_check(self, step: int, **kwargs):
         if is_master_rank(self.parallel_dims, self.global_rank):

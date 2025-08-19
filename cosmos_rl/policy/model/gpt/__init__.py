@@ -16,7 +16,6 @@
 import os
 import torch
 from torch import nn
-import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Callable
 from transformers import AutoConfig
@@ -37,31 +36,16 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
+from cosmos_rl.policy.kernel.norm import RMSNorm
+import cosmos_rl.policy.kernel.rope as rope
+from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 
 
-class RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        RMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
-
-
-def build_norm(norm_type: str, dim: int, eps: float):
+def build_norm(
+    norm_type: str, dim: int, eps: float, casting_mode: Optional[str] = None
+):
     assert norm_type == "rmsnorm", f"Unknown norm_type: '{norm_type}'"
-    return RMSNorm(dim, eps)
+    return RMSNorm(dim, eps, casting_mode=casting_mode)
 
 
 @dataclass
@@ -135,40 +119,6 @@ class RotaryEmbedding(nn.Module):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=2):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -201,7 +151,12 @@ class Attention(nn.Module):
             bias="q_proj" in model_args.biases,
         )
         self.q_norm = (
-            build_norm(model_args.norm_type, dim=self.head_dim, eps=model_args.norm_eps)
+            build_norm(
+                model_args.norm_type,
+                dim=self.head_dim,
+                eps=model_args.norm_eps,
+                casting_mode=model_args.hf_config.model_type,
+            )
             if model_args.q_k_norm_enabled
             else None
         )
@@ -212,7 +167,12 @@ class Attention(nn.Module):
             bias="k_proj" in model_args.biases,
         )
         self.k_norm = (
-            build_norm(model_args.norm_type, dim=self.head_dim, eps=model_args.norm_eps)
+            build_norm(
+                model_args.norm_type,
+                dim=self.head_dim,
+                eps=model_args.norm_eps,
+                casting_mode=model_args.hf_config.model_type,
+            )
             if model_args.q_k_norm_enabled
             else None
         )
@@ -227,6 +187,7 @@ class Attention(nn.Module):
             model_args.dim,
             bias="o_proj" in model_args.biases,
         )
+        self.rope_func = rope.RotaryPositionEmbedding()
 
     def forward(
         self,
@@ -260,7 +221,7 @@ class Attention(nn.Module):
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         cos, sin = position_embeddings
-        xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
+        xq, xk = self.rope_func(xq, xk, cos, sin, unsqueeze_dim=2)
 
         input_dtype = xq.dtype
         if input_dtype == torch.float32:
@@ -306,9 +267,10 @@ class FeedForward(nn.Module):
         self.gate_proj = nn.Linear(
             dim, hidden_dim, bias="gate_proj" in model_args.biases
         )
+        self.act_mul_func = MLPActMulFunc(nn.SiLU())
 
     def forward(self, x):
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self.act_mul_func(self.gate_proj(x), self.up_proj(x)))
 
 
 class GPTBlock(nn.Module):
@@ -345,10 +307,16 @@ class GPTBlock(nn.Module):
         self.num_layers = model_args.n_layers
 
         self.input_layernorm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
         )
         self.post_attention_layernorm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
         )
 
     def forward(
@@ -411,7 +379,10 @@ class GPT(BaseModel):
             self.layers[str(layer_id)] = GPTBlock(layer_id, model_args)
 
         self.norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
         )
 
         if not model_args.hf_config.tie_word_embeddings:

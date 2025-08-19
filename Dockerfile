@@ -49,6 +49,11 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86
     && apt-get install -y libnccl2=${NCCL_VERSION} libnccl-dev=${NCCL_VERSION}
 
 ###################################################
+## Install cuDNN
+RUN apt-get update -y && \
+    apt-get install -y libcudnn9-cuda-12 libcudnn9-dev-cuda-12
+
+###################################################
 ## Install redis
 # Download and add Redis GPG key, Redis APT repository
 RUN curl -fsSL https://packages.redis.io/gpg  | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg && \

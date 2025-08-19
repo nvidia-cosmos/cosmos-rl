@@ -3,10 +3,10 @@ redis = "12800"
 [train]
 resume = false
 epoch = 1
-output_dir = "./outputs/gemma3-12b-vlm-fsdp4-sft"
+output_dir = "./outputs/deepseek-v3-test"
 epsilon = 1e-6
 optm_name = "AdamW"
-optm_lr = 1e-6
+optm_lr = 2e-7
 optm_impl = "fused"
 optm_weight_decay = 0.01
 optm_betas = [ 0.9, 0.999,]
@@ -16,46 +16,41 @@ async_tp_enabled = false
 compile = false
 param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
-master_dtype = "bfloat16"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 32
+train_batch_per_replica = 1
 sync_weight_interval = 1
-enable_validation = true
-validation_step = 30
-validation_batch_per_replica = 2
 
 [policy]
-model_name_or_path = "google/gemma-3-12b-it"
-model_max_length = 4096
+model_name_or_path = "deepseek-ai/DeepSeek-V3"
+model_max_length = 1024
 model_gradient_checkpointing = true
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "cosmos_reason1"
-experiment_name = "cosmos-reason1-sft"
+project_name = "cosmos_rl"
+experiment_name = "deepseek-v3-sft"
 
 [train.train_policy]
 type = "sft"
-dataset.name = "HuggingFaceH4/llava-instruct-mix-vsft"
+dataset.name = "LNTANOooo/sharegpt52k"
 dataset.subset = ""
 dataset.split = "train"
-dataset.test_size = 100
-enable_dataset_cache = false
-dataloader_num_workers = 4
-dataloader_prefetch_factor = 4
-conversation_column_name = "messages"
+conversation_column_name = "conversation"
+mini_batch = 1
 
 [train.ckpt]
 enable_checkpoint = true
-save_freq = 30
+save_freq = 100
+max_keep = 2
 save_mode = "async"
 
 [policy.parallelism]
 n_init_replicas = 1
 tp_size = 1
-cp_size = 1
-dp_shard_size = 4
+cp_size = 4
+ep_size = 64
+dp_shard_size = 64
 pp_size = 1
 dp_replicate_size = 1
 cp_rotate_method = "allgather"
