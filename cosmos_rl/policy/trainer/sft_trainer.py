@@ -315,12 +315,13 @@ class SFTTrainer(Trainer):
             dataset.setup(self.config, self.tokenizer)
         if data_packer:
             data_packer.setup(self.config, self.tokenizer)
+            self.data_packer = data_packer
 
         # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
             config.train.train_policy,
             tokenizer=self.tokenizer,
-            data_packer=data_packer,
+            data_packer=self.data_packer,
             user_provided_dataset=dataset,
         )
         train_sampler = DistributedSampler(
