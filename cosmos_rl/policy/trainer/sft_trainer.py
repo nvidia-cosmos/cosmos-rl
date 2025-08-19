@@ -942,6 +942,19 @@ class SFTTrainer(Trainer):
                 else:
                     global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
 
+                # Statistic loss across replicas for logging
+                if self.replica_world_size > 1:
+                    global_avg_loss = torch.tensor(global_avg_loss, device=self.device)
+                    global_max_loss = torch.tensor(global_max_loss, device=self.device)
+                    self.inter_policy_nccl.allreduce(
+                        global_avg_loss, global_avg_loss, dist.ReduceOp.AVG
+                    )
+                    self.inter_policy_nccl.allreduce(
+                        global_max_loss, global_max_loss, dist.ReduceOp.MAX
+                    )
+                    global_avg_loss = global_avg_loss.item()
+                    global_max_loss = global_max_loss.item()
+
                 if self.config.logging.logger:
                     if util.is_master_rank(self.parallel_dims, self.global_rank):
                         # Calculate last iteration time
@@ -980,7 +993,11 @@ class SFTTrainer(Trainer):
                                 data=report_data,
                                 step=self.train_step,
                             )
-                        if "console" in self.config.logging.logger:
+                        if (
+                            "console" in self.config.logging.logger
+                            and self.global_rank == 0
+                            and self.replica_rank == 0
+                        ):
                             logger.info(
                                 f"Step: {self.train_step}/{self.total_steps}, Loss: {global_avg_loss:.5f}, Grad norm: {grad_norm:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}, Iteration time: {iter_time:.2f}s."
                             )
