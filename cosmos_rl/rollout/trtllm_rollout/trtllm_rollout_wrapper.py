@@ -194,7 +194,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             is_end=True,
         )
         try:
-            logger.debug(
+            logger.info(
                 f"[Rollout] Posting rollout end signal to controller: {response}"
             )
             make_request_with_retry(
@@ -286,7 +286,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         self.batch_size, self._prompt_queue
                     )
                     if no_more_prompts:
-                        logger.debug(
+                        logger.info(
                             f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation."
                         )
                         self.state.set_prompt_fetch_end()
@@ -389,10 +389,14 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         self.state.set_prompt_consume_end()
                         if self.global_rank == 0:
                             self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
+        logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
     def life_control_loop(self):
         while inst := self.cosmos_weight_sync_queue.get():
             if isinstance(inst, ShutdownInstruction):
+                logger.info(
+                    f"[Rollout] Received shutdown instruction of {self.replica_name}, setting shutdown signal"
+                )
                 self.shutdown_signal.set()
             elif isinstance(inst, ValidationInstruction):
                 self.validation_event.set()
