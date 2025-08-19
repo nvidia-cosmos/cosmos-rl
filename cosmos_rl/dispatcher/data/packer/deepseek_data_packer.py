@@ -33,6 +33,11 @@ class DeepSeek_DataPacker(DecoderOnlyLLMDataPacker):
         super().setup(config, tokenizer, *args, **kwargs)
         self.seq_len = config.policy.model_max_length
 
+    def policy_compute_max_len(
+        self, processed_samples: List[DecoderOnlyLLMDataPacker.RLPolicyInput]
+    ) -> int:
+        return max(self.seq_len, max([len(x.input_ids) for x in processed_samples]))
+
     def policy_collate_fn(
         self,
         processed_samples: List[DecoderOnlyLLMDataPacker.RLPolicyInput],

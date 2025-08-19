@@ -400,7 +400,7 @@ class DeepseekV3MoEModel(BaseModel):
 
             logger.info("Creating storage reader...")
             fs_storage_reader = torch.distributed.checkpoint.FileSystemReader(
-                dcp_checkpoint_path
+                model_name_or_path
             )
             logger.info("Loading checkpoint ...")
             torch.distributed.checkpoint.load(
