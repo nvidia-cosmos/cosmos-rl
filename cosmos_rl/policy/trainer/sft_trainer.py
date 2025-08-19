@@ -41,12 +41,18 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
+import time
 import atexit
+import threading
 from typing import Optional, Dict, Any
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from functools import partial
-from cosmos_rl.utils.distributed import HighAvailabilitylNccl
+from cosmos_rl.utils.distributed import (
+    HighAvailabilitylNccl,
+    wrap_to_cuda_tensor,
+    extract_from_cuda_tensor,
+)
 from cosmos_rl.dispatcher.command import Command, BuildMeshCommand
 
 
@@ -113,7 +119,9 @@ def construct_dataset(
     if user_provided_dataset is not None:
         dataset = None
         train_dataset = user_provided_dataset
-        logger.info("Using user-provided dataset, which will skip split processing.")
+        logger.info(
+            "[SFTTrainer] Using user-provided dataset, which will skip split processing."
+        )
     else:
         dataset = util.load_data_from_disk_or_hf(
             config.dataset.name,
@@ -127,7 +135,7 @@ def construct_dataset(
             )
             dataset_list.append(dataset[split_name])
         train_dataset = concatenate_datasets(dataset_list)
-    logger.info(f"Final dataset size = {len(train_dataset)}")
+    logger.info(f"[SFTTrainer] Final dataset size = {len(train_dataset)}")
 
     # try:
     #     if dataset is not None:
@@ -216,7 +224,7 @@ class SFTDataset(Dataset):
                 "datasets_cache",
                 f"{self.config.dataset.name}-{config_hash(config)}",
             )
-            logger.info(f"SFTDataset Cache folder: {cache_folder}")
+            logger.info(f"[SFTTrainer] SFTDataset Cache folder: {cache_folder}")
             self.cache = cache.DiskCache(cache_folder)
 
     def __len__(self):
@@ -256,6 +264,9 @@ class SFTTrainer(Trainer):
             self.dp_rank = parallel_dims.mesh["dp"].get_local_rank()
             self.dp_world_size = parallel_dims.mesh["dp"].size()
 
+        # Init redis controller
+        self.init_redis()
+
         # For mesh build
         self.inter_policy_nccl = HighAvailabilitylNccl(
             replica_name=self.replica_name,
@@ -267,13 +278,19 @@ class SFTTrainer(Trainer):
             master_rank=0,
             shutdown_event=self.shutdown_signal,
         )
+        self.fetch_command_thread = threading.Thread(
+            target=self.fetch_command,
+            daemon=True,
+            name="fetch_command_thread",
+        )
+        self.fetch_command_thread.start()
 
         # Prepare wandb
         if "wandb" in config.logging.logger and is_wandb_available():
             init_wandb(config, parallel_dims)
         else:
             logger.warning(
-                "Wandb is not available. Please install it to use wandb logging features."
+                "[SFTTrainer] Wandb is not available. Please install it to use wandb logging features."
             )
 
         self.train_step = 0
@@ -295,7 +312,7 @@ class SFTTrainer(Trainer):
                 self.train_step = ckpt_extra_vars.get("step", 0)
             except Exception as e:
                 logger.error(
-                    f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
+                    f"[SFTTrainer] Cannot resume due to error: {e}. Trying to load from HuggingFace..."
                 )
                 self.model.load_hf_weights(
                     config.policy.model_name_or_path,
@@ -312,17 +329,26 @@ class SFTTrainer(Trainer):
             )
         self.model.train()
 
+        # TODO(zjx): remove this after dynamic scaling is supported
+        self.inter_policy_nccl.wait_comm_ready()
+
+        # because dp_replica_size = 1 means dynamic scaling mode. so we choose n_init_replicas as the replica world size
+        self.replica_world_size = self.config.policy.parallelism.n_init_replicas
+        self.replica_rank = self.inter_policy_nccl.get_replica_rank(self.replica_name)
+
         # Prepare dataset
+        # TODO(zjx): for FTDP, we shoud move dataset to controller side
         train_dataset, val_dataset = construct_dataset(
             config.train.train_policy,
             tokenizer=self.tokenizer,
             data_packer=self.data_packer,
             user_provided_dataset=self.sft_user_dataset,
         )
+        # TODO(zjx): for FTDP, we only support fixed replica number currently
         train_sampler = DistributedSampler(
             train_dataset,
-            num_replicas=self.dp_world_size,
-            rank=self.dp_rank,
+            num_replicas=self.dp_world_size * self.replica_world_size,
+            rank=self.dp_rank + self.dp_world_size * self.replica_rank,
             shuffle=config.train.train_policy.dataloader_shuffle,
             drop_last=False,
         )
@@ -349,7 +375,7 @@ class SFTTrainer(Trainer):
             data_loader_bias = self.train_step % total_steps_per_epoch
             data_loader_bias *= config.train.train_batch_per_replica
             logger.info(
-                f"Resuming training from step {self.train_step}/{ckpt_total_steps}"
+                f"[SFTTrainer] Resuming training from step {self.train_step}/{ckpt_total_steps}"
             )
             train_sampler = SkippingSampler(
                 train_sampler, skip_samples=data_loader_bias
@@ -358,8 +384,8 @@ class SFTTrainer(Trainer):
 
         val_sampler = DistributedSampler(
             val_dataset,
-            num_replicas=self.dp_world_size,
-            rank=self.dp_rank,
+            num_replicas=self.dp_world_size * self.replica_world_size,
+            rank=self.dp_rank + self.dp_world_size * self.replica_rank,
             shuffle=False,
             drop_last=False,
         )
@@ -420,8 +446,15 @@ class SFTTrainer(Trainer):
         Handle shutdown of the trainer.
         """
         self.inter_policy_nccl.shutdown()
-        self.kv_store.shutdown()
         self.shutdown_signal.set()
+
+        if self.fetch_command_thread is not None:
+            self.fetch_command_thread.join()
+            self.fetch_command_thread = None
+
+        # Another notice is that make sure the background threads detect the shutdown event in less than 15 seconds
+        # Otherwise, the main thread may exit before the background threads detect the shutdown event
+        time.sleep(15)
 
     def fetch_command(self):
         """
@@ -437,18 +470,25 @@ class SFTTrainer(Trainer):
                     )
                 except Exception as e:
                     logger.debug(
-                        f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+                        f"[SFTTrainer] Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
                     )
                 for x in commands:
                     command = Command.depack(x)
-                    assert isinstance(command, BuildMeshCommand)
-                    """ directly push the buildmesh command to the nccl comm, will not block main thread """
-                    # broadcast the buildmesh command to all ranks
-                    cmd = self.kv_store.broadcast_command(command, src=0)
-                    self.is_master_replica = (
-                        cmd.replica_name_to_rank[self.replica_name] == 0
-                    )
-                    self.inter_policy_nccl.push_cmd(cmd)
+                    if isinstance(command, BuildMeshCommand):
+                        """ directly push the buildmesh command to the nccl comm, will not block main thread """
+                        logger.info(
+                            "[SFTTrainer] Broadcast buildmesh command to all ranks"
+                        )
+                        # broadcast the buildmesh command to all ranks
+                        cmd = self.kv_store.broadcast_command(command, src=0)
+                        self.is_master_replica = (
+                            cmd.replica_name_to_rank[self.replica_name] == 0
+                        )
+                        self.inter_policy_nccl.push_cmd(cmd)
+                    else:
+                        logger.debug(
+                            f"[SFTTrainer] Fetch command drop command: {type(command)}"
+                        )
             else:
                 try:
                     bmcmd = self.kv_store.broadcast_command(None, src=0)
@@ -467,6 +507,15 @@ class SFTTrainer(Trainer):
         Sync weights between replicas. all replicas will get the same weights from replica 0.
         """
         is_send = self.inter_policy_nccl.get_replica_rank(self.replica_name) == 0
+        src_replica = self.replica_name
+        for (
+            replica_name,
+            replica_rank,
+        ) in self.inter_policy_nccl.replica_name_to_rank.items():
+            if replica_rank == 0:
+                src_replica = replica_name
+                break
+
         len_params = 0
         model_state_dict = [self.model.state_dict()]
 
@@ -475,18 +524,34 @@ class SFTTrainer(Trainer):
             for dest_name in sorted(state_to_sync.keys()):
                 obj = state_to_sync[dest_name]
                 assert isinstance(obj, torch.Tensor)
-                local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-                self.inter_policy_nccl.broadcast(
-                    local_view, src_replica=self.replica_name
+                local_view = wrap_to_cuda_tensor(
+                    dest_name, obj, current_device=self.device
                 )
+                self.inter_policy_nccl.broadcast(local_view, src_replica=src_replica)
+                if not is_send:
+                    if isinstance(obj, torch.distributed.tensor.DTensor):
+                        to_write = obj.to_local()
+                    else:
+                        to_write = obj
+
+                    # Copy again for offloaded tensor since it is not inplace received
+                    if not to_write.is_cuda:
+                        to_write.copy_(local_view)
                 len_params += 1
 
         # 2. Sync optimizer states
         optimizer_state = self.optimizers.state_dict()
         for dest_name in sorted(optimizer_state.keys()):
             obj = optimizer_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            self.inter_policy_nccl.broadcast(local_view, src_replica=self.replica_name)
+            local_view = wrap_to_cuda_tensor(dest_name, obj, current_device=self.device)
+            if local_view.data_ptr() is None:
+                # skip the optimizer state if the data pointer is None
+                continue
+            self.inter_policy_nccl.broadcast(local_view, src_replica=src_replica)
+            if not is_send:
+                optimizer_state[dest_name] = extract_from_cuda_tensor(
+                    dest_name, obj, local_view, current_device=self.device
+                )
             len_params += 1
         if not is_send:
             self.optimizers.load_state_dict(optimizer_state)
@@ -495,8 +560,12 @@ class SFTTrainer(Trainer):
         lr_sheduler_state = self.lr_schedulers.state_dict()
         for dest_name in sorted(lr_sheduler_state.keys()):
             obj = lr_sheduler_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            self.inter_policy_nccl.broadcast(local_view, src_replica=self.replica_name)
+            local_view = wrap_to_cuda_tensor(dest_name, obj, current_device=self.device)
+            self.inter_policy_nccl.broadcast(local_view, src_replica=src_replica)
+            if not is_send:
+                lr_sheduler_state[dest_name] = extract_from_cuda_tensor(
+                    dest_name, obj, local_view, current_device=self.device
+                )
             len_params += 1
         if not is_send:
             self.lr_schedulers.load_state_dict(lr_sheduler_state)
@@ -505,8 +574,12 @@ class SFTTrainer(Trainer):
         rng_state = self.ckpt_manager.get_rng_state()
         for dest_name in sorted(rng_state.keys()):
             obj = rng_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            self.inter_policy_nccl.broadcast(local_view, src_replica=self.replica_name)
+            local_view = wrap_to_cuda_tensor(dest_name, obj, current_device=self.device)
+            self.inter_policy_nccl.broadcast(local_view, src_replica=src_replica)
+            if not is_send:
+                rng_state[dest_name] = extract_from_cuda_tensor(
+                    dest_name, obj, local_view, current_device=self.device
+                )
             len_params += 1
         if not is_send:
             self.ckpt_manager.set_rng_state(rng_state)
@@ -546,7 +619,9 @@ class SFTTrainer(Trainer):
         return grad_norm
 
     def validate(self):
-        logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
+        logger.info(
+            f"[SFTTrainer] Validation at step {self.train_step}/{self.total_steps}..."
+        )
         self.model.eval()
         with torch.no_grad():
             val_total_loss = 0.0
@@ -644,7 +719,7 @@ class SFTTrainer(Trainer):
                     val_loss = self.loss_fn(val_logits, val_labels)
                 val_total_loss += val_loss.item() * val_inputs.size(0)
             val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
-            logger.info(f"Validation loss: {val_avg_loss}")
+            logger.info(f"[SFTTrainer] Validation loss: {val_avg_loss}")
         return val_avg_loss
 
     def train(self):
@@ -652,7 +727,7 @@ class SFTTrainer(Trainer):
         pp_last_stage = False
 
         for cur_epoch in range(self.start_epoch, self.epoch):
-            logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
+            logger.info(f"[SFTTrainer] Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:
                 acc_loss = torch.zeros(1, device=self.device)
                 self.optimizers.zero_grad()
@@ -930,7 +1005,7 @@ class SFTTrainer(Trainer):
                     # TODO(dinghaoy): support export safetensors asynchronously.
                     if self.config.train.ckpt.export_safetensors:
                         logger.info(
-                            f"Saving huggingface checkpoint at step {self.train_step} to {self.config.train.output_dir}..."
+                            f"[SFTTrainer] Saving huggingface checkpoint at step {self.train_step} to {self.config.train.output_dir}..."
                         )
                         self.export_safetensors(
                             output_dir=self.config.train.output_dir,
@@ -942,7 +1017,7 @@ class SFTTrainer(Trainer):
                             dtype=util.str2torch_dtype(self.config.train.param_dtype),
                         )
                     logger.info(
-                        f"Saving cosmos checkpoint at step {self.train_step}..."
+                        f"[SFTTrainer] Saving cosmos checkpoint at step {self.train_step}..."
                     )
                     self.ckpt_manager.save_checkpoint(
                         model=self.model,
@@ -970,7 +1045,7 @@ class SFTTrainer(Trainer):
             val_score = self.validate()
         if self.config.train.ckpt.export_safetensors:
             logger.info(
-                f"Saving final huggingface checkpoint to {self.config.train.output_dir}..."
+                f"[SFTTrainer] Saving final huggingface checkpoint to {self.config.train.output_dir}..."
             )
             self.export_safetensors(
                 output_dir=self.config.train.output_dir,
@@ -984,7 +1059,7 @@ class SFTTrainer(Trainer):
             )
         if self.config.train.ckpt.enable_checkpoint:
             logger.info(
-                f"Training finished at step {self.train_step}/{self.total_steps}, saving final cosmos checkpoint..."
+                f"[SFTTrainer] Training finished at step {self.train_step}/{self.total_steps}, saving final cosmos checkpoint..."
             )
             self.ckpt_manager.save_checkpoint(
                 model=self.model,

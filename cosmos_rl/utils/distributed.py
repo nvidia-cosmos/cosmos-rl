@@ -35,12 +35,20 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, distribute_module, Placement
 from torch.distributed.tensor.parallel import ParallelStyle
+import numpy as np
+import msgpack
 
 # Local imports
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils import constant, network_util
-from cosmos_rl.utils.util import list_to_b64, b64_to_list
+from cosmos_rl.utils.util import (
+    list_to_b64,
+    b64_to_list,
+    fix_data_type_size,
+    msgpack_c_long,
+    msgunpack_c_long,
+)
 from cosmos_rl.dispatcher.command import Command, BuildMeshCommand
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_META_SUFFIX,
@@ -403,6 +411,79 @@ def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
     obj_lst = [None for i in range(world_size)]
     dist.all_gather_object(obj_lst, obj, group=group)
     return obj_lst
+
+
+def wrap_to_cuda_tensor(key, obj, current_device: torch.device, in_place=False):
+    """
+    wrap the object to cuda tensor for sync parameters using nccl.
+    """
+    if isinstance(obj, torch.Tensor):
+        if isinstance(obj, torch.distributed.tensor.DTensor):
+            obj = obj.to_local()
+
+        if obj.device != current_device:
+            if in_place:
+                raise ValueError(
+                    f"Object {key} is not on the same device as the model. Please set in_place to False."
+                )
+            obj = obj.to(current_device)
+        return obj
+    elif isinstance(obj, np.ndarray):
+        if in_place:
+            raise ValueError(
+                f"Object {key} is not a tensor. Please set in_place to False."
+            )
+        obj = torch.from_numpy(obj).to(current_device)
+        return obj
+    else:
+        if in_place:
+            raise ValueError(
+                f"Object {key} is not a tensor. Please set in_place to False."
+            )
+        if isinstance(obj, tuple):
+            obj = tuple([x.tolist() if isinstance(x, np.ndarray) else x for x in obj])
+            obj = fix_data_type_size(obj)
+        bytes = msgpack.packb(obj, default=msgpack_c_long)
+        obj = torch.frombuffer(bytes, dtype=torch.uint8).to(current_device)
+        return obj
+
+
+def extract_from_cuda_tensor(key, obj, tensor, current_device: torch.device):
+    """
+    Extract the object from cuda tensor for sync parameters using nccl.
+    """
+    if isinstance(obj, torch.distributed.tensor.DTensor):
+        assert (
+            obj.device == current_device
+        ), "DTensor is not on the same device as the model."
+    elif isinstance(obj, torch.Tensor):
+        if obj.device != current_device:
+            obj.copy_(tensor)
+    elif isinstance(obj, np.ndarray):
+        if obj.shape != tensor.shape:
+            raise ValueError(
+                f"Object {key} is not the same shape as the tensor. Please check the data consistency."
+            )
+        x = tensor.cpu()
+        obj.copy_(x.numpy())
+    else:
+        np_arr = tensor.cpu()
+        obj_new = msgpack.unpackb(bytes(np_arr.numpy()), ext_hook=msgunpack_c_long)
+        if isinstance(obj, tuple):
+            assert len(obj) == len(obj_new)
+            obj = tuple(
+                [
+                    np.array(obj_new[idx])
+                    if isinstance(x, np.ndarray)
+                    else tuple(obj_new[idx])
+                    if isinstance(x, tuple)
+                    else obj_new[idx]
+                    for idx, x in enumerate(obj)
+                ]
+            )
+        else:
+            obj = obj_new
+    return obj
 
 
 class HighAvailabilitylNccl:
