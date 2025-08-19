@@ -258,7 +258,13 @@ class SFTDataset(Dataset):
 
 
 class SFTTrainer(Trainer):
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
+    def __init__(
+        self,
+        config: CosmosConfig,
+        parallel_dims: ParallelDims,
+        dataset: Optional[Dataset] = None,
+        data_packer: Optional[DataPacker] = None,
+    ):
         super(SFTTrainer, self).__init__(config, parallel_dims)
 
         # Enlarge the compile cache size for validation
@@ -318,8 +324,8 @@ class SFTTrainer(Trainer):
         train_dataset, val_dataset = construct_dataset(
             config.train.train_policy,
             tokenizer=self.tokenizer,
-            data_packer=self.data_packer,
-            user_provided_dataset=self.sft_user_dataset,
+            data_packer=data_packer,
+            user_provided_dataset=dataset,
         )
         train_sampler = DistributedSampler(
             train_dataset,
