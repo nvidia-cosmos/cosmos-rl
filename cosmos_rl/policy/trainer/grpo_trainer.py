@@ -773,7 +773,6 @@ class GRPOTrainer(Trainer):
                 grouped_send_ops = []
                 num_groups = 0
 
-                TRANSFER_GROUP_SIZE = 4
                 for insts_group in self.policy_to_rollout_insts:
                     for insts_for_per_param in insts_group.param_instructions:
                         dest_name = insts_for_per_param.param_name
@@ -807,7 +806,7 @@ class GRPOTrainer(Trainer):
                             grouped_send_ops.append((view, r_rank))
                             total_bytes_sent += view.numel() * view.element_size()
                     num_groups += 1
-                    if num_groups == TRANSFER_GROUP_SIZE:
+                    if num_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
                         grouped_send(grouped_send_ops)
                         num_groups = 0
 

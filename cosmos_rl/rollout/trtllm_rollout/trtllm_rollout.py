@@ -21,15 +21,12 @@ import tensorrt_llm
 
 trtllm_version = tensorrt_llm.__version__
 
-if trtllm_version == "0.20.0":
-    from tensorrt_llm._torch import LLM
-elif trtllm_version == "1.0.0rc6":
+if trtllm_version == "1.0.0rc6":
     from tensorrt_llm import LLM
 else:
     raise NotImplementedError(f"Unsupported trtllm version: {trtllm_version}")
 
 from tensorrt_llm import SamplingParams
-from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 from tensorrt_llm.llmapi.llm_args import KvCacheConfig
 
 from cosmos_rl.rollout.rollout_base import RolloutBase
@@ -94,12 +91,7 @@ class TRTLLM_Rollout(RolloutBase):
             moe_tensor_parallel_size = tp_size
 
         kwargs = {}
-        if trtllm_version == "0.20.0":
-            kwargs["pytorch_backend_config"] = PyTorchConfig(
-                disable_overlap_scheduler=True
-            )
-        elif trtllm_version == "1.0.0rc6":
-            kwargs["disable_overlap_scheduler"] = True
+        kwargs["disable_overlap_scheduler"] = True
         policy_config = self.config.policy
         # Check the prefix_caching like arguments default enabled?
         kv_cache_config = KvCacheConfig(

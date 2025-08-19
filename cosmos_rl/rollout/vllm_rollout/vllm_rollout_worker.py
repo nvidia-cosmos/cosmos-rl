@@ -688,7 +688,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             nccl_group_start(communicator_index)
 
-            TRANSFER_GROUP_SIZE = 4
             for insts_group in self.policy_to_rollout_recv_insts:
                 # insts_group: WeightSyncInstructionsGroup -> inst collection for a full weight tensor
                 # handle inst group
@@ -703,7 +702,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 total_bytes_received += bytes_received
 
                 pending_groups += 1
-                if pending_groups == TRANSFER_GROUP_SIZE:
+                if pending_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
                     nccl_group_end(communicator_index)
                     flush_completions(pending_bytes, pending_completions)
                     nccl_group_start(communicator_index)
