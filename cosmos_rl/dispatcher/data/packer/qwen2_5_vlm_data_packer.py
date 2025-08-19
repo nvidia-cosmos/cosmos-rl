@@ -565,9 +565,9 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
-        assert all(
-            isinstance(x, dict) and "role" in x and "content" in x for x in sample
-        ), "All samples should be in conversation format, but got: {}".format(sample)
+        # assert all(
+        #     isinstance(x, dict) and "role" in x and "content" in x for x in sample
+        # ), "All samples should be in conversation format, but got: {}".format(sample)
 
         x = self._process_single_sample(
             sample, add_generation_prompt=add_generation_prompt

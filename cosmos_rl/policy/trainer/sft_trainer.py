@@ -40,7 +40,7 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
@@ -143,17 +143,6 @@ def construct_dataset(
         train_dataset = concatenate_datasets(dataset_list)
     logger.info(f"Final dataset size = {len(train_dataset)}")
 
-    # try:
-    #     if dataset is not None:
-    #         dataset_list = []
-    #         for split_name in config.dataset.split:
-    #             dataset_list.append(dataset[split_name])
-    #         test_dataset = concatenate_datasets(dataset_list)
-    #         if len(test_dataset) == 0:
-    #             raise ValueError("Test dataset is empty")
-    #     else:
-    #         raise ValueError("Test dataset is empty")
-    # except Exception:
     if isinstance(train_dataset, torch.utils.data.Dataset):
         # Define the split ratio (e.g., 80% train, 20% test)
         if config.dataset.test_size is None:
@@ -319,6 +308,13 @@ class SFTTrainer(Trainer):
                 revision=config.policy.model_revision,
             )
         self.model.train()
+
+        if isinstance(dataset, Callable):
+            # Incase it is a factory function, we need to call it to get the dataset
+            dataset = dataset(self.config)
+            dataset.setup(self.config, self.tokenizer)
+        if data_packer:
+            data_packer.setup(self.config, self.tokenizer)
 
         # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
@@ -843,6 +839,9 @@ class SFTTrainer(Trainer):
                 if (
                     self.config.train.enable_validation
                     and self.train_step % self.config.train.validation_step == 0
+                    and self.parallel_dims.dp_replicate_coord[0] == 0
+                    # TODO(jiaxinc):
+                    # Add filter for FTDP where dp_rank == 0
                 ):
                     val_score = self.validate()
 
