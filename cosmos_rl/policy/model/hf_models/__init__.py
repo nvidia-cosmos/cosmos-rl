@@ -60,13 +60,19 @@ class HFModel(BaseModel):
         self.model_class = model_class
         self.is_vlm = is_vlm
         if getattr(model, "_checkpoint_conversion_mapping", None):
-            # reverse the hf checkpoint conversion mapping to aligh with the vllm weights' name
-            self.weight_mapper.reverse_hf_conversion_mapping = (
-                reverse_hf_checkpoint_mapping(model._checkpoint_conversion_mapping)
-            )
-            logger.info(
-                f"reverse_hf_conversion_mapping={self.weight_mapper.reverse_hf_conversion_mapping}"
-            )
+            if hf_config.model_type in ["R"]:
+                logger.warning(
+                    f"{hf_config.model_type}'s checkpoint_conversion_mapping do not take effect, "
+                    "skip reverse_hf_conversion_mapping"
+                )
+            else:
+                # reverse the hf checkpoint conversion mapping to aligh with the vllm weights' name
+                self.weight_mapper.reverse_hf_conversion_mapping = (
+                    reverse_hf_checkpoint_mapping(model._checkpoint_conversion_mapping)
+                )
+                logger.info(
+                    f"reverse_hf_conversion_mapping={self.weight_mapper.reverse_hf_conversion_mapping}"
+                )
 
     @cached_property
     def model_forward_valid_kwargs(self):
