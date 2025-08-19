@@ -418,6 +418,11 @@ class SFTTrainer(Trainer):
         )
 
     def validate(self):
+        if not self.config.train.enable_validation:
+            return
+        if self.parallel_dims.dp_replicate_coord[0] != 0:
+            return
+
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
         self.model.eval()
         with torch.no_grad():
@@ -692,7 +697,7 @@ class SFTTrainer(Trainer):
                             else torch.tensor([-1.0], device=self.device)
                         )
                     else:
-                        # # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
+                        # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
                         # last_token_ids = []
                         # with torch.no_grad():
                         #     N_NEW_TOKENS = 100
@@ -711,13 +716,15 @@ class SFTTrainer(Trainer):
                         #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
                         #         last_token_ids.append(token_ids)
                         #     if self.global_rank == 0:
-                        #         for i in range(len(last_token_ids)):
-                        #             print(
-                        #                 f"generated tokens at sample {i}: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[i])}"
-                        #             )
-
-                        #     return
-                        # #########################################################################################
+                        #         text = ''
+                        #         new_last_token_ids = torch.cat(last_token_ids, dim=-1).squeeze(0)
+                        #         logger.info(f'{new_last_token_ids=}')
+                        #         text = self.tokenizer.decode(new_last_token_ids)
+                        #         logger.info(
+                        #             f"generated tokens at sample : {text}"
+                        #         )
+                        # return
+                        #########################################################################################
 
                         logits = self.model(**batch)
 
@@ -836,13 +843,7 @@ class SFTTrainer(Trainer):
 
                 val_score = None
                 # validation
-                if (
-                    self.config.train.enable_validation
-                    and self.train_step % self.config.train.validation_step == 0
-                    and self.parallel_dims.dp_replicate_coord[0] == 0
-                    # TODO(jiaxinc):
-                    # Add filter for FTDP where dp_rank == 0
-                ):
+                if self.train_step % self.config.train.validation_step == 0:
                     val_score = self.validate()
 
                 # save checkpoint
@@ -850,6 +851,7 @@ class SFTTrainer(Trainer):
                     self.config.train.ckpt.enable_checkpoint
                     and self.train_step % self.config.train.ckpt.save_freq == 0
                     and self.train_step > 0
+                    and self.parallel_dims.dp_replicate_coord[0] == 0
                 ):
                     # TODO(dinghaoy): support export safetensors asynchronously.
                     if self.config.train.ckpt.export_safetensors:
@@ -890,9 +892,11 @@ class SFTTrainer(Trainer):
                 break  # break outer epoch loop
 
         # process the final step
-        if self.config.train.enable_validation:
-            val_score = self.validate()
-        if self.config.train.ckpt.export_safetensors:
+        val_score = self.validate()
+        if (
+            self.config.train.ckpt.export_safetensors
+            and self.parallel_dims.dp_replicate_coord[0] == 0
+        ):
             logger.info(
                 f"Saving final huggingface checkpoint to {self.config.train.output_dir}..."
             )

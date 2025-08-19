@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import torch
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
@@ -165,10 +166,12 @@ class R4BDataPacker(DataPacker):
                 for message in messages:
                     if message["role"] == "assistant":
                         content = message["content"]
-                        new_content = content.copy()
+                        new_content = copy.deepcopy(content)
                         if isinstance(new_content, str):
                             assistant_content.append(new_content)
-                            new_content = pad_token * pad_run_length
+                            new_content = [
+                                {"text": pad_token * pad_run_length, "type": "text"}
+                            ]
                         elif isinstance(new_content, dict):
                             assert (
                                 "text" in new_content
