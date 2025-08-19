@@ -275,7 +275,7 @@ class R4BDataPacker(DataPacker):
             image_sizes = None
 
         if all([x is not None for x in batch_num_images]):
-            batch_num_images = torch.stack(batch_num_images)
+            batch_num_images = torch.cat(batch_num_images)
         else:
             assert all(
                 [x is None for x in batch_num_images]
