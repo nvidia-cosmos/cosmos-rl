@@ -865,7 +865,7 @@ class ParallelTopoMapper:
                     return None
             else:
                 logger.warning(
-                    f"Class {part.__class__.__name__} is not supported by auto parallelism, treat it as non-parallel Lyaer. If issues happened, please contact the maintainer."
+                    f"Class {part.__class__.__name__} is not supported by auto parallelism, treat it as non-parallel Layer. If issues happened, please contact the maintainer."
                 )
                 return None
         else:
