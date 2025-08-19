@@ -70,7 +70,11 @@ class BaseModel(torch.nn.Module, ABC):
             local_view = v.to_local() if is_dist_tensor else v
             # We must pass the requires_grad attribute
             # Should pay attention to passing the requires_grad attribute when adding custom transform functions.
-            local_view.requires_grad = v.requires_grad
+            if local_view.requires_grad != v.requires_grad:
+                local_view.requires_grad = v.requires_grad
+            assert (
+                local_view.requires_grad == v.requires_grad
+            ), f"Mismatch in requires_grad attribute for {k}"
             transforms[
                 self.weight_mapper.policy_map_local_key_to_hf_key(
                     util.clear_weight_name(k)

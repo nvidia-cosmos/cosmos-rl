@@ -161,6 +161,7 @@ class TestPolicy:
             self.model,
             self.model.weight_mapper,
         )
+        self.trainable_params = set(self.model.sharded_tensors.keys())
         self.replica_name = name
         self.rollouts_comm = rollouts_comm
         self.policy_to_rollout_insts = None
@@ -176,6 +177,9 @@ class TestPolicy:
 
     def pre_P2R_collect_parameters(self):
         return {}
+
+    def prepare_trainable_params(self):
+        pass
 
 
 class TestRollout:
@@ -212,9 +216,10 @@ class TestRollout:
         self.ref_compatibale_map = compatibale_map
         self.quantization_type = None
         self.config = CosmosConfig()
+        self.trainable_params = set(compatibale_map.keys())
 
         self.vllm_weight_inplace_view_map = compatibale_map
-        self.recv_key_n_rank_list = compatibale_list
+        self.recv_param_key_n_rank_list = compatibale_list
         self.vllm_quantized_weight_map = {}
         self.vllm_hp_weight_map = {}
 
@@ -239,6 +244,9 @@ class TestRollout:
         return None
 
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
+        pass
+
+    def prepare_trainable_params(self):
         pass
 
 
@@ -326,6 +334,7 @@ async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank:
         "shard_infos": local_shards_p,
         "param_groups": [],
         "sorted_params": p_params,
+        "trainable_params": [x[0] for x in model.sorted_hf_key_n_rank],
     }
     p_data = msgpack.packb(p_body)
     r_body = {
@@ -359,7 +368,11 @@ async def run_policy_send_to_rollout(shm_name, shm_size, rank):
     shm = shared_memory.SharedMemory(name=shm_name)
 
     command = PolicyToRolloutUnicastCommand(
-        policy_name, rollout_name, POLICY_WORLD_SIZE, ROLLOUT_WORLD_SIZE, ""
+        policy_name,
+        rollout_name,
+        POLICY_WORLD_SIZE,
+        ROLLOUT_WORLD_SIZE,
+        trainable_only=True,
     )
 
     try:
@@ -410,7 +423,11 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
     shm = shared_memory.SharedMemory(name=shm_name)
 
     command = PolicyToRolloutUnicastCommand(
-        policy_name, rollout_name, POLICY_WORLD_SIZE, ROLLOUT_WORLD_SIZE, ""
+        policy_name,
+        rollout_name,
+        POLICY_WORLD_SIZE,
+        ROLLOUT_WORLD_SIZE,
+        trainable_only=True,
     )
     try:
         # Get NCCL UID from shared memory
@@ -1097,6 +1114,7 @@ async def parallel_map_check():
         "shard_infos": local_shards_p,
         "param_groups": [],
         "sorted_params": p_params,
+        "trainable_params": [x[0] for x in layers],
     }
     p_data = msgpack.packb(p_body)
     r_body = {
