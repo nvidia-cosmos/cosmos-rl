@@ -120,7 +120,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
         super(vLLMRolloutWorker, self).__init__(config, parallel_dims)
-        self.backend = "vllm"
 
         self.state = State()
 

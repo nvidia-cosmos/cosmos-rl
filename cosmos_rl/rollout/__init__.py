@@ -67,10 +67,13 @@ class RolloutWorkerBase(CommMixin):
         self.global_rank = int(os.environ.get("RANK", 0))  # rank in replica
         self.world_size = int(os.environ.get("WORLD_SIZE", 1))
         self.device = torch.device(f"cuda:{self.local_rank}")
+        torch.cuda.set_device(self.device)
+
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
             self.config.policy.model_name_or_path
         )
-        torch.cuda.set_device(self.device)
+
+        self.backend = "vllm"
 
         # Initialize the communication to controller.
         self.init_comm()

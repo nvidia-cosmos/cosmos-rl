@@ -135,7 +135,6 @@ if [ "$BACKEND" == "vllm" ]; then
     LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
   fi
 elif [ "$BACKEND" == "trtllm" ]; then
-  export COSMO_USING_TRTLLM=1
   COSMOS_WORLD_SIZE=$((NNODES * NGPU))
   export COSMOS_WORLD_SIZE
   COSMOS_LOCAL_WORLD_SIZE=$((NGPU))

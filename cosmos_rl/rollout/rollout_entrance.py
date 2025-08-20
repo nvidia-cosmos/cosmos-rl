@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import sys
-import os
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as RolloutConfig
@@ -24,14 +23,6 @@ from cosmos_rl.utils.distributed import (
     get_controller_metadata,
 )
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker import vLLMRolloutWorker
-
-try:
-    from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (
-        TRTLLMRolloutWrapper,
-    )
-except ImportError as e:
-    logger.error(f"[Rollout] TRTLLMRolloutWrapper importing failed! {e}")
-    TRTLLMRolloutWrapper = None
 
 
 def run_rollout(*args, **kwargs):
@@ -68,13 +59,14 @@ def run_rollout(*args, **kwargs):
             rollout_worker = vLLMRolloutWorker(cosmos_rollout_config, parallel_dims)
 
         elif rollout_backend == "trtllm":
-            assert (
-                "COSMO_USING_TRTLLM" in os.environ
-            ), "[Rollout] COSMO_USING_TRTLLM is not set when using trtllm as the rollout backend."
+            try:
+                from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (
+                    TRTLLMRolloutWrapper,
+                )
+            except ImportError as e:
+                logger.error(f"[Rollout] TRTLLMRolloutWrapper importing failed! {e}")
+                raise e
             # if backend is trtllm, we leave distribution initialization to trtllm executor.
-            assert (
-                TRTLLMRolloutWrapper is not None
-            ), "[Rollout] TRTLLMRolloutWrapper importing failed!"
             rollout_worker = TRTLLMRolloutWrapper(cosmos_rollout_config)
         else:
             raise ValueError(f"Invalid rollout backend: {rollout_backend}")

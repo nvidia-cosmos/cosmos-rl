@@ -19,7 +19,7 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 import vllm
 import torch
 from typing import List, Tuple, Any, Optional
-from transformers import AutoConfig
+from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
 from vllm import SamplingParams
@@ -30,7 +30,6 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.model import WeightMapper
-from transformers import AutoTokenizer
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
