@@ -531,3 +531,48 @@ def patch_worker_main():
 
 
 patch_worker_main()
+
+
+# patch the ExecutorRequestQueue
+import datetime
+import queue
+from typing import List
+from tensorrt_llm._torch.pyexecutor.executor_request_queue import (
+    ExecutorRequestQueue,
+    RequestQueueItem,
+)
+
+
+def cosmos_get_from_request_queue(
+    self, timeout: Optional[datetime.timedelta]
+) -> List[RequestQueueItem]:
+    items = []
+    timeout_secs = timeout.total_seconds() if timeout is not None else None
+    try:
+        if self.request_queue.empty() and (timeout_secs is None or timeout_secs > 0):
+            # if queue is empty and want to wait, wait
+            # items.append(self.request_queue.get(timeout=timeout_secs))
+
+            #### Cosmos-RL modification start.
+
+            # Note: self.request_queue.get will block the thread.
+            # We do not want it to block the thread.
+            request = self.request_queue.get(False)
+            items.append(request)
+
+            #### Cosmos-RL modification end.
+        else:
+            # if not empty or don't want to wait, just return all items in queue
+            while True:
+                queue_item = self.request_queue.get_nowait()
+                items.append(queue_item)
+    except queue.Empty:
+        pass
+    return items
+
+
+def patch_executor_request_queue():
+    ExecutorRequestQueue._get_from_request_queue = cosmos_get_from_request_queue
+
+
+patch_executor_request_queue()

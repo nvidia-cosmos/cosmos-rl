@@ -221,174 +221,176 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             self.replica_name = (
                 replica_name  # retrieve the replica name from trtllm worker.
             )
+            # Mock the result of `register_to_controller`
+            self._is_registered = True
             break
 
         while not self.shutdown_signal.is_set():
+            # 1. check if we have to do validation first
+            if self.validation_event.is_set():
+                # validation
+                validation_queue = Queue()
+                validation_results = []
+                prompt_idxs: List[int] = []
+                payloads: List[Any] = []
+                while True:
+                    is_end = self.request_new_prompts(
+                        self.val_batch_size,
+                        validation_queue,
+                        validation_step=self.validation_step,
+                    )
+
+                    if not validation_queue.empty():
+                        prompts = validation_queue.get()
+                        completions: List[List[str]] = self.rollout.rollout_generation(
+                            prompt_id_and_payload_list=prompts,
+                            data_packer=self.val_data_packer,
+                            sampling_params=self.val_sampling_params,
+                        )
+                        if completions:
+                            prompt_idxs.extend([prompt[0] for prompt in prompts])
+                            payloads.extend([prompt[1] for prompt in prompts])
+                            validation_results.extend(completions)
+
+                    if is_end:
+                        break
+
+                    response = ValidationReportRequest(
+                        src_replica_name=self.replica_name,
+                        validation_step=self.validation_step,
+                        prompt_idxs=prompt_idxs,
+                        payloads=payloads,
+                        completions=validation_results,
+                        is_end=True,
+                    )
+                    try:
+                        make_request_with_retry(
+                            partial(
+                                requests.post,
+                                json=response.model_dump(),
+                            ),
+                            self.get_alternative_urls(
+                                COSMOS_API_VALIDATION_REPORT_SUFFIX
+                            ),
+                            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
+                        )
+
+                self.validation_event.clear()
+            # 2. Rollout Generation
             if not self.state.prompt_fetch_end():
-                if self.validation_event.is_set():
-                    # validation
-                    validation_queue = Queue()
-                    validation_results = []
-                    prompt_idxs: List[int] = []
-                    payloads: List[Any] = []
-                    while True:
-                        is_end = self.request_new_prompts(
-                            self.val_batch_size,
-                            validation_queue,
-                            validation_step=self.validation_step,
-                        )
-
-                        if not validation_queue.empty():
-                            prompts = validation_queue.get()
-                            completions: List[List[str]] = (
-                                self.rollout.rollout_generation(
-                                    prompt_id_and_payload_list=prompts,
-                                    data_packer=self.val_data_packer,
-                                    sampling_params=self.val_sampling_params,
-                                )
-                            )
-                            if completions:
-                                prompt_idxs.extend([prompt[0] for prompt in prompts])
-                                payloads.extend([prompt[1] for prompt in prompts])
-                                validation_results.extend(completions)
-
-                        if is_end:
-                            break
-
-                        response = ValidationReportRequest(
-                            src_replica_name=self.replica_name,
-                            validation_step=self.validation_step,
-                            prompt_idxs=prompt_idxs,
-                            payloads=payloads,
-                            completions=validation_results,
-                            is_end=True,
-                        )
-                        try:
-                            make_request_with_retry(
-                                partial(
-                                    requests.post,
-                                    json=response.model_dump(),
-                                ),
-                                self.get_alternative_urls(
-                                    COSMOS_API_VALIDATION_REPORT_SUFFIX
-                                ),
-                                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
-                            )
-
-                    self.validation_event.clear()
-                else:
-                    # Rollout Generation
-                    no_more_prompts = self.request_new_prompts(
-                        self.batch_size, self._prompt_queue
+                # query new prompts
+                no_more_prompts = self.request_new_prompts(
+                    self.batch_size, self._prompt_queue
+                )
+                if no_more_prompts:
+                    logger.info(
+                        f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation: {self._prompt_queue.qsize()}."
                     )
-                    if no_more_prompts:
-                        logger.info(
-                            f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation: {self._prompt_queue.qsize()}."
-                        )
-                        self.state.set_prompt_fetch_end()
-                        # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
-                        if self._prompt_queue.empty():
-                            self.state.set_prompt_consume_end()
-                            self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
-
-                    if self.state.prompt_consume_end():
-                        assert (
-                            self._prompt_queue.empty() and self.state.prompt_fetch_end()
-                        ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
-                        continue
-                    elif self._prompt_queue.empty():
-                        continue
-                    else:
-                        prompts: List[Tuple[int, str]] = self._prompt_queue.get()
-                        logger.debug(f"[Rollout] generate start for prompts: {prompts}")
-
-                    completions: List[List[str]] = self.rollout.rollout_generation(
-                        prompt_id_and_payload_list=prompts,
-                        data_packer=self.data_packer,
-                        sampling_params=self.sampling_params,
-                    )
-
-                    logger.debug(
-                        f"[Rollout] completions[-1][-1] of {len(completions[-1])} completions from trtllm: {completions[-1][-1]}"
-                    )
-
-                    # Remove empty completions
-                    valid_completions: List[List[str]] = []
-                    prompt_indices_to_remove: List[int] = []
-                    if len(completions):
-                        batch_size = len(prompts)
-                        for i in range(batch_size):
-                            completion = completions[i]
-                            skip_output = False
-                            total_generation_count = len(completion)
-                            empty_generation_count = 0
-                            output_texts = []
-                            for j in range(total_generation_count):
-                                output_text = completion[j]
-                                if output_text == "":
-                                    logger.warning(
-                                        f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
-                                    )
-                                    empty_generation_count += 1
-                                else:
-                                    output_texts.append(output_text)
-                            # Skip the output if there is one or zero non-empty completions
-                            skip_output = (
-                                total_generation_count - empty_generation_count
-                            ) <= 1
-                            if not skip_output:
-                                valid_completions.append(output_texts)
-                            else:
-                                prompt_indices_to_remove.append(i)
-                    if len(prompt_indices_to_remove):
-                        prompts = [
-                            prompt
-                            for i, prompt in enumerate(prompts)
-                            if i not in prompt_indices_to_remove
-                        ]
-                        assert (
-                            len(prompts) == len(valid_completions)
-                        ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
-
-                    logger.debug("[Rollout] generate end!")
-
-                    should_report = len(valid_completions) > 0
-
-                    if should_report:
-                        url_suffix = COSMOS_API_ROLLOUT_SUFFIX
-                        # only the first tp rank in the rollout replica will post the completion to the controller.
-                        prompt_idxs = [prompt[0] for prompt in prompts]
-                        payloads = [prompt[1] for prompt in prompts]
-
-                        response = RolloutRequest(
-                            src_replica_name=self.replica_name,
-                            prompt_idxs=prompt_idxs,
-                            payloads=payloads,
-                            completions=valid_completions,
-                            is_end=False,
-                        )
-                        try:
-                            make_request_with_retry(
-                                partial(
-                                    requests.post,
-                                    json=response.model_dump(),
-                                ),
-                                self.get_alternative_urls(url_suffix),
-                                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
-                            )
-
-                    if self.state.prompt_fetch_end() and self._prompt_queue.empty():
+                    self.state.set_prompt_fetch_end()
+                    # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
+                    if self._prompt_queue.empty():
                         self.state.set_prompt_consume_end()
-                        if self.global_rank == 0:
-                            self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
+                        self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
+
+            if self.state.prompt_consume_end():
+                assert (
+                    self._prompt_queue.empty() and self.state.prompt_fetch_end()
+                ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
+                continue
+            elif self._prompt_queue.empty():
+                continue
+            else:
+                logger.debug(f"[Rollout] Rollout Generation for {self.replica_name}")
+                prompts: List[Tuple[int, str]] = self._prompt_queue.get()
+                logger.debug(f"[Rollout] generate start for prompts: {prompts}")
+
+                completions: List[List[str]] = self.rollout.rollout_generation(
+                    prompt_id_and_payload_list=prompts,
+                    data_packer=self.data_packer,
+                    sampling_params=self.sampling_params,
+                )
+
+                logger.debug(
+                    f"[Rollout] completions[-1][-1] of {len(completions[-1])} completions from trtllm: {completions[-1][-1]}"
+                )
+
+                # Remove empty completions
+                valid_completions: List[List[str]] = []
+                prompt_indices_to_remove: List[int] = []
+                if len(completions):
+                    batch_size = len(prompts)
+                    for i in range(batch_size):
+                        completion = completions[i]
+                        skip_output = False
+                        total_generation_count = len(completion)
+                        empty_generation_count = 0
+                        output_texts = []
+                        for j in range(total_generation_count):
+                            output_text = completion[j]
+                            if output_text == "":
+                                logger.warning(
+                                    f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                                )
+                                empty_generation_count += 1
+                            else:
+                                output_texts.append(output_text)
+                        # Skip the output if there is one or zero non-empty completions
+                        skip_output = (
+                            total_generation_count - empty_generation_count
+                        ) <= 1
+                        if not skip_output:
+                            valid_completions.append(output_texts)
+                        else:
+                            prompt_indices_to_remove.append(i)
+                if len(prompt_indices_to_remove):
+                    prompts = [
+                        prompt
+                        for i, prompt in enumerate(prompts)
+                        if i not in prompt_indices_to_remove
+                    ]
+                    assert (
+                        len(prompts) == len(valid_completions)
+                    ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+
+                logger.debug("[Rollout] generate end!")
+
+                should_report = len(valid_completions) > 0
+
+                if should_report:
+                    url_suffix = COSMOS_API_ROLLOUT_SUFFIX
+                    # only the first tp rank in the rollout replica will post the completion to the controller.
+                    prompt_idxs = [prompt[0] for prompt in prompts]
+                    payloads = [prompt[1] for prompt in prompts]
+
+                    response = RolloutRequest(
+                        src_replica_name=self.replica_name,
+                        prompt_idxs=prompt_idxs,
+                        payloads=payloads,
+                        completions=valid_completions,
+                        is_end=False,
+                    )
+                    try:
+                        make_request_with_retry(
+                            partial(
+                                requests.post,
+                                json=response.model_dump(),
+                            ),
+                            self.get_alternative_urls(url_suffix),
+                            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
+                        )
+
+                if self.state.prompt_fetch_end() and self._prompt_queue.empty():
+                    self.state.set_prompt_consume_end()
+                    self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
+
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
     def life_control_loop(self):
@@ -425,5 +427,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             if not self.shutdown_signal.is_set():
                 self.shutdown_signal.set()
             if self.life_control_thread is not None:
-                self.life_control_thread.join()
-                self.life_control_thread = None
+                # Don't wait for life_control_thread to finish
+                # self.life_control_thread.join()
+                # self.life_control_thread = None
+                pass
+
+            self.unregister_from_controller()
