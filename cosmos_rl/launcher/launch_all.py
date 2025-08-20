@@ -507,7 +507,7 @@ def replica_placement(
                     ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
                 )
                 commands.append(
-                    f"{replica_script} --type policy --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --config {config_path}"
+                    f"{replica_script} --type policy --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
                 )
                 if script is not None:
                     commands[-1] += f" --script {script}"
@@ -559,7 +559,7 @@ def replica_placement(
                 )
             )
             commands.append(
-                f"{replica_script} --type policy --ngpus {min_n_gpus_policy} --config {config_path}"
+                f"{replica_script} --type policy --ngpus {min_n_gpus_policy} --backend {backend} --config {config_path}"
             )
             if script is not None:
                 commands[-1] += f" --script {script}"

@@ -92,7 +92,14 @@ fi
 
 # NCCL related
 set_env "NCCL_CUMEM_ENABLE" "1"
-set_env "NCCL_RUNTIME_CONNECT" "0"
+
+if [ "$BACKEND" == "trtllm" ]; then
+  # BACKEND won't have affect on policy.
+  # But we still need user speicify rollout backend when launch policy.
+  # to set this variable.
+  set_env "NCCL_RUNTIME_CONNECT" "0"
+fi
+
 # Torch related
 set_env "TORCH_CPP_LOG_LEVEL" "ERROR"
 
@@ -121,7 +128,7 @@ fi
 
 LAUNCH_CMD=("$LAUNCH_BINARY")
 
-if [ "$BACKEND" == "vllm" ]; then
+if [ "$TYPE" == "policy" ]; then
   LAUNCH_CMD+=(
     --nproc-per-node="$NGPU"
     --nnodes="$NNODES"
@@ -134,28 +141,44 @@ if [ "$BACKEND" == "vllm" ]; then
   if [ -n "$LOG_RANKS" ]; then
     LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
   fi
-elif [ "$BACKEND" == "trtllm" ]; then
-  COSMOS_WORLD_SIZE=$((NNODES * NGPU))
-  export COSMOS_WORLD_SIZE
-  COSMOS_LOCAL_WORLD_SIZE=$((NGPU))
-  export COSMOS_LOCAL_WORLD_SIZE
-  export COSMOS_RDZV_ENDPOINT="$RDZV_ENDPOINT"
+elif [ "$TYPE" == "rollout" ]; then
+  if [ "$BACKEND" == "vllm" ]; then
+    LAUNCH_CMD+=(
+      --nproc-per-node="$NGPU"
+      --nnodes="$NNODES"
+      --role rank
+      --tee 3
+      --rdzv_backend c10d
+      --rdzv_endpoint="$RDZV_ENDPOINT"
+    )
 
-  # Set np to 1 just for trtllm to get OMP_* entvironments.
-  LAUNCH_CMD+=(
-    -np 1
-    --allow-run-as-root
-    --oversubscribe
-    python
-  )
+    if [ -n "$LOG_RANKS" ]; then
+      LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
+    fi
+  elif [ "$BACKEND" == "trtllm" ]; then
+    COSMOS_WORLD_SIZE=$((NNODES * NGPU))
+    export COSMOS_WORLD_SIZE
+    COSMOS_LOCAL_WORLD_SIZE=$((NGPU))
+    export COSMOS_LOCAL_WORLD_SIZE
+    export COSMOS_RDZV_ENDPOINT="$RDZV_ENDPOINT"
 
-  echo "Launching trtllm as the backend, ignoring:
-          --log-rank flags."
-else
-  echo "Error: Invalid --backend value '$BACKEND'. Must be 'vllm' or 'trtllm'."
-  print_help
-  exit 1
+    # Set np to 1 just for trtllm to get OMP_* entvironments.
+    LAUNCH_CMD+=(
+      -np 1
+      --allow-run-as-root
+      --oversubscribe
+      python
+    )
+
+    echo "Launching trtllm as the backend, ignoring:
+            --log-rank flags."
+  else
+    echo "Error: Invalid --backend value '$BACKEND'. Must be 'vllm' or 'trtllm'."
+    print_help
+    exit 1
+  fi
 fi
+
 
 if [ -n "$SCRIPT" ]; then
   if [[ "$SCRIPT" != *.py ]]; then
