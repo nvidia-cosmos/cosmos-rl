@@ -618,6 +618,7 @@ class Controller:
                 raise Exception(f"[Controller] Unknown role: {role}")
 
     async def unregister(self, replica_name: str):
+        logger.info(f"[Controller] Unregistering replica {replica_name}")
         async with self.life_cycle_lock:
             if replica_name in self.policy_status_manager:
                 self.policy_status_manager.unregister(replica_name)

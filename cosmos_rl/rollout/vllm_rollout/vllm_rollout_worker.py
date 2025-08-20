@@ -337,6 +337,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         if not hasattr(self, "_shutdown_handled"):
             self._shutdown_handled = True
             if not self.shutdown_signal.is_set():
+                logger.info(
+                    f"[Rollout] shutdown instruction of {self.replica_name}, setting shutdown signal"
+                )
                 self.shutdown_signal.set()
             if self.background_thread is not None:
                 self.background_thread.join()
@@ -936,6 +939,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         current_command = dist_utils.broadcast_object_cpu(current_command)
 
         if current_command is not None:
+            logger.info(f"[Rollout] Current command: {current_command}")
             handler = self.get_rollout_command_handler(type(current_command))
             if handler is None:
                 raise Exception(
@@ -964,7 +968,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             is_end=True,
         )
         try:
-            logger.debug(
+            logger.info(
                 f"[Rollout] Posting rollout end signal to controller: {response}"
             )
             make_request_with_retry(
@@ -995,8 +999,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     self.batch_size, self._prompt_queue
                 )
                 if no_more_prompts:
-                    logger.debug(
-                        f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation."
+                    logger.info(
+                        f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation. {self._prompt_queue.qsize()}"
                     )
                     self.state.set_prompt_fetch_end()
                     # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
@@ -1127,6 +1131,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     self.state.set_prompt_consume_end()
                     if self.global_rank == 0:
                         self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
+        logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
     def work(self):
         # Start the thread with daemon=True, so it will exit when the main program exits.

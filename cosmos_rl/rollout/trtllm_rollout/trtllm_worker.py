@@ -568,7 +568,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             torch.cuda.synchronize()
 
             time_eclapsed = time.time() - st
-            logger.debug(
+            logger.info(
                 f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
             )
             self.cosmos_state.set_weight_synced()
@@ -713,7 +713,8 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if hasattr(self, "heartbeat_thread") and self.heartbeat_thread is not None:
             self.heartbeat_thread.join()
             self.heartbeat_thread = None
-        self.unregister_from_controller()
+        # let wrapper do this instead.
+        # self.unregister_from_controller()
 
     def shutdown(self):
         # override pyexecutor's shutdown
