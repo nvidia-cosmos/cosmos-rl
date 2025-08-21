@@ -748,7 +748,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             nccl_group_start(communicator_index)
 
-
             skipped_params_cnt = 0
             transferred_params_cnt = 0
             skipped_groups_cnt = 0
