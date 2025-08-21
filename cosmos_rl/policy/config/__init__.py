@@ -932,6 +932,22 @@ class Config(BaseModel):
                 == 0
             ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
 
+        # Validate constraints for GRPO with LoRA
+        if (
+            isinstance(self.train.train_policy, GrpoConfig)
+            and self.policy.lora is not None
+        ):
+            # compile must be disabled due to known incompatibilities
+            if self.train.compile:
+                raise ValueError(
+                    "Invalid config: GRPO with LoRA requires train.compile=False."
+                )
+            # TP must be 1 to avoid unsupported/distributed behaviors
+            if self.policy.parallelism.tp_size != 1:
+                raise ValueError(
+                    "Invalid config: GRPO with LoRA requires policy.parallelism.tp_size == 1."
+                )
+
         if self.train.train_policy.type == "grpo":
             # Handle for evaludation configuration.
             if isinstance(self.validation.dataset.split, str):
