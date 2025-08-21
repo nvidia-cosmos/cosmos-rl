@@ -55,10 +55,10 @@ class BaseModel(torch.nn.Module, ABC):
                 if not hasattr(module, "_gradient_checkpointing_enabled"):
                     setattr(module, "_gradient_checkpointing_enabled", enabled)
 
-    @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
-        from cosmos_rl.utils.parallelism_map import DimSliceInfo, ParallelTopoMapper
+    def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
+        return local_view
 
+    def get_local_view_transforms(self):
         # 1. get all parameters, but not buffers
         named_parameters = {name: param for name, param in self.named_parameters()}
         keys = list(named_parameters.keys())
@@ -68,11 +68,23 @@ class BaseModel(torch.nn.Module, ABC):
             v = named_parameters[k]
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
+            local_view = self.post_transform_of_local_view(local_view, k)
             transforms[
                 self.weight_mapper.policy_map_local_key_to_hf_key(
                     util.clear_weight_name(k)
                 )
             ] = local_view
+        return transforms
+
+    @cached_property
+    def weight_sync_transforms(
+        self,
+    ) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+        from cosmos_rl.utils.parallelism_map import ParallelTopoMapper
+        from cosmos_rl.utils.dim_slice_info import DimSliceInfo
+
+        # 1. get all parameters, but not buffers
+        transforms = self.get_local_view_transforms()
 
         # 2. do 1->n decomposition on weights like qkv_proj.weight -> q.weight, k.weight, v.weight
         for name, param in self.named_parameters():
@@ -619,7 +631,7 @@ class WeightMapper(ABC):
         return False
 
     @cached_property
-    def packed_modules_mapping(self):
+    def packed_modules_mapping(self) -> Dict[str, List[str]]:
         """
         Return the packed modules mapping for the model.
         This method defines a mapping of packed modules to their corresponding components.
@@ -653,6 +665,12 @@ class WeightMapper(ABC):
         Each tuple element includes a transformed tensor and its corresponding slice strategy to derive from the original tensor.
         """
         return []
+
+    def weight_sync_check_filter(self, parallel_dims: ParallelDims, name: str) -> bool:
+        """
+        Sometimes we want to skip some weight sync check for certain weights or certain ranks.
+        """
+        return True
 
     def setup_rollout_backend(self, backend: str):
         """

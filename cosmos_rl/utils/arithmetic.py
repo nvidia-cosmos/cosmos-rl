@@ -13,43 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import click
-import socket
-import sys
 
-from . import replica
-from . import profiler
-from . import nccl
-from . import algo
-from .utils import console
+def cdiv(a: int, b: int) -> int:
+    return -(a // -b)
 
 
-@click.group()
-def cosmos():
-    """
-    Cosmos Reason1 CLI.
-    """
-    pass
+def next_power_of_2(n) -> int:
+    if n < 1:
+        return 1
+    return 1 << (n - 1).bit_length()
 
 
-replica.add_command(cosmos)
-profiler.add_command(cosmos)
-nccl.add_command(cosmos)
-algo.add_command(cosmos)
+def prev_power_of_2(n: int) -> int:
+    if n <= 0:
+        return 0
+    return 1 << (n.bit_length() - 1)
 
 
-def get_ip_from_hostname(hostname):
-    try:
-        ip_address = socket.gethostbyname(hostname)
-    except socket.error as e:
-        console.print(f"Failed to get IP from hostname: {e}")
-        sys.exit(1)
-    return ip_address
+def round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
 
 
-def main():
-    cosmos()
-
-
-if __name__ == "__main__":
-    main()
+def round_down(x: int, y: int) -> int:
+    return (x // y) * y
