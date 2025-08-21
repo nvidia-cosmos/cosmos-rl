@@ -65,6 +65,22 @@ from cosmos_rl.utils.pynccl import (
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils.logging import logger
 import asyncio
+from cosmos_rl.dispatcher.data.packer import (
+    DecoderOnlyLLMDataPacker,
+)
+import cosmos_rl.utils.distributed as dist_utils
+import uuid
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_info_collect,
+    pack_sequences_for_masks,
+    pack_sequences_for_labels,
+)
+from torch.utils.data import DataLoader, DistributedSampler, Sampler
+from cosmos_rl.policy.trainer.sft_trainer import collate_fn, construct_dataset
+
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -1217,6 +1233,201 @@ async def parallel_map_check():
                     p_rank_max = p_rank
 
 
+def run_sft_for_sequence_packing(fsdp, tp, cp):
+    def train_test(self, packing_seq):
+        train_dataset, _ = construct_dataset(
+            config.train.train_policy,
+            tokenizer=self.tokenizer,
+            data_packer=self.data_packer,
+            user_provided_dataset=self.sft_user_dataset,
+        )
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=False,
+            drop_last=False,
+        )
+
+        def get_train_data_loader(sampler: Sampler[int]):
+            return DataLoader(
+                train_dataset,
+                batch_size=config.train.train_batch_per_replica,
+                shuffle=False,
+                num_workers=config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                sampler=sampler,
+                collate_fn=collate_fn,
+                drop_last=False,
+            )
+
+        self.train_data_loader = get_train_data_loader(train_sampler)
+        losses = []
+        for global_batch in self.train_data_loader:
+            acc_loss = torch.zeros(1, device=self.device)
+            self.optimizers.zero_grad()
+            global_batch_size = len(global_batch)
+            # split global_batch into mini_batches
+            mini_batch_begin_idxs = list(
+                range(
+                    0,
+                    global_batch_size,
+                    self.config.train.train_policy.mini_batch,
+                )
+            )
+            for i in mini_batch_begin_idxs:
+                raw_batch = global_batch[
+                    i : i + self.config.train.train_policy.mini_batch
+                ]
+                max_len = min(
+                    self.config.policy.model_max_length,
+                    self.data_packer.sft_compute_max_len(raw_batch),
+                )
+                if self.seq_len_multiple > 1:
+                    max_len = (
+                        (max_len + self.seq_len_multiple - 1)
+                        // self.seq_len_multiple
+                        * self.seq_len_multiple
+                    )
+                batch = self.data_packer.sft_collate_fn(
+                    raw_batch,
+                    computed_max_len=max_len,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    ignore_label_id=-100,
+                )
+                self.model.train()
+                for k, v in batch.items():
+                    batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
+                labels = batch.pop("label_ids")
+                position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
+                    **batch
+                )
+                batch["position_ids"] = position_ids
+                padding_mask = batch.get("padding_mask", None)
+                if packing_seq:
+                    # Prepare for the sequence packing information.
+                    packed_args = pack_sequences_info_collect(
+                        batch["input_ids"],
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        label_ids=labels,
+                        ignore_label_id=-100,
+                        seq_len_multiple=self.seq_len_multiple,
+                    )
+                    batch.update(packed_args)
+                    labels = pack_sequences_for_labels(labels, batch["valid_input_len"])
+                    packed_args = pack_sequences_for_masks(
+                        batch["valid_input_len"], batch["valid_input_len"]
+                    )
+                    batch.update(packed_args)
+
+                if self.parallel_dims.cp_enabled and not packing_seq:
+                    [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
+                        [input_ids, position_ids, padding_mask],
+                        self.parallel_dims.mesh["cp"],
+                        seq_dims=[1, pos_seq_dim, 1],
+                    )
+                    batch["input_ids"] = input_ids
+                    batch["position_ids"] = position_ids
+                    if padding_mask is not None:
+                        batch["padding_mask"] = padding_mask
+
+                if self.parallel_dims.cp_enabled and packing_seq:
+                    # Slice for cp after embedding generation and sequence packing in the model forward later.
+                    batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
+                logits = self.model(**batch)
+
+                loss = self.loss_fn(
+                    logits,
+                    labels,
+                    output_packing_mask=batch.get("input_packing_mask", None),
+                    target_packing_mask=batch.get("label_packing_mask", None),
+                    loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
+                )
+                loss.backward()
+                acc_loss += loss.detach()
+                all_params = [
+                    p
+                    for m in [model for model in self.model_parts if model is not None]
+                    for p in m.parameters()
+                ]
+                dist_util.gradient_norm_clipping(
+                    all_params,
+                    self.config.train.optm_grad_norm_clip,
+                    foreach=True,
+                    pp_mesh=self.parallel_dims.mesh["pp"]
+                    if self.parallel_dims.pp_enabled
+                    else None,
+                    return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+                )
+                self.optimizers.step()
+                self.lr_schedulers.step()
+                self.train_step += 1
+                if (
+                    self.parallel_dims.dp_replicate_enabled
+                    or self.parallel_dims.dp_shard_enabled
+                    or self.parallel_dims.cp_enabled
+                ):
+                    global_avg_loss, global_max_loss = (  # noqa: F841
+                        dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                        dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                    )
+                else:
+                    global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
+
+                if util.is_master_rank(self.parallel_dims, self.global_rank):
+                    losses.append(global_avg_loss)
+                if self.train_step >= 8:
+                    return losses
+        return losses
+
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_sft.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.policy.parallelism.dp_shard_size = fsdp
+    config.policy.parallelism.tp_size = tp
+    config.policy.parallelism.cp_size = cp
+    logger.info(f"[Test] sequence packing with fsdp {fsdp}, tp {tp}, cp {cp}")
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        # `sft_user_dataset` is only used in SFT mode when the user provides a dataset
+        self.sft_user_dataset = None
+        hf_config = util.retry(AutoConfig.from_pretrained)(
+            self.config.policy.model_name_or_path, trust_remote_code=True
+        )
+        model_type = hf_config.model_type
+        logger.info(f"model type {model_type}")
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        self.remote_hosts = ["0.0.0.0:8000"]
+        pass
+
+    CommMixin.init_comm = dummy
+    trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
+    non_packing_losses = train_test(trainer, False)
+    trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
+    packing_losses = train_test(trainer, True)
+    if util.is_master_rank(trainer.parallel_dims, trainer.global_rank):
+        assert len(non_packing_losses) == 8
+        assert len(packing_losses) == 8
+        logger.info(f"[Test] non_packing_losses: {non_packing_losses}")
+        logger.info(f"[Test] packing_losses: {packing_losses}")
+        assert np.allclose(non_packing_losses, packing_losses, atol=1e-3, rtol=1e-3)
+
+
 async def main():
     # Get shared memory name and size from command line arguments
     import argparse
@@ -1260,6 +1471,14 @@ async def main():
         exit(0)
     elif mode == "test_overfit":
         run_overfitting_policy()
+        exit(0)
+    elif mode == "sft_for_sequence_packing":
+        sepc = args.parallel_config
+        fsdp, tp, cp = sepc.split(";")
+        fsdp = int(fsdp.split(":")[1])
+        tp = int(tp.split(":")[1])
+        cp = int(cp.split(":")[1])
+        run_sft_for_sequence_packing(fsdp, tp, cp)
         exit(0)
 
     # Initialize distributed environment

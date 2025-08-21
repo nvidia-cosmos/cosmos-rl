@@ -82,6 +82,16 @@ def pack_sequences_info_collect(
 ):
     """
     Collect valid length at each batch information used for sequence packing.
+
+    input_ids: the padded input ids in [batch, seq_len] to be input to the model.
+    pad_token_id: the token id used for padding the input ids.
+    label_ids: the padded label ids in [batch, seq_len] used for supervised fine-tuning loss calculation.
+    ignore_label_id: the token id used for ignoring certain labels during loss calculation.
+    seq_len_multiple: the value which the processed seq_len must be multiple of.
+
+    Return:
+    A Dictionary including tensor "valid_input_len" which is a list of actual sequence length in the batch.
+    This information will be used to apply the sequence packing.
     """
     args_dict = {}
     with torch.no_grad():
@@ -133,6 +143,29 @@ def pack_sequences_for_inputs(
     """
     Processing input tensors inside model forward function after embedding calculation.
     Packing the tensors from different batches into one.
+
+    inputs_embeds: the input embeddings in [batch, seq_len, hidden_size].
+    valid_input_len: the valid input lengths in [batch] used for packing.
+    position_ids_list: a list of position ids in [batch, seq_len] for each input sequence.
+    interested_tokens: a tensor of interested tokens in [batch, seq_len] for each input sequence.
+    padding_mask: a tensor of padding masks in [batch, seq_len] for each input sequence.
+    cp_mesh: the device mesh for model parallelism.
+    inputs_seq_dim: the sequence dimension of the input tensors.
+    inputs_batch_dim: the batch dimension of the input tensors.
+    position_ids_seq_dim: the sequence dimension of the position ids.
+    position_ids_batch_dim: the batch dimension of the position ids.
+    interested_tokens_seq_dim: the sequence dimension of the interested tokens.
+    interested_tokens_batch_dim: the batch dimension of the interested tokens.
+    padding_mask_seq_dim: the sequence dimension of the padding mask.
+    padding_mask_batch_dim: the batch dimension of the padding mask.
+
+    Return:
+    A Dictionary including all related tensors generated for model inputs after sequence packing.
+    Including sequence packed "inputs", "interested_tokens", "padding_mask", and "position_ids".
+    After packing, the batch dimension will be 1 and the seq_len will be the sum of all inputs lengths with some paddings in a packing way.
+    Also including "cu_seqlens" for accumulated sequence length for the batchs.
+    And "max_seqlen" for the max sequence length in the batch.
+    These will be used by the model to do the forward and backward in a sequence packing way.
     """
 
     args_dict = {}
@@ -205,8 +238,7 @@ def pack_sequences_for_inputs(
                 position_ids_updated.append(position_ids)
         args_dict["position_ids"] = position_ids_updated
 
-        valid_input_len = valid_input_len.tolist()
-        seq_len = torch.tensor(valid_input_len, dtype=torch.int32, device=device)
+        seq_len = valid_input_len
         prefill_start_pos = torch.cumsum(seq_len, dim=0, dtype=torch.int32) - seq_len
         cu_seqlens = torch.cat(
             [
@@ -216,7 +248,7 @@ def pack_sequences_for_inputs(
             dim=0,
         )
         args_dict["cu_seqlens"] = cu_seqlens
-        args_dict["max_seqlen"] = max(valid_input_len)
+        args_dict["max_seqlen"] = max(valid_input_len.tolist())
     return args_dict
 
 
@@ -226,6 +258,15 @@ def pack_sequences_for_masks(
 ):
     """
     Generate the related masks for packed input sequences used for loss calculation.
+
+    valid_input_len: the valid input lengths for each sequence in the batch of shape [batch].
+    valid_label_len: the valid label lengths for each sequence in the batch of shape [batch].
+
+    Return:
+    A Dictionary including all related masks generated for model inputs and labels after sequence packing.
+    "input_packing_mask" is the mask for extracting the useful positions from the packed inputs.
+    "label_packing_mask" is the mask for extracting the useful positions from the packed labels.
+    The extracted useful positions from inputs and labels will be compared to calculate the loss.
     """
 
     args_dict = {}
@@ -257,6 +298,15 @@ def pack_sequences_for_labels(
 ):
     """
     Generate packed label ids to pack from different batches into one used for SFT loss calculation.
+
+    label_ids: the label ids of shape [batch, seq_len] for each sequence in the batch.
+    valid_label_len: the valid label lengths of shape [batch, seq_len] for each sequence in the batch.
+    label_ids_seq_dim: the sequence dimension of the label ids tensor.
+    label_ids_batch_dim: the batch dimension of the label ids tensor.
+
+    Return:
+    The packed label ids after sequence packing.
+    It will be used with the packed model outputs to get the loss in SFT.
     """
     with torch.no_grad():
         valid_label_mask = generate_mask(
@@ -280,6 +330,17 @@ def pack_sequences_for_logprobs(
 ):
     """
     Generate packed log probabilities and advantages to pack from different batches into one used for GRPO loss calculation.
+
+    logprob_masks: the log probability masks of shape [batch, seq_len] for each sequence in the batch.
+    valid_input_len: the valid input lengths of shape [batch] for each sequence in the batch.
+    advantages: the advantages of shape [batch] for each sequence in the batch.
+    input_ids_seq_dim: the sequence dimension of the input ids tensor.
+    input_ids_batch_dim: the batch dimension of the input ids tensor.
+
+    Return:
+    A Dictionary including related logprob_masks and advantages after sequence packing.
+    "logprob_masks" and "advantages" are the logprob_masks and advantages after sequence packing.
+    They will be used to calculate the loss together with the packed model inputs and outputs in RL.
     """
     args_dict = {}
     with torch.no_grad():
