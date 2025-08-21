@@ -20,11 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-try:
-    from torch.distributed.device_mesh import DeviceMesh
-    from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
-except ImportError:
-    print("torch.distributed.tensor is not available. DeepSeek model will not work.")
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 
 try:
     from grouped_gemm import ops
@@ -41,62 +38,7 @@ from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
     MoEConfig,
     MoEFlexTokenDispatcher,
 )
-
-_shared_experts_stream: Optional[torch.cuda.Stream] = None
-
-
-@dataclass
-class MoEArgs:
-    n_routed_experts: int
-    n_shared_experts: int
-    n_activated_experts: int
-    n_expert_groups: int
-    n_limited_groups: int
-    train_gate: bool
-    gate_bias_update_factor: float
-    aux_loss_coeff: float
-    score_func: str
-    route_scale: float
-    dim: int
-    moe_inter_dim: int
-    enable_deepep: bool = False
-    fake_balanced_gate: bool = False
-
-
-class MLP(nn.Module):
-    """
-    Multi-Layer Perceptron (MLP) used as a feed-forward layer.
-
-    Attributes:
-        gate_proj (nn.Module): Linear layer for input-to-hidden transformation.
-        down_proj (nn.Module): Linear layer for hidden-to-output transformation.
-        up_proj (nn.Module): Additional linear layer for feature transformation.
-    """
-
-    def __init__(self, dim: int, inter_dim: int, use_tp: bool = True):
-        """
-        Initializes the MLP layer.
-
-        Args:
-            dim (int): Input and output dimensionality.
-            inter_dim (int): Hidden layer dimensionality.
-        """
-        super().__init__()
-        self.gate_proj = nn.Linear(dim, inter_dim, bias=False)
-        self.down_proj = nn.Linear(inter_dim, dim, bias=False)
-        self.up_proj = nn.Linear(dim, inter_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for the MLP layer.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output tensor after MLP computation.
-        """
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+from cosmos_rl.policy.kernel.mlp import MLP
 
 
 class GroupedExperts(nn.Module):
@@ -113,25 +55,49 @@ class GroupedExperts(nn.Module):
         down_projs (nn.Parameter): Linear layer for hidden-to-output transformation.
     """
 
-    def __init__(self, args: MoEArgs):
+    def __init__(
+        self,
+        dim: int,
+        inter_dim: int,
+        n_routed_experts: int,
+        n_activated_experts: int,
+    ):
         """
         Initializes the GroupedExperts module.
 
         Args:
-            args (MoEArgs): Model arguments containing the number of routed experts,
-                model and intermediate dimension parameters.
+            dim (int): Dimension of the model.
+            inter_dim (int): Intermediate dimension of the feed-forward layers.
+            n_routed_experts (int): Total number of experts in the MoE.
+            n_activated_experts (int): Number of activated experts in the MoE.
         """
         super().__init__()
         self.n_routed_experts = args.n_routed_experts
         self.gate_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
+            torch.empty(n_routed_experts, moe_inter_dim, dim)
         )
         self.up_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
+            torch.empty(n_routed_experts, moe_inter_dim, dim)
         )
         self.down_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim)
+            torch.empty(n_routed_experts, dim, moe_inter_dim)
         )
+
+        # Default expert parallelism parameters if EP is not enabled.
+        self.ep_mesh = None
+        self.ep_size = 1
+        self.ep_rank = 0
+
+    def setup_mesh(self, ep_mesh: DeviceMesh) -> None:
+        assert ep_mesh is not None:
+        assert ep_mesh.ndim == 1, "We only support 1D mesh for MoE"
+        self.ep_mesh = ep_mesh
+        self.ep_size = ep_mesh.size()
+        self.ep_rank = ep_mesh.get_local_rank()
+        assert (
+            self.n_routed_experts % self.ep_size == 0
+        ), f"Number of experts must be divisible by ep_size (ep_size={ep_size})"
+
 
     def forward(
         self,
@@ -158,39 +124,24 @@ class GroupedExperts(nn.Module):
         """
         assert not isinstance(x, DTensor)
 
-        if isinstance(self.gate_projs, DTensor):
-            ep_mesh = self.gate_projs.device_mesh
-            assert ep_mesh is not None
-            assert ep_mesh.ndim == 1, "We only support 1D mesh for MoE"
-            ep_size = ep_mesh.size()
-            ep_rank = ep_mesh.get_local_rank()
-        else:
-            ep_mesh = None
-            ep_size = 1
-            ep_rank = 0
-
-        assert (
-            self.n_routed_experts % ep_size == 0
-        ), f"Number of experts must be divisible by ep_size (ep_size={ep_size})"
-
         # Replicate the tensor to all experts. This is sub-optimal but is
         # used by this implementation for correctness.
-        if ep_size > 1:
+        if self.ep_size > 1:
             x = DTensor.from_local(
-                x, device_mesh=ep_mesh, placements=[Shard(0)]
+                x, device_mesh=self.ep_mesh, placements=[Shard(0)]
             ).full_tensor()
             weights = DTensor.from_local(
-                weights, device_mesh=ep_mesh, placements=[Shard(0)]
+                weights, device_mesh=self.ep_mesh, placements=[Shard(0)]
             ).full_tensor()
             indices = DTensor.from_local(
-                indices, device_mesh=ep_mesh, placements=[Shard(0)]
+                indices, device_mesh=self.ep_mesh, placements=[Shard(0)]
             ).full_tensor()
             token_mask = DTensor.from_local(
-                token_mask, device_mesh=ep_mesh, placements=[Shard(0)]
+                token_mask, device_mesh=self.ep_mesh, placements=[Shard(0)]
             ).full_tensor()
 
-        n_local_experts = self.n_routed_experts // ep_size
-        experts_start_idx = ep_rank * n_local_experts
+        n_local_experts = self.n_routed_experts // self.ep_size
+        experts_start_idx = self.ep_rank * n_local_experts
         experts_end_idx = experts_start_idx + n_local_experts
 
         def get_local_proj(proj, expert_id):
@@ -232,8 +183,8 @@ class GroupedExperts(nn.Module):
             )
             y[0] += expert_out
 
-        if ep_size > 1:
-            y = DTensor.from_local(y, device_mesh=ep_mesh, placements=[Partial()])
+        if self.ep_size > 1:
+            y = DTensor.from_local(y, device_mesh=self.ep_mesh, placements=[Partial()])
             y = y.redistribute(placements=[Shard(0)]).to_local()
 
         return y
@@ -253,38 +204,49 @@ class GroupedExpertsDeepEP(nn.Module):
         down_projs (nn.Parameter): Linear layer for hidden-to-output transformation.
     """
 
-    def __init__(self, args: MoEArgs):
+    def __init__(
+        self,
+        dim: int,
+        inter_dim: int,
+        n_routed_experts: int,
+        n_activated_experts: int,
+    ):
         """
         Initializes the GroupedExperts module.
 
         Args:
-            args (MoEArgs): Model arguments containing the number of routed experts,
-                model and intermediate dimension parameters.
+            dim (int): Dimension of the model.
+            inter_dim (int): Intermediate dimension of the feed-forward layers.
+            n_routed_experts (int): Total number of experts in the MoE.
+            n_activated_experts (int): Number of activated experts in the MoE.
         """
         super().__init__()
+        self.n_activated_experts = n_activated_experts
+        self.n_routed_experts = n_routed_experts
 
         self.gate_and_up_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim * 2)
+            torch.empty(n_routed_experts, dim, inter_dim * 2)
         )
         self.down_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
+            torch.empty(n_routed_experts, inter_dim, dim)
         )
-        self.args = args
 
     def init_token_dispatcher(self, ep_mesh: DeviceMesh):
+        assert ep_mesh is not None
         self.ep_size = ep_mesh.size()
         self.ep_rank = ep_mesh.get_local_rank()
 
-        # TODO: merge with MoEArgs
+        assert (
+            self.n_routed_experts % self.ep_size == 0
+        ), f"Number of experts must be divisible by ep_size (ep_size={self.ep_size})"
+
         config = MoEConfig(
-            moe_router_topk=self.args.n_activated_experts,
-            num_moe_experts=self.args.n_routed_experts,
+            moe_router_topk=self.n_activated_experts,
+            num_moe_experts=self..n_routed_experts,
             moe_permute_fusion=True,
         )
 
-        self.n_routed_experts = self.args.n_routed_experts
-
-        num_local_experts = self.args.n_routed_experts // self.ep_size
+        num_local_experts = self.n_routed_experts // self.ep_size
 
         local_expert_indices_offset = self.ep_rank * num_local_experts
         local_expert_indices = [
@@ -297,6 +259,7 @@ class GroupedExpertsDeepEP(nn.Module):
             config=config,
             ep_group=ep_mesh.get_group(),
         )
+
 
     def forward(
         self,
@@ -322,10 +285,6 @@ class GroupedExpertsDeepEP(nn.Module):
                 Shape is [num_tokens, model_dim]
         """
         assert not isinstance(x, DTensor)
-
-        assert (
-            self.n_routed_experts % self.ep_size == 0
-        ), f"Number of experts must be divisible by ep_size (ep_size={self.ep_size})"
 
         indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
 
@@ -367,33 +326,27 @@ class FakeBalancedGate(nn.Module):
     how the load imbalance with real data is impacting end-to-end performance.
     """
 
-    def __init__(self, args: MoEArgs):
+    def __init__(self, n_routed_experts: int, n_activated_experts: int):
         super().__init__()
-        self.dim = args.dim
-        self.n_routed_experts = args.n_routed_experts
-        self.n_activated_experts = args.n_activated_experts
+        self.n_routed_experts = n_routed_experts
+        self.n_activated_experts = n_activated_experts
 
     def forward(
         self,
         x: torch.Tensor,
-        token_mask: torch.Tensor,
-        cp_mesh: Optional[DeviceMesh],
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        *args, **kwargs,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for the gating mechanism.
 
         Args:
             x (torch.Tensor): Input tensor.
-            token_mask (torch.Tensor): Boolean mask indicating valid tokens.
-            cp_mesh (Optional[DeviceMesh]): Device mesh for context parallel computation.
 
         Returns:
             weights (torch.Tensor): Routing weights for the selected experts.
             indices (torch.Tensor): Indices of the selected experts.
-            aux_loss (Optional[torch.Tensor]): Auxiliary loss for load balancing.
         """
-        del token_mask
-        del cp_mesh
+        del args, kwargs
 
         n_exp = self.n_routed_experts
         a_exp = self.n_activated_experts
@@ -402,279 +355,7 @@ class FakeBalancedGate(nn.Module):
             torch.arange(x.size(0) * a_exp, device=x.device).view(-1, a_exp) % n_exp
         )
 
-        return weights.type_as(x), indices, None
-
-    def update_bias(self) -> None:
-        pass
-
-
-class Gate(nn.Module):
-    """
-    Gating mechanism for routing inputs in a mixture-of-experts (MoE) model.
-
-    Attributes:
-        dim (int): Dimensionality of input features.
-        topk (int): Number of top experts activated for each input.
-        n_groups (int): Number of groups for routing.
-        topk_groups (int): Number of groups to route inputs to.
-        score_func (str): Scoring function ('softmax' or 'sigmoid').
-        route_scale (float): Scaling factor for routing weights.
-        weight (torch.nn.Parameter): Learnable weights for the gate.
-        bias (Optional[torch.nn.Parameter]): Optional bias term for the gate.
-    """
-
-    def __init__(self, args: MoEArgs):
-        """
-        Initializes the Gate module.
-
-        Args:
-            args (MoEArgs): Model arguments containing gating parameters.
-        """
-        super().__init__()
-        self.dim = args.dim
-        self.n_experts = args.n_routed_experts
-        self.topk = args.n_activated_experts
-        self.n_groups = args.n_expert_groups
-        self.topk_groups = args.n_limited_groups
-        self.score_func = args.score_func
-        self.route_scale = args.route_scale
-        self.train_gate = args.train_gate
-        self.bias_update_factor = args.gate_bias_update_factor
-        self.aux_loss_coeff = args.aux_loss_coeff
-
-        if self.bias_update_factor > 0:
-            assert (
-                self.train_gate
-            ), "Require train_gate to be set to True to apply the bias update"
-
-        self.weight = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.dim), requires_grad=self.train_gate
-        )
-        self.e_score_correction_bias = nn.Parameter(
-            torch.empty(args.n_routed_experts), requires_grad=False
-        )
-        self.e_score_correction_bias_master = None
-
-        # Cumulative expert load is a tensor representing the number of tokens
-        # routed to each expert on the current rank, accumulated across gradient
-        # accumulation steps.
-        self._cumulative_expert_load: Optional[torch.Tensor] = None
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        token_mask: torch.Tensor,
-        cp_mesh: Optional[DeviceMesh],
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Forward pass for the gating mechanism.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            token_mask (torch.Tensor): Boolean mask indicating valid tokens.
-            cp_mesh (Optional[DeviceMesh]): Device mesh for context parallel computation.
-
-        Returns:
-            weights (torch.Tensor): Routing weights for the selected experts.
-            indices (torch.Tensor): Indices of the selected experts.
-            aux_loss (Optional[torch.Tensor]): Auxiliary loss for load balancing.
-        """
-        scores = F.linear(x, self.weight)
-
-        if self.score_func == "softmax":
-            scores = scores.softmax(dim=-1, dtype=torch.float32)
-        else:
-            scores = scores.sigmoid()
-        original_scores = scores
-
-        # Add correction bias to balance tokens across gates.
-        if self.e_score_correction_bias is not None:
-            scores = scores + self.e_score_correction_bias
-
-        if self.n_groups > 1:
-            scores = scores.view(x.size(0), self.n_groups, -1)
-            if self.e_score_correction_bias is None:
-                group_scores = scores.amax(dim=-1)
-            else:
-                group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1)
-
-            indices = group_scores.topk(self.topk_groups, dim=-1)[1]
-            mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True)
-            scores = (scores * mask.unsqueeze(-1)).flatten(1)
-
-        indices = torch.topk(scores, self.topk, dim=-1)[1]
-        weights = original_scores.gather(1, indices)
-
-        if self.score_func == "sigmoid":
-            weights /= weights.sum(dim=-1, keepdim=True)
-            original_scores /= original_scores.sum(dim=-1, keepdim=True)
-        weights *= self.route_scale
-
-        if self.bias_update_factor > 0 or self.aux_loss_coeff > 0:
-            expert_load = self._compute_expert_load(indices, token_mask)
-
-        if self.bias_update_factor > 0 and self.training:
-            if self._cumulative_expert_load is None:
-                self._cumulative_expert_load = expert_load.detach()
-            else:
-                self._cumulative_expert_load += expert_load.detach()
-
-        aux_loss = None
-        if self.aux_loss_coeff > 0 and self.training:
-            aux_loss = self._compute_aux_loss(
-                original_scores, expert_load, token_mask, cp_mesh
-            )
-
-        return weights.type_as(x), indices, aux_loss
-
-    def update_bias(self) -> None:
-        """
-        Updates the correction bias used in the gate based on the popularity of experts.
-        This function is a NoOp if the gate is not trained.
-
-        To avoid routing collapse, and to promote better load balance of experts,
-        DeepSeek-V3 uses a correction mechanism to adjust the scores of experts using
-        a learned bias parameter. The bias parameter is updated based on the popularity
-        of experts, i.e., the number of tokens routed to each expert. If an expert is
-        more popular than the average, its bias term is decreased, and vice versa.
-        This encourages the model to route tokens to less popular experts, promoting
-        better load balance.
-        """
-        assert (
-            self.train_gate and self.bias_update_factor > 0
-        ), "Gate bias update is disabled"
-
-        assert self.training, "Gate bias update is only supported during training"
-        assert (
-            self._cumulative_expert_load is not None
-        ), "Score correction bias cannot be updated without the current expert load"
-
-        # 1) Compute the expert load across all DP ranks.
-        # Copy the cumulative load into a local variable, and set the stored load to None.
-        expert_load = self._cumulative_expert_load
-        self._cumulative_expert_load = None
-
-        # Place the expert load on the same device mesh as the score correction
-        # bias parameter, and sum across all ranks.
-        if isinstance(self.e_score_correction_bias, DTensor):
-            expert_load = DTensor.from_local(
-                expert_load,
-                device_mesh=self.e_score_correction_bias.device_mesh,
-                placements=[Partial()] * self.e_score_correction_bias.device_mesh.ndim,
-            )
-            expert_load = expert_load.full_tensor()
-
-        # 2) Compute the bias update by comparing the expert load to the average expert load.
-        expert_load = expert_load.float()
-        average_expert_load = expert_load.mean()
-        bias_update = torch.sign(average_expert_load - expert_load)
-
-        if isinstance(self.e_score_correction_bias, DTensor):
-            # Convert the bias update back to a replicated DTensor with the same device
-            # mesh as the score correction bias parameter.
-            bias_update = DTensor.from_local(
-                bias_update,
-                device_mesh=self.e_score_correction_bias.device_mesh,
-                placements=[Replicate()]
-                * self.e_score_correction_bias.device_mesh.ndim,
-            )
-
-            # The score correction bias parameter could be sharded across FSDP
-            # ranks (dim=-1), and/or optionally replicated across DDP ranks (dim=0).
-            # Redistribute the bias update with the same placement.
-            bias_update = bias_update.redistribute(
-                placements=self.e_score_correction_bias.placements
-            )
-
-        # 3) Update the correction bias using the bias update.
-        with torch.no_grad():
-            # Create full precision master weights
-            if self.e_score_correction_bias_master is None:
-                self.e_score_correction_bias_master = (
-                    self.e_score_correction_bias.clone().detach().float()
-                )
-            self.e_score_correction_bias_master += bias_update * self.bias_update_factor
-            self.e_score_correction_bias.copy_(self.e_score_correction_bias_master)
-
-    def _compute_expert_load(
-        self,
-        indices: torch.Tensor,
-        token_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Computes the load of each expert based on the selected indices.
-        Args:
-            indices (torch.Tensor): Indices of the selected experts.
-                Shape is [num_tokens, num_activated_experts].
-            token_mask (torch.Tensor): Boolean mask indicating valid tokens.
-                Shape is [num_tokens].
-
-        Returns:
-            torch.Tensor: Load of each expert (number of tokens routed to each expert).
-                Shape is [num_local_experts].
-        """
-        # Create a mask for the experts based on the selected indices.
-        expert_mask = indices.new_zeros((indices.shape[0], self.n_experts))
-        contribution = (
-            token_mask.to(dtype=expert_mask.dtype)
-            .unsqueeze(-1)
-            .expand(-1, indices.shape[1])
-        )
-        expert_mask.scatter_(dim=1, index=indices, src=contribution)
-        return expert_mask.sum(dim=0)
-
-    def _compute_aux_loss(
-        self,
-        original_scores: torch.Tensor,
-        expert_load: torch.Tensor,
-        token_mask: torch.Tensor,
-        cp_mesh: Optional[DeviceMesh],
-    ) -> torch.Tensor:
-        """
-        Computes the auxiliary loss for load balancing.
-
-        **Warning**: Assumes batch size = 1, if batch size > 1, the aux_loss will
-        be computed across multiple sequences.
-
-        Args:
-            original_scores (torch.Tensor): Original scores from the gating mechanism.
-                Shape is [num_tokens, num_experts].
-            expert_load (torch.Tensor): Load of each expert (number of tokens routed to each expert).
-                Shape is [num_experts].
-            token_mask (torch.Tensor): Boolean mask indicating valid tokens.
-                Shape is [num_tokens].
-            cp_mesh (Optional[DeviceMesh]): Device mesh for context parallel computation.
-
-        Returns:
-            torch.Tensor: Auxiliary loss for load balancing.
-                Shape is [].
-        """
-        context_length = token_mask.sum()
-        expert_scores = (original_scores * token_mask.unsqueeze(-1)).sum(dim=0)
-
-        if cp_mesh is not None:
-            context_length = DTensor.from_local(
-                context_length, device_mesh=cp_mesh, placements=[Partial()]
-            ).full_tensor()
-            expert_load = DTensor.from_local(
-                expert_load, device_mesh=cp_mesh, placements=[Partial()]
-            ).full_tensor()
-            expert_scores = DTensor.from_local(
-                expert_scores, device_mesh=cp_mesh, placements=[Partial()]
-            ).full_tensor()
-
-        # Compute f_i (fraction of tokens dispatched to each expert).
-        # If uniform distribution, expert_load will be topk * num_location / n_experts, and f_i will be 1
-        # Maximum value f_i entries happens when expert_load = num_location, the value will be n_experts / topk
-        f_i = (
-            expert_load * self.n_experts / (self.topk * context_length)
-        )  # Normalized fraction, (n_experts)
-
-        # Compute P_i (average routing probability per expert)
-        P_i = expert_scores / context_length  # (n_experts)
-
-        loss = torch.sum(f_i * P_i)
-        return loss
+        return weights.type_as(x), indices
 
 
 def swiglu(x, gate_proj, down_proj, up_proj):
@@ -682,112 +363,3 @@ def swiglu(x, gate_proj, down_proj, up_proj):
     return F.linear(inter, down_proj)
 
 
-class MoE(nn.Module):
-    """
-    Mixture-of-Experts (MoE) module.
-
-    Attributes:
-        dim (int): Dimensionality of input features.
-        n_routed_experts (int): Total number of experts in the model.
-        n_local_experts (int): Number of experts handled locally in distributed systems.
-        n_activated_experts (int): Number of experts activated for each input.
-        gate (nn.Module): Gating mechanism to route inputs to experts.
-        experts (nn.ModuleList): List of expert modules.
-        shared_experts (nn.Module): Shared experts applied to all inputs.
-    """
-
-    def __init__(self, args: MoEArgs):
-        """
-        Initializes the MoE module.
-
-        Args:
-            args (MoEArgs): Model arguments containing MoE parameters.
-        """
-        super().__init__()
-        self.dim = args.dim
-        self.n_routed_experts = args.n_routed_experts
-        self.n_activated_experts = args.n_activated_experts
-
-        if args.fake_balanced_gate:
-            self.gate = FakeBalancedGate(args)
-        else:
-            self.gate = Gate(args)
-        if args.enable_deepep:
-            self.experts = GroupedExpertsDeepEP(args)
-        else:
-            self.experts = GroupedExperts(args)
-        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        padding_mask: Optional[torch.Tensor] = None,
-        cp_mesh: Optional[DeviceMesh] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Forward pass for the MoE module.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            padding_mask (Optional[torch.Tensor]): Boolean mask indicating padding positions.
-
-        Returns:
-            torch.Tensor: Output tensor after expert routing and computation.
-            Optional[torch.Tensor]: Auxiliary loss for load balancing (if applicable).
-        """
-        # Reshape the inputs to 2-D since we are just distributing tokens.
-        shape = x.size()
-        x = x.view(-1, self.dim)
-        if padding_mask is not None:
-            token_mask = (~padding_mask).flatten()
-        else:
-            token_mask = torch.ones(x.size(0), dtype=torch.bool, device=x.device)
-
-        weights, indices, aux_loss = self.gate(x, token_mask, cp_mesh)
-
-        # Execute shared experts in a separate stream to overlap compute with the
-        # communication for grouped experts.
-        global _shared_experts_stream
-        if _shared_experts_stream is None:
-            _shared_experts_stream = torch.cuda.Stream()
-
-        _shared_experts_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(_shared_experts_stream):
-            z = self.shared_experts(x)
-
-        y = self.experts(x, token_mask, weights, indices)
-
-        # Wait for the shared experts stream to complete all operations before
-        # adding together the outputs of grouped experts and shared experts.
-        torch.cuda.current_stream().wait_stream(_shared_experts_stream)
-
-        # Reshape the outputs back to 3-D.
-        return (y + z).view(shape), aux_loss
-
-    def init_weights(self) -> None:
-        self.apply(_init_weights)
-
-
-def _init_weights(module):
-    std = 0.02
-
-    def to_local(tensor):
-        if isinstance(tensor, DTensor):
-            return tensor.to_local()
-        else:
-            return tensor
-
-    if isinstance(module, Gate):
-        to_local(module.weight).normal_(mean=0.0, std=std)
-        to_local(module.e_score_correction_bias).zero_()
-    elif isinstance(module, GroupedExperts):
-        to_local(module.gate_projs).normal_(mean=0.0, std=std)
-        to_local(module.up_projs).normal_(mean=0.0, std=std)
-        to_local(module.down_projs).normal_(mean=0.0, std=std)
-    elif isinstance(module, GroupedExpertsDeepEP):
-        to_local(module.gate_and_up_projs).normal_(mean=0.0, std=std)
-        to_local(module.down_projs).normal_(mean=0.0, std=std)
-    elif isinstance(module, MLP):
-        to_local(module.gate_proj.weight).normal_(mean=0.0, std=std)
-        to_local(module.down_proj.weight).normal_(mean=0.0, std=std)
-        to_local(module.up_proj.weight).normal_(mean=0.0, std=std)
