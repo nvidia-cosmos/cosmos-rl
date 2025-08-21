@@ -278,7 +278,7 @@ class AVLMDataPacker(DataPacker):
 
         batch = {}
         if pixel_values is not None:
-            batch["pixel_values"] = pixel_values[0]
+            batch["pixel_values"] = pixel_values
 
         if image_sizes is not None:
             batch["image_sizes"] = image_sizes
