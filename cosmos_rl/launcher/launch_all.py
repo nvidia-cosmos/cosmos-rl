@@ -776,9 +776,11 @@ def main():
             make_env_vars_from_strings,
             make_mounts_from_strings,
         )
-        from leptonai.cli.util import _get_valid_nodegroup_ids, _get_valid_node_ids
-
-        from leptonai.cli.job import make_container_port_from_string
+        from leptonai.cli.util import (
+            _get_valid_nodegroup_ids,
+            _get_valid_node_ids,
+            make_container_port_from_string,
+        )
 
         # Initialize Lepton client
         client = APIClient()
