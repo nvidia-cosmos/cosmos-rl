@@ -40,7 +40,7 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from functools import partial
@@ -125,17 +125,6 @@ def construct_dataset(
         train_dataset = concatenate_datasets(dataset_list)
     logger.info(f"Final dataset size = {len(train_dataset)}")
 
-    # try:
-    #     if dataset is not None:
-    #         dataset_list = []
-    #         for split_name in config.dataset.split:
-    #             dataset_list.append(dataset[split_name])
-    #         test_dataset = concatenate_datasets(dataset_list)
-    #         if len(test_dataset) == 0:
-    #             raise ValueError("Test dataset is empty")
-    #     else:
-    #         raise ValueError("Test dataset is empty")
-    # except Exception:
     if isinstance(train_dataset, torch.utils.data.Dataset):
         # Define the split ratio (e.g., 80% train, 20% test)
         if config.dataset.test_size is None:
@@ -240,7 +229,13 @@ class SFTDataset(Dataset):
 
 
 class SFTTrainer(Trainer):
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
+    def __init__(
+        self,
+        config: CosmosConfig,
+        parallel_dims: ParallelDims,
+        dataset: Optional[Dataset] = None,
+        data_packer: Optional[DataPacker] = None,
+    ):
         super(SFTTrainer, self).__init__(config, parallel_dims)
 
         # Enlarge the compile cache size for validation
@@ -296,12 +291,20 @@ class SFTTrainer(Trainer):
             )
         self.model.train()
 
+        if isinstance(dataset, Callable):
+            # Incase it is a factory function, we need to call it to get the dataset
+            dataset = dataset(self.config)
+            dataset.setup(self.config, self.tokenizer)
+        if data_packer:
+            data_packer.setup(self.config, self.tokenizer)
+            self.data_packer = data_packer
+
         # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
             config.train.train_policy,
             tokenizer=self.tokenizer,
             data_packer=self.data_packer,
-            user_provided_dataset=self.sft_user_dataset,
+            user_provided_dataset=dataset,
         )
         train_sampler = DistributedSampler(
             train_dataset,
@@ -381,8 +384,8 @@ class SFTTrainer(Trainer):
                 self.optimizers, self.config, self.total_steps
             )
 
-        if self.parallel_dims.dp_enabled:
-            dp_group = self.parallel_dims.mesh["dp"].get_group()
+        if self.parallel_dims.dp_shard_enabled:
+            dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
         else:
             dp_group = None
 
@@ -398,6 +401,11 @@ class SFTTrainer(Trainer):
         )
 
     def validate(self):
+        if not self.config.train.enable_validation:
+            return
+        if self.parallel_dims.dp_replicate_coord[0] != 0:
+            return
+
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
         self.model.eval()
         with torch.no_grad():
@@ -636,7 +644,7 @@ class SFTTrainer(Trainer):
                             else torch.tensor([-1.0], device=self.device)
                         )
                     else:
-                        # # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
+                        # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
                         # last_token_ids = []
                         # with torch.no_grad():
                         #     N_NEW_TOKENS = 100
@@ -655,13 +663,15 @@ class SFTTrainer(Trainer):
                         #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
                         #         last_token_ids.append(token_ids)
                         #     if self.global_rank == 0:
-                        #         for i in range(len(last_token_ids)):
-                        #             print(
-                        #                 f"generated tokens at sample {i}: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[i])}"
-                        #             )
-
-                        #     return
-                        # #########################################################################################
+                        #         text = ''
+                        #         new_last_token_ids = torch.cat(last_token_ids, dim=-1).squeeze(0)
+                        #         logger.info(f'{new_last_token_ids=}')
+                        #         text = self.tokenizer.decode(new_last_token_ids)
+                        #         logger.info(
+                        #             f"generated tokens at sample : {text}"
+                        #         )
+                        # return
+                        #########################################################################################
 
                         logits = self.model(**batch)
 
@@ -677,7 +687,6 @@ class SFTTrainer(Trainer):
                             labels,
                             loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                         )
-
                         # # Hint FSDP to do all-reduce on the last backward pass
                         # if hasattr(self.model, "set_is_last_backward"):
                         #     print(f"set_is_last_backward: {i == mini_batch_begin_idxs[-1]}")
@@ -778,10 +787,7 @@ class SFTTrainer(Trainer):
 
                 val_score = None
                 # validation
-                if (
-                    self.config.train.enable_validation
-                    and self.train_step % self.config.train.validation_step == 0
-                ):
+                if self.train_step % self.config.train.validation_step == 0:
                     val_score = self.validate()
 
                 # save checkpoint
@@ -789,6 +795,7 @@ class SFTTrainer(Trainer):
                     self.config.train.ckpt.enable_checkpoint
                     and self.train_step % self.config.train.ckpt.save_freq == 0
                     and self.train_step > 0
+                    and self.parallel_dims.dp_replicate_coord[0] == 0
                 ):
                     # TODO(dinghaoy): support export safetensors asynchronously.
                     if self.config.train.ckpt.export_safetensors:
@@ -829,9 +836,11 @@ class SFTTrainer(Trainer):
                 break  # break outer epoch loop
 
         # process the final step
-        if self.config.train.enable_validation:
-            val_score = self.validate()
-        if self.config.train.ckpt.export_safetensors:
+        val_score = self.validate()
+        if (
+            self.config.train.ckpt.export_safetensors
+            and self.parallel_dims.dp_replicate_coord[0] == 0
+        ):
             logger.info(
                 f"Saving final huggingface checkpoint to {self.config.train.output_dir}..."
             )
@@ -877,8 +886,8 @@ class SFTTrainer(Trainer):
         loss_scaling_factor = (
             mini_batch_size / self.config.train.train_batch_per_replica
         )
-        if self.parallel_dims.dp_enabled:
-            dp_group = self.parallel_dims.mesh["dp"].get_group()
+        if self.parallel_dims.dp_shard_enabled:
+            dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
         else:
             dp_group = None
 

@@ -141,7 +141,10 @@ def resolve_model_path(model_path: str, revision: Optional[str] = None) -> str:
             if file_path is not None:
                 model_path = os.path.join(model_path, file_path)
             logger.info(f"Downloaded model from HuggingFace to {model_path}")
-
+        elif os.path.isdir(model_path):
+            # In case model_path is a local directory, we need to check if the file_path exists
+            if file_path is not None:
+                model_path = os.path.join(model_path, file_path)
         else:
             raise ValueError(
                 f"Model path {model_path} is not a directory and not a valid HuggingFace repo id with repo name."
@@ -677,10 +680,6 @@ def sync_model_vocab(
                         tensor_slice = f.get_slice(key)
                     vocab_size, _ = tensor_slice.get_shape()
                     break
-            if vocab_size is None:
-                raise ValueError(
-                    "Could not find `lm_head` or `model.embed_tokens.weight` in the model."
-                )
         else:
             # models like google/gemma-3-1b-pt does not have model.safetensors.index.json
             model_safetensors_path = resolve_model_path(
@@ -688,16 +687,19 @@ def sync_model_vocab(
             )
             with safe_open(model_safetensors_path, framework="pt", device="cpu") as f:
                 tensor_names = f.keys()
-                if lm_head_key in tensor_names:
-                    tensor_slice = f.get_slice(lm_head_key)
-                    vocab_size, _ = tensor_slice.get_shape()
-                elif embed_tokens_key in tensor_names:
-                    tensor_slice = f.get_slice(embed_tokens_key)
-                    vocab_size, _ = tensor_slice.get_shape()
-                else:
-                    raise ValueError(
-                        "Could not find `lm_head` or `model.embed_tokens.weight` in the model."
-                    )
+                possible_prefix = ["", "model.", "language_model."]
+                possible_keys = [prefix + lm_head_key for prefix in possible_prefix] + [
+                    prefix + embed_tokens_key for prefix in possible_prefix
+                ]
+                for key in possible_keys:
+                    if key in tensor_names:
+                        tensor_slice = f.get_slice(key)
+                        vocab_size, _ = tensor_slice.get_shape()
+                        break
+        if vocab_size is None:
+            raise ValueError(
+                "Could not find `lm_head` or `model.embed_tokens.weight` in the model."
+            )
 
     from cosmos_rl.utils.distributed import broadcast_object_cpu
 

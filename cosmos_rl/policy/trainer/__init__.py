@@ -238,7 +238,9 @@ class Trainer(CommMixin):
             logger.info(
                 f"Prepare to exporting safetensors to {path} at rank {self.global_rank}"
             )
-        torch.distributed.barrier()
+
+        if not self.parallel_dims.dp_replicate_enabled:
+            torch.distributed.barrier()
 
         def get_tensor_size(tensor):
             """Get the size of the tensor in bytes."""
@@ -350,7 +352,8 @@ class Trainer(CommMixin):
             merged_manifest = manifest
             total_tensor_size = total_chunk_size
 
-        torch.distributed.barrier()
+        if not self.parallel_dims.dp_replicate_enabled:
+            torch.distributed.barrier()
 
         def upload_handler(config, is_final, path, rel_path, max_retries=3):
             """Handle the upload of the model to huggingface and s3."""
