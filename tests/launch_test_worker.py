@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
 import torch
 import time
 from multiprocessing import shared_memory
@@ -26,7 +25,6 @@ import cosmos_rl.utils.util as util
 from transformers import AutoTokenizer
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 import msgpack
-
 import threading
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.trainer import Trainer
@@ -65,6 +63,7 @@ from cosmos_rl.utils.pynccl import (
     nccl_broadcast,
 )
 import cosmos_rl.utils.distributed as dist_util
+from cosmos_rl.utils.logging import logger
 import asyncio
 
 POLICY_WORLD_SIZE = 4
@@ -76,7 +75,7 @@ class TestModel:
     model_path = "Qwen/Qwen2.5-3B-Instruct"
     num_hidden_layers = 16
 
-    def __init__(self, device, parallel_dims):
+    def __init__(self, device, parallel_dims, freeze_params: bool = False):
         self.sorted_hf_key_n_rank = [
             ("model.layers.9.input_layernorm.weight", torch.Size([1024])),
             ("model.layers.9.mlp.down_proj.weight", torch.Size([1024, 11008])),
@@ -113,6 +112,16 @@ class TestModel:
             ("model.embed_tokens.weight", {"tp": 0}),
         ]
 
+        self.keys_to_freeze = (
+            [
+                "model.layers.9.mlp.down_proj.weight",
+                "model.layers.9.mlp.gate_proj.weight",
+                "model.layers.9.mlp.up_proj.weight",
+            ]
+            if freeze_params
+            else []
+        )
+
         self.sorted_hf_key_n_rank.sort(key=lambda x: x[0])
 
         self.config = AutoConfig.from_pretrained(self.model_path)
@@ -121,10 +130,19 @@ class TestModel:
         self.tensors = [
             (
                 k,
-                torch.arange(v.numel(), dtype=torch.float32, device=self.device)
-                .reshape(v)
-                .to(self.device)
-                * 0.001,
+                (
+                    torch.arange(v.numel(), dtype=torch.float32, device=self.device)
+                    .reshape(v)
+                    .to(self.device)
+                    * 0.001
+                ).requires_grad_(True)
+                if k not in self.keys_to_freeze
+                else (
+                    torch.arange(v.numel(), dtype=torch.float32, device=self.device)
+                    .reshape(v)
+                    .to(self.device)
+                    * 0.001
+                ).requires_grad_(False),
             )
             for k, v in self.sorted_hf_key_n_rank
         ]
@@ -138,9 +156,18 @@ class TestModel:
         ]
         self.weight_mapper = GPTWeightMapper(self.config)
 
+    def get_trainable_params(self):
+        trainable_params = set()
+        for k, v in self.sharded_tensors.items():
+            if v.requires_grad:
+                trainable_params.add(k)
+        return trainable_params
+
 
 class TestPolicy:
-    def __init__(self, name, policy_world_size, rollouts_comm):
+    def __init__(
+        self, name, policy_world_size, rollouts_comm, freeze_params: bool = False
+    ):
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
@@ -153,7 +180,7 @@ class TestPolicy:
             policy_parallelism_dims,
         )
         self.parallel_dims.build_mesh(device_type="cuda")
-        self.model = TestModel(self.device, self.parallel_dims)
+        self.model = TestModel(self.device, self.parallel_dims, freeze_params)
         self.parallel_mapper = ParallelTopoMapperGroup(
             self.parallel_dims,
             self.model.config,
@@ -161,7 +188,6 @@ class TestPolicy:
             self.model,
             self.model.weight_mapper,
         )
-        self.trainable_params = set(self.model.sharded_tensors.keys())
         self.replica_name = name
         self.rollouts_comm = rollouts_comm
         self.policy_to_rollout_insts = None
@@ -172,6 +198,8 @@ class TestPolicy:
         self.config = CosmosConfig()
         self.config.train.param_dtype = "float32"
 
+        self.prepare_trainable_params()
+
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
 
@@ -179,11 +207,13 @@ class TestPolicy:
         return {}
 
     def prepare_trainable_params(self):
-        pass
+        self.trainable_params = self.model.get_trainable_params()
 
 
 class TestRollout:
-    def __init__(self, name, rollout_world_size, policies_comm):
+    def __init__(
+        self, name, rollout_world_size, policies_comm, freeze_params: bool = False
+    ):
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
@@ -198,7 +228,7 @@ class TestRollout:
             rollout_parallelism_config,
         )
         self.parallel_dims.build_mesh(device_type="cuda")
-        self.model = TestModel(self.device, self.parallel_dims)
+        self.model = TestModel(self.device, self.parallel_dims, freeze_params)
         self.parallel_mapper = ParallelTopoMapperGroup(
             self.parallel_dims,
             self.model.config,
@@ -216,7 +246,6 @@ class TestRollout:
         self.ref_compatibale_map = compatibale_map
         self.quantization_type = None
         self.config = CosmosConfig()
-        self.trainable_params = set(compatibale_map.keys())
 
         self.vllm_weight_inplace_view_map = compatibale_map
         self.recv_param_key_n_rank_list = compatibale_list
@@ -240,6 +269,8 @@ class TestRollout:
 
         self.rollout = vLLMRollout(self.config, tokenizer)
 
+        self.prepare_trainable_params()
+
     def get_underlying_model(self):
         return None
 
@@ -247,7 +278,7 @@ class TestRollout:
         pass
 
     def prepare_trainable_params(self):
-        pass
+        self.trainable_params = self.model.get_trainable_params()
 
 
 async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
@@ -334,7 +365,7 @@ async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank:
         "shard_infos": local_shards_p,
         "param_groups": [],
         "sorted_params": p_params,
-        "trainable_params": [x[0] for x in model.sorted_hf_key_n_rank],
+        "trainable_params": list(model.get_trainable_params()),
     }
     p_data = msgpack.packb(p_body)
     r_body = {
@@ -358,7 +389,7 @@ async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank:
     return policy_to_rollout_insts
 
 
-async def run_policy_send_to_rollout(shm_name, shm_size, rank):
+async def run_policy_send_to_rollout(shm_name, shm_size, rank, trainable_param_sync):
     """Run as a test policy process to send to rollout process"""
     # Set up NCCL communicator
     policy_name = "policy"
@@ -372,7 +403,7 @@ async def run_policy_send_to_rollout(shm_name, shm_size, rank):
         rollout_name,
         POLICY_WORLD_SIZE,
         ROLLOUT_WORLD_SIZE,
-        trainable_only=True,
+        trainable_only=trainable_param_sync,
     )
 
     try:
@@ -398,6 +429,7 @@ async def run_policy_send_to_rollout(shm_name, shm_size, rank):
             policy_name,
             POLICY_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
+            trainable_param_sync,
         )
         policy.policy_to_rollout_insts = await generate_send_recv_insts(
             policy.model, True, rank
@@ -413,7 +445,7 @@ async def run_policy_send_to_rollout(shm_name, shm_size, rank):
         shm.close()
 
 
-async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
+async def run_rollout_recv_from_policy(shm_name, shm_size, rank, trainable_param_sync):
     """Run as a rollout process to receive from policy process"""
     # Set up NCCL communicator
     policy_name = "policy"
@@ -427,7 +459,7 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
         rollout_name,
         POLICY_WORLD_SIZE,
         ROLLOUT_WORLD_SIZE,
-        trainable_only=True,
+        trainable_only=trainable_param_sync,
     )
     try:
         # Get NCCL UID from shared memory
@@ -445,6 +477,7 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
             rollout_name,
             ROLLOUT_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
+            trainable_param_sync,
         )
         rollout.policy_to_rollout_recv_insts = await generate_send_recv_insts(
             rollout.model, False, rank
@@ -664,7 +697,6 @@ def run_policy_broadcast_to_policy(shm_names, shm_size, rank, total_rep, self_re
 
 def run_overfitting_policy():
     from cosmos_rl.policy.train import main as policy_main
-    from cosmos_rl.utils.logging import logger
     from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 
     N_STEPS = 30
@@ -1187,9 +1219,34 @@ async def parallel_map_check():
 
 async def main():
     # Get shared memory name and size from command line arguments
-    shm_name = sys.argv[1]
-    shm_size = int(sys.argv[2])
-    mode = sys.argv[3]
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--shm_name", type=str, required=True)  # 1st arg
+    parser.add_argument("--shm_size", type=int, required=True)  # 2nd arg
+    parser.add_argument("--mode", type=str, required=True)  # 3rd arg
+    parser.add_argument(
+        "--parallel_config",
+        type=str,
+        required=False,
+        default="",
+        help="Parallel dimensions to use for the test. Format: fsdp;tp;pp",
+    )
+    parser.add_argument(
+        "--trainable_param_sync",
+        type=bool,
+        required=False,
+        default=False,
+        help="If only trainable params are synced. If set, part of the params will be frozen.",
+    )  # 4th arg
+    args = parser.parse_args()
+    mode = args.mode
+    shm_name = args.shm_name
+    shm_size = args.shm_size
+    mode = args.mode
+    trainable_param_sync = (
+        args.trainable_param_sync
+    )  # If only trainable params are synced
 
     if mode == "dummy_policy":
         os.environ["COSMOS_ROLE"] = "Policy"
@@ -1222,12 +1279,14 @@ async def main():
         assert (
             world_size == POLICY_WORLD_SIZE
         ), "World size must match POLICY_WORLD_SIZE for policy process"
-        await run_policy_send_to_rollout(shm_name, shm_size, rank)
+        await run_policy_send_to_rollout(shm_name, shm_size, rank, trainable_param_sync)
     elif mode == "rollout_recv_from_policy":
         assert (
             world_size == ROLLOUT_WORLD_SIZE
         ), "World size must match ROLLOUT_WORLD_SIZE for rollout process"
-        await run_rollout_recv_from_policy(shm_name, shm_size, rank)
+        await run_rollout_recv_from_policy(
+            shm_name, shm_size, rank, trainable_param_sync
+        )
     elif mode == "policy_send_to_policy":
         run_policy_unicast_to_policy(shm_name, shm_size, rank, True)
     elif mode == "policy_recv_from_policy":
@@ -1237,14 +1296,14 @@ async def main():
         self_rep = int(mode.split(",")[2])
         run_policy_broadcast_to_policy(shm_name, shm_size, rank, total_rep, self_rep)
     elif mode == "policy_parallelism_extract":
-        sepc = sys.argv[4]
+        sepc = args.parallel_config
         fsdp, tp, pp = sepc.split(";")
         fsdp = int(fsdp.split(":")[1])
         tp = int(tp.split(":")[1])
         pp = int(pp.split(":")[1])
         run_policy_parallelism_extract(rank, fsdp, tp, pp)
     elif mode == "rollout_parallelism_extract":
-        sepc = sys.argv[4]
+        sepc = args.parallel_config
         fsdp, tp, pp = sepc.split(";")
         fsdp = int(fsdp.split(":")[1])
         tp = int(tp.split(":")[1])

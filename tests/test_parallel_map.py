@@ -33,8 +33,11 @@ class TestParallelMap(unittest.TestCase):
             "--rdzv_backend=c10d",
             "--rdzv_endpoint=localhost:0",
             os.path.join(cur_dir, "launch_test_worker.py"),
+            "--shm_name",
             "-1",  # Use -1 to indicate no need for shared memory
+            "--shm_size",
             "-1",  # Use -1 to indicate no need for shared memory size
+            "--mode",
             "parallel_map_check",
         ]
 
@@ -85,9 +88,13 @@ class TestParallelMap(unittest.TestCase):
                 "--rdzv_backend=c10d",
                 "--rdzv_endpoint=localhost:0",
                 os.path.join(cur_dir, "launch_test_worker.py"),
+                "--shm_name",
                 "-1",  # Use -1 to indicate no need for shared memory
+                "--shm_size",
                 "-1",  # Use -1 to indicate no need for shared memory size
+                "--mode",
                 "policy_parallelism_extract",
+                "--parallel_config",
                 f"fsdp:{fsdp};tp:{tp};pp:{pp}",
             ]
 
@@ -133,9 +140,13 @@ class TestParallelMap(unittest.TestCase):
                 "--rdzv_backend=c10d",
                 "--rdzv_endpoint=localhost:0",
                 os.path.join(cur_dir, "launch_test_worker.py"),
+                "--shm_name",
                 "-1",  # Use -1 to indicate no need for shared memory
+                "--shm_size",
                 "-1",  # Use -1 to indicate no need for shared memory size
+                "--mode",
                 "rollout_parallelism_extract",
+                "--parallel_config",
                 f"fsdp:{fsdp};tp:{tp};pp:{pp}",
             ]
 
