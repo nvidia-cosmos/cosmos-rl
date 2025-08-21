@@ -1222,8 +1222,8 @@ async def main():
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--shm_name", type=str, required=True)  # 1st arg
-    parser.add_argument("--shm_size", type=int, required=True)  # 2nd arg
+    parser.add_argument("--shm_name", type=str)  # 1st arg
+    parser.add_argument("--shm_size", type=int)  # 2nd arg
     parser.add_argument("--mode", type=str, required=True)  # 3rd arg
     parser.add_argument(
         "--parallel_config",
