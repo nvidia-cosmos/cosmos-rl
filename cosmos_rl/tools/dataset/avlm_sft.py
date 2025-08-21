@@ -243,9 +243,6 @@ class AVLMDataPacker(DataPacker):
         result_dict["image_sizes"] = (
             inputs["image_sizes"] if "image_sizes" in inputs else None
         )
-        result_dict["batch_num_images"] = (
-            inputs["batch_num_images"] if "batch_num_images" in inputs else None
-        )
 
         return result_dict
 
@@ -254,7 +251,6 @@ class AVLMDataPacker(DataPacker):
     ) -> Dict[str, Any]:
         pixel_values = [x["pixel_values"] for x in processed_samples]
         image_sizes = [x["image_sizes"] for x in processed_samples]
-        batch_num_images = [x["batch_num_images"] for x in processed_samples]
 
         if all([x is not None for x in pixel_values]):
             pixel_values = torch.cat(pixel_values, dim=0)
@@ -268,23 +264,12 @@ class AVLMDataPacker(DataPacker):
             assert all([x is None for x in image_sizes]), "image_sizes should be None"
             image_sizes = None
 
-        if all([x is not None for x in batch_num_images]):
-            batch_num_images = torch.cat(batch_num_images)
-        else:
-            assert all(
-                [x is None for x in batch_num_images]
-            ), "batch_num_images should be None"
-            batch_num_images = None
-
         batch = {}
         if pixel_values is not None:
             batch["pixel_values"] = pixel_values
 
         if image_sizes is not None:
             batch["image_sizes"] = image_sizes
-
-        if batch_num_images is not None:
-            batch["batch_num_images"] = batch_num_images
 
         # Pad the input_ids, logprob_masks
         batch["input_ids"] = torch.tensor(
@@ -337,12 +322,8 @@ class AVLMDataPacker(DataPacker):
         )
 
         return_dict = {}
-
         return_dict["pixel_values"] = x["pixel_values"] if "pixel_values" in x else None
         return_dict["image_sizes"] = x["image_sizes"] if "image_sizes" in x else None
-        return_dict["batch_num_images"] = (
-            x["batch_num_images"] if "batch_num_images" in x else None
-        )
 
         # Common fields
         input_ids = x["input_ids"]
