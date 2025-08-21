@@ -37,6 +37,7 @@ def main(*args, **kwargs):
         )
 
     cosmos_config = CosmosConfig.from_dict(metadata["config"])
+
     logger.info(f"[Policy] Loaded configuration: {cosmos_config.model_dump()}")
 
     parallel_dims = ParallelDims.from_config(

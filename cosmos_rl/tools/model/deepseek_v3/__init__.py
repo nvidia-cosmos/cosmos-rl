@@ -44,31 +44,8 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import BaseModel
 from transformers.activations import ACT2FN
 from functools import cached_property
-
-
-class DeepseekV3RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        DeepseekV3RMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
-
-
-def build_norm(norm_type: str, dim: int, eps: float):
-    assert norm_type == "rmsnorm", f"Unknown norm_type: '{norm_type}'"
-    return DeepseekV3RMSNorm(dim, eps)
+from cosmos_rl.policy.kernel.norm import RMSNorm
+from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 
 
 @dataclass
@@ -258,7 +235,9 @@ class DeepseekV3Attention(nn.Module):
             self.q_a_proj = nn.Linear(
                 self.hidden_size, config.q_lora_rank, bias=config.attention_bias
             )
-            self.q_a_layernorm = DeepseekV3RMSNorm(config.q_lora_rank)
+            self.q_a_layernorm = RMSNorm(
+                config.q_lora_rank, casting_mode=config.hf_config.model_type
+            )
             self.q_b_proj = nn.Linear(
                 config.q_lora_rank, self.num_heads * self.q_head_dim, bias=False
             )
@@ -268,7 +247,9 @@ class DeepseekV3Attention(nn.Module):
             config.kv_lora_rank + config.qk_rope_head_dim,
             bias=config.attention_bias,
         )
-        self.kv_a_layernorm = DeepseekV3RMSNorm(config.kv_lora_rank)
+        self.kv_a_layernorm = RMSNorm(
+            config.kv_lora_rank, casting_mode=config.hf_config.model_type
+        )
         self.kv_b_proj = nn.Linear(
             config.kv_lora_rank,
             self.num_heads
@@ -409,10 +390,10 @@ class DeepseekV3MLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.act_mul_func = MLPActMulFunc(ACT2FN[config.hidden_act])
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self.act_mul_func(self.gate_proj(x), self.up_proj(x)))
 
 
 class DeepseekV3MLPWithEP(nn.Module):
@@ -777,9 +758,11 @@ class DeepseekV3DecoderLayer(nn.Module):
 
         self.mlp = DeepseekV3MoE(config) if self.use_moe else DeepseekV3MLP(config)
 
-        self.input_layernorm = DeepseekV3RMSNorm(config.dim, eps=config.norm_eps)
-        self.post_attention_layernorm = DeepseekV3RMSNorm(
-            config.dim, eps=config.norm_eps
+        self.input_layernorm = RMSNorm(
+            config.dim, eps=config.norm_eps, casting_mode=config.hf_config.model_type
+        )
+        self.post_attention_layernorm = RMSNorm(
+            config.dim, eps=config.norm_eps, casting_mode=config.hf_config.model_type
         )
 
     def forward(
@@ -836,8 +819,10 @@ class DeepseekV3MoEModel(BaseModel):
                 for layer_idx in range(model_args.n_layers)
             ]
         )
-        self.norm = build_norm(
-            model_args.norm_type, dim=model_args.dim, eps=model_args.norm_eps
+        self.norm = RMSNorm(
+            model_args.dim,
+            model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
         )
 
         if not model_args.hf_config.tie_word_embeddings:

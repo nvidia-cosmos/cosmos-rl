@@ -49,6 +49,11 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86
     && apt-get install -y libnccl2=${NCCL_VERSION} libnccl-dev=${NCCL_VERSION}
 
 ###################################################
+## Install cuDNN
+RUN apt-get update -y && \
+    apt-get install -y libcudnn9-cuda-12 libcudnn9-dev-cuda-12
+
+###################################################
 ## Install redis
 # Download and add Redis GPG key, Redis APT repository
 RUN curl -fsSL https://packages.redis.io/gpg  | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg && \
@@ -71,6 +76,7 @@ RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
 RUN pip install -U pip setuptools wheel packaging
+
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
 RUN pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128

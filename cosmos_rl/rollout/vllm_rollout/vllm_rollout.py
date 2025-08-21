@@ -51,9 +51,7 @@ class vLLMRollout(RolloutBase):
             hf_config_path: huggingface config file path.
             model_hf_config: the huggingface config to initiallize the generating model in vllm
         """
-        super().__init__()
-
-        self.config = config
+        super().__init__(config, tokenizer)
         policy_config = self.config.policy
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
@@ -63,8 +61,6 @@ class vLLMRollout(RolloutBase):
         model_path = policy_config.model_name_or_path
 
         self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
-
-        self.pad_token_id = tokenizer.pad_token_id
 
         hf_config_path = self.config.policy.model_name_or_path
         try:
@@ -81,7 +77,6 @@ class vLLMRollout(RolloutBase):
             # self.eos_token_ids = [tokenizer.eos_token_id]
             # TODO(lms): remove this
             self.eos_token_ids = [151645, 151643]
-        self.tokenizer = tokenizer
         self._engine_initialized = False
         self.rollout_engine = None
 
@@ -112,7 +107,7 @@ class vLLMRollout(RolloutBase):
             disable_mm_preprocessor_cache = False
 
             # Check if the model has MoE
-            moe_model_type = {"qwen3_moe"}
+            moe_model_type = {"qwen3_moe", "deepseek_v3"}
             multimodal_type = {"qwen2_5_vl"}
 
             model_type = self.model_config.model_type

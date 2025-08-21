@@ -82,8 +82,6 @@ VLMs
 - **Llama VLM**
 - **LLava**
 
-- Currently under active development
-
 .. note::
    While models above have been extensively tested, other Hugging Face models should also be compatible. If you encounter issues with untested models, please report them by opening an issue in our repository.
 

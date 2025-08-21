@@ -31,8 +31,8 @@ from cosmos_rl.utils.wandb_logger import (
 )
 import torch
 import numpy as np
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import Dataset, DataLoader, DistributedSampler, Sampler
+from cosmos_rl.policy.trainer.sampler import SkippingSampler
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.cache as cache
@@ -260,78 +260,23 @@ class SFTTrainer(Trainer):
                 "Wandb is not available. Please install it to use wandb logging features."
             )
 
-        # Prepare dataset
-        train_dataset, val_dataset = construct_dataset(
-            config.train.train_policy,
-            tokenizer=self.tokenizer,
-            data_packer=self.data_packer,
-            user_provided_dataset=self.sft_user_dataset,
-        )
-        train_sampler = DistributedSampler(
-            train_dataset,
-            num_replicas=self.dp_world_size,
-            rank=self.dp_rank,
-            shuffle=True,
-            drop_last=False,
-        )
-
-        val_sampler = DistributedSampler(
-            val_dataset,
-            num_replicas=self.dp_world_size,
-            rank=self.dp_rank,
-            shuffle=False,
-            drop_last=False,
-        )
-        self.epoch = config.train.epoch
-
-        assert (
-            self.tokenizer.pad_token_id is not None
-        ), "Tokenizer must have a pad token id"
-        self.train_data_loader = DataLoader(
-            train_dataset,
-            batch_size=config.train.train_batch_per_replica,
-            shuffle=False,
-            num_workers=config.train.train_policy.dataloader_num_workers,
-            prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-            sampler=train_sampler,
-            collate_fn=collate_fn,
-            drop_last=False,
-        )
-        self.val_data_loader = DataLoader(
-            val_dataset,
-            batch_size=config.train.validation_batch_per_replica,
-            num_workers=config.train.train_policy.dataloader_num_workers,
-            prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-            sampler=val_sampler,
-            collate_fn=collate_fn,
-            drop_last=False,
-        )
-        steps_by_dataset = len(self.train_data_loader) * self.epoch
-        if config.train.max_num_steps is not None:
-            self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
-        else:
-            self.total_steps = steps_by_dataset
-
-        self.lr_schedulers = build_lr_schedulers(
-            self.optimizers, self.config, self.total_steps
-        )
         self.train_step = 0
-
+        ckpt_total_steps = 0
+        self.lr_schedulers = None
+        self.start_epoch = 0
         # Load model
         if config.train.resume:
             try:
-                ckpt_extra_vars = self.ckpt_manager.load_checkpoint(
+                # early init the lr_schedulers to avoid it is not initialized when loading the checkpoint
+                ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
                     model=self.model,
                     optimizer=self.optimizers,
-                    scheduler=self.lr_schedulers,
+                    scheduler=partial(
+                        build_lr_schedulers, self.optimizers, self.config
+                    ),
                 )
                 ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
-                if ckpt_total_steps != self.total_steps:
-                    logger.warning(
-                        f"Checkpoint total steps {ckpt_total_steps} does not match expected {self.total_steps}. Start training from step 0"
-                    )
-                else:
-                    self.train_step = ckpt_extra_vars.get("step", 0)
+                self.train_step = ckpt_extra_vars.get("step", 0)
             except Exception as e:
                 logger.error(
                     f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
@@ -351,6 +296,91 @@ class SFTTrainer(Trainer):
             )
         self.model.train()
 
+        # Prepare dataset
+        train_dataset, val_dataset = construct_dataset(
+            config.train.train_policy,
+            tokenizer=self.tokenizer,
+            data_packer=self.data_packer,
+            user_provided_dataset=self.sft_user_dataset,
+        )
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=True,
+            drop_last=False,
+        )
+
+        def get_train_data_loader(sampler: Sampler[int]):
+            return DataLoader(
+                train_dataset,
+                batch_size=config.train.train_batch_per_replica,
+                shuffle=False,
+                num_workers=config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                sampler=sampler,
+                collate_fn=collate_fn,
+                drop_last=False,
+            )
+
+        if config.train.resume and self.train_step > 0:
+            """
+            Note: Here we assume there is no data shuffling across epochs.
+            Otherwise, we need to call `set_epoch` on the sampler after each epoch.
+            """
+            # Resume training from the last checkpoint if needed
+            total_steps_per_epoch = len(get_train_data_loader(train_sampler))
+            data_loader_bias = self.train_step % total_steps_per_epoch
+            data_loader_bias *= config.train.train_batch_per_replica
+            logger.info(
+                f"Resuming training from step {self.train_step}/{ckpt_total_steps}"
+            )
+            train_sampler = SkippingSampler(
+                train_sampler, skip_samples=data_loader_bias
+            )
+            self.start_epoch = self.train_step // total_steps_per_epoch
+
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=False,
+            drop_last=False,
+        )
+        self.epoch = config.train.epoch
+
+        assert (
+            self.tokenizer.pad_token_id is not None
+        ), "Tokenizer must have a pad token id"
+        self.train_data_loader = get_train_data_loader(train_sampler)
+        self.val_data_loader = DataLoader(
+            val_dataset,
+            batch_size=config.train.validation_batch_per_replica,
+            num_workers=config.train.train_policy.dataloader_num_workers,
+            prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+            sampler=val_sampler,
+            collate_fn=collate_fn,
+            drop_last=False,
+        )
+
+        steps_by_dataset = (
+            ckpt_total_steps
+            if ckpt_total_steps > 0
+            else len(self.train_data_loader) * self.epoch
+        )
+        if config.train.max_num_steps is not None:
+            self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
+        else:
+            self.total_steps = steps_by_dataset
+
+        if self.lr_schedulers is None:
+            assert (
+                self.train_step == 0
+            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            self.lr_schedulers = build_lr_schedulers(
+                self.optimizers, self.config, self.total_steps
+            )
+
         if self.parallel_dims.dp_enabled:
             dp_group = self.parallel_dims.mesh["dp"].get_group()
         else:
@@ -361,7 +391,11 @@ class SFTTrainer(Trainer):
         else:
             cp_group = None
 
-        self.loss_fn = partial(async_safe_ce, dp_group=dp_group, cp_group=cp_group)
+        self.loss_fn = partial(
+            async_safe_ce,
+            dp_group=dp_group,
+            cp_group=cp_group,
+        )
 
     def validate(self):
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
@@ -469,23 +503,9 @@ class SFTTrainer(Trainer):
         self.profiler.start()
         pp_last_stage = False
 
-        start_epoch = 0
-        data_loader_bias = 0
-        # Resume training from the last checkpoint if needed
-        if self.config.train.resume and self.train_step > 0:
-            logger.info(
-                f"Resuming training from step {self.train_step}/{self.total_steps}..."
-            )
-            start_epoch = self.train_step // len(self.train_data_loader)
-            data_loader_bias = self.train_step % len(self.train_data_loader)
-
-        for cur_epoch in range(start_epoch, self.epoch):
+        for cur_epoch in range(self.start_epoch, self.epoch):
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:
-                if data_loader_bias > 0:
-                    data_loader_bias -= 1
-                    continue
-
                 acc_loss = torch.zeros(1, device=self.device)
                 self.optimizers.zero_grad()
                 global_batch_size = len(global_batch)

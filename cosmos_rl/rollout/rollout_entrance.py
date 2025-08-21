@@ -48,15 +48,28 @@ def run_rollout(*args, **kwargs):
         f"[Rollout] Loaded rollout configuration: {cosmos_rollout_config.rollout.model_dump()}"
     )
 
-    parallel_dims = ParallelDims.from_config(
-        parallesim_config=cosmos_rollout_config.rollout.parallelism
-    )
-
-    init_distributed()
-    parallel_dims.build_mesh(device_type="cuda")
-
     try:
-        rollout_worker = vLLMRolloutWorker(cosmos_rollout_config, parallel_dims)
+        rollout_backend = cosmos_rollout_config.rollout.backend
+        if rollout_backend == "vllm":
+            parallel_dims = ParallelDims.from_config(
+                parallesim_config=cosmos_rollout_config.rollout.parallelism
+            )
+            init_distributed()
+            parallel_dims.build_mesh(device_type="cuda")
+            rollout_worker = vLLMRolloutWorker(cosmos_rollout_config, parallel_dims)
+
+        elif rollout_backend == "trtllm":
+            try:
+                from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (
+                    TRTLLMRolloutWrapper,
+                )
+            except ImportError as e:
+                logger.error(f"[Rollout] TRTLLMRolloutWrapper importing failed! {e}")
+                raise e
+            # if backend is trtllm, we leave distribution initialization to trtllm executor.
+            rollout_worker = TRTLLMRolloutWrapper(cosmos_rollout_config)
+        else:
+            raise ValueError(f"Invalid rollout backend: {rollout_backend}")
         rollout_worker.work()
     except Exception:
         import traceback

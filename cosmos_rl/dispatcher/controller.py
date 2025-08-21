@@ -44,7 +44,7 @@ from cosmos_rl.dispatcher.data import (
     RLPayload,
     CosmosValidationDataset,
 )
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 from cosmos_rl.dispatcher.status import (
     PolicyStatusManager,
@@ -138,6 +138,9 @@ class Controller:
         self.user_data_packer = data_packer
         self.user_val_data_packer = val_data_packer
         self.dataset = None
+        self.ckpt_extra_info = {}
+        remain_samples_num = 0
+
         if self.is_rl:
             if dataset is not None:
                 assert isinstance(dataset, Dataset)
@@ -158,13 +161,90 @@ class Controller:
                 ),
                 unbiased=config.train.train_policy.unbiased_advantage,
             )
+
+            remain_samples_num = (
+                (
+                    len(self.dataset.train_set)
+                    * config.rollout.n_generation
+                    * config.train.epoch
+                )
+                if self.dataset is not None
+                else 0
+            )
+
+            train_sampler = DistributedSampler(
+                self.dataset.train_set,
+                num_replicas=1,
+                rank=0,
+                shuffle=config.train.train_policy.dataloader_shuffle,
+                drop_last=False,
+            )
+            if config.train.resume:
+                try:
+                    # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
+                    PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
+                    self.ckpt_manager = CheckpointMananger(config)
+                    self.ckpt_extra_info = (
+                        self.ckpt_manager.load_extra_info_from_checkpoint()
+                    )
+                    remain_samples_num = self.ckpt_extra_info.get(
+                        "remain_samples_num", remain_samples_num
+                    )
+                    self.epoch = (
+                        config.train.epoch
+                        - (
+                            math.ceil(
+                                remain_samples_num
+                                / (
+                                    len(self.dataset.train_set)
+                                    * config.rollout.n_generation
+                                )
+                            )
+                        )
+                        + 1
+                    )
+                    logger.info(
+                        f"[Controller] Resuming from checkpoint, current epoch: {self.epoch}, remaining samples: {remain_samples_num}"
+                    )
+
+                    train_dataloader_bias = max(
+                        0,
+                        len(self.dataset.train_set)
+                        - (
+                            (
+                                math.ceil(
+                                    remain_samples_num / config.rollout.n_generation
+                                )
+                            )
+                            % len(self.dataset.train_set)
+                        ),
+                    )
+
+                    logger.info(
+                        f"[Controller] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
+                    )
+                    from cosmos_rl.policy.trainer.sampler import SkippingSampler
+
+                    train_sampler = SkippingSampler(
+                        base_sampler=train_sampler,
+                        skip_samples=train_dataloader_bias,
+                    )
+                except Exception as e:
+                    import traceback
+
+                    traceback.print_exc()
+                    logger.error(
+                        f"[Controller] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
+                    )
+
             self.train_dataloader = DataLoader(
                 self.dataset.train_set,
                 batch_size=1,  # batch size is 1 is mandatory
-                shuffle=config.train.train_policy.dataloader_shuffle,
+                shuffle=False,
                 num_workers=config.train.train_policy.dataloader_num_workers,
                 prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
                 collate_fn=RLPayload.collate_fn,
+                sampler=train_sampler,
             )
             self.train_dataloader_iter = iter(self.train_dataloader)
 
@@ -258,66 +338,6 @@ class Controller:
             ips=["0.0.0.0"], port=redis_free_port
         )
 
-        remain_samples_num = (
-            (
-                len(self.dataset.train_set)
-                * config.rollout.n_generation
-                * config.train.epoch
-            )
-            if self.dataset is not None
-            else 0
-        )
-        self.ckpt_extra_info = {}
-        self.train_dataloader_bias = 0
-        if self.config.train.resume:
-            try:
-                # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
-                PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
-                self.ckpt_manager = CheckpointMananger(config)
-                self.ckpt_extra_info = (
-                    self.ckpt_manager.load_extra_info_from_checkpoint()
-                )
-                remain_samples_num = self.ckpt_extra_info.get(
-                    "remain_samples_num", remain_samples_num
-                )
-                self.epoch = (
-                    config.train.epoch
-                    - (
-                        math.ceil(
-                            remain_samples_num
-                            / (
-                                len(self.dataset.train_set)
-                                * config.rollout.n_generation
-                            )
-                        )
-                    )
-                    + 1
-                )
-                logger.info(
-                    f"[Controller] Resuming from checkpoint, current epoch: {self.epoch}, remaining samples: {remain_samples_num}"
-                )
-                if config.train.train_policy.dataloader_shuffle:
-                    logger.warning(
-                        "[Controller] Since dataloader_shuffle is True, the dataloader status cannot be resumed identically."
-                    )
-
-                self.train_dataloader_bias = max(
-                    0,
-                    len(self.dataset.train_set)
-                    - (
-                        (math.ceil(remain_samples_num / config.rollout.n_generation))
-                        % len(self.dataset.train_set)
-                    ),
-                )
-
-                logger.info(
-                    f"[Controller] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"[Controller] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
-                )
-
         self.policy_status_manager.setup(
             config,
             self.redis_controller,
@@ -383,18 +403,6 @@ class Controller:
             )
         else:
             iterator = self.train_dataloader_iter
-            for _ in range(self.train_dataloader_bias):
-                try:
-                    next(iterator)
-                except StopIteration:
-                    logger.warning(
-                        "[Controller] Data loader bias adjustment: reached end of dataset."
-                    )
-                    iterator = iter(self.train_dataloader)
-            if self.train_dataloader_bias > 0:
-                logger.info(
-                    f"[Controller] Data loader bias adjustment: skipped {self.train_dataloader_bias} samples due to checkpoint reuse."
-                )
 
         if not is_validation:
             # Throttle the generation speed:
@@ -610,6 +618,7 @@ class Controller:
                 raise Exception(f"[Controller] Unknown role: {role}")
 
     async def unregister(self, replica_name: str):
+        logger.info(f"[Controller] Unregistering replica {replica_name}")
         async with self.life_cycle_lock:
             if replica_name in self.policy_status_manager:
                 self.policy_status_manager.unregister(replica_name)

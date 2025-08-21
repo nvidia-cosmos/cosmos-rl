@@ -28,7 +28,6 @@ import tarfile
 import ctypes
 import asyncio
 import importlib
-import importlib.util
 import sys
 import glob
 import io
@@ -1140,3 +1139,43 @@ def decode_vision_info(prompts):
         new_prompt["multi_modal_data"] = multi_modal_data
         new_prompts.append(new_prompt)
     return new_prompts
+
+
+def rank0_print(msg, *args, **kwargs):
+    if os.environ.get("RANK", "0") == "0":
+        logger.info(msg, *args, **kwargs)
+
+
+def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
+    # Walk children first so we can safely replace in-place.
+    for name, child in list(root.named_children()):
+        replace_with_liger_equivalents(child)
+
+        lig = getattr(child, "liger_equivalent", None)
+        if lig is None:
+            continue
+
+        # Call the factory/method if it's callable; otherwise assume it's already a module.
+        new_child = lig() if callable(lig) else lig
+
+        # Keep training/eval state.
+        try:
+            new_child.train(child.training)
+        except Exception:
+            pass
+
+        # Try to place on the same device/dtype as the original.
+        ref = next(child.parameters(recurse=True), None)
+        if ref is None:
+            ref = next(child.buffers(recurse=True), None)
+        if ref is not None:
+            try:
+                if ref.is_floating_point():
+                    new_child.to(device=ref.device, dtype=ref.dtype)
+                else:
+                    new_child.to(device=ref.device)
+            except Exception:
+                pass
+        rank0_print(f"Replaced {name} with liger equivalent")
+        # Swap it in.
+        setattr(root, name, new_child)

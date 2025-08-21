@@ -231,6 +231,10 @@ def inject_lora_adapters(
     from cosmos_rl.policy.model.hf_models import HFModel
 
     if isinstance(model, HFModel):
+        # Must enable input require grads for the HFModel to work with LoRA.
+        # Otherwise, the model will raise a RuntimeError:
+        # `element 0 of tensors does not require grad and does not have a grad_fn`.
+        model.model.enable_input_require_grads()
         output_layer = model.model.get_output_embeddings()
         lm_head_module_name = [
             name for name, module in model.named_modules() if module is output_layer

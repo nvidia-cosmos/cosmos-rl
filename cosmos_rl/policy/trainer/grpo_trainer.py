@@ -784,7 +784,6 @@ class GRPOTrainer(Trainer):
 
                     grouped_send_ops = []
                     num_groups = 0
-                    TRANSFER_GROUP_SIZE = 4
 
                     for insts_group in self.policy_to_rollout_insts:
                         for insts_for_per_param in insts_group.param_instructions:
@@ -816,12 +815,12 @@ class GRPOTrainer(Trainer):
                                 )
                                 assert self.global_rank == p_rank
                                 logger.debug(
-                                    f"Sending {dest_name} to rollout rank {r_rank}, {view.shape}"
+                                    f"Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
                                 )
                                 grouped_send_ops.append((view, r_rank, dest_name))
                                 total_bytes_sent += view.numel() * view.element_size()
                         num_groups += 1
-                        if num_groups == TRANSFER_GROUP_SIZE:
+                        if num_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
                             grouped_send(grouped_send_ops)
                             num_groups = 0
 
@@ -904,9 +903,19 @@ class GRPOTrainer(Trainer):
                 logger.info(
                     f"[Policy] Building lr schedulers for total steps {command.total_steps}"
                 )
-                self.lr_schedulers = build_lr_schedulers(
+
+                # TODO(jiaxinc): This is a tricky part:
+                # Rebuild lr schedulers for the very first step because
+                # only until the first step, we can know the exact total steps from the controller
+                new_lr_schedulers = build_lr_schedulers(
                     self.optimizers, self.config, command.total_steps
                 )
+                with torch.no_grad():
+                    # Note: we need to load the state dict of the old lr schedulers
+                    # in case it is resumed from a checkpoint,
+                    # otherwise, the lr scheduler will be reset to the initial value
+                    new_lr_schedulers.load_state_dict(self.lr_schedulers.state_dict())
+                self.lr_schedulers = new_lr_schedulers
                 self.lr_schedulers_updated = True
             report_data = self.train(
                 current_step=command.global_step,

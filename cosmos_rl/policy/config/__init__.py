@@ -671,6 +671,9 @@ class PolicyConfig(BaseModel):
         "- exact parameter names (from model.named_parameters()) "
         "- exact module paths (from model.named_modules()) ",
     )
+    enable_liger_kernel: bool = Field(
+        default=False, description="Whether to use liger kernel."
+    )
 
     @model_validator(mode="after")
     def check_params_value(self):
@@ -803,6 +806,12 @@ class RolloutConfig(BaseModel):
 
     vllm_use_flashinfer: bool = Field(
         default=False, description="Use flashinfer for vllm rollout."
+    )
+
+    backend: str = Field(
+        default="vllm",
+        description="Backend for rollout. Currently support `vllm` and `trtllm`.",
+        choices=["vllm", "trtllm"],
     )
 
     @model_validator(mode="after")

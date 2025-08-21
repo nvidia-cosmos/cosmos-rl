@@ -257,8 +257,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         """
         Compute the maximum sequence length of the processed samples
         """
-        max_len = max([len(x["token_ids"]) for x in processed_samples])
-        return max_len
+        return max([len(x["token_ids"]) for x in processed_samples])
 
     def sft_collate_fn(
         self,

@@ -478,6 +478,9 @@ class ModelRegistry:
                         model, _ = inject_lora_adapters(model, config.policy.lora)
                         mark_only_lora_as_trainable(model, config.policy.lora)
 
+                    if config.policy.enable_liger_kernel:
+                        util.replace_with_liger_equivalents(model)
+
                     # If we further need finer-grained control over trainable parameters, we need to apply trainable flags after LoRA is applied
                     if config.policy.trainable_map is not None:
                         if config.policy.lora is not None:
@@ -504,11 +507,13 @@ class ModelRegistry:
 
 
 class WeightMapper(ABC):
+    _WEIGHT_MAPPER_BACKEND_SUPPORTED = ["vllm", "trtllm"]
     _MODEL_WEIGHT_MAPPER_REGISTRY: Dict[str, Tuple[Type["WeightMapper"], int]] = {}
 
     def __init__(self, hf_config: AutoConfig):
         logger.info(f"WeightMapper: {type(self).__name__} is being initialized.")
         self.config = hf_config
+        self.backend = "vllm"  # default rollout backend is vllm.
 
     @torch.no_grad()
     def policy_maybe_decompose_weights_to_hf_naming(self, name, param):
@@ -648,3 +653,11 @@ class WeightMapper(ABC):
         Each tuple element includes a transformed tensor and its corresponding slice strategy to derive from the original tensor.
         """
         return []
+
+    def setup_rollout_backend(self, backend: str):
+        """
+        Setup the rollout backend for the weight mapper.
+        """
+        self.backend = backend
+        if backend not in WeightMapper._WEIGHT_MAPPER_BACKEND_SUPPORTED:
+            raise ValueError(f"Backend {backend} is not supported by weight mapper.")

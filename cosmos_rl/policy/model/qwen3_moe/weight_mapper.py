@@ -23,7 +23,6 @@ from cosmos_rl.utils.parallelism_registry import (
 )
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 
 
 class Qwen3MoeWeightMapper(WeightMapper):
@@ -44,6 +43,20 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 return rollout_weight_name.replace(
                     "experts.w2_weight", "down_proj.weight"
                 )
+            # below are for trtllm weight for gate_up_proj and input_layernorm.
+            elif "experts.w3_w1_weight" in rollout_weight_name:
+                return rollout_weight_name.replace(
+                    "experts.w3_w1_weight", "gate_up_proj.weight"
+                )
+            elif "next_layer_layernorm" in rollout_weight_name:
+                # For trtllm, next_layer_layernorm is:
+                #   `model.norm` when layer_id == self.config.num_hidden_layers - 1
+                #   `model.layers.${layer_id + 1}.input_layernorm` when layer_id < self.config.num_hidden_layers - 1
+                layer_id = int(rollout_weight_name.split(".")[2])
+                if layer_id == self.config.num_hidden_layers - 1:
+                    return "model.norm.weight"
+                else:
+                    return f"model.layers.{layer_id + 1}.input_layernorm.weight"
         return rollout_weight_name
 
     def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
@@ -60,20 +73,22 @@ class Qwen3MoeWeightMapper(WeightMapper):
         return q_weight, k_weight, v_weight
 
     def _split_gate_proj_weight(self, name, weight: torch.Tensor):
-        # weight has shape [num_experts, 2 * x, hidden_dim]
+        # weight has shape [num_experts, 2 * x, hidden_dim], first gate_proj, then up_proj
+        # if backend is trtllm,  [num_experts, 2 * x, hidden_dim], first up_proj, then gate_proj
         dim_1 = weight.shape[1]
         gate_proj_weight = weight[:, : dim_1 // 2]
         up_proj_weight = weight[:, dim_1 // 2 :]
+        if self.backend == "trtllm":
+            gate_proj_weight, up_proj_weight = up_proj_weight, gate_proj_weight
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
         self,
-        vllm_model: Qwen3MoeForCausalLM,
+        vllm_model,
     ) -> Tuple[
         Dict[str, torch.Tensor],
         List[List[Tuple[str, torch.Size]]],
     ]:
-        assert isinstance(vllm_model, Qwen3MoeForCausalLM)
         recv_key_n_rank_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():

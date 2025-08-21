@@ -246,6 +246,7 @@ class ParallelTopoMapper:
         hf_config: Any,
         is_policy: bool,
         underlying_model: Any,
+        backend: str = "vllm",
     ):
         """
         Initialize the ParallelTopoMap with the given parallelism configurations.
@@ -269,6 +270,7 @@ class ParallelTopoMapper:
         self.weight_mapper = weight_mapper
         self.is_policy = is_policy
         self.underlying_model = underlying_model
+        self.backend = backend
 
     def get_full_mesh_rank_info(self, global_rank: int) -> Dict[str, DimSliceInfo]:
         """
@@ -795,6 +797,74 @@ class ParallelTopoMapper:
                 dims_rank_info=dims_rank_info,
             )
 
+    def determine_tp_dim(
+        self, part: torch.nn.Module, param: torch.Tensor, param_name: str, is_bias: bool
+    ) -> int:
+        if self.backend == "vllm":
+            if isinstance(part, (QKVParallelLinear)):
+                output_dim = getattr(param, "output_dim", 0)
+                assert any(
+                    [
+                        k in param_name
+                        for k in self.weight_mapper.packed_modules_mapping.keys()
+                    ]
+                ), f"QKVParallelLinear {param_name} is not in packed_modules_mapping {self.weight_mapper.packed_modules_mapping}."
+                return output_dim
+            elif isinstance(part, (MergedColumnParallelLinear)):
+                output_dim = getattr(param, "output_dim", 0)
+                assert any(
+                    [
+                        k in param_name
+                        for k in self.weight_mapper.packed_modules_mapping.keys()
+                    ]
+                ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {self.weight_mapper.packed_modules_mapping}."
+                return output_dim
+            elif isinstance(part, (RowParallelLinear)):
+                if not is_bias:
+                    input_dim = getattr(param, "input_dim", 1)
+                    assert (
+                        input_dim is not None
+                    ), f"RowParallelLinear {param_name} has no input_dim attribute."
+                    return input_dim
+            elif isinstance(part, (ColumnParallelLinear)):
+                output_dim = getattr(param, "output_dim", 0)
+                return output_dim
+            elif isinstance(part, VocabParallelEmbedding):
+                # lm_head and embed_tokens
+                output_dim = getattr(param, "output_dim", 0)
+                assert (
+                    not is_bias
+                ), f"VocabParallelEmbedding {param_name} should not have bias."
+                return output_dim
+            else:
+                assert (
+                    "Parallel" not in part.__class__.__name__
+                ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+        elif self.backend == "trtllm":
+            # for trtllm
+            try:
+                from tensorrt_llm._torch.modules.linear import TensorParallelMode
+                from tensorrt_llm._torch.modules.linear import Linear as TRTLLMLinear
+            except ImportError as e:
+                logger.error(f"Failed to import modules from tensorrt_llm: {e}")
+                raise e
+            if isinstance(part, TRTLLMLinear):
+                # For lm_head and embed_tokens: LMHead is children class of Linear
+                # For mlp and attention, they both use Linear, too.
+                if part.tp_mode == TensorParallelMode.COLUMN:
+                    return 0
+                elif part.tp_mode == TensorParallelMode.ROW:
+                    return 1
+                else:
+                    return None
+            else:
+                logger.warning(
+                    f"Class {part.__class__.__name__} is not supported by auto parallelism, treat it as non-parallel Layer. If issues happened, please contact the maintainer."
+                )
+                return None
+        else:
+            raise ValueError(f"Backend {self.backend} is not supported.")
+
     def parallelism_info_for_vllm_params(self):
         """
         Get the parallelism info for the vllm rollout model parameters by analyzing the model's named parameters with vllm instance check.
@@ -843,44 +913,9 @@ class ParallelTopoMapper:
             if should_skip:
                 continue
             dims_map = {}
-            if isinstance(part, (QKVParallelLinear)):
-                output_dim = getattr(param, "output_dim", 0)
-                dims_map["tp"] = output_dim
-                assert any(
-                    [
-                        k in param_name
-                        for k in self.weight_mapper.packed_modules_mapping.keys()
-                    ]
-                ), f"QKVParallelLinear {param_name} is not in packed_modules_mapping {self.weight_mapper.packed_modules_mapping}."
-            elif isinstance(part, (MergedColumnParallelLinear)):
-                output_dim = getattr(param, "output_dim", 0)
-                dims_map["tp"] = output_dim
-                assert any(
-                    [
-                        k in param_name
-                        for k in self.weight_mapper.packed_modules_mapping.keys()
-                    ]
-                ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {self.weight_mapper.packed_modules_mapping}."
-            elif isinstance(part, (RowParallelLinear)):
-                input_dim = getattr(param, "input_dim", 1)
-                if not is_bias:
-                    assert (
-                        input_dim is not None
-                    ), f"RowParallelLinear {param_name} has no input_dim attribute."
-                    dims_map["tp"] = input_dim
-            elif isinstance(part, (ColumnParallelLinear)):
-                output_dim = getattr(param, "output_dim", 0)
-                dims_map["tp"] = output_dim
-            elif isinstance(part, VocabParallelEmbedding):
-                output_dim = getattr(param, "output_dim", 0)
-                assert (
-                    not is_bias
-                ), f"VocabParallelEmbedding {param_name} should not have bias."
-                dims_map["tp"] = output_dim
-            else:
-                assert (
-                    "Parallel" not in part.__class__.__name__
-                ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+            tp_dim = self.determine_tp_dim(part, param, param_name, is_bias)
+            if tp_dim is not None:
+                dims_map["tp"] = tp_dim
 
             self.insert_to_parallelism_info(
                 param_name,
@@ -905,6 +940,7 @@ class ParallelTopoMapperGroup:
         hf_config: Any,
         is_policy: bool,
         underlying_model: Any,
+        backend: str = "vllm",
         weight_mapper: Optional[WeightMapper] = None,
     ):
         """
@@ -919,6 +955,7 @@ class ParallelTopoMapperGroup:
         self.hf_config = hf_config
         model_type = hf_config.model_type
         self.mapper_group: List[ParallelTopoMapper] = []
+        self.backend = backend
 
         if weight_mapper is None:
             if model_type not in WeightMapper._MODEL_WEIGHT_MAPPER_REGISTRY:
@@ -955,6 +992,7 @@ class ParallelTopoMapperGroup:
                         weight_mapper,
                         hf_config,
                         is_policy=is_policy,
+                        backend=self.backend,
                         underlying_model=underlying_model,
                     )
                 )
@@ -967,6 +1005,7 @@ class ParallelTopoMapperGroup:
                     weight_mapper,
                     hf_config,
                     is_policy=is_policy,
+                    backend=self.backend,
                     underlying_model=underlying_model,
                 )
             )

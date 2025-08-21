@@ -39,7 +39,7 @@ class TestProcessFlow(unittest.TestCase):
             config = toml.load(f)
         config["train"]["epoch"] = 1
         config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
-            cur_dir, "test_dataset"
+            cur_dir, "data_fixtures", "test_dataset"
         )
         with tempfile.NamedTemporaryFile(
             mode="w+", suffix=".toml", delete=False
@@ -125,7 +125,7 @@ class TestProcessFlow(unittest.TestCase):
             config = toml.load(f)
         config["train"]["epoch"] = 1
         config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
-            cur_dir, "test_dataset"
+            cur_dir, "data_fixtures", "test_dataset"
         )
         with tempfile.NamedTemporaryFile(
             mode="w+", suffix=".toml", delete=False
