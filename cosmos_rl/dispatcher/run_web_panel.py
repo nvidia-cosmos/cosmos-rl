@@ -309,6 +309,10 @@ async def rollout_shard_recv_insts(request: GetShardSendRecvInstsRequest):
             "Rollout shard receive instructions not found",
         )
 
+    logger.debug(
+        f"[Dispatcher] Received rollout shard receive instructions for rank {request.rank}"
+    )
+
     return Response(content=recv_insts, media_type="application/msgpack")
 
 

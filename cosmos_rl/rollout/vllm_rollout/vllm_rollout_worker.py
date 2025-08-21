@@ -999,7 +999,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 )
                 if no_more_prompts:
                     logger.info(
-                        f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation. {self._prompt_queue.qsize()}"
+                        f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
                     )
                     self.state.set_prompt_fetch_end()
                     # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
