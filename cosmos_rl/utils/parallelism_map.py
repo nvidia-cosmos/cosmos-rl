@@ -795,13 +795,13 @@ class ParallelTopoMapper:
 
                 if isinstance(part, vllm_model_classes.gpt_oss.OAIAttention):
                     if "sinks" in param_name:
-                        return 0  # sinks has shape [num_heads]
+                        tp_dim = 0  # sinks has shape [num_heads]
                 elif isinstance(part, FusedMoE):
                     # This temporarily for mxfp4 gpt-oss model. un-even sharding.
                     dims_rank_info, _tp_dim = genereate_dim_rank_info(
                         part, param_name, param, self.hf_config, self.parallelism
                     )
-                    if tp_dim > 0:
+                    if _tp_dim > 0:
                         tp_dim = _tp_dim
                     packed_modules_mapping = {}
             else:
