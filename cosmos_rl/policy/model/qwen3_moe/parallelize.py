@@ -253,7 +253,7 @@ def apply_tp_ep(
 
     # - Apply tensor + sequence parallelism to self-attention
     # - Apply expert parallelism to MLP
-    for layer_id, transformer_block in model.layers.items():
+    for _, transformer_block in model.layers.items():
         layer_plan = {
             "input_layernorm": SequenceParallel(),
             "self_attn": prepare_module_input(
@@ -280,6 +280,7 @@ def apply_tp_ep(
                 use_local_output=True,
             ),
         }
+
         transformer_block.mlp.ep_group = tp_ep_mesh.get_group()
         transformer_block.mlp.ep_size = tp_ep_mesh.size()
         assert (
