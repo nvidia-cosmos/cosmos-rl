@@ -287,7 +287,7 @@ class GRPOTrainer(Trainer):
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
         keys_n_ranks = []
-        trainable_params = []
+        trainable_params = self.model.trainable_params
         for name, tensor_or_callable in self.model.weight_sync_transforms:
             if isinstance(tensor_or_callable, torch.Tensor):
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
@@ -295,9 +295,7 @@ class GRPOTrainer(Trainer):
                 assert isinstance(tensor_or_callable, Callable)
                 tensor_or_callable = tensor_or_callable()
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
-            if tensor_or_callable.requires_grad:
-                trainable_params.append(name)
-            else:
+            if name not in trainable_params:
                 logger.debug(f"[Policy] Not trainable for param {name}")
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
@@ -787,7 +785,7 @@ class GRPOTrainer(Trainer):
                         nccl_group_start(comm_id)
                         for view, r_rank, dest_name in grouped_send_ops:
                             logger.debug(
-                                f"[Policy] Sending tensor {dest_name} to rollout rank {r_rank}, shape {view.shape}"
+                                f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                             )
                             nccl_send(
                                 view,
@@ -809,6 +807,9 @@ class GRPOTrainer(Trainer):
                                 dest_name not in self.trainable_params
                                 and command.trainable_only
                             ):
+                                logger.debug(
+                                    f"[Policy] Skip {dest_name} in P2R send due to non trainable."
+                                )
                                 skipped_params_cnt += 1
                                 continue
                             transferred_params_cnt += 1

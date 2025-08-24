@@ -469,6 +469,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             logger.info(
                 f"[Rollout] Finished fetching {len(self.trainable_params)} trainable params from controller."
             )
+            # The splitted and unsplited version of param names should both added to handle for P2R and R2R cases separately.
             for p in trainable_params:
                 self.trainable_params.add(
                     self.weight_mapper.get_unsplited_weight_name(p)
@@ -512,6 +513,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             inst_dest_name = insts_for_per_param.param_name
 
             if inst_dest_name not in self.trainable_params and trainable_only:
+                logger.debug(
+                    f"[Rollout] Skip {inst_dest_name} in P2R recv due to non trainable."
+                )
                 skipped_params_cnt += 1
                 continue
 
@@ -535,7 +539,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     # new a temp tensor
                     recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
                 logger.debug(
-                    f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape}."
+                    f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape} with dtype {vllm_tensor_view.dtype}."
                 )
                 nccl_recv(recv_tensor, p_rank, communicator_index)
                 # inplace copy
@@ -872,6 +876,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         name not in self.trainable_params
                         and broadcast_command.trainable_only
                     ):
+                        logger.debug(
+                            f"[Rollout] Skip {name} in R2R due to non trainable."
+                        )
                         skipped_params_cnt += 1
                         continue
                     transferred_params_cnt += 1
