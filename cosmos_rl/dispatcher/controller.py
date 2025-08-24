@@ -74,6 +74,7 @@ class Controller:
         self._init_status()
 
     def _init_status(self):
+        # We treat the SFT trainer as policy
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
         self.epoch = 1
@@ -142,165 +143,162 @@ class Controller:
         self.ckpt_extra_info = {}
         remain_samples_num = 0
 
-        if self.is_rl:
-            if dataset is not None:
-                assert isinstance(dataset, Dataset)
-                self.dataset = CosmosDataset(
-                    config=config, train_set=dataset, tokenizer=self.tokenizer
-                )
-                logger.info(
-                    "[Controller] Using provided dataset for training, dataset specification in the toml config will be ignored"
-                )
-            else:
-                self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
-            self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
-                reward_fn=Reward(
-                    config=config,
-                    tokenier=self.tokenizer,
-                    reward_function=config.train.train_policy.reward_function,
-                    explicit_reward_fn=reward_fns,
-                ),
-                unbiased=config.train.train_policy.unbiased_advantage,
+        if dataset is not None:
+            assert isinstance(dataset, Dataset)
+            self.dataset = CosmosDataset(
+                config=config, train_set=dataset, tokenizer=self.tokenizer
             )
+            logger.info(
+                "[Controller] Using provided dataset for training, dataset specification in the toml config will be ignored"
+            )
+        else:
+            self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
+        self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
+            reward_fn=Reward(
+                config=config,
+                tokenier=self.tokenizer,
+                reward_function=config.train.train_policy.reward_function,
+                explicit_reward_fn=reward_fns,
+            ),
+            unbiased=config.train.train_policy.unbiased_advantage,
+        )
 
-            remain_samples_num = (
-                (
-                    len(self.dataset.train_set)
-                    * config.rollout.n_generation
-                    * config.train.epoch
-                )
-                if self.dataset is not None
-                else 0
+        remain_samples_num = (
+            (
+                len(self.dataset.train_set)
+                * config.rollout.n_generation
+                * config.train.epoch
             )
+            if self.dataset is not None
+            else 0
+        )
 
-            train_sampler = DistributedSampler(
-                self.dataset.train_set,
-                num_replicas=1,
-                rank=0,
-                shuffle=config.train.train_policy.dataloader_shuffle,
-                drop_last=False,
-            )
-            if config.train.resume:
-                try:
-                    # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
-                    PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
-                    self.ckpt_manager = CheckpointMananger(config)
-                    self.ckpt_extra_info = (
-                        self.ckpt_manager.load_extra_info_from_checkpoint()
-                    )
-                    remain_samples_num = self.ckpt_extra_info.get(
-                        "remain_samples_num", remain_samples_num
-                    )
-                    self.epoch = (
-                        config.train.epoch
-                        - (
-                            math.ceil(
-                                remain_samples_num
-                                / (
-                                    len(self.dataset.train_set)
-                                    * config.rollout.n_generation
-                                )
+        train_sampler = DistributedSampler(
+            self.dataset.train_set,
+            num_replicas=1,
+            rank=0,
+            shuffle=config.train.train_policy.dataloader_shuffle,
+            drop_last=False,
+        )
+        if config.train.resume:
+            try:
+                # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
+                PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
+                self.ckpt_manager = CheckpointMananger(config)
+                self.ckpt_extra_info = (
+                    self.ckpt_manager.load_extra_info_from_checkpoint()
+                )
+                remain_samples_num = self.ckpt_extra_info.get(
+                    "remain_samples_num", remain_samples_num
+                )
+                self.epoch = (
+                    config.train.epoch
+                    - (
+                        math.ceil(
+                            remain_samples_num
+                            / (
+                                len(self.dataset.train_set)
+                                * config.rollout.n_generation
                             )
                         )
-                        + 1
                     )
-                    logger.info(
-                        f"[Controller] Resuming from checkpoint, current epoch: {self.epoch}, remaining samples: {remain_samples_num}"
-                    )
+                    + 1
+                )
+                logger.info(
+                    f"[Controller] Resuming from checkpoint, current epoch: {self.epoch}, remaining samples: {remain_samples_num}"
+                )
 
-                    train_dataloader_bias = max(
-                        0,
-                        len(self.dataset.train_set)
-                        - (
-                            (
-                                math.ceil(
-                                    remain_samples_num / config.rollout.n_generation
-                                )
+                train_dataloader_bias = max(
+                    0,
+                    len(self.dataset.train_set)
+                    - (
+                        (
+                            math.ceil(
+                                remain_samples_num / config.rollout.n_generation
                             )
-                            % len(self.dataset.train_set)
-                        ),
-                    )
+                        )
+                        % len(self.dataset.train_set)
+                    ),
+                )
 
-                    logger.info(
-                        f"[Controller] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
-                    )
-                    from cosmos_rl.policy.trainer.sampler import SkippingSampler
+                logger.info(
+                    f"[Controller] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
+                )
+                from cosmos_rl.policy.trainer.sampler import SkippingSampler
 
-                    train_sampler = SkippingSampler(
-                        base_sampler=train_sampler,
-                        skip_samples=train_dataloader_bias,
-                    )
-                except Exception as e:
-                    import traceback
+                train_sampler = SkippingSampler(
+                    base_sampler=train_sampler,
+                    skip_samples=train_dataloader_bias,
+                )
+            except Exception as e:
+                import traceback
 
-                    traceback.print_exc()
-                    logger.error(
-                        f"[Controller] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
-                    )
+                traceback.print_exc()
+                logger.error(
+                    f"[Controller] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
+                )
 
-            self.train_dataloader = DataLoader(
-                self.dataset.train_set,
+        self.train_dataloader = DataLoader(
+            self.dataset.train_set,
+            batch_size=1,  # batch size is 1 is mandatory
+            shuffle=False,
+            num_workers=config.train.train_policy.dataloader_num_workers,
+            prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+            collate_fn=RLPayload.collate_fn,
+            sampler=train_sampler,
+        )
+        self.train_dataloader_iter = iter(self.train_dataloader)
+
+        if config.train.enable_validation:
+            if val_dataset is not None:
+                assert isinstance(val_dataset, Dataset)
+                self.val_dataset = CosmosValidationDataset(
+                    config=config, val_set=val_dataset, tokenizer=self.tokenizer
+                )
+                logger.info(
+                    "[Controller] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
+                )
+            else:
+                self.val_dataset = CosmosValidationDataset(
+                    config=config, tokenizer=self.tokenizer
+                )
+            val_dataloader = DataLoader(
+                self.val_dataset.val_set,
                 batch_size=1,  # batch size is 1 is mandatory
                 shuffle=False,
                 num_workers=config.train.train_policy.dataloader_num_workers,
                 prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
                 collate_fn=RLPayload.collate_fn,
-                sampler=train_sampler,
             )
-            self.train_dataloader_iter = iter(self.train_dataloader)
 
-            if config.train.enable_validation:
-                if val_dataset is not None:
-                    assert isinstance(val_dataset, Dataset)
-                    self.val_dataset = CosmosValidationDataset(
-                        config=config, val_set=val_dataset, tokenizer=self.tokenizer
-                    )
-                    logger.info(
-                        "[Controller] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
-                    )
-                else:
-                    self.val_dataset = CosmosValidationDataset(
-                        config=config, tokenizer=self.tokenizer
-                    )
-                val_dataloader = DataLoader(
-                    self.val_dataset.val_set,
-                    batch_size=1,  # batch size is 1 is mandatory
-                    shuffle=False,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                    collate_fn=RLPayload.collate_fn,
+            if not config.validation.reward_function:
+                if val_reward_fns is None:
+                    val_reward_fns = reward_fns
+                    if val_reward_fns is not None:
+                        logger.info(
+                            "[Controller] No validation reward functions provided, using the same reward functions as training."
+                        )
+                config.validation.reward_function = (
+                    config.train.train_policy.reward_function
                 )
-
-                if not config.validation.reward_function:
-                    if val_reward_fns is None:
-                        val_reward_fns = reward_fns
-                        if val_reward_fns is not None:
-                            logger.info(
-                                "[Controller] No validation reward functions provided, using the same reward functions as training."
-                            )
-                    config.validation.reward_function = (
-                        config.train.train_policy.reward_function
-                    )
-                    logger.info(
-                        "[Controller] No validation reward function config specified, using the same reward function as training."
-                    )
-                self.val_rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
-                    reward_fn=Reward(
-                        config=config,
-                        tokenier=self.tokenizer,
-                        reward_function=config.validation.reward_function,
-                        explicit_reward_fn=val_reward_fns,
-                    )
+                logger.info(
+                    "[Controller] No validation reward function config specified, using the same reward function as training."
                 )
-            else:
-                self.val_dataset = None
-                self.val_rl_algo = None
-                val_dataloader = None
+            self.val_rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
+                reward_fn=Reward(
+                    config=config,
+                    tokenier=self.tokenizer,
+                    reward_function=config.validation.reward_function,
+                    explicit_reward_fn=val_reward_fns,
+                )
+            )
         else:
-            self.rl_algo = None
             self.val_dataset = None
             self.val_rl_algo = None
             val_dataloader = None
+
+        if not self.is_rl:
+            self.rl_algo = None
 
         redis_free_port = util.find_available_port(redis_port)
         self.config.redis = str(redis_free_port)

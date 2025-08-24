@@ -674,51 +674,47 @@ class PolicyStatusManager:
                 self[replica_name].sub_profiler_config.do_profile = False
 
             # Sum and report data
+            # TODO(zjx): compate format with sft trainer
             if self.config.logging.logger:
                 try:
-                    total_loss_avg = np.mean(
-                        [data["train/loss_avg"] for data in self.report_data_list]
-                    )
-                    total_loss_max = np.max(
-                        [data["train/loss_max"] for data in self.report_data_list]
-                    )
-                    total_learning_rate = self.report_data_list[0][
-                        "train/learning_rate"
-                    ]
-                    total_iter_time_avg = np.mean(
-                        [data["train/iteration_time"] for data in self.report_data_list]
-                    )
-                    # KL loss
-                    total_kl_loss_avg = np.mean(
-                        [
-                            data.get("train/kl_loss_avg", 0)
-                            for data in self.report_data_list
-                        ]
-                    )
-                    total_kl_loss_max = np.max(
-                        [
-                            data.get("train/kl_loss_max", 0)
-                            for data in self.report_data_list
-                        ]
-                    )
-                    total_grad_norm = np.mean(
-                        [
-                            data.get("train/grad_norm", 0)
-                            for data in self.report_data_list
-                        ]
-                    )
+                    # reduce the metrics
+                    policy_report_data = {}
+
+                    ## extract first item
+                    for m in ["train/learning_rate"]:
+                        if m in self.report_data_list[0]:
+                            policy_report_data[m] = self.report_data_list[0][m]
+
+                    ## average metrics
+                    for m in [
+                        "train/loss_avg", "train/iteration_time",
+                        "train/kl_loss_avg", "train/grad_norm",
+                    ]:
+                        if m in self.report_data_list[0]:
+                            policy_report_data[m] = np.mean(
+                                [data[m] for data in self.report_data_list]
+                            )
+                    
+                    ## max metrics
+                    for m in [
+                        "train/loss_max", "train/kl_loss_max", 
+                    ]:
+                        if m in self.report_data_list[0]:
+                            policy_report_data[m] = np.max(
+                                [data[m] for data in self.report_data_list]
+                            )
+
+                    # set default value if not present
+                    for m in [
+                        "train/kl_loss_avg", "train/kl_loss_max", "train/grad_norm",
+                    ] if self.is_rl else [
+                        "train/grad_norm",
+                    ]:
+                        if m not in policy_report_data:
+                            policy_report_data[m] = 0
+
                     train_step = self.report_data_list[0]["train_step"]
                     self.report_data_list = []
-
-                    policy_report_data = {
-                        "train/loss_avg": total_loss_avg,
-                        "train/loss_max": total_loss_max,
-                        "train/learning_rate": total_learning_rate,
-                        "train/iteration_time": total_iter_time_avg,
-                        "train/kl_loss_avg": total_kl_loss_avg,
-                        "train/kl_loss_max": total_kl_loss_max,
-                        "train/grad_norm": total_grad_norm,
-                    }
 
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
@@ -730,8 +726,27 @@ class PolicyStatusManager:
                             step=train_step,
                         )
                     if "console" in self.config.logging.logger:
-                        logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
+                        if self.is_rl:
+                            logger.info(
+                                f"Step: {train_step}/{total_steps}, "
+                                f"Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, "
+                                f"Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, "
+                                f"Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, "
+                                f"Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, "
+                                f"Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, "
+                                f"Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, "
+                                f"Average loss: {self.train_report_data[train_step]['train/loss_avg']:.5f}, "
+                                f"Max loss: {self.train_report_data[train_step]['train/loss_max']:.5f}, "
+                                f"Learning rate: {self.train_report_data[train_step]['train/learning_rate']:.5e}, "
+                                f"Iteration time: {self.train_report_data[train_step]['train/iteration_time']:.2f}s."
+                            )
+                        else:
+                            logger.info(
+                                f"Step: {train_step}/{self.total_steps}, "
+                                f"Loss: {self.train_report_data[train_step]['train/loss_avg']:.5f}, "
+                                f"Grad norm: {self.train_report_data[train_step]['train/grad_norm']:.5f}, "
+                                f"Learning rate: {self.train_report_data[train_step]['train/learning_rate']:.5e}, "
+                                f"Iteration time: {self.train_report_data[train_step]['train/iteration_time']:.2f}s."
                         )
                     for logger_fn in self.custom_logger_fns:
                         try:
@@ -739,7 +754,7 @@ class PolicyStatusManager:
                         except Exception as e:
                             logger.warning(
                                 f"[Controller] Warning reporting customized training results: {e}"
-                            )
+                                )
                 except Exception as e:
                     logger.warning(
                         f"[Controller] Warning reporting training results: {e}"
