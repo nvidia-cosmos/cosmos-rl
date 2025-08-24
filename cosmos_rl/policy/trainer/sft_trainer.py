@@ -14,34 +14,22 @@
 # limitations under the License.
 
 from cosmos_rl.policy.trainer import Trainer
-from cosmos_rl.utils.parallelism import (
-    ParallelDims,
-)
-from cosmos_rl.policy.config import (
-    Config as CosmosConfig,
-    SFTDataConfig,
-    config_hash,
-)
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.logging import logger
 import torch
 import torch.distributed as dist
 import numpy as np
-from torch.utils.data import Dataset
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
-import cosmos_rl.utils.cache as cache
 from cosmos_rl.utils import constant, api_suffix
 from cosmos_rl.utils.network_util import make_request_with_retry
-from transformers import AutoTokenizer
-from datasets import concatenate_datasets
-from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
 import time
 import atexit
 import threading
 import requests
-import asyncio
 from typing import Optional, Dict, Any, Tuple, List
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from functools import partial
@@ -51,10 +39,7 @@ from cosmos_rl.utils.distributed import (
     extract_from_cuda_tensor,
 )
 from cosmos_rl.dispatcher.command import Command, BuildMeshCommand
-from cosmos_rl.dispatcher.command import (
-    Command,
-    BuildMeshCommand,
-)
+
 
 def async_safe_ce(
     output: torch.Tensor,
@@ -102,153 +87,6 @@ def async_safe_ce(
             * (num_dp_workers * loss_scaling_factor)
         )
         return loss
-
-
-def collate_fn(
-    batch,
-):
-    return batch
-
-
-def construct_dataset(
-    config: SFTDataConfig,
-    tokenizer: AutoTokenizer,
-    data_packer: DataPacker,
-    user_provided_dataset: Optional[Dataset] = None,
-):
-    if user_provided_dataset is not None:
-        dataset = None
-        train_dataset = user_provided_dataset
-        logger.info(
-            "[SFTTrainer] Using user-provided dataset, which will skip split processing."
-        )
-    else:
-        dataset = util.load_data_from_disk_or_hf(
-            config.dataset.name,
-            config.dataset.subset,
-            config.dataset.revision or None,
-        )
-        dataset_list = []
-        for split_name in config.dataset.split:
-            logger.info(
-                f"Appending split {split_name}, dataset size = {len(dataset[split_name])}"
-            )
-            dataset_list.append(dataset[split_name])
-        train_dataset = concatenate_datasets(dataset_list)
-    logger.info(f"[SFTTrainer] Final dataset size = {len(train_dataset)}")
-
-    # try:
-    #     if dataset is not None:
-    #         dataset_list = []
-    #         for split_name in config.dataset.split:
-    #             dataset_list.append(dataset[split_name])
-    #         test_dataset = concatenate_datasets(dataset_list)
-    #         if len(test_dataset) == 0:
-    #             raise ValueError("Test dataset is empty")
-    #     else:
-    #         raise ValueError("Test dataset is empty")
-    # except Exception:
-    if isinstance(train_dataset, torch.utils.data.Dataset):
-        # Define the split ratio (e.g., 80% train, 20% test)
-        if config.dataset.test_size is None:
-            logger.warning(
-                "No test size specified, using 10% of the training dataset for testing."
-            )
-            config.dataset.test_size = 0.1
-        if isinstance(config.dataset.test_size, float):
-            n_test_samples = int(len(train_dataset) * config.dataset.test_size)
-        else:
-            n_test_samples = config.dataset.test_size
-        n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
-
-        # Generate deterministic indices
-        indices = list(range(len(train_dataset)))
-        test_indices = indices[:n_test_samples]
-        train_indices = indices[n_test_samples:]
-
-        test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
-        train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
-    else:
-        assert hasattr(
-            train_dataset, "train_test_split"
-        ), "train_dataset must have train_test_split method"
-        split = train_dataset.train_test_split(
-            test_size=config.dataset.test_size, shuffle=False
-        )
-        train_dataset = split["train"]
-        test_dataset = split["test"]
-
-    train_sft_dataset = SFTDataset(
-        config,
-        tokenizer=tokenizer,
-        dataset=train_dataset,
-        data_packer=data_packer,
-        is_user_dataset=user_provided_dataset is not None,
-    )
-    test_sft_dataset = SFTDataset(
-        config,
-        tokenizer=tokenizer,
-        dataset=test_dataset,
-        data_packer=data_packer,
-        is_user_dataset=user_provided_dataset is not None,
-    )
-
-    return train_sft_dataset, test_sft_dataset
-
-
-class SFTDataset(Dataset):
-    def __init__(
-        self,
-        config: SFTDataConfig,
-        tokenizer: AutoTokenizer,
-        dataset: Dataset,
-        data_packer: DataPacker,
-        is_user_dataset: bool = False,
-    ):
-        self.config = config
-        self.tokenizer = tokenizer
-        self.column_name = config.conversation_column_name
-        self.dataset = dataset
-        self.data_packer = data_packer
-        self.is_user_dataset = is_user_dataset
-        self.cache = None
-        if self.config.enable_dataset_cache:
-            # TODO(zjx): can we reuse the cache between different training jobs?
-            # It's not stable yet, we only checked if the config is the same
-            # If there are any problems, it is recommended that the user clears the cache folder
-            cache_folder = os.path.join(
-                os.environ.get(
-                    "COSMOS_CACHE",
-                    os.path.join(os.path.expanduser("~"), ".cache/cosmos/"),
-                ),
-                "datasets_cache",
-                f"{self.config.dataset.name}-{config_hash(config)}",
-            )
-            logger.info(f"[SFTTrainer] SFTDataset Cache folder: {cache_folder}")
-            self.cache = cache.DiskCache(cache_folder)
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        # we only cache on_the_fly result
-        if self.cache is not None:
-            cache_obj = self.cache.get(idx)
-            if cache_obj is not None:
-                return cache_obj
-
-        raw_item = (
-            self.dataset[idx][self.column_name]
-            if not self.is_user_dataset and self.column_name
-            else self.dataset[idx]
-        )
-
-        item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
-
-        if self.cache is not None:
-            # try cache obj
-            self.cache.set(idx, item)
-        return item
 
 
 class SFTTrainer(Trainer):
@@ -413,8 +251,9 @@ class SFTTrainer(Trainer):
                 except Exception as e:
                     raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
 
-
-    def fetch_data_from_controller(self, validation_step: Optional[int] = None) -> Tuple[bool, Dict[str, Any], int, int]:
+    def fetch_data_from_controller(
+        self, validation_step: Optional[int] = None
+    ) -> Tuple[bool, Dict[str, Any], int, int]:
         """
         Fetch data from the controller.
         """
@@ -439,8 +278,10 @@ class SFTTrainer(Trainer):
             response = None
 
         # broadcast the response to all ranks
-        response = dist_util.broadcast_object_cpu(response, src=0, device=torch.device("cpu"))
-        
+        response = dist_util.broadcast_object_cpu(
+            response, src=0, device=torch.device("cpu")
+        )
+
         # unpack the response
         is_end = response["is_end"]
         train_step = response["train_step"]
@@ -451,8 +292,9 @@ class SFTTrainer(Trainer):
 
         return is_end, global_batch, train_step, total_steps
 
-
-    def post_fetch_data_from_controller(self, report_data: Dict[str, Any], train_step: int, total_steps: int):
+    def post_fetch_data_from_controller(
+        self, report_data: Dict[str, Any], train_step: int, total_steps: int
+    ):
         """
         Post fetch data from the controller.
         """
@@ -469,16 +311,17 @@ class SFTTrainer(Trainer):
                             "report_data": util.sanitize(report_data),
                         },
                     ),
-                    self.get_alternative_urls(api_suffix.COSMOS_API_POLICY_TRAIN_ACK_SUFFIX),
+                    self.get_alternative_urls(
+                        api_suffix.COSMOS_API_POLICY_TRAIN_ACK_SUFFIX
+                    ),
                     max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
                 )
             except Exception as e:
                 raise RuntimeError(
                     f"[Policy] Failed in in send train ack to controller after retries {e}."
                 )
-        
-        logger.debug(f"[Policy] Train ack sent for global step {total_steps}.")
 
+        logger.debug(f"[Policy] Train ack sent for global step {total_steps}.")
 
     def _sync_weights_between_replicas(self):
         """
@@ -634,7 +477,7 @@ class SFTTrainer(Trainer):
                 step=current_step,
                 val_score=val_score,
             )
-        
+
     def _try_process_after_final_step(self, current_step: int, total_steps: int):
         """
         Do some process after the final step.
@@ -681,10 +524,12 @@ class SFTTrainer(Trainer):
         # Do training
         while True:
             # get batch data
-            is_end, global_batch, current_step, total_steps = self.fetch_data_from_controller()
+            is_end, global_batch, current_step, total_steps = (
+                self.fetch_data_from_controller()
+            )
             if is_end:
                 break
-            
+
             report_data = self.train_step(global_batch, current_step, total_steps)
             self.post_fetch_data_from_controller(report_data, current_step, total_steps)
 
@@ -697,7 +542,7 @@ class SFTTrainer(Trainer):
                 self.config.train.enable_validation
                 and current_step % self.config.train.validation_step == 0
             ):
-                # for save ckpt 
+                # for save ckpt
                 val_score = self.validate_step(current_step, total_steps)
 
             # try save ckpt
@@ -714,15 +559,15 @@ class SFTTrainer(Trainer):
 
     @torch.no_grad()
     def validate_step(self, current_step: int, total_steps: int):
-        logger.info(
-            f"[SFTTrainer] Validation at step {current_step}/{total_steps}..."
-        )
+        logger.info(f"[SFTTrainer] Validation at step {current_step}/{total_steps}...")
         self.model.eval()
         val_total_loss = 0.0
         val_total_samples = 0
 
         while True:
-            is_end, val_global_batch, _, _ = self.fetch_data_from_controller(current_step)
+            is_end, val_global_batch, _, _ = self.fetch_data_from_controller(
+                current_step
+            )
             if is_end:
                 break
 
@@ -753,9 +598,7 @@ class SFTTrainer(Trainer):
                 ignore_label_id=-100,
             )
             for k, v in val_batch.items():
-                val_batch[k] = (
-                    v.to(self.device) if isinstance(v, torch.Tensor) else v
-                )
+                val_batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
             val_inputs = val_batch["input_ids"]
             val_labels = val_batch.pop("label_ids")
             val_position_ids, _, val_pos_seq_dim = self.model.get_position_ids(
@@ -784,8 +627,7 @@ class SFTTrainer(Trainer):
 
             if self.parallel_dims.pp_enabled:
                 pp_last_stage = (
-                    self.parallel_dims.pp_coord[0]
-                    == self.parallel_dims.pp_coord[1] - 1
+                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
                 )
                 pp_first_stage = self.parallel_dims.pp_coord[0] == 0
 
@@ -820,13 +662,19 @@ class SFTTrainer(Trainer):
             val_total_loss += val_loss.item() * val_inputs.size(0)
             val_total_samples += len(val_inputs)
 
-        concat_avg_count = torch.tensor([val_total_loss, val_total_samples], dtype=torch.float32, device=self.device)
-        self.inter_policy_nccl.all_reduce(concat_avg_count, op=torch.distributed.ReduceOp.SUM)
+        concat_avg_count = torch.tensor(
+            [val_total_loss, val_total_samples], dtype=torch.float32, device=self.device
+        )
+        self.inter_policy_nccl.all_reduce(
+            concat_avg_count, op=torch.distributed.ReduceOp.SUM
+        )
         val_avg_loss = (concat_avg_count[0] / concat_avg_count[1]).item()
         logger.info(f"[SFTTrainer] Validation loss: {val_avg_loss}")
         return val_avg_loss
 
-    def train_step(self, global_batch: List[Dict[str, Any]], current_step: int, total_steps: int) -> Dict[str, Any]:
+    def train_step(
+        self, global_batch: List[Dict[str, Any]], current_step: int, total_steps: int
+    ) -> Dict[str, Any]:
         report_data = {}
         self.model.train()
 
@@ -854,9 +702,7 @@ class SFTTrainer(Trainer):
                 and not self.parallel_dims.pp_dynamic_shape
                 else None
             )
-            raw_batch = global_batch[
-                i : i + self.config.train.train_policy.mini_batch
-            ]
+            raw_batch = global_batch[i : i + self.config.train.train_policy.mini_batch]
             if fixed_length is None:
                 max_len = min(
                     self.config.policy.model_max_length,
@@ -899,15 +745,11 @@ class SFTTrainer(Trainer):
 
             self.model.train()
             for k, v in batch.items():
-                batch[k] = (
-                    v.to(self.device) if isinstance(v, torch.Tensor) else v
-                )
+                batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
 
             labels = batch.pop("label_ids")
 
-            position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
-                **batch
-            )
+            position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(**batch)
 
             batch["position_ids"] = position_ids
             padding_mask = batch.get("padding_mask", None)
@@ -917,11 +759,9 @@ class SFTTrainer(Trainer):
                 position_ids_before_cp = position_ids
                 padding_mask_before_cp = padding_mask
 
-                [input_ids, position_ids, padding_mask] = (
-                    slice_inputs_for_ulysses(
-                        [input_ids, position_ids, padding_mask],
-                        self.parallel_dims.mesh["cp"],
-                    )
+                [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
+                    [input_ids, position_ids, padding_mask],
+                    self.parallel_dims.mesh["cp"],
                 )
 
                 batch["input_ids"] = input_ids
@@ -931,15 +771,12 @@ class SFTTrainer(Trainer):
 
             if self.parallel_dims.pp_enabled:
                 pp_last_stage = (
-                    self.parallel_dims.pp_coord[0]
-                    == self.parallel_dims.pp_coord[1] - 1
+                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
                 )
                 pp_first_stage = self.parallel_dims.pp_coord[0] == 0
 
                 # Pipeline Parallel forward / backward inside step() call
-                targets, losses = (
-                    (labels, []) if pp_last_stage else (None, None)
-                )
+                targets, losses = (labels, []) if pp_last_stage else (None, None)
                 if pp_first_stage:
                     self.pp_scheduler.step(
                         **batch,
@@ -1041,18 +878,14 @@ class SFTTrainer(Trainer):
             if util.is_master_rank(self.parallel_dims, self.global_rank):
                 # Calculate last iteration time
                 assert end_event.query()
-                iter_time = (
-                    start_event.elapsed_time(end_event) / 1000.0
-                )  # in seconds
+                iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
 
                 report_data = {
                     "train/iteration_time": iter_time,
                     "train/loss_avg": global_avg_loss,
                     "train/loss_max": global_max_loss,
                     "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                    "train/grad_norm": grad_norm
-                    if grad_norm is not None
-                    else -1,
+                    "train/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
