@@ -388,10 +388,20 @@ async def get_batched_prompt(n: int, validation_step: Optional[int] = None):
     prompt_id_and_payload_list, is_end = await controller.get_batched_prompt(
         n, validation_step
     )
-    return {
-        "prompt_id_and_payload_list": prompt_id_and_payload_list,
-        "is_end": is_end,
-    }
+
+    if controller.is_rl:
+        return {
+            "prompt_id_and_payload_list": prompt_id_and_payload_list,
+            "is_end": is_end,
+        }
+    else:
+        return {
+            "prompt_id_and_payload_list": prompt_id_and_payload_list,
+            "is_end": is_end,
+            # for sft trainer, tell the policy the current step and total steps
+            "train_step": controller.policy_status_manager.current_step,
+            "total_steps": controller.policy_status_manager.total_steps,
+        }
 
 
 @app.post(COSMOS_API_VALIDATION_REPORT_SUFFIX)
