@@ -784,6 +784,8 @@ class GRPOTrainer(Trainer):
                     def grouped_send(grouped_send_ops):
                         nccl_group_start(comm_id)
                         for view, r_rank, dest_name in grouped_send_ops:
+                            if "model.embed_tokens.weight" in dest_name:
+                                logger.info(f"===== {view.shape}, {view.dtype}")
                             logger.debug(
                                 f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                             )

@@ -798,7 +798,7 @@ class ParallelTopoMapper:
             )
 
     def determine_tp_dim(
-        self, part: torch.nn.Module, param: torch.Tensor, param_name: str, is_bias: bool
+        self, part: torch.nn.Module, param: torch.Tensor, param_name: str, is_bias: bool, leaf_name: str,
     ) -> int:
         if self.backend == "vllm":
             if isinstance(part, (QKVParallelLinear)):
@@ -840,6 +840,8 @@ class ParallelTopoMapper:
                 assert (
                     "Parallel" not in part.__class__.__name__
                 ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                logger.warning(f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate.")
+                return None
         elif self.backend == "trtllm":
             # for trtllm
             try:
@@ -899,11 +901,6 @@ class ParallelTopoMapper:
                         elif part_name == "mm_input_projection_weight":
                             # Gemma has mm_input_projection_weight
                             is_bias = True
-                        else:
-                            logger.warning(
-                                f"Part {part_name} is not a Parameter. Skipping."
-                            )
-                            should_skip = True
                         break
                     part = getattr(part, part_name)
                 elif str.isdigit(part_name):
@@ -913,7 +910,7 @@ class ParallelTopoMapper:
             if should_skip:
                 continue
             dims_map = {}
-            tp_dim = self.determine_tp_dim(part, param, param_name, is_bias)
+            tp_dim = self.determine_tp_dim(part, param, param_name, is_bias, part_name)
             if tp_dim is not None:
                 dims_map["tp"] = tp_dim
 
