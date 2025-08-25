@@ -757,7 +757,7 @@ class PolicyStatusManager:
                         )
                 except Exception as e:
                     logger.warning(
-                        f"[Controller] Warning reporting training results: {e}"
+                        f"[Controller] Warning reporting rl training results: {e}"
                     )
 
             # All replicas have been reduced, trigger weight sync
@@ -861,7 +861,9 @@ class PolicyStatusManager:
                         f"Iteration time: {self.train_report_data[train_step]['train/iteration_time']:.2f}s."
                     )
             except Exception as e:
-                logger.warning(f"[Controller] Warning reporting training results: {e}")
+                logger.warning(
+                    f"[Controller] Warning reporting sft training results: {e}"
+                )
 
     def trigger_weight_sync(
         self,

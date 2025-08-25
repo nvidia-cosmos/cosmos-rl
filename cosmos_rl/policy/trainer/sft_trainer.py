@@ -289,7 +289,6 @@ class SFTTrainer(Trainer):
         is_end = response["is_end"]
         train_step = response["train_step"]
         total_steps = response["total_steps"]
-        # TODO(zjx): package the payload into a global batch
         global_batch = response["global_batch"]
 
         # check if should update lr_scheduler
@@ -317,7 +316,7 @@ class SFTTrainer(Trainer):
                         requests.post,
                         json={
                             "replica_name": self.replica_name,
-                            "step": total_steps,
+                            "weight_step": total_steps,
                             "total_steps": total_steps,
                             "profile_finished": self.profiler.check_finished(),
                             "report_data": util.sanitize(report_data),
@@ -893,11 +892,14 @@ class SFTTrainer(Trainer):
                 iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
 
                 report_data = {
+                    "train_step": current_step,
                     "train/iteration_time": iter_time,
                     "train/loss_avg": global_avg_loss,
                     "train/loss_max": global_max_loss,
                     "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                    "train/grad_norm": grad_norm if grad_norm is not None else -1,
+                    "train/grad_norm": grad_norm.item()
+                    if grad_norm is not None
+                    else -1,
                 }
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
