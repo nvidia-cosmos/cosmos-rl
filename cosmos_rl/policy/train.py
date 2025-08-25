@@ -60,7 +60,7 @@ def main(*args, **kwargs):
             elif policy_type == "sft":
                 logger.info("Starting SFT training...")
                 trainer = SFTTrainer(config=cosmos_config, parallel_dims=parallel_dims)
-                trainer.train()
+                trainer.main_loop()
             else:
                 raise ValueError(f"Unknown policy type: {policy_type}")
     except Exception as e:

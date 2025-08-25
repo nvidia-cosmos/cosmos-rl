@@ -16,7 +16,7 @@
 from cosmos_rl.policy.trainer import Trainer
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.trainer.optm import build_lr_schedulers
+from cosmos_rl.policy.trainer.optm import build_lr_schedulers, LRSchedulersContainer
 from cosmos_rl.utils.logging import logger
 import torch
 import torch.distributed as dist
@@ -123,7 +123,7 @@ class SFTTrainer(Trainer):
         )
         self.fetch_command_thread.start()
 
-        self.lr_schedulers = None
+        self.lr_schedulers: LRSchedulersContainer = None
         self.start_epoch = 0
         # Load model
         train_step = 0
@@ -168,9 +168,10 @@ class SFTTrainer(Trainer):
             assert (
                 train_step == 0
             ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
-            self.lr_schedulers = build_lr_schedulers(
-                self.optimizers, self.config, self.total_steps
-            )
+            # This is a fake lr_schedulers, when fetch data, we update the lr_schedulers to real one.
+            self.lr_schedulers = build_lr_schedulers(self.optimizers, self.config, 1e6)
+            # use this to control the lr_scheduler update
+            self.last_total_steps = -1
 
         if self.parallel_dims.dp_enabled:
             dp_group = self.parallel_dims.mesh["dp"].get_group()
@@ -289,6 +290,16 @@ class SFTTrainer(Trainer):
         # TODO(zjx): package the payload into a global batch
         prompt_id_and_payload_list = response["prompt_id_and_payload_list"]
         global_batch = prompt_id_and_payload_list
+
+        # check if should update lr_scheduler
+        if self.last_total_steps != total_steps:
+            # Rebuild lr schedulers for the very first step because
+            # 1. only until the first step, we can know the exact total steps from the controller
+            # 2. need update lr_scheduler when total_steps is changed
+            self.lr_schedulers = build_lr_schedulers(
+                self.optimizers, self.config, total_steps
+            )
+            self.last_total_steps = total_steps
 
         return is_end, global_batch, train_step, total_steps
 
