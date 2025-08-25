@@ -262,8 +262,8 @@ class SFTTrainer(Trainer):
             try:
                 response = make_request_with_retry(
                     partial(
-                        requests.post,
-                        json={
+                        requests.get,
+                        params={
                             "n": self.config.train.train_batch_per_replica,
                             "validation_step": validation_step,
                             "replica_name": self.replica_name,
@@ -274,11 +274,12 @@ class SFTTrainer(Trainer):
                 )
             except Exception as e:
                 raise RuntimeError(
-                    f"[Policy] Failed in in send train ack to controller after retries {e}."
+                    f"[Policy] Failed in fetch data from controller after retries {e}."
                 )
         else:
             response = None
 
+        response = response.json()
         # broadcast the response to all ranks
         response = dist_util.broadcast_object_cpu(
             response, src=0, device=torch.device("cpu")
@@ -289,8 +290,7 @@ class SFTTrainer(Trainer):
         train_step = response["train_step"]
         total_steps = response["total_steps"]
         # TODO(zjx): package the payload into a global batch
-        prompt_id_and_payload_list = response["prompt_id_and_payload_list"]
-        global_batch = prompt_id_and_payload_list
+        global_batch = response["global_batch"]
 
         # check if should update lr_scheduler
         if self.last_total_steps != total_steps:
@@ -330,7 +330,7 @@ class SFTTrainer(Trainer):
                 )
             except Exception as e:
                 raise RuntimeError(
-                    f"[Policy] Failed in in send train ack to controller after retries {e}."
+                    f"[Policy] Failed in send train ack to controller after retries {e}."
                 )
 
         logger.debug(f"[Policy] Train ack sent for global step {total_steps}.")

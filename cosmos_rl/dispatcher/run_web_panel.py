@@ -398,9 +398,7 @@ async def get_batched_prompt(
                 constant.ErrorCode.INVALID_REQUEST,
                 f"Replica {replica_name} is not alive",
             )
-        prompt_id_and_payload_list, is_end = await controller.get_batched_prompt(
-            n, validation_step
-        )
+        global_batch, is_end = await controller.get_batched_data(n, validation_step)
 
         # make sure sft stop while total_steps is reached,
         # only validation_step is exception
@@ -412,7 +410,7 @@ async def get_batched_prompt(
             is_end = True
 
         return {
-            "prompt_id_and_payload_list": prompt_id_and_payload_list,
+            "global_batch": global_batch,
             "is_end": is_end,
             # for sft trainer, tell the policy the current step and total steps
             "train_step": controller.policy_status_manager.current_step,

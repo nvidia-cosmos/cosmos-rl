@@ -28,6 +28,12 @@ from cosmos_rl.utils.util import load_data_from_disk_or_hf
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 
+def collate_fn(
+    batch,
+):
+    return batch
+
+
 class SFTDataset(Dataset):
     def __init__(
         self,

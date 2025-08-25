@@ -53,11 +53,20 @@ from cosmos_rl.dispatcher.status import (
 from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from transformers import AutoTokenizer
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer import (
+    DataPacker,
+    DecoderOnlyLLMDataPacker,
+    HFVLMDataPacker,
+)
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
-from cosmos_rl.dispatcher.data.sft_dataset import SFTDataset, construct_sft_dataset
+from cosmos_rl.dispatcher.data.sft_dataset import (
+    SFTDataset,
+    construct_sft_dataset,
+    collate_fn as sft_collate_fn,
+)
+from transformers import AutoConfig
 
 
 class Controller:
@@ -256,6 +265,28 @@ class Controller:
     def _init_sft_dataset(
         self, config: Config, user_provided_dataset: Optional[Dataset] = None
     ):
+        if self.user_data_packer is None:
+            hf_config = util.retry(AutoConfig.from_pretrained)(
+                self.config.policy.model_name_or_path, trust_remote_code=True
+            )
+            is_vlm = getattr(hf_config, "vision_config", None) is not None
+            model_type = hf_config.model_type
+
+            try:
+                data_packer = DataPacker.get_default_data_packer(model_type)
+                logger.info(f"Using default data packer: {data_packer}")
+            except ValueError:
+                data_packer = (
+                    DecoderOnlyLLMDataPacker() if not is_vlm else HFVLMDataPacker()
+                )
+                logger.warning(
+                    f"No default data packer found for {model_type}, using {type(data_packer).__name__} as default"
+                )
+
+            data_packer.setup(self.config, self.tokenizer)
+            self.user_data_packer = data_packer
+            self.user_val_data_packer = data_packer
+
         # for sft trainer, we create dataset in the controller
         train_dataset, val_dataset = construct_sft_dataset(
             config=config.train.train_policy,
@@ -319,7 +350,7 @@ class Controller:
             shuffle=False,
             num_workers=config.train.train_policy.dataloader_num_workers,
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-            collate_fn=RLPayload.collate_fn,
+            collate_fn=sft_collate_fn,
             sampler=train_sampler,
         )
         self.train_dataloader_iter = iter(self.train_dataloader)
@@ -332,7 +363,7 @@ class Controller:
                 shuffle=False,
                 num_workers=config.train.train_policy.dataloader_num_workers,
                 prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                collate_fn=RLPayload.collate_fn,
+                collate_fn=sft_collate_fn,
             )
         else:
             self.val_dataset = None
@@ -481,6 +512,49 @@ class Controller:
 
     async def get_kv_store(self, key: str) -> str:
         return self.temp_kv_store.get(key)
+
+    """
+    Policy functionality
+    """
+
+    async def get_batched_data(self, n: int, validation_step: Optional[int] = None):
+        # For sft mode, get batched_data from the dataset
+        assert (
+            "sft" == self.config.train.train_policy.type
+        ), "Only SFT mode supports get_batched_data"
+
+        global_batch: List[str] = []
+        is_end = False
+
+        is_validation = validation_step is not None
+        if is_validation:
+            iterator = self.policy_status_manager.validation_get_dataloader(
+                validation_step
+            )
+        else:
+            iterator = self.train_dataloader_iter
+
+        for _ in range(n):
+            try:
+                payload = next(iterator)
+                assert len(payload) == 1
+            except StopIteration:
+                if not is_validation:
+                    self.epoch += 1
+                    if self.epoch <= self.config.train.epoch:
+                        logger.info(f"[Controller] Epoch {self.epoch} start.")
+                        iterator = iter(self.train_dataloader)
+                        self.train_dataloader_iter = iterator
+
+                        payload = next(iterator)
+                        assert len(payload) == 1
+
+                is_end = True
+                break
+
+            global_batch.append(payload[0])
+
+        return global_batch, is_end
 
     """
     Rollout functionality
