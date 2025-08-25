@@ -148,10 +148,6 @@ async def meta():
     meta = {
         "config": controller.config,
     }
-    if not controller.is_rl and controller.sft_user_dataset is not None:
-        meta["sft_user_dataset"] = base64.b64encode(
-            cloudpickle.dumps(controller.sft_user_dataset)
-        ).decode("utf-8")
     if controller.user_data_packer is not None:
         meta["user_data_packer"] = base64.b64encode(
             cloudpickle.dumps(controller.user_data_packer)

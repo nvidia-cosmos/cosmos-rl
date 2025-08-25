@@ -21,10 +21,10 @@ from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 
-from cosmos_rl.policy.config import SFTDataConfig
+from cosmos_rl.policy.config import config_hash, SFTDataConfig
 from cosmos_rl.utils import cache
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import config_hash, load_data_from_disk_or_hf
+from cosmos_rl.utils.util import load_data_from_disk_or_hf
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 

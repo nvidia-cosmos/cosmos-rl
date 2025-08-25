@@ -26,7 +26,7 @@ import os
 import math
 import threading
 import tempfile
-from typing import List, Dict, Tuple, Any, Optional, Callable
+from typing import List, Dict, Tuple, Any, Optional, Callable, Union
 from cosmos_rl.dispatcher.replica import Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role, MESH_NAMES
 from cosmos_rl.utils.logging import logger
@@ -57,7 +57,7 @@ from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
-from cosmos_rl.dispatcher.data.sft_dataset import construct_sft_dataset
+from cosmos_rl.dispatcher.data.sft_dataset import SFTDataset, construct_sft_dataset
 
 
 class Controller:
@@ -253,19 +253,20 @@ class Controller:
             val_dataloader = None
         return val_dataloader
 
-    def _init_sft_dataset(self, config: Config, dataset: Optional[Dataset] = None):
+    def _init_sft_dataset(
+        self, config: Config, user_provided_dataset: Optional[Dataset] = None
+    ):
         # for sft trainer, we create dataset in the controller
         train_dataset, val_dataset = construct_sft_dataset(
-            config=config,
+            config=config.train.train_policy,
             tokenizer=self.tokenizer,
             data_packer=self.user_data_packer,
-            user_provided_dataset=dataset,
+            user_provided_dataset=user_provided_dataset,
         )
-        self.dataset.train_set = train_dataset
-        remain_samples_num = len(self.dataset.train_set) * config.train.epoch
+        remain_samples_num = len(train_dataset) * config.train.epoch
 
         train_sampler = DistributedSampler(
-            self.dataset.train_set,
+            train_dataset,
             num_replicas=1,
             rank=0,
             shuffle=config.train.train_policy.dataloader_shuffle,
@@ -283,7 +284,7 @@ class Controller:
                 )
                 self.epoch = (
                     config.train.epoch
-                    - (math.ceil(remain_samples_num / len(self.dataset.train_set)))
+                    - (math.ceil(remain_samples_num / len(train_dataset)))
                     + 1
                 )
                 logger.info(
@@ -292,8 +293,7 @@ class Controller:
 
                 train_dataloader_bias = max(
                     0,
-                    len(self.dataset.train_set)
-                    - (remain_samples_num % len(self.dataset.train_set)),
+                    len(train_dataset) - (remain_samples_num % len(train_dataset)),
                 )
 
                 logger.info(
@@ -314,7 +314,7 @@ class Controller:
                 )
 
         self.train_dataloader = DataLoader(
-            self.dataset.train_set,
+            train_dataset,
             batch_size=1,  # batch size is 1 is mandatory
             shuffle=False,
             num_workers=config.train.train_policy.dataloader_num_workers,
@@ -327,7 +327,7 @@ class Controller:
         if config.train.enable_validation:
             self.val_dataset = val_dataset
             val_dataloader = DataLoader(
-                self.val_dataset.val_set,
+                val_dataset,
                 batch_size=1,  # batch size is 1 is mandatory
                 shuffle=False,
                 num_workers=config.train.train_policy.dataloader_num_workers,
@@ -383,10 +383,9 @@ class Controller:
         if val_dataset is not None and isinstance(val_dataset, Callable):
             val_dataset = val_dataset(config)
 
-        self.sft_user_dataset = dataset if not self.is_rl else None
         self.user_data_packer = data_packer
         self.user_val_data_packer = val_data_packer
-        self.dataset = None
+        self.dataset: Union[CosmosDataset, SFTDataset] = None
         self.ckpt_extra_info = {}
         remain_samples_num = 0
 
@@ -396,7 +395,7 @@ class Controller:
                 config, dataset, val_dataset, reward_fns, val_reward_fns
             )
         else:
-            val_dataloader = self._init_sft_dataset(config, dataset, data_packer)
+            val_dataloader = self._init_sft_dataset(config, dataset)
             self.rl_algo = None
 
         redis_free_port = util.find_available_port(redis_port)
