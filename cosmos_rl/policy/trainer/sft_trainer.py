@@ -266,6 +266,7 @@ class SFTTrainer(Trainer):
                         json={
                             "n": self.config.train.train_batch_per_replica,
                             "validation_step": validation_step,
+                            "replica_name": self.replica_name,
                         },
                     ),
                     self.get_alternative_urls(api_suffix.COSMOS_API_NEXT_PROMPT_SUFFIX),

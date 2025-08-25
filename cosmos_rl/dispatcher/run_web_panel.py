@@ -380,17 +380,37 @@ Rollout API
 
 
 @app.get(COSMOS_API_NEXT_PROMPT_SUFFIX)
-async def get_batched_prompt(n: int, validation_step: Optional[int] = None):
-    prompt_id_and_payload_list, is_end = await controller.get_batched_prompt(
-        n, validation_step
-    )
-
+async def get_batched_prompt(
+    n: int, validation_step: Optional[int] = None, replica_name: Optional[str] = None
+):
     if controller.is_rl:
+        prompt_id_and_payload_list, is_end = await controller.get_batched_prompt(
+            n, validation_step
+        )
         return {
             "prompt_id_and_payload_list": prompt_id_and_payload_list,
             "is_end": is_end,
         }
     else:
+        # avoid dead replica get batch data
+        if replica_name not in controller.policy_status_manager.policy_replicas:
+            return create_error_response(
+                constant.ErrorCode.INVALID_REQUEST,
+                f"Replica {replica_name} is not alive",
+            )
+        prompt_id_and_payload_list, is_end = await controller.get_batched_prompt(
+            n, validation_step
+        )
+
+        # make sure sft stop while total_steps is reached,
+        # only validation_step is exception
+        if (
+            validation_step is None
+            and controller.policy_status_manager.current_step + 1
+            == controller.policy_status_manager.total_steps
+        ):
+            is_end = True
+
         return {
             "prompt_id_and_payload_list": prompt_id_and_payload_list,
             "is_end": is_end,
