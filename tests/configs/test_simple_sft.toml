@@ -28,7 +28,7 @@ model_gradient_checkpointing = true
 
 [train.train_policy]
 type = "sft"
-dataset.name = "data_fixtures/test_dataset"
+dataset.name = "LNTANOooo/sharegpt52k"
 dataset.subset = ""
 dataset.split = "train"
 conversation_column_name = "conversation"

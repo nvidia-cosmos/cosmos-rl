@@ -59,7 +59,9 @@ import types
 from functools import partial
 import msgpack
 from cosmos_rl.utils.network_util import make_request_with_retry
-from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
 from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
@@ -78,6 +80,12 @@ from cosmos_rl.utils.pynccl import (
     nccl_group_end,
 )
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_for_inputs,
+    pack_sequences_for_logprobs,
+    pack_sequences_info_collect,
+    pack_sequences_for_masks,
+)
 
 
 def compute_loss(
@@ -1207,6 +1215,8 @@ class GRPOTrainer(Trainer):
             minibatch["logprob_masks"],
             logits,
             is_full_logits=is_full_logits,
+            label_packing_mask=minibatch.get("label_packing_mask", None),
+            input_packing_mask=minibatch.get("input_packing_mask", None),
         )
 
     @torch.no_grad()
@@ -1365,6 +1375,13 @@ class GRPOTrainer(Trainer):
                                     computed_max_len=computed_max_len,
                                 )
                             )
+                            packing_seq = self.config.train.sequence_packing
+                            if packing_seq:
+                                if self.parallel_dims.pp_enabled:
+                                    packing_seq = False
+                                    logger.debug(
+                                        "[Policy] Packing sequence is disabled due to incompatible dimensions."
+                                    )
 
                             # TP/CP will shard the sequence dimension into n-ranks.
                             # The interested_tokens will be unevenly distributed across ranks.
@@ -1390,6 +1407,30 @@ class GRPOTrainer(Trainer):
                             position_ids, input_ids, pos_seq_dim = (
                                 self.model.get_position_ids(**user_mini_batch)
                             )
+
+                            if packing_seq:
+                                # Prepare for the sequence packing information.
+                                packed_args = pack_sequences_info_collect(
+                                    input_ids,
+                                    pad_token_id=self.tokenizer.pad_token_id,
+                                    seq_len_multiple=self.seq_len_multiple,
+                                )
+                                user_mini_batch.update(packed_args)
+                                packed_args = pack_sequences_for_masks(
+                                    user_mini_batch["valid_input_len"],
+                                    user_mini_batch["valid_input_len"],
+                                )
+                                user_mini_batch.update(packed_args)
+                                packed_args = pack_sequences_for_logprobs(
+                                    user_mini_batch["logprob_masks"],
+                                    user_mini_batch["valid_input_len"],
+                                    advantages=advantages_t[i:end],
+                                )
+                                user_mini_batch.update(packed_args)
+                                minibatched_advantages = user_mini_batch.pop(
+                                    "advantages"
+                                )
+
                             acc_n_tokens += np.prod(input_ids.shape)
                             user_mini_batch["position_ids"] = position_ids
                             padding_mask = user_mini_batch.get("padding_mask", None)
@@ -1398,17 +1439,23 @@ class GRPOTrainer(Trainer):
                             position_ids_before_cp = user_mini_batch["position_ids"]
                             padding_mask_before_cp = padding_mask
 
-                            if self.parallel_dims.cp_enabled:
+                            if self.parallel_dims.cp_enabled and not packing_seq:
                                 [input_ids, position_ids, padding_mask] = (
                                     slice_inputs_for_ulysses(
                                         [input_ids, position_ids, padding_mask],
                                         self.parallel_dims.mesh["cp"],
+                                        seq_dims=[1, pos_seq_dim, 1],
                                     )
                                 )
                                 user_mini_batch["position_ids"] = position_ids
                                 user_mini_batch["input_ids"] = input_ids
                                 if padding_mask is not None:
                                     user_mini_batch["padding_mask"] = padding_mask
+                            if self.parallel_dims.cp_enabled and packing_seq:
+                                # Slice for cp after embedding generation and sequence packing in the model forward later.
+                                user_mini_batch["cp_mesh"] = self.parallel_dims.mesh[
+                                    "cp"
+                                ]
 
                             if self.parallel_dims.pp_enabled:
                                 if pp_last_stage:
@@ -1545,6 +1592,14 @@ class GRPOTrainer(Trainer):
                                 # returned shape:
                                 # current_per_token_logprobs: [n_tokens_of_logprobs]
                                 # cu_seqlens: [batch_size + 1]
+                                if packing_seq:
+                                    # Pack sequences for inputs to match the logits from model forward.
+                                    packed_args = pack_sequences_for_inputs(
+                                        user_mini_batch["input_ids"],
+                                        user_mini_batch["valid_input_len"],
+                                    )
+                                    user_mini_batch["input_ids"] = packed_args["inputs"]
+
                                 current_per_token_logprobs, cu_seqlens = (
                                     self.compute_logprobs(
                                         user_mini_batch,

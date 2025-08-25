@@ -42,8 +42,15 @@ from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
 from typing import Optional, Dict, Any
 from tqdm import tqdm
-from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
 from functools import partial
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_info_collect,
+    pack_sequences_for_masks,
+    pack_sequences_for_labels,
+)
 
 
 def async_safe_ce(
@@ -51,11 +58,22 @@ def async_safe_ce(
     target: torch.LongTensor,
     ignore_index: int = -100,
     loss_scaling_factor: float = 1.0,
+    output_packing_mask: Optional[torch.Tensor] = None,
+    target_packing_mask: Optional[torch.Tensor] = None,
     dp_group: Optional[torch.distributed.ProcessGroup] = None,
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> torch.Tensor:
-    target = target[:, 1:].contiguous().view(-1)
-    output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+    if output_packing_mask is not None:
+        output = (
+            output[output_packing_mask].contiguous().view(-1, output.size(-1)).float()
+        )
+    else:
+        output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+
+    if target_packing_mask is not None:
+        target = target[target_packing_mask].contiguous().view(-1)
+    else:
+        target = target[:, 1:].contiguous().view(-1)
 
     if cp_group is not None and cp_group.size() > 1:
         # Fallback to unbalance loss
@@ -451,6 +469,7 @@ class SFTTrainer(Trainer):
                         slice_inputs_for_ulysses(
                             [val_inputs, val_position_ids, val_padding_mask],
                             self.parallel_dims.mesh["cp"],
+                            seq_dims=[1, val_pos_seq_dim, 1],
                         )
                     )
 
@@ -546,6 +565,15 @@ class SFTTrainer(Trainer):
                             // self.seq_len_multiple
                             * self.seq_len_multiple
                         )
+
+                    packing_seq = self.config.train.sequence_packing
+                    if packing_seq:
+                        if self.parallel_dims.pp_enabled:
+                            packing_seq = False
+                            logger.debug(
+                                "[Policy] Packing sequence is disabled due to incompatible dimensions."
+                            )
+
                     batch = self.data_packer.sft_collate_fn(
                         raw_batch,
                         computed_max_len=max_len,
@@ -587,7 +615,25 @@ class SFTTrainer(Trainer):
                     batch["position_ids"] = position_ids
                     padding_mask = batch.get("padding_mask", None)
 
-                    if self.parallel_dims.cp_enabled:
+                    if packing_seq:
+                        # Prepare for the sequence packing information.
+                        packed_args = pack_sequences_info_collect(
+                            batch["input_ids"],
+                            pad_token_id=self.tokenizer.pad_token_id,
+                            label_ids=labels,
+                            ignore_label_id=-100,
+                            seq_len_multiple=self.seq_len_multiple,
+                        )
+                        batch.update(packed_args)
+                        labels = pack_sequences_for_labels(
+                            labels, batch["valid_input_len"]
+                        )
+                        packed_args = pack_sequences_for_masks(
+                            batch["valid_input_len"], batch["valid_input_len"]
+                        )
+                        batch.update(packed_args)
+
+                    if self.parallel_dims.cp_enabled and not packing_seq:
                         input_ids_before_cp = input_ids
                         position_ids_before_cp = position_ids
                         padding_mask_before_cp = padding_mask
@@ -596,6 +642,7 @@ class SFTTrainer(Trainer):
                             slice_inputs_for_ulysses(
                                 [input_ids, position_ids, padding_mask],
                                 self.parallel_dims.mesh["cp"],
+                                seq_dims=[1, pos_seq_dim, 1],
                             )
                         )
 
@@ -603,6 +650,13 @@ class SFTTrainer(Trainer):
                         batch["position_ids"] = position_ids
                         if padding_mask is not None:
                             batch["padding_mask"] = padding_mask
+
+                    if self.parallel_dims.cp_enabled and packing_seq:
+                        # Slice for cp after embedding generation and sequence packing in the model forward later.
+                        batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
+                        input_ids_before_cp = input_ids
+                        position_ids_before_cp = position_ids
+                        padding_mask_before_cp = padding_mask
 
                     if self.parallel_dims.pp_enabled:
                         pp_last_stage = (
@@ -675,6 +729,8 @@ class SFTTrainer(Trainer):
                         loss = self.loss_fn(
                             logits,
                             labels,
+                            output_packing_mask=batch.get("input_packing_mask", None),
+                            target_packing_mask=batch.get("label_packing_mask", None),
                             loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                         )
 

@@ -44,6 +44,7 @@ from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 from cosmos_rl.policy.kernel.norm import RMSNorm
 from cosmos_rl.policy.kernel.fused import MLPActMulFunc
+from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
 
 
 @dataclass
@@ -703,6 +704,7 @@ class Qwen2_5_VLAttention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
         self.attn_func = modeling_utils.flash_attn_func
+        self.attn_func_varlen = modeling_utils.flash_attn_varlen_func
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -729,6 +731,8 @@ class Qwen2_5_VLAttention(nn.Module):
         self,
         x: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor],
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,
     ):
         """
         Forward pass of the attention module.
@@ -736,6 +740,8 @@ class Qwen2_5_VLAttention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor.
             position_embeddings (torch.Tensor): Position embeddings.
+            cu_seqlens (Optional[torch.Tensor]): Cumulative sequence lengths for variable-length sequences.
+            max_seqlen (Optional[int]): Maximum sequence length for variable-length sequences.
 
         Returns:
             torch.Tensor: Output tensor after attention.
@@ -765,7 +771,22 @@ class Qwen2_5_VLAttention(nn.Module):
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
 
-        output = self.attn_func(xq, xk, xv, causal=True)
+        if cu_seqlens is not None:
+            xq = xq.view(seqlen, -1, self.head_dim)
+            xk = xk.view(seqlen, -1, self.head_dim)
+            xv = xv.view(seqlen, -1, self.head_dim)
+            output = self.attn_func_varlen(
+                xq,
+                xk,
+                xv,
+                cu_seqlens,
+                cu_seqlens,
+                max_seqlen,
+                max_seqlen,
+                causal=True,
+            )
+        else:
+            output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
@@ -809,7 +830,10 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(
-            self.input_layernorm(hidden_states), position_embeddings
+            self.input_layernorm(hidden_states),
+            position_embeddings,
+            cu_seqlens=kwargs.get("cu_seqlens", None),
+            max_seqlen=kwargs.get("max_seqlen", None),
         )
         hidden_states = residual + hidden_states
 
@@ -842,10 +866,33 @@ class Qwen2_5_VLModel(nn.Module):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         interested_tokens: Optional[torch.BoolTensor] = None,
+        **kwargs,  # Additional arguments for compatibility
     ):
         h = self.identity_layer(inputs_embeds)
 
         position_embeddings = self.rotary_emb(h, position_ids)
+
+        if "valid_input_len" in kwargs:
+            valid_input_len = kwargs["valid_input_len"]
+            updated_kwargs = pack_sequences_for_inputs(
+                inputs_embeds,
+                valid_input_len,
+                list(position_embeddings),
+                interested_tokens,
+                inputs_seq_dim=1,
+                inputs_batch_dim=0,
+                position_ids_seq_dim=2,
+                position_ids_batch_dim=1,
+                interested_tokens_seq_dim=1,
+                interested_tokens_batch_dim=0,
+                padding_mask=kwargs.get("padding_mask", None),
+                cp_mesh=kwargs.get("cp_mesh", None),
+            )
+            position_embeddings = tuple(updated_kwargs.pop("position_ids"))
+            interested_tokens = updated_kwargs.pop("interested_tokens")
+            h = updated_kwargs.pop("inputs")
+            h = self.identity_layer(h)
+            kwargs.update(updated_kwargs)
 
         for layer in self.layers.values():
             if (
@@ -856,10 +903,11 @@ class Qwen2_5_VLModel(nn.Module):
                     layer,
                     h,
                     position_embeddings,
+                    **kwargs,
                     use_reentrant=False,
                 )
             else:
-                h = layer(h, position_embeddings=position_embeddings)
+                h = layer(h, position_embeddings=position_embeddings, **kwargs)
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
@@ -985,7 +1033,8 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             inputs_embeds=inputs_embeds,
             # Permute back to [3, batch_size, seq_len] for Pipeline Parallelism micro batch
             position_ids=position_ids.permute(1, 0, 2).contiguous(),
-            interested_tokens=kwargs.get("interested_tokens", None),
+            interested_tokens=kwargs.pop("interested_tokens", None),
+            **kwargs,  # Additional arguments for compatibility
         )
         return outputs
 
