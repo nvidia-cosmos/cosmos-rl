@@ -29,6 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from typing import Dict, List, Optional, Callable, Tuple, Union
 from cosmos_rl.dispatcher.controller import Controller
 import cosmos_rl.utils.constant as constant
+from cosmos_rl.dispatcher.status import PolicyStatus
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
 from cosmos_rl.dispatcher.replica import Atom, RolloutGroup, Rollout, Replica
 from cosmos_rl.dispatcher.protocol import (
@@ -408,6 +409,11 @@ async def get_batched_prompt(
             == controller.policy_status_manager.total_steps
         ):
             is_end = True
+
+        controller.policy_status_manager.set_status(replica_name, PolicyStatus.READY)
+        if controller.policy_status_manager.all_ready():
+            controller.policy_status_manager.remain_samples_num -= n
+            controller.policy_status_manager.recompute_total_steps()
 
         return {
             "global_batch": global_batch,

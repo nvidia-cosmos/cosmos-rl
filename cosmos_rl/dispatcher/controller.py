@@ -260,7 +260,7 @@ class Controller:
             self.val_dataset = None
             self.val_rl_algo = None
             val_dataloader = None
-        return val_dataloader
+        return val_dataloader, remain_samples_num
 
     def _init_sft_dataset(
         self, config: Config, user_provided_dataset: Optional[Dataset] = None
@@ -369,7 +369,7 @@ class Controller:
             self.val_dataset = None
             val_dataloader = None
 
-        return val_dataloader
+        return val_dataloader, remain_samples_num
 
     def setup(
         self,
@@ -418,15 +418,14 @@ class Controller:
         self.user_val_data_packer = val_data_packer
         self.dataset: Union[CosmosDataset, SFTDataset] = None
         self.ckpt_extra_info = {}
-        remain_samples_num = 0
 
         # init dataset and return val_dataloader for policy status manager
         if self.is_rl:
-            val_dataloader = self._init_rl_dataset(
+            val_dataloader, remain_samples_num = self._init_rl_dataset(
                 config, dataset, val_dataset, reward_fns, val_reward_fns
             )
         else:
-            val_dataloader = self._init_sft_dataset(config, dataset)
+            val_dataloader, remain_samples_num = self._init_sft_dataset(config, dataset)
             self.rl_algo = None
 
         redis_free_port = util.find_available_port(redis_port)
