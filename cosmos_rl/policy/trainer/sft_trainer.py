@@ -626,6 +626,10 @@ class SFTTrainer(Trainer):
             if is_end:
                 break
 
+            # Attention: When alternating between train and eval, checkpoint may retain some frame state.
+            # error output like:
+            #   "torch.utils.checkpoint.CheckpointError: torch.utils.checkpoint: Recomputed values for the following tensors have different metadata than during the forward pass"
+            # To overcome this, we need torch.util.checkpoint.checkpoint to 'use_reentrant=True'.
             report_data = self.train_step(global_batch, current_step, total_steps)
             self.post_fetch_data_from_controller(report_data, current_step, total_steps)
 
@@ -638,7 +642,6 @@ class SFTTrainer(Trainer):
                 self.config.train.enable_validation
                 and current_step % self.config.train.validation_step == 0
             ):
-                # for save ckpt
                 val_score = self.validate_step(current_step, total_steps)
 
             # try save ckpt
@@ -836,7 +839,6 @@ class SFTTrainer(Trainer):
                 ):
                     torch.cuda.cudart().cudaProfilerStop()
 
-            self.model.train()
             for k, v in batch.items():
                 batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
 

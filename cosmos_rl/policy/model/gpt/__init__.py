@@ -422,7 +422,7 @@ class GPT(BaseModel):
                     layer,
                     h,
                     position_embeddings,
-                    use_reentrant=False,
+                    use_reentrant=True,
                 )
             else:
                 h = layer(h, position_embeddings=position_embeddings)
