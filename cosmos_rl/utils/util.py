@@ -1019,23 +1019,30 @@ def dynamic_import_module(path: str, attr: Optional[str] = None) -> Dict[str, An
 
     Returns the imported module object.
     """
-    path = os.path.abspath(path)
-    if os.path.isdir(path):
-        # it's a package dir
-        pkg_dir = path
-        if not os.path.isfile(os.path.join(pkg_dir, "__init__.py")):
-            raise ImportError(f"{pkg_dir!r} is not a package (no __init__.py)")
-        module_name = os.path.basename(pkg_dir)
-        parent_dir = os.path.dirname(pkg_dir)
+    if os.path.exists(path):
+        path = os.path.abspath(path)
+        if os.path.isdir(path):
+            # it's a package dir
+            pkg_dir = path
+            if not os.path.isfile(os.path.join(pkg_dir, "__init__.py")):
+                raise ImportError(f"{pkg_dir!r} is not a package (no __init__.py)")
+            module_name = os.path.basename(pkg_dir)
+            parent_dir = os.path.dirname(pkg_dir)
+        else:
+            # it's a single .py file
+            if not path.lower().endswith(".py"):
+                raise ImportError(
+                    f"{path!r} is neither a .py file nor a package directory"
+                )
+            parent_dir, filename = os.path.split(path)
+            module_name = os.path.splitext(filename)[0]
+        # Ensure the parent directory is on sys.path
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
     else:
-        # it's a single .py file
-        if not path.lower().endswith(".py"):
-            raise ImportError(f"{path!r} is neither a .py file nor a package directory")
-        parent_dir, filename = os.path.split(path)
-        module_name = os.path.splitext(filename)[0]
-    # Ensure the parent directory is on sys.path
-    if parent_dir not in sys.path:
-        sys.path.insert(0, parent_dir)
+        # Direct python module
+        module_name = path
+
     # Now import by name – normal import machinery applies
     module = importlib.import_module(module_name)
 

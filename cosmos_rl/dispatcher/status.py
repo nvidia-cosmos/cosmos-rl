@@ -21,7 +21,7 @@ from typing import Dict, List, Iterator, Any, Optional
 from torch.utils.data import DataLoader
 from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import RollingDict
+from cosmos_rl.utils.util import RollingDict, dynamic_import_module
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.replica import Replica, Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role
@@ -719,16 +719,33 @@ class PolicyStatusManager:
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
                     )
-
-                    if "wandb" in self.config.logging.logger and is_wandb_available():
-                        log_wandb(
-                            data=self.train_report_data[train_step],
-                            step=train_step,
-                        )
-                    if "console" in self.config.logging.logger:
-                        logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
-                        )
+                    for logger_type in self.config.logging.logger:
+                        if logger_type == "wandb":
+                            if is_wandb_available():
+                                log_wandb(
+                                    data=self.train_report_data[train_step],
+                                    step=train_step,
+                                )
+                        elif logger_type == "console":
+                            logger.info(
+                                f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
+                            )
+                        else:
+                            try:
+                                splitted = logger_type.split(":")
+                                assert (
+                                    len(splitted) == 2
+                                ), f"Customized logger must be in format of 'module path:func name' for {logger_type}"
+                                logger_func = dynamic_import_module(
+                                    splitted[0], splitted[1]
+                                )
+                                logger_func(
+                                    self.train_report_data[train_step], train_step
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"[Controller] Warning reporting customized training results: {e}"
+                                )
                 except Exception as e:
                     logger.warning(
                         f"[Controller] Warning reporting training results: {e}"

@@ -843,7 +843,9 @@ class LoggingConfig(BaseModel):
     @model_validator(mode="after")
     def check_params_value(self):
         if self.logger:
-            self.logger = [logger.lower() for logger in self.logger]
+            self.logger = [
+                logger if ":" in logger else logger.lower() for logger in self.logger
+            ]
         return self
 
 
