@@ -265,6 +265,11 @@ class Controller:
     def _init_sft_dataset(
         self, config: Config, user_provided_dataset: Optional[Dataset] = None
     ):
+        """
+        Init the sft train_dataset.
+        Attention:
+            - the val dataset is initialized in the policy side for better performance
+        """
         if self.user_data_packer is None:
             hf_config = util.retry(AutoConfig.from_pretrained)(
                 self.config.policy.model_name_or_path, trust_remote_code=True
@@ -287,8 +292,8 @@ class Controller:
             self.user_data_packer = data_packer
             self.user_val_data_packer = data_packer
 
-        # for sft trainer, we create dataset in the controller
-        train_dataset, val_dataset = construct_sft_dataset(
+        # for sft trainer, we create train dataset in the controller
+        train_dataset, _ = construct_sft_dataset(
             config=config.train.train_policy,
             tokenizer=self.tokenizer,
             data_packer=self.user_data_packer,
@@ -354,22 +359,9 @@ class Controller:
             sampler=train_sampler,
         )
         self.train_dataloader_iter = iter(self.train_dataloader)
+        self.val_dataset = None
 
-        if config.train.enable_validation:
-            self.val_dataset = val_dataset
-            val_dataloader = DataLoader(
-                val_dataset,
-                batch_size=1,  # batch size is 1 is mandatory
-                shuffle=False,
-                num_workers=config.train.train_policy.dataloader_num_workers,
-                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                collate_fn=sft_collate_fn,
-            )
-        else:
-            self.val_dataset = None
-            val_dataloader = None
-
-        return val_dataloader, remain_samples_num
+        return remain_samples_num
 
     def setup(
         self,
@@ -425,7 +417,8 @@ class Controller:
                 config, dataset, val_dataset, reward_fns, val_reward_fns
             )
         else:
-            val_dataloader, remain_samples_num = self._init_sft_dataset(config, dataset)
+            remain_samples_num = self._init_sft_dataset(config, dataset)
+            val_dataloader = None
             self.rl_algo = None
 
         redis_free_port = util.find_available_port(redis_port)
@@ -516,7 +509,7 @@ class Controller:
     Policy functionality
     """
 
-    async def get_batched_data(self, n: int, validation_step: Optional[int] = None):
+    async def get_batched_data(self, n: int):
         # For sft mode, get batched_data from the dataset
         assert (
             "sft" == self.config.train.train_policy.type
@@ -525,28 +518,21 @@ class Controller:
         global_batch: List[str] = []
         is_end = False
 
-        is_validation = validation_step is not None
-        if is_validation:
-            iterator = self.policy_status_manager.validation_get_dataloader(
-                validation_step
-            )
-        else:
-            iterator = self.train_dataloader_iter
+        iterator = self.train_dataloader_iter
 
         for _ in range(n):
             try:
                 payload = next(iterator)
                 assert len(payload) == 1
             except StopIteration:
-                if not is_validation:
-                    self.epoch += 1
-                    if self.epoch <= self.config.train.epoch:
-                        logger.info(f"[Controller] Epoch {self.epoch} start.")
-                        iterator = iter(self.train_dataloader)
-                        self.train_dataloader_iter = iterator
+                self.epoch += 1
+                if self.epoch <= self.config.train.epoch:
+                    logger.info(f"[Controller] Epoch {self.epoch} start.")
+                    iterator = iter(self.train_dataloader)
+                    self.train_dataloader_iter = iterator
 
-                        payload = next(iterator)
-                        assert len(payload) == 1
+                    payload = next(iterator)
+                    assert len(payload) == 1
 
                 is_end = True
                 break

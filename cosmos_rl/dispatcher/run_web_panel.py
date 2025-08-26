@@ -399,6 +399,13 @@ async def get_batched_prompt(
                 constant.ErrorCode.INVALID_REQUEST,
                 f"Replica {replica_name} is not alive",
             )
+
+        if validation_step is not None:
+            return {
+                "train_step": controller.policy_status_manager.current_step,
+                "total_steps": controller.policy_status_manager.total_steps,
+            }
+
         global_batch, is_end = await controller.get_batched_data(n, validation_step)
 
         # make sure sft stop while total_steps is reached,
@@ -426,30 +433,40 @@ async def get_batched_prompt(
 
 @app.post(COSMOS_API_VALIDATION_REPORT_SUFFIX)
 async def validation_report(request: ValidationReportRequest):
-    rollout_groups: List[RolloutGroup] = [
-        RolloutGroup(
-            prompt_idx=prompt_idx,
-            payload=payload,
-            # Only report once per replica, so is_end is always True
-            is_end=True,
-            completions=completions,
-            reference_answer=controller.query_reference_answer(
-                prompt_idx, dataset_type="val"
-            ),
-        )
-        for prompt_idx, payload, completions in zip(
-            request.prompt_idxs, request.payloads, request.completions
-        )
-    ]
+    if controller.is_rl:
+        rollout_groups: List[RolloutGroup] = [
+            RolloutGroup(
+                prompt_idx=prompt_idx,
+                payload=payload,
+                # Only report once per replica, so is_end is always True
+                is_end=True,
+                completions=completions,
+                reference_answer=controller.query_reference_answer(
+                    prompt_idx, dataset_type="val"
+                ),
+            )
+            for prompt_idx, payload, completions in zip(
+                request.prompt_idxs, request.payloads, request.completions
+            )
+        ]
 
-    rollouts_list: List[List[Rollout]] = [
-        rollout_group.compute_rollouts(controller.val_rl_algo)
-        for rollout_group in rollout_groups
-    ]
-    controller.policy_status_manager.validation_report_validation_results(
-        request.validation_step, rollouts_list, controller.rollout_status_manager
-    )
-    return {"message": "Validation rollout put"}
+        rollouts_list: List[List[Rollout]] = [
+            rollout_group.compute_rollouts(controller.val_rl_algo)
+            for rollout_group in rollout_groups
+        ]
+        controller.policy_status_manager.validation_report_validation_results(
+            request.validation_step, rollouts_list, controller.rollout_status_manager
+        )
+        return {"message": "Validation rollout put"}
+    else:
+        # for sft trainer
+        validation_results = {
+            "val/loss_avg": request.average_loss,
+        }
+        controller.policy_status_manager.validation_report_validation_results(
+            request.validation_step, validation_results
+        )
+        return {"message": "Validation report received"}
 
 
 @app.post(COSMOS_API_ROLLOUT_SUFFIX)

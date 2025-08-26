@@ -17,7 +17,7 @@ import time
 import math
 from queue import Queue
 from strenum import StrEnum
-from typing import Dict, List, Iterator, Any, Optional, Callable
+from typing import Dict, List, Iterator, Any, Optional, Callable, Union
 from torch.utils.data import DataLoader
 from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
@@ -557,6 +557,21 @@ class PolicyStatusManager:
         validation_results: List[List[Rollout]],
         rollout_status_manager: "RolloutStatusManager",
     ):
+        if self.is_rl:
+            self._validation_report_validation_results_rl(
+                validation_step, validation_results, rollout_status_manager
+            )
+        else:
+            self._validation_report_validation_results_sft(
+                validation_step, validation_results
+            )
+
+    def _validation_report_validation_results_rl(
+        self,
+        validation_step: int,
+        validation_results: Union[List[List[Rollout]], Dict[str, Any]],
+        rollout_status_manager: "RolloutStatusManager",
+    ):
         if validation_step not in self.val_report_data:
             self.val_report_data[validation_step] = []
 
@@ -614,6 +629,32 @@ class PolicyStatusManager:
             # The order is important, because the previous code block logs the previous step's validation results
             # while `try_trigger_data_fetch_and_training` will immediately report the next step's results
             self.try_trigger_data_fetch_and_training()
+
+    def _validation_report_validation_results_sft(
+        self,
+        validation_step: int,
+        validation_results: Dict[str, Any],
+    ):
+        # use self.val_report_data to record the validation results
+        if validation_step not in self.val_report_data:
+            self.val_report_data[validation_step] = []
+
+        self.val_report_data[validation_step].extend(validation_results)
+
+        all_reported = len(self.val_report_data[validation_step]) == len(
+            self.policy_replicas
+        )
+        if not all_reported:
+            return
+
+        # report the validation results
+        val_avg_loss = self.val_report_data[validation_step]["val/loss_avg"]
+        logger.info(
+            f"[Controller] Validation finished, average loss: {val_avg_loss} at step {validation_step}"
+        )
+
+        # release the validation results to save memory
+        self.val_report_data.pop(validation_step)
 
     def total_pending_rollouts(self) -> int:
         """

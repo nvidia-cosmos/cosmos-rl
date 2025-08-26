@@ -20,6 +20,7 @@ from cosmos_rl.policy.trainer.optm import build_lr_schedulers, LRSchedulersConta
 from cosmos_rl.utils.logging import logger
 import torch
 import torch.distributed as dist
+from torch.utils.data import DistributedSampler, DataLoader
 import numpy as np
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
@@ -30,6 +31,7 @@ import time
 import atexit
 import threading
 import requests
+from tqdm import tqdm
 from typing import Optional, Dict, Any, Tuple, List
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from functools import partial
@@ -39,6 +41,10 @@ from cosmos_rl.utils.distributed import (
     extract_from_cuda_tensor,
 )
 from cosmos_rl.dispatcher.command import Command, BuildMeshCommand
+from cosmos_rl.dispatcher.data.sft_dataset import (
+    construct_sft_dataset,
+    collate_fn as sft_collate_fn,
+)
 
 
 def async_safe_ce(
@@ -160,6 +166,10 @@ class SFTTrainer(Trainer):
         # Prepare dataset
         # build dataset at controller side, we don't need to prepare dataset here
 
+        self.val_dataset = None
+        self.old_replica_world_size = 1
+        self.old_replica_rank = 0
+
         assert (
             self.tokenizer.pad_token_id is not None
         ), "Tokenizer must have a pad token id"
@@ -205,6 +215,48 @@ class SFTTrainer(Trainer):
         # Another notice is that make sure the background threads detect the shutdown event in less than 15 seconds
         # Otherwise, the main thread may exit before the background threads detect the shutdown event
         time.sleep(15)
+
+    def reinit_local_hosted_dataset(self):
+        """
+        Init the local hosted dataset.
+        """
+        replica_rank = self.inter_policy_nccl.get_replica_rank(self.replica_name)
+        replica_world_size = self.inter_policy_nccl.world_size()
+
+        if (
+            self.val_dataset is not None
+            and self.old_replica_world_size == replica_world_size
+            and self.old_replica_rank == replica_rank
+        ):
+            # inter policy nccl not changed, no need to re-init the val_dataset
+            return
+
+        self.old_replica_world_size = replica_world_size
+        val_sampler = DistributedSampler(
+            self.val_dataset,
+            num_replicas=self.dp_world_size * replica_world_size,
+            rank=self.dp_world_size * replica_rank + self.dp_rank,
+            shuffle=False,
+            drop_last=False,
+        )
+
+        _, val_dataset = construct_sft_dataset(
+            config=self.config.train.train_policy,
+            tokenizer=self.tokenizer,
+            data_packer=self.user_val_data_packer,
+            user_provided_dataset=self.val_dataset,
+        )
+
+        self.val_dataset = val_dataset
+        self.val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=self.config.train.train_policy.mini_batch,
+            shuffle=False,
+            num_workers=self.config.train.train_policy.dataloader_num_workers,
+            prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
+            collate_fn=sft_collate_fn,
+            sampler=val_sampler,
+        )
 
     def fetch_command_worker(self):
         """
@@ -276,10 +328,10 @@ class SFTTrainer(Trainer):
                 raise RuntimeError(
                     f"[Policy] Failed in fetch data from controller after retries {e}."
                 )
+            response = response.json()
         else:
             response = None
 
-        response = response.json()
         # broadcast the response to all ranks
         response = dist_util.broadcast_object_cpu(
             response, src=0, device=torch.device("cpu")
@@ -333,6 +385,37 @@ class SFTTrainer(Trainer):
                 )
 
         logger.debug(f"[Policy] Train ack sent for global step {total_steps}.")
+
+    def report_validation_results(
+        self, validation_step: int, validation_results: Dict[str, Any]
+    ):
+        """
+        Post the validation results to the controller.
+        """
+        if util.is_master_rank(self.parallel_dims, self.global_rank):
+            try:
+                make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json={
+                            "src_replica_name": self.replica_name,
+                            "validation_step": validation_step,
+                            "average_loss": util.sanitize(validation_results),
+                        },
+                    ),
+                    self.get_alternative_urls(
+                        api_suffix.COSMOS_API_VALIDATION_REPORT_SUFFIX
+                    ),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Policy] Failed in report validation results to controller after retries {e}."
+                )
+
+        logger.debug(
+            f"[Policy] Validation results sent for global step {validation_step}."
+        )
 
     def _sync_weights_between_replicas(self):
         """
@@ -575,13 +658,9 @@ class SFTTrainer(Trainer):
         val_total_loss = 0.0
         val_total_samples = 0
 
-        while True:
-            is_end, val_global_batch, _, _ = self.fetch_data_from_controller(
-                current_step
-            )
-            if is_end:
-                break
+        self.reinit_local_hosted_dataset()
 
+        for val_global_batch in tqdm(self.val_dataloader, desc="Validating"):
             fixed_length = (
                 self.config.policy.model_max_length
                 if self.parallel_dims.pp_enabled
@@ -680,7 +759,7 @@ class SFTTrainer(Trainer):
             concat_avg_count, op=torch.distributed.ReduceOp.SUM
         )
         val_avg_loss = (concat_avg_count[0] / concat_avg_count[1]).item()
-        logger.info(f"[SFTTrainer] Validation loss: {val_avg_loss}")
+        self.report_validation_results(current_step, {"val/loss_avg": val_avg_loss})
         return val_avg_loss
 
     def train_step(

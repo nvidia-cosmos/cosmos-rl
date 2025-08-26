@@ -68,6 +68,8 @@ class ValidationReportRequest(BaseModel):
     completions: List[List[str]]
     is_end: bool = False
     reference_answer: Optional[str] = None
+    # For SFT trainer, the average loss is reported by the policy side
+    average_loss: Optional[float] = None
 
 
 class RolloutRequest(BaseModel):
