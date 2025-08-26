@@ -406,7 +406,7 @@ async def get_batched_prompt(
                 "total_steps": controller.policy_status_manager.total_steps,
             }
 
-        global_batch, is_end = await controller.get_batched_data(n, validation_step)
+        global_batch, is_end = await controller.get_batched_data(n)
 
         # make sure sft stop while total_steps is reached,
         # only validation_step is exception
@@ -460,11 +460,10 @@ async def validation_report(request: ValidationReportRequest):
         return {"message": "Validation rollout put"}
     else:
         # for sft trainer
-        validation_results = {
-            "val/loss_avg": request.average_loss,
-        }
         controller.policy_status_manager.validation_report_validation_results(
-            request.validation_step, validation_results
+            request.validation_step,
+            request.report_data,
+            controller.rollout_status_manager,
         )
         return {"message": "Validation report received"}
 

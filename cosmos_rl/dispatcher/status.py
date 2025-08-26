@@ -639,7 +639,7 @@ class PolicyStatusManager:
         if validation_step not in self.val_report_data:
             self.val_report_data[validation_step] = []
 
-        self.val_report_data[validation_step].extend(validation_results)
+        self.val_report_data[validation_step].extend([validation_results])
 
         all_reported = len(self.val_report_data[validation_step]) == len(
             self.policy_replicas
@@ -648,7 +648,7 @@ class PolicyStatusManager:
             return
 
         # report the validation results
-        val_avg_loss = self.val_report_data[validation_step]["val/loss_avg"]
+        val_avg_loss = self.val_report_data[validation_step][0]["val/loss_avg"]
         logger.info(
             f"[Controller] Validation finished, average loss: {val_avg_loss} at step {validation_step}"
         )

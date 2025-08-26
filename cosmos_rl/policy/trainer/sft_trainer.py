@@ -232,19 +232,21 @@ class SFTTrainer(Trainer):
             return
 
         self.old_replica_world_size = replica_world_size
-        val_sampler = DistributedSampler(
-            self.val_dataset,
-            num_replicas=self.dp_world_size * replica_world_size,
-            rank=self.dp_world_size * replica_rank + self.dp_rank,
-            shuffle=False,
-            drop_last=False,
-        )
+        self.old_replica_rank = replica_rank
 
         _, val_dataset = construct_sft_dataset(
             config=self.config.train.train_policy,
             tokenizer=self.tokenizer,
-            data_packer=self.user_val_data_packer,
+            data_packer=self.val_data_packer,
             user_provided_dataset=self.val_dataset,
+        )
+
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=self.dp_world_size * replica_world_size,
+            rank=self.dp_world_size * replica_rank + self.dp_rank,
+            shuffle=False,
+            drop_last=False,
         )
 
         self.val_dataset = val_dataset
@@ -400,7 +402,7 @@ class SFTTrainer(Trainer):
                         json={
                             "src_replica_name": self.replica_name,
                             "validation_step": validation_step,
-                            "average_loss": util.sanitize(validation_results),
+                            "report_data": util.sanitize(validation_results),
                         },
                     ),
                     self.get_alternative_urls(
@@ -752,11 +754,12 @@ class SFTTrainer(Trainer):
             val_total_loss += val_loss.item() * val_inputs.size(0)
             val_total_samples += len(val_inputs)
 
+        # summary the avarage loss
         concat_avg_count = torch.tensor(
             [val_total_loss, val_total_samples], dtype=torch.float32, device=self.device
         )
-        self.inter_policy_nccl.all_reduce(
-            concat_avg_count, op=torch.distributed.ReduceOp.SUM
+        self.inter_policy_nccl.allreduce(
+            concat_avg_count, concat_avg_count, op=torch.distributed.ReduceOp.SUM
         )
         val_avg_loss = (concat_avg_count[0] / concat_avg_count[1]).item()
         self.report_validation_results(current_step, {"val/loss_avg": val_avg_loss})

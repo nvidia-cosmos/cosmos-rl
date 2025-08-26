@@ -63,13 +63,13 @@ class WeightReadyRequest(BaseModel):
 class ValidationReportRequest(BaseModel):
     src_replica_name: str
     validation_step: int
-    prompt_idxs: List[int]
-    payloads: List[Any]
-    completions: List[List[str]]
+    prompt_idxs: List[int] = []
+    payloads: List[Any] = []
+    completions: List[List[str]] = []
     is_end: bool = False
     reference_answer: Optional[str] = None
     # For SFT trainer, the average loss is reported by the policy side
-    average_loss: Optional[float] = None
+    report_data: Dict[str, Any] = {}
 
 
 class RolloutRequest(BaseModel):
