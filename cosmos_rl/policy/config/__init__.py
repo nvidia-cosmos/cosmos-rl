@@ -620,6 +620,10 @@ class LoraConfig(BaseModel):
         " was proven to work better. Otherwise, it will use the original default"
         " value of `lora_alpha/r`.",
     )
+    deterministic_merge: bool = Field(
+        default=False,
+        description="Enable deterministic LoRA merge/unmerge by backing up and restoring base weights only for LoRA.",
+    )
     modules_to_save: Optional[List[str]] = Field(
         default=None,
         description="List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint. ",
