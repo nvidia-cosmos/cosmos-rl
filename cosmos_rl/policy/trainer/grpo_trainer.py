@@ -775,7 +775,9 @@ class GRPOTrainer(Trainer):
                             unmerge_lora_weights_,
                         )
 
-                        merge_lora_weights_(self.model)
+                        merge_lora_weights_(
+                            self.model, deterministic=self.config.train.deterministic
+                        )
 
                     pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
                         self.pre_P2R_collect_parameters()
@@ -854,7 +856,9 @@ class GRPOTrainer(Trainer):
                 finally:
                     if self.config.policy.lora is not None:
                         # Always attempt to unmerge to restore training state
-                        unmerge_lora_weights_(self.model)
+                        unmerge_lora_weights_(
+                            self.model, deterministic=self.config.train.deterministic
+                        )
 
                 if command.trainable_only:
                     if not hasattr(self, "synced_trainable_params"):
