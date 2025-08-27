@@ -13,7 +13,7 @@ class MLP(nn.Module):
         up_proj (nn.Module): Additional linear layer for feature transformation.
     """
 
-    def __init__(self, dim: int, inter_dim: int, use_tp: bool = True):
+    def __init__(self, dim: int, inter_dim: int):
         """
         Initializes the MLP layer.
 
