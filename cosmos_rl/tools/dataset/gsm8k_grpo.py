@@ -128,6 +128,43 @@ def custom_reward_fn(
     return reward
 
 
+def custom_logger_fn(data: dict, step: int) -> None:
+    """
+    Example of custom logger function.
+    Please mimic this to implement your own custom logger function.
+    Your custom logger function is in the same format with this `custom_logger_fn`.
+    It shoule be with two arguments: `data` and `step`.
+
+    Arguments:
+        The data argument will always be the follwing format:
+            data = {
+                "train/loss_avg": total_loss_avg,
+                "train/loss_max": total_loss_max,
+                "train/learning_rate": total_learning_rate,
+                "train/iteration_time": total_iter_time_avg,
+                "train/kl_loss_avg": total_kl_loss_avg,
+                "train/kl_loss_max": total_kl_loss_max,
+                "train/grad_norm": total_grad_norm,
+            }
+        The data argument includes the infomation could be logged.
+        The step argument is the number for the current training step.
+
+    Usage:
+        After implementing this `custom_logger_fn` function, you can pass it through the `custom_logger_fns` argument of the `launch_worker`.
+        The `custom_logger_fns` argument of the `launch_worker` is a list of Callable, which can includes multiple custom logger functions.
+        Then the given custom logger functions will be called with the appropriate arguments during the training process.
+    """
+    # total_loss_avg = data.get("train/loss_avg", None)
+    # total_loss_max = data.get("train/loss_max", None)
+    # total_learning_rate = data.get("train/learning_rate", None)
+    # total_iter_time_avg = data.get("train/iteration_time", None)
+    # total_kl_loss_avg = data.get("train/kl_loss_avg", None)
+    # total_kl_loss_max = data.get("train/kl_loss_max", None)
+    # total_grad_norm = data.get("train/grad_norm", None)
+    # This is only an example and no actual operations done for the logging.
+    pass
+
+
 class GSM8kDataPacker(DataPacker):
     """
     This is a demo data packer that wraps the underlying data packer of the selected model.
@@ -206,4 +243,5 @@ if __name__ == "__main__":
         # Optional: if not provided, the default data packer of the selected model will be used
         data_packer=GSM8kDataPacker(),
         val_data_packer=GSM8kDataPacker(),
+        custom_logger_fns=[custom_logger_fn],
     )

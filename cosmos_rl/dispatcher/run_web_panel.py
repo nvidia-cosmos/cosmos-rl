@@ -599,6 +599,7 @@ def main(
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,
+    custom_logger_fns: Optional[List[Callable]] = None,
     **kwargs,
 ):
     if kwargs:
@@ -691,6 +692,7 @@ def main(
             val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
             val_data_packer=val_data_packer,
+            custom_logger_fns=custom_logger_fns,
         )
         logger.info(f"Successfully loaded configuration from {args.config_file}")
     except FileNotFoundError:
