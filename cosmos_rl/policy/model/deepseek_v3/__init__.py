@@ -35,10 +35,12 @@ from cosmos_rl.policy.kernel.moe import moe
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.deepseek_v3 import deepseekv3_mapped
 from cosmos_rl.policy.model.deepseek_v3.checkpoint_planner import RenameLoadPlanner
-from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
-    DeepseekV3MoEWeightMapper,
+from cosmos_rl.policy.model.deepseek_v3.weight_converter import (
     convert_weight_from_hf,
     weight_dequant,
+)
+from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
+    DeepseekV3MoEWeightMapper,
 )
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
