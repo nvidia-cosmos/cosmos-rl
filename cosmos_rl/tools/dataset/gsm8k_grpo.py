@@ -44,7 +44,7 @@ class GSM8kDataset(Dataset):
             self.dataset = modelscope_dataset_if_enabled
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.dataset) // 16
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
         """
