@@ -305,7 +305,10 @@ class GroupedExpertsDeepEP(nn.Module):
             )
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             output2 = ops.gmm(
-                output1_, self.down_projs.to_local(), tokens_per_expert, trans_b=False
+                output1_,
+                self.down_projs.to_local(),
+                tokens_per_expert,
+                trans_b=False,
             )
         else:
             output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0])
@@ -374,9 +377,9 @@ class GroupedExpertsSymmMem(nn.Module):
         super().__init__()
         self.total_experts = n_routed_experts
         self.local_experts = n_routed_experts
-        self.up_proj = FakeLinear(dim, inter_dim, self.local_experts)
-        self.gate_proj = FakeLinear(dim, inter_dim, self.local_experts)
-        self.down_proj = FakeLinear(inter_dim, dim, self.local_experts)
+        self.gate_projs = nn.Parameter(torch.empty(self.local_experts, inter_dim, dim))
+        self.up_projs = nn.Parameter(torch.empty(self.local_experts, inter_dim, dim))
+        self.down_projs = nn.Parameter(torch.empty(self.local_experts, dim, inter_dim))
         self.act_fn = F.silu
 
         self.group_gemm_imp = group_gemm_imp()
@@ -497,9 +500,9 @@ class GroupedExpertsSymmMem(nn.Module):
             contig_tokens,
             m_sizes,
             m_offsets,
-            self.gate_proj.weight.to_local(),
-            self.up_proj.weight.to_local(),
-            self.down_proj.weight.to_local(),
+            self.gate_projs.to_local(),
+            self.up_projs.to_local(),
+            self.down_projs.to_local(),
             self.act_fn,
         )
 
@@ -547,12 +550,6 @@ class GroupedExpertsSymmMem(nn.Module):
         y = self.moe_on_device(hidden_states, topk_idx, topk_weight)
         y = y.view(*orig_shape)
         return self.reshard_helper_layer(y)
-
-
-class FakeLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, num_experts: int):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(num_experts, out_features, in_features))
 
 
 def swiglu(x, gate_proj, down_proj, up_proj):
