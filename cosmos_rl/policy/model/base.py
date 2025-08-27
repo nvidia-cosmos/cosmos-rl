@@ -168,11 +168,14 @@ class BaseModel(torch.nn.Module, ABC):
             parent_path, leaf_name = (k.rsplit(".", 1) + [""])[:2]
             parent_module = module_map.get(parent_path, None)
             if isinstance(parent_module, LoraInjectedLinear) and leaf_name == "weight":
-                transforms[
-                    self.weight_mapper.policy_map_local_key_to_hf_key(
-                        util.clear_weight_name(k)
-                    )
-                ] = _make_lora_merged_local_view(parent_module, v)
+                dest_key = self.weight_mapper.policy_map_local_key_to_hf_key(
+                    util.clear_weight_name(k)
+                )
+                if not hasattr(self.weight_mapper, "pre_p2r_required_keys"):
+                    self.weight_mapper.pre_p2r_required_keys = set()
+                self.weight_mapper.pre_p2r_required_keys.add(dest_key)
+
+                transforms[dest_key] = _make_lora_merged_local_view(parent_module, v)
                 continue
 
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
@@ -725,6 +728,8 @@ class WeightMapper(ABC):
         Returns:
             bool: True if the tensor sync precollect is required, False otherwise.
         """
+        if hasattr(self, "pre_p2r_required_keys"):
+            return name in self.pre_p2r_required_keys
         return False
 
     @cached_property
