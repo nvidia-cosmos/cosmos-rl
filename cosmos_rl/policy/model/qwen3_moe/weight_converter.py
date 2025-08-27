@@ -215,7 +215,7 @@ def map_weight_parallel_dims(
                 dims_map[dim] = n_dim - 1
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.(up_proj|gate_proj)\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj)\.(weight|bias)", dest_name
                 )
             ) is not None:
                 dims_map[dim] = (
@@ -223,7 +223,7 @@ def map_weight_parallel_dims(
                 )
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.experts\.down_proj\.(weight|bias)", dest_name
                 )
             ) is not None:
                 dims_map[dim] = (
@@ -254,7 +254,7 @@ def map_weight_parallel_dims(
     else:
         dims_map = {}
 
-    # Do FSDP sharding
+    # Do FSDP sharding. Why is FSDP sharding only done on dim0?
     dim = "dp_shard_cp"
     if dp_shard_size > 1:
         dims_map[dim] = 0

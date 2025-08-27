@@ -539,14 +539,14 @@ class Qwen3MoE(BaseModel):
         self.rotary_emb.reset_inv_freq()
 
         # TODO(cjx): max_seq_len * mini_batch is a better choice
-        MAX_BATCH_MUL_SEQ_LEN = (
+        _MAX_BATCH_MUL_SEQ_LEN = (
             self.model_args.max_seq_len
             * cosmos_config.train.train_batch_per_replica
             * self.model_args.hf_config.num_experts_per_tok
         )
 
         setup_symm_mem(
-            max_batch_tokens=MAX_BATCH_MUL_SEQ_LEN,
+            max_batch_tokens=_MAX_BATCH_MUL_SEQ_LEN,
             model_dim=self.model_args.dim,
             dtype=self.model_args.hf_config.torch_dtype,
             device=torch.cuda.current_device(),
