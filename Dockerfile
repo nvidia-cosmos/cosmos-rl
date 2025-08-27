@@ -21,7 +21,7 @@ ENV TZ=Etc/UTC
 RUN apt-get update -y && apt-get upgrade -y
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
-    curl git gpg lsb-release tzdata wget unzip
+    curl git gpg lsb-release tzdata wget unzip nginx default-jre
 RUN apt-get purge -y cuda-compat-*
 
 #################################################
@@ -144,5 +144,32 @@ FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 COPY . /workspace/cosmos_rl
 RUN pip install -U git+https://github.com/nvidia-cosmos/cosmos-reason1.git#subdirectory=cosmos_reason1_utils
 RUN pip install /workspace/cosmos_rl
+
+# Installing TAO-Core
+COPY tao-core tao-core
+RUN cd tao-core && bash release/python/build_wheel.sh && \
+    find dist/ -name "nvidia_tao_core*.whl" -type f | xargs -n 1 pip install && \
+    cp nvidia_tao_core/microservices/nginx.conf /etc/nginx/ && \
+    cd .. && rm -rf tao-core
+
+ENV NVIDIA_PRODUCT_NAME "TAO Toolkit"
+ENV TAO_TOOLKIT_VERSION="6.25.7"
+ENV NVIDIA_TAO_TOOLKIT_VERSION="${TAO_TOOLKIT_VERSION}-PyTorch"
+
+# Defining the telemetry URL.
+ENV TAO_TELEMETRY_SERVER="https://api.tao.ngc.nvidia.com"
+
+EXPOSE 8000
+
+# Microservices entrypoint
+ENV FLASK_APP=nvidia_tao_core.microservices.app
+
+ENV RUN_CLI=1
+
+CMD if [ "$RUN_CLI" = "1" ]; then \
+        /bin/bash; \
+    else \
+        /bin/bash $(get-microservice-script); \
+    fi
 
 
