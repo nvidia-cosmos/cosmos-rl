@@ -371,16 +371,6 @@ class SFTTrainer(Trainer):
         """
         assert self.replica_name == command.replica_name
 
-        # check if should update lr_scheduler
-        if self.last_total_steps != command.total_steps:
-            # Rebuild lr schedulers for the very first step because
-            # 1. only until the first step, we can know the exact total steps from the controller
-            # 2. need update lr_scheduler when total_steps is changed
-            self.lr_schedulers = build_lr_schedulers(
-                self.optimizers, self.config, command.total_steps
-            )
-            self.last_total_steps = command.total_steps
-
         self.current_step = command.global_step
         self.total_steps = command.total_steps
 
@@ -407,7 +397,6 @@ class SFTTrainer(Trainer):
                 current_step=command.global_step,
                 total_steps=command.total_steps,
             )
-            self.report_validation_results(command.global_step, val_score)
 
         # try save ckpt
         self._try_save_ckpt(
@@ -894,9 +883,28 @@ class SFTTrainer(Trainer):
         report_data = {}
         self.model.train()
 
+        # check if should update lr_scheduler
+        if self.last_total_steps != total_steps:
+            logger.info(
+                f"[Policy] Train step: update lr_scheduler for total_steps changed from {self.last_total_steps} to {total_steps}"
+            )
+
+            # Rebuild lr schedulers for the very first step because
+            # 1. only until the first step, we can know the exact total steps from the controller
+            # 2. need update lr_scheduler when total_steps is changed
+            new_lr_schedulers = build_lr_schedulers(
+                self.optimizers, self.config, total_steps
+            )
+            with torch.no_grad():
+                # Note: we need to load the state dict of the old lr schedulers
+                # in case it is resumed from a checkpoint or continue the train_step,
+                # otherwise, the lr scheduler will be reset to the initial value
+                new_lr_schedulers.load_state_dict(self.lr_schedulers.state_dict())
+            self.lr_schedulers = new_lr_schedulers
+            self.last_total_steps = total_steps
+
         # train a global batch data
         acc_loss = torch.zeros(1, device=self.device)
-        self.optimizers.zero_grad()
         global_batch_size = len(global_batch)
         # split global_batch into mini_batches
         mini_batch_begin_idxs = list(
@@ -1065,6 +1073,8 @@ class SFTTrainer(Trainer):
         self._allreduce_gradients()
         grad_norm = self._clipping_gradients()
         self.optimizers.step()
+        self.optimizers.zero_grad()
+
         self.lr_schedulers.step()
 
         if (

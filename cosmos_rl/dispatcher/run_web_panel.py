@@ -393,6 +393,10 @@ async def get_batched_prompt(
             "is_end": is_end,
         }
     else:
+        assert (
+            validation_step is None
+        ), "Validation batch data should get from policy side in SFT mode"
+
         # avoid dead replica get batch data
         if replica_name not in controller.policy_status_manager.policy_replicas:
             return create_error_response(
@@ -400,28 +404,8 @@ async def get_batched_prompt(
                 f"Replica {replica_name} is not alive",
             )
 
-        if validation_step is not None:
-            return {
-                "train_step": controller.policy_status_manager.current_step,
-                "total_steps": controller.policy_status_manager.total_steps,
-            }
-
         global_batch, is_end = await controller.get_batched_data(n)
-
-        # make sure sft stop while total_steps is reached,
-        # only validation_step is exception
-        if (
-            validation_step is None
-            and controller.policy_status_manager.current_step + 1
-            == controller.policy_status_manager.total_steps
-        ):
-            is_end = True
-
         controller.policy_status_manager.set_status(replica_name, PolicyStatus.READY)
-        if controller.policy_status_manager.all_ready():
-            controller.policy_status_manager.remain_samples_num -= n
-            controller.policy_status_manager.recompute_total_steps()
-
         return {
             "global_batch": global_batch,
             "is_end": is_end,

@@ -533,9 +533,15 @@ class Controller:
 
                     payload = next(iterator)
                     assert len(payload) == 1
-
-                is_end = True
-                break
+                else:
+                    if self.epoch == self.config.train.epoch + 1:
+                        # Here the epoch means how many StopIteration has been raised
+                        # So we can only log this information once
+                        logger.info(
+                            "[Controller] All epochs finished fetching train data, wait for training to complete."
+                        )
+                    is_end = True
+                    break
 
             global_batch.append(payload[0])
 

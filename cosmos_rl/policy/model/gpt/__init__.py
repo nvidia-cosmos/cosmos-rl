@@ -422,6 +422,12 @@ class GPT(BaseModel):
                     layer,
                     h,
                     position_embeddings,
+                    # TODO(zjx): disable use_reentrant will cause error in sft mode.
+                    # The issue reproduce:
+                    # 1. set use_reentrant=False
+                    # 2. model.train() and forward/backward a batch
+                    # 3. model.eval() and forward a batch
+                    # 4. model.train() again, then raise error
                     use_reentrant=True,
                 )
             else:
