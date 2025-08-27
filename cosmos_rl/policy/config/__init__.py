@@ -471,6 +471,11 @@ class TrainingConfig(BaseModel):
         description="The data type for forward/backward. Outside forward/backward, params are in `master_dtype`",
         choices=["bfloat16", "float16", "float32"],
     )
+    transfer_dtype: str = Field(
+        default=None,
+        description="The data type for transfer parameters between Policy and Rollout.",
+        choices=["bfloat16", "float16", "float32"],
+    )
 
     fsdp_reduce_dtype: str = Field(
         default="float32",
@@ -952,6 +957,10 @@ class Config(BaseModel):
             # Handle for evaludation configuration.
             if isinstance(self.validation.dataset.split, str):
                 self.validation.dataset.split = [self.validation.dataset.split]
+
+        if self.train.transfer_dtype is None:
+            # Default use param_dtype as transfer_dtype
+            self.train.transfer_dtype = self.train.param_dtype
         return self
 
 

@@ -832,7 +832,7 @@ class GRPOTrainer(Trainer):
                                 else:
                                     pass
                                 local_view = local_view.to(
-                                    str2torch_dtype(self.config.train.param_dtype)
+                                    str2torch_dtype(self.config.train.transfer_dtype)
                                 )
                                 view = (
                                     local_view.cosmos_slice(tensor_split_strategys)
