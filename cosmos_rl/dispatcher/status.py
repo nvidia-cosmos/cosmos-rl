@@ -807,11 +807,13 @@ class PolicyStatusManager:
                         )
                         for logger_fn in self.custom_logger_fns:
                             try:
-                                logger_fn(self.train_report_data[train_step], train_step)
+                                logger_fn(
+                                    self.train_report_data[train_step], train_step
+                                )
                             except Exception as e:
                                 logger.warning(
                                     f"[Controller] Warning reporting customized training results: {e}"
-                            )
+                                )
                 except Exception as e:
                     logger.warning(
                         f"[Controller] Warning reporting rl training results: {e}"
@@ -848,15 +850,10 @@ class PolicyStatusManager:
 
         self.set_status(replica_name, PolicyStatus.REDUCED)
 
-        # logger.info(f"[Controller] train_ack_sft: {report_data}, current_step: {self.current_step}, status: {self.get_status(replica_name)}")
-
         if not hasattr(self, "report_data_list"):
             self.report_data_list = []
         self.report_data_list.append(report_data)
         if not self.all_reduced():
-            logger.info(
-                f"[Controller] train_ack_sft: not all reduced, current_step: {self.current_step}, status: {list(self.status.items())}"
-            )
             return
 
         # post process if all replica have send ack
@@ -918,14 +915,14 @@ class PolicyStatusManager:
                         f"Grad norm: {self.train_report_data[train_step]['train/grad_norm']:.5f}, "
                         f"Learning rate: {self.train_report_data[train_step]['train/learning_rate']:.5e}, "
                         f"Iteration time: {self.train_report_data[train_step]['train/iteration_time']:.2f}s."
-                        )
+                    )
                     for logger_fn in self.custom_logger_fns:
                         try:
                             logger_fn(self.train_report_data[train_step], train_step)
                         except Exception as e:
                             logger.warning(
                                 f"[Controller] Warning reporting customized training results: {e}"
-                        )
+                            )
             except Exception as e:
                 logger.warning(
                     f"[Controller] Warning reporting sft training results: {e}"
