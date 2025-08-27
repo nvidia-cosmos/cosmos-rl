@@ -1826,7 +1826,7 @@
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
+<td colspan="3"><p>True</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>enable_dataset_cache</p></li>
@@ -2121,7 +2121,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="174"><ul class="simple">
+<tr class="row-even"><td rowspan="178"><ul class="simple">
 <li><p>TrainingConfig</p></li>
 </ul>
 </td>
@@ -2450,6 +2450,20 @@
 </tr>
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>bfloat16</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>transfer_dtype</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Transfer Dtype</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>The data type for transfer parameters between Policy and Rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>fsdp_reduce_dtype</p></li>
