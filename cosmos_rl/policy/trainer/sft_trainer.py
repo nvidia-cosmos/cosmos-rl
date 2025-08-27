@@ -307,7 +307,7 @@ class SFTTrainer(Trainer):
             train_dataset,
             num_replicas=self.dp_world_size,
             rank=self.dp_rank,
-            shuffle=True,
+            shuffle=config.train.train_policy.dataloader_shuffle,
             drop_last=False,
         )
 

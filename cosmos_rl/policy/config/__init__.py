@@ -112,7 +112,7 @@ class SFTDataConfig(BaseModel):
     )
 
     dataloader_shuffle: bool = Field(
-        default=False,
+        default=True,
         description="Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.",
     )
     enable_dataset_cache: bool = Field(

@@ -908,6 +908,9 @@ class ParallelTopoMapper:
                         elif part_name == "mm_input_projection_weight":
                             # Gemma has mm_input_projection_weight
                             is_bias = True
+                        elif part_name == "weight_scale":
+                            # Currently weight scale should be skipped not for weight sync.
+                            should_skip = True
                         break
                     part = getattr(part, part_name)
                 elif str.isdigit(part_name):
