@@ -101,7 +101,7 @@ if [ "$BACKEND" == "trtllm" ]; then
 fi
 
 # Torch related
-set_env "TORCH_CPP_LOG_LEVEL" "ERROR"
+set_env "TORCH_CPP_LOG_LEVEL" "INFO"
 
 LAUNCH_BINARY="torchrun"
 

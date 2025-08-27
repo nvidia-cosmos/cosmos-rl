@@ -21,7 +21,7 @@ ENV TZ=Etc/UTC
 RUN apt-get update -y && apt-get upgrade -y
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
-    curl git gpg lsb-release tzdata wget
+    curl git gpg lsb-release tzdata wget unzip
 RUN apt-get purge -y cuda-compat-*
 
 #################################################
@@ -142,4 +142,7 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 
 COPY . /workspace/cosmos_rl
-RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
+RUN pip install -U git+https://github.com/nvidia-cosmos/cosmos-reason1.git#subdirectory=cosmos_reason1_utils
+RUN pip install /workspace/cosmos_rl
+
+

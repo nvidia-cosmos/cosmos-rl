@@ -1,0 +1,6 @@
+data/
+/data
+outputs/
+results/
+checkpoints/*
+!checkpoints/README.md
