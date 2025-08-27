@@ -425,9 +425,6 @@ async def get_batched_prompt(
         return {
             "global_batch": global_batch,
             "is_end": is_end,
-            # for sft trainer, tell the policy the current step and total steps
-            "train_step": controller.policy_status_manager.current_step,
-            "total_steps": controller.policy_status_manager.total_steps,
         }
 
 

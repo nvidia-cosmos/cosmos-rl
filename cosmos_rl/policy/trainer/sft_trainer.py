@@ -32,6 +32,7 @@ import atexit
 import threading
 import requests
 from tqdm import tqdm
+from queue import Queue
 from typing import Optional, Dict, Any, Tuple, List
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from functools import partial
@@ -40,7 +41,16 @@ from cosmos_rl.utils.distributed import (
     wrap_to_cuda_tensor,
     extract_from_cuda_tensor,
 )
-from cosmos_rl.dispatcher.command import Command, BuildMeshCommand
+from cosmos_rl.dispatcher.command import (
+    CommandRegistry,
+    Command,
+    BuildMeshCommand,
+    DataFetchCommand,
+    PolicyToPolicyBroadcastCommand,
+    PolicyToPolicyUnicastCommand,
+    WeightResumeCommand,
+    register_command_handler,
+)
 from cosmos_rl.dispatcher.data.sft_dataset import (
     construct_sft_dataset,
     collate_fn as sft_collate_fn,
@@ -96,6 +106,8 @@ def async_safe_ce(
 
 
 class SFTTrainer(Trainer):
+    command_handler_registry = CommandRegistry()
+
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
         super(SFTTrainer, self).__init__(config, parallel_dims)
 
@@ -122,46 +134,20 @@ class SFTTrainer(Trainer):
             master_rank=0,
             shutdown_event=self.shutdown_signal,
         )
-        self.fetch_command_thread = threading.Thread(
-            target=self.fetch_command_worker,
-            daemon=True,
-            name="fetch_command_thread",
-        )
-        self.fetch_command_thread.start()
 
+        # For command fetch and execute
+        self.fetch_command_thread = None
+        self.fetch_command_buffer = Queue()
+        self.command_buffer = Queue()
+
+        # For SFT
+        self.optimizers.zero_grad()
         self.lr_schedulers: LRSchedulersContainer = None
         self.start_epoch = 0
-        # Load model
-        train_step = 0
-        if config.train.resume:
-            try:
-                # early init the lr_schedulers to avoid it is not initialized when loading the checkpoint
-                ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
-                    model=self.model,
-                    optimizer=self.optimizers,
-                    scheduler=partial(
-                        build_lr_schedulers, self.optimizers, self.config
-                    ),
-                )
-                # ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
-                train_step = ckpt_extra_vars.get("step", 0)
-            except Exception as e:
-                logger.error(
-                    f"[SFTTrainer] Cannot resume due to error: {e}. Trying to load from HuggingFace..."
-                )
-                self.model.load_hf_weights(
-                    config.policy.model_name_or_path,
-                    parallel_dims,
-                    self.device,
-                    revision=config.policy.model_revision,
-                )
-        else:
-            self.model.load_hf_weights(
-                config.policy.model_name_or_path,
-                parallel_dims,
-                self.device,
-                revision=config.policy.model_revision,
-            )
+
+        # DataFetchCommand will update current step and total steps.
+        self.current_step = 0
+        self.total_steps = 0
 
         # Prepare dataset
         # build dataset at controller side, we don't need to prepare dataset here
@@ -173,15 +159,6 @@ class SFTTrainer(Trainer):
         assert (
             self.tokenizer.pad_token_id is not None
         ), "Tokenizer must have a pad token id"
-
-        if self.lr_schedulers is None:
-            assert (
-                train_step == 0
-            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
-            # This is a fake lr_schedulers, when fetch data, we update the lr_schedulers to real one.
-            self.lr_schedulers = build_lr_schedulers(self.optimizers, self.config, 1e6)
-            # use this to control the lr_scheduler update
-            self.last_total_steps = -1
 
         if self.parallel_dims.dp_enabled:
             dp_group = self.parallel_dims.mesh["dp"].get_group()
@@ -290,9 +267,7 @@ class SFTTrainer(Trainer):
                         )
                         self.inter_policy_nccl.push_cmd(cmd)
                     else:
-                        logger.debug(
-                            f"[SFTTrainer] Fetch command drop command: {type(command)}"
-                        )
+                        self.fetch_command_buffer.put_nowait(command)
             else:
                 try:
                     bmcmd = self.kv_store.broadcast_command(None, src=0)
@@ -305,6 +280,161 @@ class SFTTrainer(Trainer):
                     self.inter_policy_nccl.push_cmd(bmcmd)
                 except Exception as e:
                     raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
+
+    def broadcast_command(self):
+        command = []
+        if self.global_rank == 0:
+            while len(self.fetch_command_buffer.queue) > 0:
+                command.append(self.fetch_command_buffer.get_nowait())
+        command = dist_util.broadcast_object_cpu(
+            command, src=0, device=torch.device("cpu")
+        )
+
+        if len(command) > 0:
+            for c in command:
+                self.command_buffer.put_nowait(c)
+
+    def execute_command(self, command: Command):
+        """
+        Execute the command.
+
+        For SFT loop, it usually looks like:
+
+        1. exec fetch data command
+            1. fetch data
+            2. do training
+            3. post train ack to controller
+        """
+
+        logger.debug(f"[Policy] Process command {command._serialize()}")
+
+        handler = self.command_handler_registry.get_command_handler(type(command))
+        if handler is None:
+            raise Exception(f"No such command supoorted in policy {command}")
+        should_abort = handler(self, command)
+        logger.debug(
+            f"[Policy] Command {command._serialize()} executed with abort: {should_abort}"
+        )
+        return should_abort
+
+    @register_command_handler(command_handler_registry, WeightResumeCommand)
+    def execute_weight_resume(self, command: WeightResumeCommand):
+        """
+        Execute the weight resume command.
+        """
+        # Load model
+        train_step = 0
+        if self.config.train.resume:
+            try:
+                # early init the lr_schedulers to avoid it is not initialized when loading the checkpoint
+                ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
+                    model=self.model,
+                    optimizer=self.optimizers,
+                    scheduler=partial(
+                        build_lr_schedulers, self.optimizers, self.config
+                    ),
+                )
+                # ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
+                train_step = ckpt_extra_vars.get("step", 0)
+            except Exception as e:
+                logger.error(
+                    f"[SFTTrainer] Cannot resume due to error: {e}. Trying to load from HuggingFace..."
+                )
+                self.model.load_hf_weights(
+                    self.config.policy.model_name_or_path,
+                    self.parallel_dims,
+                    self.device,
+                    revision=self.config.policy.model_revision,
+                )
+        else:
+            self.model.load_hf_weights(
+                self.config.policy.model_name_or_path,
+                self.parallel_dims,
+                self.device,
+                revision=self.config.policy.model_revision,
+            )
+
+        if self.lr_schedulers is None:
+            assert (
+                train_step == 0
+            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            # This is a fake lr_schedulers, when fetch data, we update the lr_schedulers to real one.
+            self.lr_schedulers = build_lr_schedulers(self.optimizers, self.config, 1e6)
+            # use this to control the lr_scheduler update
+            self.last_total_steps = -1
+
+    @register_command_handler(command_handler_registry, DataFetchCommand)
+    def execute_data_fetch(self, command: DataFetchCommand):
+        """
+        Execute the fetch data command.
+        will train the data, check validation score if need, check save checkpoint if need
+        """
+        assert self.replica_name == command.replica_name
+
+        # check if should update lr_scheduler
+        if self.last_total_steps != command.total_steps:
+            # Rebuild lr schedulers for the very first step because
+            # 1. only until the first step, we can know the exact total steps from the controller
+            # 2. need update lr_scheduler when total_steps is changed
+            self.lr_schedulers = build_lr_schedulers(
+                self.optimizers, self.config, command.total_steps
+            )
+            self.last_total_steps = command.total_steps
+
+        self.current_step = command.global_step
+        self.total_steps = command.total_steps
+
+        # fetch data from controller
+        is_end, global_batch = self.fetch_data_from_controller()
+        if is_end:
+            return command.replica_should_stop()
+
+        report_data = self.train_step(
+            global_batch=global_batch,
+            current_step=command.global_step,
+            total_steps=command.total_steps,
+        )
+        self.post_train_ack_to_controller(
+            report_data, command.global_step, command.total_steps
+        )
+
+        val_score = None
+        if (
+            self.config.train.enable_validation
+            and command.global_step % self.config.train.validation_step == 0
+        ):
+            val_score = self.validate_step(
+                current_step=command.global_step,
+                total_steps=command.total_steps,
+            )
+            self.report_validation_results(command.global_step, val_score)
+
+        # try save ckpt
+        self._try_save_ckpt(
+            command.global_step,
+            command.total_steps,
+            val_score,
+            remain_samples_num=command.remain_samples_num,
+        )
+
+        return command.replica_should_stop()
+
+    @register_command_handler(command_handler_registry, PolicyToPolicyBroadcastCommand)
+    def execute_policy_to_policy_broadcast(
+        self, command: PolicyToPolicyBroadcastCommand
+    ):
+        """
+        Execute the policy to policy broadcast command.
+        """
+        self._sync_weights_between_replicas()
+
+    @register_command_handler(command_handler_registry, PolicyToPolicyUnicastCommand)
+    def execute_policy_to_policy_unicast(self, command: PolicyToPolicyUnicastCommand):
+        """
+        Execute the policy to policy unicast command.
+        """
+        # if a new replica is added, we need to sync weights between the new replica and the old replicas
+        self._sync_weights_between_replicas()
 
     def fetch_data_from_controller(
         self, validation_step: Optional[int] = None
@@ -341,23 +471,10 @@ class SFTTrainer(Trainer):
 
         # unpack the response
         is_end = response["is_end"]
-        train_step = response["train_step"]
-        total_steps = response["total_steps"]
         global_batch = response["global_batch"]
+        return is_end, global_batch
 
-        # check if should update lr_scheduler
-        if self.last_total_steps != total_steps:
-            # Rebuild lr schedulers for the very first step because
-            # 1. only until the first step, we can know the exact total steps from the controller
-            # 2. need update lr_scheduler when total_steps is changed
-            self.lr_schedulers = build_lr_schedulers(
-                self.optimizers, self.config, total_steps
-            )
-            self.last_total_steps = total_steps
-
-        return is_end, global_batch, train_step, total_steps
-
-    def post_fetch_data_from_controller(
+    def post_train_ack_to_controller(
         self, report_data: Dict[str, Any], train_step: int, total_steps: int
     ):
         """
@@ -423,6 +540,8 @@ class SFTTrainer(Trainer):
         """
         Sync weights between replicas. all replicas will get the same weights from replica 0.
         """
+        logger.info("[SFTTrainer] Sync weights between replicas")
+
         is_send = self.inter_policy_nccl.get_replica_rank(self.replica_name) == 0
         src_replica = self.replica_name
         for (
@@ -535,7 +654,13 @@ class SFTTrainer(Trainer):
         )
         return grad_norm
 
-    def _try_save_ckpt(self, current_step: int, total_steps: int, val_score: float):
+    def _try_save_ckpt(
+        self,
+        current_step: int,
+        total_steps: int,
+        val_score: float,
+        remain_samples_num: int,
+    ):
         """
         Try to save the checkpoint if the current step is the save frequency.
         """
@@ -567,7 +692,11 @@ class SFTTrainer(Trainer):
                 optimizer=self.optimizers,
                 scheduler=self.lr_schedulers,
                 step=current_step,
-                total_steps=self.total_steps,
+                total_steps=self.last_total_steps,
+                **{
+                    "remain_samples_num": remain_samples_num,
+                    "is_final": current_step == total_steps,
+                },
             )
             self.ckpt_manager.save_check(
                 step=current_step,
@@ -614,41 +743,32 @@ class SFTTrainer(Trainer):
             )
 
     def main_loop(self):
+        self.fetch_command_thread = threading.Thread(
+            target=self.fetch_command_worker,
+            daemon=True,
+            name="fetch_command_thread",
+        )
+        self.fetch_command_thread.start()
+
         if self.config.profiler.enable_profiler:
             self.profiler.start()
 
-        # Do training
+        # TODO(zjx): without this, the sync_weights_between_replicas will fail with errors,
+        # maybe the inter_policy_nccl.broadcast has some issues.
+        self.execute_weight_resume(None)
+
+        abort = False
         while True:
-            # get batch data
-            is_end, global_batch, current_step, total_steps = (
-                self.fetch_data_from_controller()
-            )
-            if is_end:
+            self.broadcast_command()
+            while len(self.command_buffer.queue) > 0:
+                cmd = self.command_buffer.get_nowait()
+                abort = self.execute_command(cmd)
+
+            if abort:
                 break
 
-            # Attention: When alternating between train and eval, checkpoint may retain some frame state.
-            # error output like:
-            #   "torch.utils.checkpoint.CheckpointError: torch.utils.checkpoint: Recomputed values for the following tensors have different metadata than during the forward pass"
-            # To overcome this, we need torch.util.checkpoint.checkpoint to 'use_reentrant=True'.
-            report_data = self.train_step(global_batch, current_step, total_steps)
-            self.post_fetch_data_from_controller(report_data, current_step, total_steps)
-
-            # because we update the model weight, so it's the next step
-            current_step += 1
-
-            # try validation
-            val_score = None
-            if (
-                self.config.train.enable_validation
-                and current_step % self.config.train.validation_step == 0
-            ):
-                val_score = self.validate_step(current_step, total_steps)
-
-            # try save ckpt
-            self._try_save_ckpt(current_step, total_steps, val_score)
-
         # try process after final step
-        self._try_process_after_final_step(current_step, total_steps)
+        self._try_process_after_final_step(self.current_step, self.total_steps)
 
         if self.config.profiler.enable_profiler:
             self.profiler.stop()
@@ -949,6 +1069,7 @@ class SFTTrainer(Trainer):
 
         if (
             self.config.train.sync_weight_interval > 0
+            and current_step > 0
             and current_step % self.config.train.sync_weight_interval == 0
         ):
             self._sync_weights_between_replicas()

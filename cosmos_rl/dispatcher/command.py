@@ -483,3 +483,11 @@ class RolloutCommandRegistry(CommandRegistry):
         backend: str = "vllm",
     ) -> Optional[Callable]:
         return self.registry.get(backend, {}).get(key, None)
+
+
+def register_command_handler(registry: CommandRegistry, command_type: Type[Command]):
+    def decorator(func):
+        registry.register(command_type, func)
+        return func
+
+    return decorator

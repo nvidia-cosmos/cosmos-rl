@@ -495,6 +495,7 @@ class PolicyStatusManager:
             logger.info(
                 f"Waiting for {config.policy.parallelism.n_init_replicas - len(valid_replicas)} more replicas to arrive"
             )
+            return
         else:
             # This is the case when the dynamic scaling is triggered
             assert (
@@ -527,6 +528,10 @@ class PolicyStatusManager:
                 redis_handler=self.redis_handler,
             )
             self.set_status(target_replica.name, PolicyStatus.READY)
+
+        if not self.is_rl:
+            # For SFT, we need to trigger data fetch and training after all replicas are ready
+            self.try_trigger_data_fetch_and_training()
 
     ############################################################
     # utility functions
@@ -843,14 +848,16 @@ class PolicyStatusManager:
 
         self.set_status(replica_name, PolicyStatus.REDUCED)
 
+        # logger.info(f"[Controller] train_ack_sft: {report_data}, current_step: {self.current_step}, status: {self.get_status(replica_name)}")
+
         if not hasattr(self, "report_data_list"):
             self.report_data_list = []
         self.report_data_list.append(report_data)
         if not self.all_reduced():
+            logger.info(
+                f"[Controller] train_ack_sft: not all reduced, current_step: {self.current_step}, status: {list(self.status.items())}"
+            )
             return
-
-        # Diff to rl mode, sft trainer will pull data actively, so we update current_step after train_ack recieved
-        self.current_step += 1
 
         # post process if all replica have send ack
         if profile_finished:
@@ -924,6 +931,9 @@ class PolicyStatusManager:
                     f"[Controller] Warning reporting sft training results: {e}"
                 )
 
+        # Trigger next step training if data is available
+        self.try_trigger_data_fetch_and_training()
+
     def trigger_weight_sync(
         self,
         policy_replica: Replica,
@@ -962,6 +972,12 @@ class PolicyStatusManager:
         )
 
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
+        if self.is_rl:
+            self._try_trigger_data_fetch_and_training_rl(is_fake_last_cmd)
+        else:
+            self._try_trigger_data_fetch_and_training_sft(is_fake_last_cmd)
+
+    def _try_trigger_data_fetch_and_training_rl(self, is_fake_last_cmd=False):
         # If the validation dataloader is activated, do not trigger data fetch and training
         if self.activated_val_iter is not None:
             return
@@ -1040,6 +1056,53 @@ class PolicyStatusManager:
                     "train/completion_length_max": np.max(completion_lengths),
                 }
                 self.train_report_data[self.current_step] = report_data
+
+    def _try_trigger_data_fetch_and_training_sft(self, is_fake_last_cmd=False):
+        """
+        try to trigger data fetch and training for SFT mode.
+
+        SFT mode will only dispatch train data to policy replicas, so we only need to check if the train samples is enough.
+        """
+
+        arrived_replicas = self.get_all_atoms_arrived_replicas()
+        # no replicas arrived, do nothing
+        if len(arrived_replicas) == 0:
+            return
+
+        if self.training_finished():
+            return
+
+        if is_fake_last_cmd:
+            all_ready_or_reduced = True
+            items_count = 0
+            required_items_count = 0
+            assert (
+                self.current_step + 1 == self.total_steps
+            ), "The last command should be fake and next step should be the last step"
+        else:
+            items_count = self.config.train.train_batch_per_replica
+            required_items_count = items_count * len(arrived_replicas)
+            all_ready_or_reduced = self.all_ready_or_reduced()
+
+        # If the last command is fake, we need to trigger data fetch and training no matter
+        # whether there are enough rollouts or whether replicas are `ready` or `reduced`.
+        if all_ready_or_reduced:
+            self.remain_samples_num -= required_items_count
+
+            # From controller's perspective, the training step is already increased
+            self.current_step += 1
+
+            for replica in arrived_replicas:
+                command.DataFetchCommand.trigger(
+                    replica=replica,
+                    items_count=items_count,
+                    global_step=self.current_step,
+                    total_steps=self.total_steps,
+                    # `remain_samples_num` is just for checkpointing the training progress
+                    remain_samples_num=self.remain_samples_num,
+                    redis_handler=self.redis_handler,
+                )
+                self.set_status(replica.name, PolicyStatus.RUNNING)
 
 
 class RolloutStatusManager:
