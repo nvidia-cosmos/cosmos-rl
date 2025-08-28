@@ -20,7 +20,8 @@ from typing import Tuple, Dict, Any
 from cosmos_rl.utils.parallelism_registry import register_parallelism_strategy
 
 
-def map_key_from_hf(name: str, src_model_type: str) -> str:
+def map_key_from_hf(name: str) -> str:
+    # The policy weights do not have the "model." prefix, but the hf weights do.
     return name.replace("model.", "")
 
 
@@ -32,6 +33,8 @@ def convert_weight_from_hf(
     n_experts: int,
     ignore_unknown_weights: bool = False,
 ) -> Tuple[str, torch.Tensor]:
+    del src_model_type
+
     tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
     assert n_experts % tp_ep_size == 0, "n_experts must be divisible by tp_ep_size"
 
@@ -47,7 +50,7 @@ def convert_weight_from_hf(
     # So we do not do FSDP sharding on expert weights, instead we filter by expert id
     should_do_fsdp_sharding = True
 
-    dest_name = map_key_from_hf(name, src_model_type)
+    dest_name = map_key_from_hf(name)
 
     if "lm_head.weight" == dest_name:
         shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]

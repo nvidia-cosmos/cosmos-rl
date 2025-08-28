@@ -39,16 +39,16 @@ class Qwen3MoeWeightMapper(WeightMapper):
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w13_weight", "experts/gate_up_proj.weight"
+                    "experts.w13_weight", "experts.gate_up_proj.weight"
                 )
             elif "experts.w2_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w2_weight", "experts/down_proj.weight"
+                    "experts.w2_weight", "experts.down_proj.weight"
                 )
             # Below are for trtllm weight for gate_up_proj and input_layernorm.
             elif "experts.w3_w1_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w3_w1_weight", "experts/gate_up_proj.weight"
+                    "experts.w3_w1_weight", "experts.gate_up_proj.weight"
                 )
             elif "next_layer_layernorm" in rollout_weight_name:
                 # For trtllm, next_layer_layernorm is:
@@ -81,7 +81,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         ]
         return q_weight, k_weight, v_weight
 
-    def _split_gate_proj_weight(self, weight: torch.Tensor):
+    def _rollout_split_gate_up_proj_weight(self, weight: torch.Tensor):
         # weight has shape [num_experts, 2 * x, hidden_dim], first gate_proj, then up_proj
         # if backend is trtllm,  [num_experts, 2 * x, hidden_dim], first up_proj, then gate_proj
         dim_1 = weight.shape[1]
@@ -124,7 +124,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
             Where "compatible_key" is the HuggingFace param name
         """
         recv_key_n_rank_list = []
-        vllm_weight_inplace_view_map = {}
+        compatible_key_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
@@ -136,42 +136,42 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(param)
 
                 q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
-                vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
+                compatible_key_map[q_proj_weight_key] = q_weight
                 group_keys.append((q_proj_weight_key, q_weight.ndim))
 
                 k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
-                vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
+                compatible_key_map[k_proj_weight_key] = k_weight
                 group_keys.append((k_proj_weight_key, k_weight.ndim))
 
                 v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
-                vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
+                compatible_key_map[v_proj_weight_key] = v_weight
                 group_keys.append((v_proj_weight_key, v_weight.ndim))
 
             elif "gate_up_proj" in compatible_key:
                 # split gate and up proj
-                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(param)
+                gate_proj_weight, up_proj_weight = self._rollout_split_gate_up_proj_weight(param)
 
                 gate_proj_weight_key = compatible_key.replace("gate_up_proj", "gate_proj")
-                vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
+                compatible_key_map[gate_proj_weight_key] = gate_proj_weight
                 group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
                 up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
-                vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
+                compatible_key_map[up_proj_weight_key] = up_proj_weight
                 group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
 
             else:
-                vllm_weight_inplace_view_map[compatible_key] = param
+                compatible_key_map[compatible_key] = param
                 group_keys.append((compatible_key, param.ndim))
             recv_key_n_rank_list.append(group_keys)
 
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list
+        return compatible_key_map, recv_key_n_rank_list
 
     @torch.no_grad()
     def policy_maybe_decompose_weights_to_hf_naming(
         self, name, expert_weight: torch.Tensor
     ):
         if match := re.search(
-            r"model\.layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.(weight)", name
+            r"model\.layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.weight", name
         ):
             layer_id = int(match.group(1))
             w_name = match.group(2)
@@ -188,8 +188,14 @@ class Qwen3MoeWeightMapper(WeightMapper):
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
         if not name == "lm_head.weight":
+            # The policy weights do not have the "model." prefix, but the hf weights do.
             if not name.startswith("model."):
                 name = "model." + name
+
+            if re.search(
+                r"model\.layers\.(\d+)\.mlp\.experts\.(up_projs|gate_projs|down_projs)", name
+            ):
+                name = name.replace("projs", "proj.weight")
         return name
 
     def get_policy_parallelism_strategy(self):

@@ -38,7 +38,11 @@ from cosmos_rl.policy.model.qwen3_moe.weight_converter import (
     convert_weight_from_hf,
 )
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, GroupedExpertsSymmMem
+from cosmos_rl.policy.kernel.moe.moe import (
+    GroupedExpertsDeepEP,
+    GroupedExpertsSymmMem,
+    setup_symm_mem,
+)
 from cosmos_rl.policy.model.qwen3_moe.weight_mapper import Qwen3MoeWeightMapper
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
@@ -65,6 +69,7 @@ class Qwen3MoeArgs:
     rope_theta: float = 10000
     norm_type: str = "rmsnorm"
     rope_type: str = "default"
+    ep_method: str = "symm_mem"  # Choices are "deep_ep" or "symm_mem"
     hf_config: AutoConfig = None
 
 
@@ -545,12 +550,13 @@ class Qwen3MoE(BaseModel):
             * self.model_args.hf_config.num_experts_per_tok
         )
 
-        setup_symm_mem(
-            max_batch_tokens=_MAX_BATCH_MUL_SEQ_LEN,
-            model_dim=self.model_args.dim,
-            dtype=self.model_args.hf_config.torch_dtype,
-            device=torch.cuda.current_device(),
-        )
+        if self.model_args.ep_method == "symm_mem":
+            setup_symm_mem(
+                max_batch_tokens=_MAX_BATCH_MUL_SEQ_LEN,
+                model_dim=self.model_args.dim,
+                dtype=self.model_args.hf_config.torch_dtype,
+                device=torch.cuda.current_device(),
+            )
 
     @property
     def parallelize_fn(self):
@@ -648,9 +654,11 @@ class Qwen3MoE(BaseModel):
                     r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
                     dest_name,
                 ):
-                    # remove `experts.$ID.` from dest_name
                     expert_id = int(match.group(2))
-                    dest_name = dest_name.replace(f"experts.{expert_id}.", "")
+                    # remove `experts.$ID.` from dest_name
+                    dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
+                    # change `proj.weight` to `projs`.
+                    dest_name = dest_name.replace("proj.weight", "projs")
                     # Convert expert_id to local_expert_id
                     n_local_experts = (
                         self.model_args.n_experts
