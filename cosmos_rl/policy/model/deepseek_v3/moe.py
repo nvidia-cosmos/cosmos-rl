@@ -7,7 +7,11 @@ from typing import Optional, Tuple
 from torch.distributed.tensor import DTensor, DeviceMesh, Replicate, Partial
 
 from cosmos_rl.policy.kernel.mlp import MLP
-from cosmos_rl.policy.kernel.moe.moe import FakeBalancedGate, GroupedExperts, GroupedExpertsDeepEP
+from cosmos_rl.policy.kernel.moe.moe import (
+    FakeBalancedGate,
+    GroupedExperts,
+    GroupedExpertsDeepEP,
+)
 
 
 _shared_experts_stream: Optional[torch.cuda.Stream] = None

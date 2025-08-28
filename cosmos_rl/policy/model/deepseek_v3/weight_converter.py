@@ -89,6 +89,7 @@ def map_key_from_hf(name: str) -> str:
     # The weights in the policy model have a ".model" prefix.
     return "model." + name
 
+
 def convert_weight_from_hf(
     tensor: torch.Tensor,
     name: str,
@@ -150,8 +151,8 @@ def convert_weight_from_hf(
 
         expert_idx_within_ep = expert_id % n_expert_per_ep
         belongs_to_current_dp_shard = (
-            (expert_idx_within_ep // n_expert_per_dp) == dp_shard_rank
-        )
+            expert_idx_within_ep // n_expert_per_dp
+        ) == dp_shard_rank
 
         if belongs_to_current_ep and belongs_to_current_dp_shard:
             # remove `experts.$ID.` from dest_name
@@ -255,6 +256,7 @@ def weight_dequant(
     weight_dequant_kernel[grid](x, s, y, M, N, BLOCK_SIZE=block_size)
     return y
 
+
 @register_parallelism_strategy("deepseek_v3", role=ParallelismStrategyRole.ROLLOUT)
 def map_weight_parallel_dims(
     n_dim: int,
@@ -327,7 +329,7 @@ def map_weight_parallel_dims(
     #    dims_map["dp_shard_cp"] = 0
 
     # What is this mapping for? It looks like this maps each
-    # tensor dimension to a list of mesh dimensions. 
+    # tensor dimension to a list of mesh dimensions.
     tensor_dim_to_parallel_map = {}
     for k, v in dims_map.items():
         if v not in tensor_dim_to_parallel_map:
