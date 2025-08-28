@@ -15,6 +15,7 @@
 
 from typing import Any, Dict, List, Tuple
 
+import re
 import torch
 from transformers import AutoConfig
 
@@ -52,7 +53,8 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         kv_lora_rank = self.config.kv_lora_rank
         qk_rope_head_dim = self.config.qk_rope_head_dim
         assert weight.shape[0] == q_lora_rank + kv_lora_rank + qk_rope_head_dim, (
-            f"weight.shape[0] {weight.shape[0]} != q_lora_rank + kv_lora_rank + qk_rope_head_dim {q_lora_rank + kv_lora_rank + qk_rope_head_dim}"
+            f"weight.shape[0] {weight.shape[0]} != q_lora_rank + kv_lora_rank + qk_rope_head_dim "
+            f"{q_lora_rank + kv_lora_rank + qk_rope_head_dim}"
         )
         
         q_a_proj = weight[q_lora_rank :]
@@ -98,7 +100,7 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
             Where "compatible_key" is the HuggingFace param name
         """
         recv_key_n_rank_list = []
-        vllm_weight_inplace_view_map = {}
+        compatible_key_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
@@ -113,43 +115,47 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
                 q_a_proj, kv_a_proj_with_mqa = self._split_qkv_a_proj_weight(param)
 
                 q_a_proj_key = compatible_key.replace("fused_qkv_a_proj", "q_a_proj")
-                vllm_weight_inplace_view_map[q_a_proj_key] = q_a_proj
+                compatible_key_map[q_a_proj_key] = q_a_proj
                 group_keys.append((q_a_proj_key, q_a_proj.ndim))
 
                 kv_a_proj_with_mqa_key = compatible_key.replace(
                     "fused_qkv_a_proj", "kv_a_proj_with_mqa"
                 )
-                vllm_weight_inplace_view_map[kv_a_proj_with_mqa_key] = kv_a_proj_with_mqa
+                compatible_key_map[kv_a_proj_with_mqa_key] = kv_a_proj_with_mqa
                 group_keys.append((kv_a_proj_with_mqa_key, kv_a_proj_with_mqa.ndim))
 
-            if "gate_up_proj" in compatible_key:
+            elif "gate_up_proj" in compatible_key:
                 # Split gate and up proj weights.
-                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(param)
+                gate_proj_weight, up_proj_weight = self._split_gate_up_proj_weight(param)
 
                 gate_proj_weight_key = compatible_key.replace("gate_up_proj", "gate_proj")
-                vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
+                compatible_key_map[gate_proj_weight_key] = gate_proj_weight
                 group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
                 up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
-                vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
+                compatible_key_map[up_proj_weight_key] = up_proj_weight
                 group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
 
             else:
-                vllm_weight_inplace_view_map[compatible_key] = param
+                compatible_key_map[compatible_key] = param
                 group_keys.append((compatible_key, param.ndim))
 
             recv_key_n_rank_list.append(group_keys)
 
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list
+        return compatible_key_map, recv_key_n_rank_list
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
 
+        # The weights in the policy model have a ".model" prefix.
         name = name.replace("model.", "")
-        name = name.replace("mlp.experts.down_projs", "mlp.experts.down_proj.weight")
-        name = name.replace("mlp.experts.up_projs", "mlp.experts.up_proj.weight")
-        name = name.replace("mlp.experts.gate_projs", "mlp.experts.gate_proj.weight")
 
+        if not name == "lm_head.weight":
+            assert name.startswith("model."), f"Expected name to start with model., got {name}"
+            if re.search(
+                r"model\.layers\.(\d+)\.mlp\.experts\.(up_projs|gate_projs|down_projs)", name
+            ):
+                name = name.replace("projs", "proj.weight")
         return name
 
     def get_rollout_parallelism_strategy(self):

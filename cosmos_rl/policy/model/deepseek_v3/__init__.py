@@ -431,28 +431,6 @@ class DeepseekV3MoEModel(BaseModel):
                 )
         return _IncompatibleKeys(actual_missing_keys, unexpected_keys)
 
-    @cached_property
-    def weight_sync_transforms(
-        self,
-    ) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
-        # 1. get all parameters, but not buffers
-        transforms = {}
-
-        for local_name, param in self.named_parameters():
-            hf_name = self.weight_mapper.policy_map_local_key_to_hf_key(
-                clear_weight_name(local_name)
-            )
-
-            is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
-            transform_or_view = param.to_local() if is_dist_tensor else param
-
-            assert (
-                hf_name not in transforms
-            ), f"Duplicate key found in transforms: {hf_name}"
-            transforms[hf_name] = transform_or_view
-
-        return sorted(transforms.items())
-
 
 def _init_weights(module):
     std = 0.02

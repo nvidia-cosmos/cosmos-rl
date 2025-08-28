@@ -86,8 +86,8 @@ _BIAS_SUFFIX = ".bias"
 
 
 def map_key_from_hf(name: str) -> str:
+    # The weights in the policy model have a ".model" prefix.
     return "model." + name
-
 
 def convert_weight_from_hf(
     tensor: torch.Tensor,
@@ -218,7 +218,7 @@ def convert_weight_from_hf(
     if (match := _LAYER_MLP_EXPERTS_PATTERN.search(dest_name)) is not None:
         expert_id = int(match.group(2))
         dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
-        dest_name = dest_name.replace(".weight", "s")
+        dest_name = dest_name.replace("proj.weight", "projs")
 
     return dest_name, shard.contiguous(), expert_id
 
