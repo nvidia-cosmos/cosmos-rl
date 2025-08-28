@@ -81,14 +81,16 @@ RUN pip install -U pip setuptools wheel packaging
 # make sure the cuda version matches, we install it here.
 RUN pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 
-COPY requirements.txt /workspace/cosmos_rl/requirements.txt
+WORKDIR /workspace/cosmos_rl
+
+COPY . .
 
 RUN pip install \
     torchao==0.12.0 \
     vllm==0.10.0 \
     flash-attn==2.8.2 \
     https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl \
-    -r /workspace/cosmos_rl/requirements.txt
+    -r requirements.txt
 
 ###################################################
 FROM no-efa-base AS efa-base
@@ -141,12 +143,10 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 ## Image target: cosmos_rl
 FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 
-COPY . /workspace/cosmos_rl
 RUN pip install -U git+https://github.com/nvidia-cosmos/cosmos-reason1.git#subdirectory=cosmos_reason1_utils
-RUN pip install /workspace/cosmos_rl
+RUN pip install -e .
 
 # Installing TAO-Core
-COPY tao-core tao-core
 RUN cd tao-core && bash release/python/build_wheel.sh && \
     find dist/ -name "nvidia_tao_core*.whl" -type f | xargs -n 1 pip install && \
     cp nvidia_tao_core/microservices/nginx.conf /etc/nginx/ && \
@@ -164,7 +164,7 @@ EXPOSE 8000
 # Microservices entrypoint
 ENV FLASK_APP=nvidia_tao_core.microservices.app
 
-ENV RUN_CLI=1
+ENV RUN_CLI=0
 
 CMD if [ "$RUN_CLI" = "1" ]; then \
         /bin/bash; \

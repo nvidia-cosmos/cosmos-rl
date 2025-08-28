@@ -107,7 +107,7 @@ if __name__ == "__main__":
     args = parser.parse_known_args()[0]
 
     # Download and prepare data if not already present
-    data_dir = Path("data/sft")
+    data_dir = Path.cwd() / "data/sft"
     data_dir.mkdir(parents=True, exist_ok=True)
     
     # Download annotations if not present

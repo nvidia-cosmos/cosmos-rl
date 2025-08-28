@@ -247,7 +247,12 @@ def parse_args():
         default=None,
         help="Ratio of policy replicas to rollout replicas. This is used to determine the number of rollout replicas and the number of policy replicas based on the number of workers.",
     )
-
+    parser.add_argument(
+        "--results_dir",
+        type=str,
+        default=None,
+        help="Directory to save results. If not provided, results will be saved to the output directory.",
+    )
     parser.add_argument(
         "--log-dir",
         type=str,
@@ -676,6 +681,9 @@ def main():
 
     # Check if the config file is provided
     cosmos_config = CosmosConfig.from_dict(read_config(args.config))
+
+    if args.results_dir:
+        cosmos_config.train.output_dir = args.results_dir
 
     if args.script is not None and args.script.endswith(".py"):
         # If the script is a Python file, we need to make sure it is absolute path
