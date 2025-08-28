@@ -103,6 +103,7 @@ class Controller:
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
         val_data_packer: Optional[DataPacker] = None,
+        custom_logger_fns: Optional[List[Callable]] = None,
     ):
         if self.config is not None:
             raise Exception(
@@ -346,6 +347,7 @@ class Controller:
             val_dataloader=val_dataloader,
             current_step=self.ckpt_extra_info.get("step", 0),
             max_num_steps=config.train.max_num_steps,
+            custom_logger_fns=custom_logger_fns,
         )
         self.rollout_status_manager.setup(
             config, self.redis_controller, tokenizer=self.tokenizer

@@ -73,6 +73,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
     COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
+    COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from fastapi.responses import Response
@@ -316,6 +317,22 @@ async def rollout_shard_recv_insts(request: GetShardSendRecvInstsRequest):
     return Response(content=recv_insts, media_type="application/msgpack")
 
 
+@app.get(COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX)
+async def get_trainable_params():
+    try:
+        return {
+            "trainable_params": list(
+                controller.policy_to_rollout_shard_mapper.trainable_params
+            )
+        }
+    except Exception as e:
+        logger.error(f"[Controller] Error getting trainable params: {e}")
+        return create_error_response(
+            constant.ErrorCode.INTERNAL_ERROR,
+            "Error getting trainable params",
+        )
+
+
 """
 NCCL Handshake API
 """
@@ -508,10 +525,14 @@ async def put_rollout_group(rollout: RolloutRequest):
                     rewards = [rollouts_group[i].reward for i in rollout_indices]
                     if len(set(rewards)) > 1:
                         n_ignore_prefix_tokens = len(shared_prefix)
+                        prefix_str = controller.tokenizer.decode(shared_prefix)
                         for rollout_index in rollout_indices:
-                            rollouts_group[
-                                rollout_index
-                            ].n_ignore_prefix_tokens = n_ignore_prefix_tokens
+                            # Only do this if shared_prefix != rollout.completion
+                            # Else the whole sample will be ignored, which cause training issues.
+                            if prefix_str != rollouts_group[rollout_index].completion:
+                                rollouts_group[
+                                    rollout_index
+                                ].n_ignore_prefix_tokens = n_ignore_prefix_tokens
                 valid_rollouts_list.append(rollouts_group)
             else:
                 # If the rewards are all the same, we need to sample one rollout from the group
@@ -582,6 +603,7 @@ def main(
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,
+    custom_logger_fns: Optional[List[Callable]] = None,
     **kwargs,
 ):
     if kwargs:
@@ -674,6 +696,7 @@ def main(
             val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
             val_data_packer=val_data_packer,
+            custom_logger_fns=custom_logger_fns,
         )
         logger.info(f"Successfully loaded configuration from {args.config_file}")
     except FileNotFoundError:

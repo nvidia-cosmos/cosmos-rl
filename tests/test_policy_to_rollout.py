@@ -27,7 +27,7 @@ from cosmos_rl.utils.pynccl import (
 
 
 class TestPolicyToRollout(unittest.TestCase):
-    def test_policy_to_rollout_wieght_sync(self):
+    def policy_to_rollout_wieght_sync(self, trainable_param_sync: bool = False):
         """Test NCCL communication between multiple ranks using torchrun."""
         cur_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -42,6 +42,7 @@ class TestPolicyToRollout(unittest.TestCase):
             (nccl_uid_tensor.numel() + 1,), dtype=np.int64, buffer=shm.buf
         )
         uid_array[-1] = 0
+        trainable_param_sync_str = "True" if trainable_param_sync else "False"
 
         try:
             # Create the Python command for torchrun
@@ -53,9 +54,14 @@ class TestPolicyToRollout(unittest.TestCase):
                 "--rdzv_backend=c10d",
                 "--rdzv_endpoint=localhost:0",
                 os.path.join(cur_dir, "launch_test_worker.py"),
+                "--shm_name",
                 shm.name,
+                "--shm_size",
                 str(nccl_uid_tensor.numel()),
+                "--mode",
                 "policy_send_to_rollout",
+                "--trainable_param_sync",
+                trainable_param_sync_str,
             ]
             rollout_cmd = [
                 "torchrun",
@@ -65,9 +71,14 @@ class TestPolicyToRollout(unittest.TestCase):
                 "--rdzv_backend=c10d",
                 "--rdzv_endpoint=localhost:0",
                 os.path.join(cur_dir, "launch_test_worker.py"),
+                "--shm_name",
                 shm.name,
+                "--shm_size",
                 str(nccl_uid_tensor.numel()),
+                "--mode",
                 "rollout_recv_from_policy",
+                "--trainable_param_sync",
+                trainable_param_sync_str,
             ]
             policy_env = dict(os.environ)
             policy_env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
@@ -109,6 +120,12 @@ class TestPolicyToRollout(unittest.TestCase):
             except FileNotFoundError:
                 # Ignore if shared memory is already unlinked
                 pass
+
+    def test_policy_to_rollout_wieght_sync_all_params(self):
+        self.policy_to_rollout_wieght_sync(trainable_param_sync=False)
+
+    def test_policy_to_rollout_wieght_sync_trainable_params(self):
+        self.policy_to_rollout_wieght_sync(trainable_param_sync=True)
 
 
 if __name__ == "__main__":

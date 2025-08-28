@@ -27,6 +27,7 @@ from cosmos_rl.dispatcher.data.packer import DataPacker
 import collections
 from functools import partial
 from typing import Mapping
+from cosmos_rl.policy.lora.plugin import LoraInjectedLinear
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -54,6 +55,53 @@ class BaseModel(torch.nn.Module, ABC):
             if isinstance(module, torch.nn.Module):
                 if not hasattr(module, "_gradient_checkpointing_enabled"):
                     setattr(module, "_gradient_checkpointing_enabled", enabled)
+
+    @cached_property
+    def trainable_params(self) -> List[str]:
+        """
+        Get the list of trainable parameters.
+        This method returns a list of parameter names that are marked as trainable (i.e., `requires_grad` is True).
+        Maybe customized modification of this function is needed for some later special models in order to get the correct trainable parameters used for weight synchronization.
+        """
+        trainable_params = []
+        # Get all parameters.
+        named_parameters = {name: param for name, param in self.named_parameters()}
+        for k, v in named_parameters.items():
+            # Clear and get the correct format of the param names.
+            name = self.weight_mapper.policy_map_local_key_to_hf_key(
+                util.clear_weight_name(k)
+            )
+            is_trainable = v.requires_grad
+            decomposed_key_and_ranks: List[Tuple[str, int]] = (
+                self.weight_mapper.policy_decompose_param_1_to_n_for_sync(name)
+            )
+            if decomposed_key_and_ranks:
+                # The current parameter is decomposed into multiple parameters, so we need to record each of them if trainable.
+                # (This does not happen for most cases, i.e. `qkv_proj.weight` to be decomposed into `q.weight`, `k.weight`, and `v.weight`)
+                for decomposed_name, _ in decomposed_key_and_ranks:
+                    if is_trainable:
+                        trainable_params.append(decomposed_name)
+            else:
+                if is_trainable:
+                    trainable_params.append(name)
+        # Handle the lora case.
+        for k, m in self.named_modules():
+            if isinstance(m, LoraInjectedLinear):
+                # Clear and get the correct format of the param names.
+                name = self.weight_mapper.policy_map_local_key_to_hf_key(
+                    util.clear_weight_name(k + ".weight")
+                )
+                decomposed_key_and_ranks: List[Tuple[str, int]] = (
+                    self.weight_mapper.policy_decompose_param_1_to_n_for_sync(name)
+                )
+                if decomposed_key_and_ranks:
+                    # The current parameter is decomposed into multiple parameters, so we need to record each of them if trainable.
+                    # (This does not happen for most cases, i.e. `qkv_proj.weight` to be decomposed into `q.weight`, `k.weight`, and `v.weight`)
+                    for decomposed_name, _ in decomposed_key_and_ranks:
+                        trainable_params.append(decomposed_name)
+                else:
+                    trainable_params.append(name)
+        return trainable_params
 
     @cached_property
     def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:

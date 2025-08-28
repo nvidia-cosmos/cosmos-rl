@@ -112,7 +112,7 @@ class SFTDataConfig(BaseModel):
     )
 
     dataloader_shuffle: bool = Field(
-        default=False,
+        default=True,
         description="Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.",
     )
     enable_dataset_cache: bool = Field(
@@ -471,6 +471,11 @@ class TrainingConfig(BaseModel):
         description="The data type for forward/backward. Outside forward/backward, params are in `master_dtype`",
         choices=["bfloat16", "float16", "float32"],
     )
+    transfer_dtype: str = Field(
+        default=None,
+        description="The data type for transfer parameters between Policy and Rollout.",
+        choices=["bfloat16", "float16", "float32"],
+    )
 
     fsdp_reduce_dtype: str = Field(
         default="float32",
@@ -546,6 +551,11 @@ class TrainingConfig(BaseModel):
     max_num_steps: Optional[int] = Field(
         default=None,
         description="Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.",
+    )
+
+    sequence_packing: bool = Field(
+        default=False,
+        description="Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.",
     )
 
     @model_validator(mode="after")
@@ -952,6 +962,10 @@ class Config(BaseModel):
             # Handle for evaludation configuration.
             if isinstance(self.validation.dataset.split, str):
                 self.validation.dataset.split = [self.validation.dataset.split]
+
+        if self.train.transfer_dtype is None:
+            # Default use param_dtype as transfer_dtype
+            self.train.transfer_dtype = self.train.param_dtype
         return self
 
 
