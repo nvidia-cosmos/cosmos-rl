@@ -15,11 +15,11 @@
 
 from dataclasses import dataclass, field
 
-import re
 import os
 import torch
 from torch import nn
 import torch.nn.functional as F
+
 from safetensors import safe_open
 from typing import Tuple, List, Optional, Callable
 
@@ -69,7 +69,7 @@ class Qwen3MoeArgs:
     rope_theta: float = 10000
     norm_type: str = "rmsnorm"
     rope_type: str = "default"
-    ep_method: str = "symm_mem"  # Choices are "deep_ep" or "symm_mem"
+    ep_method: str = "deep_ep"  # Choices are "deep_ep" or "symm_mem"
     hf_config: AutoConfig = None
 
 
@@ -617,6 +617,48 @@ class Qwen3MoE(BaseModel):
             parallel_dims (ParallelDims): Parallel dimensions definition.
             info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
+        self_state_dict = self.state_dict()
+        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
+
+        def _get_target_tensor_view(
+            dest_name: str,
+            expert_id: Optional[int],
+        ) -> Optional[torch.Tensor]:
+            slice_range = None
+            if self.model_args.ep_method == "deep_ep":
+                if "gate_projs" in dest_name:
+                    dest_name = dest_name.replace("gate_projs", "gate_and_up_projs")
+                    slice_range = slice(0, self.model_args.ffn_dim)
+                elif "up_projs" in dest_name:
+                    dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
+                    slice_range = slice(self.model_args.ffn_dim, None)
+
+            if dest_name not in self_state_dict:
+                return None
+
+            target_tensor = self_state_dict[dest_name]
+            if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                target_tensor = target_tensor.to_local()
+
+            if expert_id is not None:
+                # Convert expert_id to local_expert_id
+                n_local_experts = (
+                    self.model_args.n_experts
+                    // parallel_dims.tp
+                    // parallel_dims.dp_shard
+                )
+                expert_id = expert_id % n_local_experts
+                target_tensor = target_tensor[expert_id]
+
+            if slice_range is not None:
+                assert target_tensor.shape[0] == 2 * self.model_args.ffn_dim, (
+                    f"Expect shape[0] of `{dest_name}` to be "
+                    f"{2 * self.model_args.ffn_dim}, but got {target_tensor.shape[0]}"
+                )
+                target_tensor = target_tensor[slice_range]
+
+            return target_tensor
+
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
@@ -624,12 +666,11 @@ class Qwen3MoE(BaseModel):
             f for f in os.listdir(model_path) if f.endswith(".safetensors")
         ]
 
-        self_state_dict = self.state_dict()
-        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         lm_head_weight_key = "lm_head.weight"
         embed_tokens_weight_key = "model.embed_tokens.weight"
         weights_of_ckpt_names = set()
         reserved = {}
+
         for f in safetensors_files:
             weights_of_ckpt = {}
             ckpt = safe_open(
@@ -645,7 +686,7 @@ class Qwen3MoE(BaseModel):
 
             for name in weights_of_ckpt.keys():
                 tensor = weights_of_ckpt[name]
-                dest_name, shared_weight = convert_weight_from_hf(
+                dest_name, shared_weight, expert_id = convert_weight_from_hf(
                     tensor,
                     name,
                     model_type,
@@ -657,37 +698,13 @@ class Qwen3MoE(BaseModel):
                     # This is due to the expert parallelism grouping
                     continue
 
-                expert_id = None
-                if match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
-                    dest_name,
-                ):
-                    expert_id = int(match.group(2))
-                    # remove `experts.$ID.` from dest_name
-                    dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
-                    # change `proj.weight` to `projs`.
-                    dest_name = dest_name.replace("proj.weight", "projs")
-                    # Convert expert_id to local_expert_id
-                    n_local_experts = (
-                        self.model_args.n_experts
-                        // parallel_dims.tp
-                        // parallel_dims.dp_shard
-                    )
-
-                    expert_id = expert_id % n_local_experts
-
-                if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                    logger.info(
-                        f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
+                target_tensor = _get_target_tensor_view(dest_name, expert_id)
+                if target_tensor is None:
+                    assert parallel_dims.pp_enabled, (
+                        f"Weight `{dest_name}` is not found in the model. "
+                        "Pipeline parallelism is disabled, this is not allowed."
                     )
                     continue
-
-                target_tensor = self_state_dict[dest_name]
-                if isinstance(target_tensor, torch.distributed.tensor.DTensor):
-                    target_tensor = target_tensor.to_local()
-                # Write to the correct expert of the target tensor
-                if expert_id is not None:
-                    target_tensor = target_tensor[expert_id]
 
                 assert (
                     target_tensor.shape == shared_weight.shape

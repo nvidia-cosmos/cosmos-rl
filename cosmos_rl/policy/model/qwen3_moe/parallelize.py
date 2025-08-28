@@ -71,10 +71,7 @@ def parallelize(
             and config.train.fp8.quant_recipe == "tensorwise",
             enable_async_tp=config.train.async_tp_enabled,
         )
-
-    if parallel_dims.ep_enabled:
-        moe_mesh = parallel_dims.meshes["moe"]
-        apply_ep(model, moe_mesh["ep"])
+        apply_ep(model, world_mesh["tp"])
 
     if parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims)
