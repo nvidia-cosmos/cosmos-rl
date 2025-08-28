@@ -112,6 +112,9 @@ class PolicyStatusManager:
         self.train_report_data = RollingDict(maxlen=20)
         self.replica_scaling_log = []
 
+        # SFT
+        self.latest_joined_replicas: List[Replica] = []
+
         # Validation
         self.val_iters: Dict[int, Iterator] = {}
         self.activated_val_iter: Optional[Iterator] = None
@@ -141,6 +144,7 @@ class PolicyStatusManager:
             custom_logger_fns if custom_logger_fns is not None else []
         )
         self.is_rl = is_rl
+        self.is_sft = not is_rl
 
     def n_atoms_per_replica(self) -> int:
         """
@@ -502,6 +506,12 @@ class PolicyStatusManager:
                 self.policy_init_done
             ), "Policy initialization must be done before building another mesh"
 
+            if self.is_sft:
+                # For SFT, we need to do post_register after train_ack is received
+                # The related logic in try_enable_latest_joined_replicas()
+                self.latest_joined_replicas.append(target_replica)
+                return
+
             assert (
                 target_replica.status.mesh_rank == -1
             ), "Target replica should not be in the mesh"
@@ -529,7 +539,7 @@ class PolicyStatusManager:
             )
             self.set_status(target_replica.name, PolicyStatus.READY)
 
-        if not self.is_rl:
+        if self.is_sft:
             # For SFT, we need to trigger data fetch and training after all replicas are ready
             self.try_trigger_data_fetch_and_training()
 
@@ -853,7 +863,10 @@ class PolicyStatusManager:
         if not hasattr(self, "report_data_list"):
             self.report_data_list = []
         self.report_data_list.append(report_data)
-        if not self.all_reduced():
+        if not self.all_with_status([PolicyStatus.REDUCED, PolicyStatus.UNINITIALIZED]):
+            # Only accept REDUCED and UNINITIALIZED status
+            # REDUCED, The replica has trained the data
+            # UNINITIALIZED, The newly joined replicas, will initialize later
             return
 
         # post process if all replica have send ack
@@ -927,6 +940,9 @@ class PolicyStatusManager:
                 logger.warning(
                     f"[Controller] Warning reporting sft training results: {e}"
                 )
+        # Must manually processed the latest joined replicas, we should control the buildmesh
+        # and weight sync command to be executed after the data fetch command.
+        self.try_enable_latest_joined_replicas()
 
         # Trigger next step training if data is available
         self.try_trigger_data_fetch_and_training()
@@ -1101,10 +1117,71 @@ class PolicyStatusManager:
                 )
                 self.set_status(replica.name, PolicyStatus.RUNNING)
 
+    def try_enable_latest_joined_replicas(self):
+        """
+        Do post register process for SFT mode.
+        """
+        assert (
+            self.policy_init_done
+        ), "Policy initialization must be done before enabling latest joined replicas"
+
+        if not self.is_sft:
+            # only support SFT mode
+            return
+
+        if len(self.latest_joined_replicas) == 0:
+            return
+
+        # Check total valid policy replicas
+        valid_replicas = []
+        for r in self.policy_replicas.values():
+            if r.all_atoms_arrived:
+                valid_replicas.append(r)
+
+        if len(valid_replicas) <= 1:
+            # Only one valid replica, no need to trigger build mesh and weight sync
+            return
+
+        # Trigger build mesh command, let the new replicas join the mesh
+        command.BuildMeshCommand.trigger(
+            valid_replicas, redis_handler=self.redis_handler
+        )
+
+        # treat the oldest valid replica as initialized replica, because it's stable
+        sorted_valid_replicas = sorted(valid_replicas, key=lambda x: x.start_time)
+        # Only broadcast when there are multiple policy replicas
+        initialized_replica = None
+        for replica in sorted_valid_replicas:
+            # We will select the first replica that has weights loaded in view of command
+            if replica.weights_loaded_in_view_of_command and replica in valid_replicas:
+                initialized_replica = replica
+                break
+
+        assert (
+            initialized_replica is not None
+        ), "No replica was selected to load weights"
+        command.PolicyToPolicyBroadcastCommand.trigger(
+            src_replica=initialized_replica,
+            dst_replicas=valid_replicas,
+            redis_handler=self.redis_handler,
+        )
+
+        # Set all newly joined replicas to `ready`
+        for replica in self.latest_joined_replicas:
+            self.set_status(replica.name, PolicyStatus.READY)
+
+        # Clear the latest joined replicas
+        self.latest_joined_replicas.clear()
+
 
 class RolloutStatusManager:
     """
     A class to manage the status of rollout replicas.
+
+        # Set all policy replicas to `ready`
+        for replica in self.latest_joined_replica:
+            self.set_status(replica.name, PolicyStatus.READY)
+
     """
 
     rollout_replicas: Dict[str, Replica]

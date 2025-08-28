@@ -257,9 +257,6 @@ class SFTTrainer(Trainer):
                     command = Command.depack(x)
                     if isinstance(command, BuildMeshCommand):
                         """ directly push the buildmesh command to the nccl comm, will not block main thread """
-                        logger.info(
-                            "[SFTTrainer] Broadcast buildmesh command to all ranks"
-                        )
                         # broadcast the buildmesh command to all ranks
                         cmd = self.kv_store.broadcast_command(command, src=0)
                         self.is_master_replica = (
@@ -427,6 +424,9 @@ class SFTTrainer(Trainer):
         """
         Execute the policy to policy unicast command.
         """
+        # TODO(zjx): we need implement the policy to policy unicast command for SFT
+        # because in this case, only master and new joined replicas recieve the command.
+
         # if a new replica is added, we need to sync weights between the new replica and the old replicas
         self._sync_weights_between_replicas()
 
@@ -891,7 +891,7 @@ class SFTTrainer(Trainer):
         # check if should update lr_scheduler
         if self.last_total_steps != total_steps:
             logger.info(
-                f"[Policy] Train step: update lr_scheduler for total_steps changed from {self.last_total_steps} to {total_steps}"
+                f"[Policy] Train step: update lr_scheduler due to total_steps changed from {self.last_total_steps} to {total_steps}"
             )
 
             # Rebuild lr schedulers for the very first step because
