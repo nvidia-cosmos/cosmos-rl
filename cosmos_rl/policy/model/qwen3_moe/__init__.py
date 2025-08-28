@@ -69,7 +69,7 @@ class Qwen3MoeArgs:
     rope_theta: float = 10000
     norm_type: str = "rmsnorm"
     rope_type: str = "default"
-    ep_method: str = "deep_ep"  # Choices are "deep_ep" or "symm_mem"
+    ep_method: str = "symm_mem"  # Choices are "deep_ep" or "symm_mem"
     hf_config: AutoConfig = None
 
 
