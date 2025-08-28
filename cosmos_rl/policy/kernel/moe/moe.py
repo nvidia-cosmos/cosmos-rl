@@ -83,7 +83,7 @@ class GroupedExperts(nn.Module):
         )
 
     def setup_mesh(self, ep_mesh: DeviceMesh) -> None:
-        assert ep_mesh is not None:
+        assert ep_mesh is not None, "ep_mesh must be provided for MoE"
         assert ep_mesh.ndim == 1, "We only support 1D mesh for MoE"
         self.ep_mesh = ep_mesh
         self.ep_size = ep_mesh.size()
@@ -384,7 +384,7 @@ class GroupedExpertsSymmMem(nn.Module):
 
         self.group_gemm_imp = group_gemm_imp()
 
-    def sort_tokens(self, x, topk_ids, topk_weights):
+    def _sort_tokens(self, x, topk_ids, topk_weights):
         # This part sorts the token indices so that tokens routed to the
         # same expert reside consecutively. An implication is that tokens
         # to the same "expert group" (i.e., device) are also consecutive.
@@ -406,7 +406,7 @@ class GroupedExpertsSymmMem(nn.Module):
 
         return (sorted_tokens, token_indices, tokens_per_expert)
 
-    def get_send_buf(self):
+    def _get_send_buf(self):
         # [Why detach?] During a first forward-backward step, the buffer would
         # be included in a computational graph. In a second step, autograd will
         # return an error saying "Trying to backward through the graph a second
@@ -418,12 +418,12 @@ class GroupedExpertsSymmMem(nn.Module):
         self.token_send_buf.grad = None
         return self.token_send_buf.detach()
 
-    def get_gather_buf(self):
-        # See [Why detach?] in `get_send_buf`
+    def _get_gather_buf(self):
+        # See [Why detach?] in `_get_send_buf`
         self.token_gather_buf.grad = None
         return self.token_gather_buf.detach()
 
-    def moe_on_device(self, x, topk_ids, topk_weight):
+    def _moe_on_device(self, x, topk_ids, topk_weight):
         """
         x: [batch * local_seq_len, dim]
         topk_ids: [batch * local_seq_len, topk]
@@ -437,7 +437,7 @@ class GroupedExpertsSymmMem(nn.Module):
             sorted_tokens,
             token_indices,
             tokens_per_expert,
-        ) = self.sort_tokens(x, topk_ids, topk_weight)
+        ) = self._sort_tokens(x, topk_ids, topk_weight)
         # keep the seqlen dimension for later use without holding onto the sorted tokens
         seqlen_sorted_tokens = sorted_tokens.shape[0]
 
@@ -467,7 +467,7 @@ class GroupedExpertsSymmMem(nn.Module):
             )
             input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
         # Move input to the `token_send_buf` symm mem
-        token_send_buf = self.get_send_buf()
+        token_send_buf = self._get_send_buf()
         token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
         # Note: `out=` avoids copy, but it is not differentiable
         # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=token_send_buf[: idxs.shape[0]])
@@ -507,7 +507,7 @@ class GroupedExpertsSymmMem(nn.Module):
         )
 
         # Prepare buffer for tokens processed by experts
-        processed_tokens = self.get_gather_buf()
+        processed_tokens = self._get_gather_buf()
 
         # Move into Symmetric Memory for the return shuffle
         processed_tokens[permuted_indices] = hidden_outputs
@@ -534,6 +534,14 @@ class GroupedExpertsSymmMem(nn.Module):
 
         return final_out
 
+    def setup_mesh(self, ep_mesh: DeviceMesh) -> None:
+        self.ep_group = ep_mesh.get_group()
+        self.ep_size = ep_mesh.size()
+        assert (
+            self.total_experts % ep_mesh.size() == 0
+        ), "number of experts must be divisible by ep_mesh.size()"
+        self.local_experts = self.total_experts // ep_mesh.size()
+
     def forward(self, hidden_states: torch.Tensor):
         """
         hidden_states: [bsz, seqlen // ep_size, dim]
@@ -547,9 +555,9 @@ class GroupedExpertsSymmMem(nn.Module):
         topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
-        y = self.moe_on_device(hidden_states, topk_idx, topk_weight)
+        y = self._moe_on_device(hidden_states, topk_idx, topk_weight)
         y = y.view(*orig_shape)
-        return self.reshard_helper_layer(y)
+        return y
 
 
 def swiglu(x, gate_proj, down_proj, up_proj):

@@ -220,12 +220,7 @@ class _ExpertParallel(ParallelStyle):
             module.register_parameter(name, dist_param)
 
         if isinstance(module, GroupedExpertsSymmMem):
-            module.ep_group = device_mesh.get_group()
-            module.ep_size = device_mesh.size()
-            assert (
-                module.total_experts % device_mesh.size() == 0
-            ), "number of experts must be divisible by device_mesh.size()"
-            module.local_experts = module.total_experts // device_mesh.size()
+            module.setup_mesh(ep_mesh=device_mesh)
 
         if isinstance(module, GroupedExpertsDeepEP):
             module.init_token_dispatcher(ep_mesh=device_mesh)
