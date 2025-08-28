@@ -109,11 +109,6 @@ def convert_weight_from_hf(
         dp_shard_rank = 0
         dp_shard_size = 1
 
-    # Expert weight are aggregated into (n_experts, in_features, out_features)
-    # Weight are loaded in (out_features, in_features) shape
-    # So we do not do FSDP sharding on expert weights, instead we filter by expert id
-    should_do_fsdp_sharding = True
-
     dest_name = map_key_from_hf(name)
 
     # Fast path for common cases using string suffix matching
@@ -139,6 +134,7 @@ def convert_weight_from_hf(
             shard = tensor
         else:
             shard = tensor.tensor_split(tp_ep_size, dim=-1)[tp_ep_rank]
+
     elif (match := _LAYER_MLP_EXPERTS_PATTERN.search(dest_name)) is not None:
         # Check whether this expert belongs to the current process
         # Groups example (with 32 experts, and 4 EP groups):
@@ -147,22 +143,32 @@ def convert_weight_from_hf(
         #  EP=2: 16, 17, 18, 19, 20, 21, 22, 23
         #  EP=3: 24, 25, 26, 27, 28, 29, 30, 31
         n_expert_per_ep = n_experts // tp_ep_size
-        belongs_to_current_ep = (
-            tp_ep_rank * n_expert_per_ep
-            <= int(match.group(2))  # Expert index
-            < (tp_ep_rank + 1) * n_expert_per_ep
-        )
+        n_expert_per_dp = n_expert_per_ep // dp_shard_size
+
+        expert_id = int(match.group(2))
+        belongs_to_current_ep = (expert_id // n_expert_per_ep) == tp_ep_rank
+
+        expert_idx_within_ep = expert_id % n_expert_per_ep
         belongs_to_current_dp_shard = (
-            int(match.group(2)) - tp_ep_rank * n_expert_per_ep
-        ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
+            (expert_idx_within_ep // n_expert_per_dp) == dp_shard_rank
+        )
+
         if belongs_to_current_ep and belongs_to_current_dp_shard:
-            should_do_fsdp_sharding = False
+            # remove `experts.$ID.` from dest_name
+            dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
+            # change `proj.weight` to `projs`.
+            dest_name = dest_name.replace("proj.weight", "projs")
+
             shard = tensor
+            return dest_name, shard.contiguous(), expert_id
         else:
-            # If the expert does not belong to the current process, return None to skip this weight
+            # If the expert does not belong to the current rank, return None
+            # to skip this weight.
             return None, None, None
+
     elif (match := _LAYER_MLP_SHARED_EXPERTS_PATTERN.search(dest_name)) is not None:
         shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+
     elif (
         match := _LAYER_MLP_SHARED_EXPERTS_DOWN_PATTERN.search(dest_name)
     ) is not None:
@@ -197,30 +203,27 @@ def convert_weight_from_hf(
     else:
         return None, None, None
 
+    # Expert weight are aggregated into (n_experts, in_features, out_features)
+    # Weight are loaded in (out_features, in_features) shape
+    # So we do not do FSDP sharding on expert weights, instead we filter by expert id
+
     # Do FSDP sharding
     shard = shard.contiguous()
-    if should_do_fsdp_sharding:
-        if match := _LAYER_ATTN_KV_A_PATTERN.search(dest_name) is not None and (
-            576 % dp_shard_size != 0
-        ):
-            tensor_shard_size = 576 // dp_shard_size + 1
-            if dp_shard_rank < (576 // tensor_shard_size):
-                shard = shard[
-                    dp_shard_rank * tensor_shard_size : (dp_shard_rank + 1)
-                    * tensor_shard_size
-                ]
-            else:
-                shard = shard[dp_shard_rank * tensor_shard_size :]
+    if match := _LAYER_ATTN_KV_A_PATTERN.search(dest_name) is not None and (
+        576 % dp_shard_size != 0
+    ):
+        tensor_shard_size = 576 // dp_shard_size + 1
+        if dp_shard_rank < (576 // tensor_shard_size):
+            shard = shard[
+                dp_shard_rank * tensor_shard_size : (dp_shard_rank + 1)
+                * tensor_shard_size
+            ]
         else:
-            shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
+            shard = shard[dp_shard_rank * tensor_shard_size :]
+    else:
+        shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
 
-    expert_id = None
-    if (match := _LAYER_MLP_EXPERTS_PATTERN.search(dest_name)) is not None:
-        expert_id = int(match.group(2))
-        dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
-        dest_name = dest_name.replace("proj.weight", "projs")
-
-    return dest_name, shard.contiguous(), expert_id
+    return dest_name, shard.contiguous(), None
 
 
 @triton.jit
