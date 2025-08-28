@@ -223,10 +223,10 @@ class GroupedExpertsDeepEP(nn.Module):
         self.n_routed_experts = n_routed_experts
 
         self.gate_and_up_projs = nn.Parameter(
-            torch.empty(n_routed_experts, dim, inter_dim * 2)
+            torch.empty(n_routed_experts, inter_dim * 2, dim)
         )
         self.down_projs = nn.Parameter(
-            torch.empty(n_routed_experts, inter_dim, dim)
+            torch.empty(n_routed_experts, dim, inter_dim)
         )
 
     def init_token_dispatcher(self, ep_mesh: DeviceMesh):
@@ -301,19 +301,21 @@ class GroupedExpertsDeepEP(nn.Module):
                 permuted_local_hidden_states,
                 self.gate_and_up_projs.to_local(),
                 tokens_per_expert,
-                trans_b=False,
+                trans_b=True,
             )
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             output2 = ops.gmm(
                 output1_,
                 self.down_projs.to_local(),
                 tokens_per_expert,
-                trans_b=False,
+                trans_b=True,
             )
         else:
-            output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0])
+            gate_and_up_projs = (self.gate_and_up_projs.to_local()[0]).t()
+            down_projs = (self.down_projs.to_local()[0]).t()
+            output1 = torch.matmul(x[0] * 0, gate_and_up_projs)
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
-            output2 = torch.matmul(output1_, self.down_projs.to_local()[0])
+            output2 = torch.matmul(output1_, down_projs)
 
         y = self.token_dispatcher.token_unpermutation(output2)
 
