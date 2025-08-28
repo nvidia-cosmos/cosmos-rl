@@ -15,14 +15,16 @@
 
 import copy
 
-import torch21
+import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed import DeviceMesh
-
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.utils.pipelining.pipelining_utils import generate_split_points, stage_ids_this_rank
+from cosmos_rl.utils.pipelining.pipelining_utils import (
+    generate_split_points,
+    stage_ids_this_rank,
+)
+from torch.distributed import DeviceMesh
 
 
 def pipeline_model(
