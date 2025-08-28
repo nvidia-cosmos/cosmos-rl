@@ -103,8 +103,8 @@ def convert_weight_from_hf(
 
         expert_idx_within_ep = expert_id % n_expert_per_ep
         belongs_to_current_dp_shard = (
-            (expert_idx_within_ep // n_expert_per_dp) == dp_shard_rank
-        )
+            expert_idx_within_ep // n_expert_per_dp
+        ) == dp_shard_rank
 
         if belongs_to_current_ep and belongs_to_current_dp_shard:
             # remove `experts.$ID.` from dest_name
@@ -204,7 +204,8 @@ def map_weight_parallel_dims(
                 dims_map[dim] = n_dim - 1
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj)\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj)\.(weight|bias)",
+                    dest_name,
                 )
             ) is not None:
                 dims_map[dim] = (

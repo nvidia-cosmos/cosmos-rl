@@ -70,15 +70,11 @@ class Qwen3MoeWeightMapper(WeightMapper):
         dim_0 = weight.shape[0]  # for both weight and bias
         unit_dim = dim_0 // shares  # unit_dim = k_num_heads * head_dim
 
-        q_weight = weight[
-            : unit_dim * self.kv_head_ratio
-        ]
+        q_weight = weight[: unit_dim * self.kv_head_ratio]
         k_weight = weight[
             unit_dim * self.kv_head_ratio : unit_dim * (self.kv_head_ratio + 1)
         ]
-        v_weight = weight[
-            unit_dim * (self.kv_head_ratio + 1) :
-        ]
+        v_weight = weight[unit_dim * (self.kv_head_ratio + 1) :]
         return q_weight, k_weight, v_weight
 
     def _rollout_split_gate_up_proj_weight(self, weight: torch.Tensor):
@@ -128,7 +124,9 @@ class Qwen3MoeWeightMapper(WeightMapper):
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            logger.info(f"[Rollout] param vllm_name {param_name} hf_name: {compatible_key}")
+            logger.info(
+                f"[Rollout] param vllm_name {param_name} hf_name: {compatible_key}"
+            )
 
             if "qkv_proj" in compatible_key:
                 # must be inplace slicing.
@@ -149,9 +147,13 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
             elif "gate_up_proj" in compatible_key:
                 # split gate and up proj
-                gate_proj_weight, up_proj_weight = self._rollout_split_gate_up_proj_weight(param)
+                gate_proj_weight, up_proj_weight = (
+                    self._rollout_split_gate_up_proj_weight(param)
+                )
 
-                gate_proj_weight_key = compatible_key.replace("gate_up_proj", "gate_proj")
+                gate_proj_weight_key = compatible_key.replace(
+                    "gate_up_proj", "gate_proj"
+                )
                 compatible_key_map[gate_proj_weight_key] = gate_proj_weight
                 group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
@@ -171,7 +173,8 @@ class Qwen3MoeWeightMapper(WeightMapper):
         self, name, expert_weight: torch.Tensor
     ):
         if match := re.search(
-            r"model\.layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.weight", name
+            r"model\.layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.weight",
+            name,
         ):
             layer_id = int(match.group(1))
             w_name = match.group(2)
@@ -193,7 +196,8 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 name = "model." + name
 
             if re.search(
-                r"model\.layers\.(\d+)\.mlp\.experts\.(up_projs|gate_projs|down_projs)", name
+                r"model\.layers\.(\d+)\.mlp\.experts\.(up_projs|gate_projs|down_projs)",
+                name,
             ):
                 name = name.replace("projs", "proj.weight")
         return name

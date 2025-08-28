@@ -367,7 +367,9 @@ class FeedForward(nn.Module):
         topk_idx, topk_weight = self.gate(hidden_states)
 
         token_mask = torch.ones(
-            hidden_states.size(0), dtype=torch.bool, device=hidden_states.device,
+            hidden_states.size(0),
+            dtype=torch.bool,
+            device=hidden_states.device,
         )
 
         y = self.experts(
