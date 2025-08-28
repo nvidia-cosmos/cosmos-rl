@@ -19,7 +19,6 @@ import inspect
 from typing import Tuple, List, Optional, Callable
 from transformers import AutoConfig
 from cosmos_rl.utils.util import (
-    sync_model_vocab,
     clear_weight_name,
     safe_deep_getattr,
     load_model_class_by_config,
@@ -265,80 +264,8 @@ class HFModel(BaseModel):
         return multi_modal_projector
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
-        # reset buffer registered in __init__() function,
-        # e.g. rotary_emb.inv_freq, embed_tokens.embed_scale
-        # For hf compatibility
-        language_model = (
-            getattr(self.language_model, "model", None) or self.language_model
-        )
-        rotary_emb = getattr(language_model, "rotary_emb", None) or getattr(
-            language_model, "rotary_pos_emb", None
-        )
-        current_device = torch.cuda.current_device()
-        if rotary_emb is not None:
-            rope_init_fn = getattr(rotary_emb, "rope_init_fn", None)
-            if rope_init_fn is not None:
-                inv_freq, rotary_emb.attention_scaling = rope_init_fn(
-                    self.text_config, device=current_device
-                )
-                rotary_emb.register_buffer("inv_freq", inv_freq, persistent=False)
-            else:
-                logger.warning(
-                    "rotary_emb does not have rope_init_fn, cannot reset inv_freq."
-                )
-        # Models like Gemma have rotary_emb_local
-        rotary_emb_local = getattr(language_model, "rotary_emb_local", None)
-        if rotary_emb_local is not None:
-            rope_init_fn = getattr(rotary_emb_local, "rope_init_fn", None)
-            if rope_init_fn is not None:
-                local_inv_freq, rotary_emb_local.attention_scaling = rope_init_fn(
-                    self.text_config, device=current_device
-                )
-                rotary_emb_local.register_buffer(
-                    "inv_freq", local_inv_freq, persistent=False
-                )
-            else:
-                logger.warning(
-                    "rotary_emb_local does not have rope_init_fn, cannot reset inv_freq."
-                )
-
-        if self.text_config.model_type in ["gemma3_text"]:
-            embed_tokens = language_model.embed_tokens
-            embed_scale = self.text_config.hidden_size**0.5
-            embed_tokens.register_buffer(
-                "embed_scale", torch.tensor(embed_scale), persistent=False
-            )
-
-        vision_model = self.vision_model
-        if vision_model is not None:
-            rotary_emb = getattr(vision_model, "rotary_pos_emb", None) or getattr(
-                vision_model, "rotary_emb", None
-            )
-            if rotary_emb is not None:
-                rope_init_fn = getattr(rotary_emb, "rope_init_fn", None)
-                if rope_init_fn is not None:
-                    inv_freq, rotary_emb.attention_scaling = rope_init_fn(
-                        self.vision_config, device=current_device
-                    )
-                    rotary_emb.register_buffer("inv_freq", inv_freq, persistent=False)
-            # CLIPVisionTransformer
-            embeddings = safe_deep_getattr(
-                vision_model, "vision_model.embeddings", None
-            )
-            # assert embeddings is not None, f"Can not get embeddings from {vision_model}"
-            if (
-                embeddings is not None
-                and getattr(embeddings, "position_ids", None) is not None
-                and getattr(embeddings, "num_positions", None) is not None
-            ):
-                position_ids = (
-                    torch.arange(embeddings.num_positions)
-                    .expand((1, -1))
-                    .to(current_device)
-                )
-                embeddings.register_buffer(
-                    "position_ids", position_ids, persistent=False
-                )
+        # Will reset all named buffers in load_hf_weights
+        return
 
     @property
     def parallelize_fn(self):
@@ -353,6 +280,16 @@ class HFModel(BaseModel):
         and moving each stage to a different device.
         """
         assert False, "Pipeline split is not supported for HFModel"
+
+    def reset_named_buffers(self, model_with_weights):
+        # copy named buffers from model_with_weights to self.model
+        hf_named_buffers = {k: v for k, v in model_with_weights.named_buffers()}
+        for name, cosmos_hf_buffer in self.model.named_buffers():
+            assert name in hf_named_buffers, f"Buffer {name} not found in hf model"
+            hf_buf = hf_named_buffers[name].to(
+                device=cosmos_hf_buffer.device, dtype=cosmos_hf_buffer.dtype
+            )
+            cosmos_hf_buffer.data.copy_(hf_buf.data)
 
     def load_hf_weights(
         self,
@@ -370,11 +307,17 @@ class HFModel(BaseModel):
             info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
         model_type = self.hf_config.model_type
+        logger.info(
+            f"Loading weights from {model_name_or_path} with revision {revision} {self.model_class=}"
+        )
         model_with_weights = self.model_class.from_pretrained(
             model_name_or_path,
             revision=revision,
+            config=self.hf_config,
             trust_remote_code=True,
         ).to("cpu")
+
+        self.reset_named_buffers(model_with_weights)
 
         state_dict = model_with_weights.state_dict()
         self_state_dict = self.model.state_dict()
@@ -588,7 +531,6 @@ class HFModel(BaseModel):
             max_position_embeddings = hf_config.max_position_embeddings
         else:
             hf_config.max_position_embeddings = max_position_embeddings
-        _ = sync_model_vocab(model_name_or_path)
 
         return cls.from_model_args(hf_config)
 
