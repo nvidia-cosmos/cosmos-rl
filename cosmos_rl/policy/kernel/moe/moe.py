@@ -72,15 +72,9 @@ class GroupedExperts(nn.Module):
         """
         super().__init__()
         self.n_routed_experts = n_routed_experts
-        self.gate_projs = nn.Parameter(
-            torch.empty(n_routed_experts, inter_dim, dim)
-        )
-        self.up_projs = nn.Parameter(
-            torch.empty(n_routed_experts, inter_dim, dim)
-        )
-        self.down_projs = nn.Parameter(
-            torch.empty(n_routed_experts, dim, inter_dim)
-        )
+        self.gate_projs = nn.Parameter(torch.empty(n_routed_experts, inter_dim, dim))
+        self.up_projs = nn.Parameter(torch.empty(n_routed_experts, inter_dim, dim))
+        self.down_projs = nn.Parameter(torch.empty(n_routed_experts, dim, inter_dim))
 
     def setup_mesh(self, ep_mesh: DeviceMesh) -> None:
         assert ep_mesh is not None, "ep_mesh must be provided for MoE"
@@ -91,7 +85,6 @@ class GroupedExperts(nn.Module):
         assert (
             self.n_routed_experts % self.ep_size == 0
         ), f"Number of experts must be divisible by ep_size (ep_size={self.ep_size})"
-
 
     def forward(
         self,
@@ -225,9 +218,7 @@ class GroupedExpertsDeepEP(nn.Module):
         self.gate_and_up_projs = nn.Parameter(
             torch.empty(n_routed_experts, inter_dim * 2, dim)
         )
-        self.down_projs = nn.Parameter(
-            torch.empty(n_routed_experts, dim, inter_dim)
-        )
+        self.down_projs = nn.Parameter(torch.empty(n_routed_experts, dim, inter_dim))
 
     def init_token_dispatcher(self, ep_mesh: DeviceMesh):
         assert ep_mesh is not None
@@ -257,7 +248,6 @@ class GroupedExpertsDeepEP(nn.Module):
             config=config,
             ep_group=ep_mesh.get_group(),
         )
-
 
     def forward(
         self,
@@ -593,7 +583,8 @@ class FakeBalancedGate(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        *args, **kwargs,
+        *args,
+        **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for the gating mechanism.
@@ -615,7 +606,3 @@ class FakeBalancedGate(nn.Module):
         )
 
         return weights.type_as(x), indices
-
-
-
-
