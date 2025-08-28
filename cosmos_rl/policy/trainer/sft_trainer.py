@@ -271,9 +271,14 @@ class SFTTrainer(Trainer):
             else:
                 try:
                     bmcmd = self.kv_store.broadcast_command(None, src=0)
+                    if bmcmd is None:
+                        logger.info(
+                            "No buildmesh command received, maybe master replica exited"
+                        )
+                        break
                     assert isinstance(
                         bmcmd, BuildMeshCommand
-                    ), "Only buildmesh command is supported"
+                    ), f"Only buildmesh command is supported, but got {type(bmcmd)}"
                     self.is_master_replica = (
                         bmcmd.replica_name_to_rank[self.replica_name] == 0
                     )
