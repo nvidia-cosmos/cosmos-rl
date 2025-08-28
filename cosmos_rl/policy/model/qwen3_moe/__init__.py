@@ -265,15 +265,12 @@ class MoEGate(nn.Module):
         self.num_routed_experts = num_routed_experts
         self.weight = nn.Parameter(torch.empty((self.num_routed_experts, dim)))
 
-    def forward(self, hidden_states):
-        _, _, h = hidden_states.shape
-        # compute gating score
-        hidden_states = hidden_states.view(-1, h)
+    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Compute gating score
         logits = F.linear(
             hidden_states.type(torch.float32), self.weight.type(torch.float32), None
         )
         scores = logits.softmax(dim=-1, dtype=torch.float32)
-
         topk_weight, topk_idx = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
 
         # norm gate to sum 1
@@ -343,12 +340,23 @@ class FeedForward(nn.Module):
         hidden_states: [bsz, seqlen // ep_size, dim]
         """
         orig_shape = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+
         # topk_idx: [batch * local_seq_len, topk]
         # topk_weight: [batch * local_seq_len, topk]
         topk_idx, topk_weight = self.gate(hidden_states)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
-        y = self.experts(hidden_states, topk_idx, topk_weight)
+        token_mask = torch.ones(
+            hidden_states.size(0), dtype=torch.bool, device=hidden_states.device,
+        )
+
+        y = self.experts(
+            x=hidden_states,
+            token_mask=token_mask,
+            weights=topk_weight,
+            indices=topk_idx,
+        )
+
         y = y.view(*orig_shape)
         return self.reshard_helper_layer(y)
 

@@ -542,22 +542,33 @@ class GroupedExpertsSymmMem(nn.Module):
         ), "number of experts must be divisible by ep_mesh.size()"
         self.local_experts = self.total_experts // ep_mesh.size()
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        hidden_states: [bsz, seqlen // ep_size, dim]
+        Forward pass for the grouped experts.
+
+        Args:
+            x (torch.Tensor): Input tensor. Shape is [num_tokens, model_dim].
+            token_mask (torch.Tensor): Boolean mask indicating valid tokens.
+                Shape is [num_tokens].
+            weights (torch.Tensor): Routing weights for the selected experts.
+                Shape is [num_tokens, num_activated_experts].
+            indices (torch.Tensor): Indices of the selected experts.
+                Shape is [num_tokens, num_activated_experts].
+
+        Returns:
+            torch.Tensor: Output tensor after expert computation.
+                Shape is [num_tokens, model_dim]
         """
+        del token_mask
         assert hasattr(self, "ep_group"), "EP group is not set."
         assert hasattr(self, "ep_size"), "EP size is not set."
-
-        orig_shape = hidden_states.shape
-        # topk_idx: [batch * local_seq_len, topk]
-        # topk_weight: [batch * local_seq_len, topk]
-        topk_idx, topk_weight = self.gate(hidden_states)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-
-        y = self._moe_on_device(hidden_states, topk_idx, topk_weight)
-        y = y.view(*orig_shape)
-        return y
+        return self._moe_on_device(x, topk_ids=indices, topk_weight=weights)
 
 
 def swiglu(x, gate_proj, down_proj, up_proj):
