@@ -26,7 +26,7 @@ from cosmos_rl.utils.pynccl import (
 
 
 class TestPolicyToPolicy(unittest.TestCase):
-    def test_policy_to_policy_unicast(self):
+    def policy_to_policy_unicast(self):
         """Test NCCL communication between multiple ranks using torchrun."""
         cur_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -57,8 +57,11 @@ class TestPolicyToPolicy(unittest.TestCase):
                 "--rdzv_backend=c10d",
                 "--rdzv_endpoint=localhost:0",
                 os.path.join(cur_dir, "launch_test_worker.py"),
+                "--shm_name",
                 ",".join([shm.name for shm in shms]),
+                "--shm_size",
                 str(nccl_uid_tensor.numel()),
+                "--mode",
                 "policy_send_to_policy",
             ]
             policy_dst_cmd = [
@@ -69,8 +72,11 @@ class TestPolicyToPolicy(unittest.TestCase):
                 "--rdzv_backend=c10d",
                 "--rdzv_endpoint=localhost:0",
                 os.path.join(cur_dir, "launch_test_worker.py"),
+                "--shm_name",
                 ",".join([shm.name for shm in shms]),
+                "--shm_size",
                 str(nccl_uid_tensor.numel()),
+                "--mode",
                 "policy_recv_from_policy",
             ]
             policy_env = dict(os.environ)
@@ -113,7 +119,7 @@ class TestPolicyToPolicy(unittest.TestCase):
                 # Ignore if shared memory is already unlinked
                 pass
 
-    def test_policy_to_policy_broadcast(self):
+    def policy_to_policy_broadcast(self):
         """Test NCCL communication between multiple ranks using torchrun."""
         cur_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -144,8 +150,11 @@ class TestPolicyToPolicy(unittest.TestCase):
                 "--rdzv_backend=c10d",
                 "--rdzv_endpoint=localhost:0",
                 os.path.join(cur_dir, "launch_test_worker.py"),
+                "--shm_name",
                 ",".join([shm.name for shm in shms]),
+                "--shm_size",
                 str(nccl_uid_tensor.numel()),
+                "--mode",
                 ",".join(["policy_broadcast_to_policy", "4", "0"]),
             ]
             policy_dst_cmd = [
@@ -156,8 +165,11 @@ class TestPolicyToPolicy(unittest.TestCase):
                 "--rdzv_backend=c10d",
                 "--rdzv_endpoint=localhost:0",
                 os.path.join(cur_dir, "launch_test_worker.py"),
+                "--shm_name",
                 ",".join([shm.name for shm in shms]),
+                "--shm_size",
                 str(nccl_uid_tensor.numel()),
+                "--mode",
                 ",".join(["policy_broadcast_to_policy", "4", "0"]),
             ]
             policy_env = dict(os.environ)
@@ -206,6 +218,12 @@ class TestPolicyToPolicy(unittest.TestCase):
             except FileNotFoundError:
                 # Ignore if shared memory is already unlinked
                 pass
+
+    def test_policy_to_policy_unicast_all_params(self):
+        self.policy_to_policy_unicast()
+
+    def test_policy_to_policy_broadcast_all_params(self):
+        self.policy_to_policy_broadcast()
 
 
 if __name__ == "__main__":

@@ -59,7 +59,9 @@ import types
 from functools import partial
 import msgpack
 from cosmos_rl.utils.network_util import make_request_with_retry
-from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
 from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
@@ -79,6 +81,12 @@ from cosmos_rl.utils.pynccl import (
     nccl_group_end,
 )
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_for_inputs,
+    pack_sequences_for_logprobs,
+    pack_sequences_info_collect,
+    pack_sequences_for_masks,
+)
 
 
 def compute_loss(
@@ -288,6 +296,7 @@ class GRPOTrainer(Trainer):
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
         keys_n_ranks = []
+        trainable_params = self.model.trainable_params
         for name, tensor_or_callable in self.model.weight_sync_transforms:
             if isinstance(tensor_or_callable, torch.Tensor):
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
@@ -295,6 +304,8 @@ class GRPOTrainer(Trainer):
                 assert isinstance(tensor_or_callable, Callable)
                 tensor_or_callable = tensor_or_callable()
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
+            if name not in trainable_params:
+                logger.debug(f"[Policy] Not trainable for param {name}")
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config=self.hf_config,
@@ -313,11 +324,21 @@ class GRPOTrainer(Trainer):
             for r, x in enumerate(sorted_params_all_rank)
             if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
         ]
+        trainable_params_all_rank = dist_util.all_gather_object_cpu(trainable_params)
+        self.trainable_params = set()
+        for trainable_params_per_rank in trainable_params_all_rank:
+            self.trainable_params.update(trainable_params_per_rank)
+
         if self.global_rank == 0:
+            logger.info(
+                f"[Policy] Parse {len(self.trainable_params)} trainable params to controller."
+            )
+
             body = {
                 "shard_infos": self.all_rank_local_shard_infos,
                 "param_groups": [],
                 "sorted_params": sorted_params_all_rank,
+                "trainable_params": list(self.trainable_params),
             }
             data = msgpack.packb(body)
             try:
@@ -756,67 +777,106 @@ class GRPOTrainer(Trainer):
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
         with torch.cuda.stream(self.train_stream):
             with torch.no_grad():
-                pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
-                    self.pre_P2R_collect_parameters()
-                )
-
-                def grouped_send(grouped_send_ops):
-                    nccl_group_start(comm_id)
-                    for view, r_rank, name in grouped_send_ops:
-                        nccl_send(
-                            view,
-                            self.world_size + r_rank,
-                            comm_id,
+                try:
+                    if self.config.policy.lora is not None:
+                        from cosmos_rl.policy.lora.plugin import (
+                            merge_lora_weights_,
+                            unmerge_lora_weights_,
                         )
-                    nccl_group_end(comm_id)
-                    grouped_send_ops.clear()
 
-                grouped_send_ops = []
-                num_groups = 0
+                        merge_lora_weights_(self.model)
 
-                for insts_group in self.policy_to_rollout_insts:
-                    for insts_for_per_param in insts_group.param_instructions:
-                        dest_name = insts_for_per_param.param_name
-                        for inst in insts_for_per_param.instructions:
-                            p_rank = inst.policy_rank
-                            r_rank = inst.rollout_rank
-                            tensor_split_strategys = inst.slice_strategy
-                            if dest_name not in self.map_w_from_policy_to_rollout:
-                                raise RuntimeError(
-                                    f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
-                                )
-                            local_view = self.map_w_from_policy_to_rollout[dest_name]
-                            if dest_name in pre_P2R_collected_tensors:
-                                local_view = pre_P2R_collected_tensors[dest_name]
-                            elif isinstance(local_view, Callable):
-                                local_view = local_view()
-                            else:
-                                pass
-                            local_view = local_view.to(
-                                str2torch_dtype(self.config.train.param_dtype)
-                            )
-                            view = (
-                                local_view.cosmos_slice(tensor_split_strategys)
-                                .contiguous()
-                                .cuda()
-                            )
-                            assert self.global_rank == p_rank
+                    pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
+                        self.pre_P2R_collect_parameters()
+                    )
+
+                    def grouped_send(grouped_send_ops):
+                        nccl_group_start(comm_id)
+                        for view, r_rank, dest_name in grouped_send_ops:
                             logger.debug(
-                                f"Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
+                                f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                             )
-                            grouped_send_ops.append((view, r_rank, dest_name))
-                            total_bytes_sent += view.numel() * view.element_size()
-                    num_groups += 1
-                    if num_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                        grouped_send(grouped_send_ops)
-                        num_groups = 0
+                            nccl_send(
+                                view,
+                                self.world_size + r_rank,
+                                comm_id,
+                            )
+                        nccl_group_end(comm_id)
+                        grouped_send_ops.clear()
 
-                grouped_send(grouped_send_ops)
+                    grouped_send_ops = []
+                    num_groups = 0
+
+                    transferred_params_cnt = 0
+                    skipped_params_cnt = 0
+                    for insts_group in self.policy_to_rollout_insts:
+                        for insts_for_per_param in insts_group.param_instructions:
+                            dest_name = insts_for_per_param.param_name
+                            if (
+                                dest_name not in self.trainable_params
+                                and command.trainable_only
+                            ):
+                                logger.debug(
+                                    f"[Policy] Skip {dest_name} in P2R send due to non trainable."
+                                )
+                                skipped_params_cnt += 1
+                                continue
+                            transferred_params_cnt += 1
+
+                            for inst in insts_for_per_param.instructions:
+                                p_rank = inst.policy_rank
+                                r_rank = inst.rollout_rank
+                                tensor_split_strategys = inst.slice_strategy
+                                if dest_name not in self.map_w_from_policy_to_rollout:
+                                    raise RuntimeError(
+                                        f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
+                                    )
+                                local_view = self.map_w_from_policy_to_rollout[
+                                    dest_name
+                                ]
+                                if dest_name in pre_P2R_collected_tensors:
+                                    local_view = pre_P2R_collected_tensors[dest_name]
+                                elif isinstance(local_view, Callable):
+                                    local_view = local_view()
+                                else:
+                                    pass
+                                local_view = local_view.to(
+                                    str2torch_dtype(self.config.train.transfer_dtype)
+                                )
+                                view = (
+                                    local_view.cosmos_slice(tensor_split_strategys)
+                                    .contiguous()
+                                    .cuda()
+                                )
+                                assert self.global_rank == p_rank
+                                logger.debug(
+                                    f"Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
+                                )
+                                grouped_send_ops.append((view, r_rank, dest_name))
+                                total_bytes_sent += view.numel() * view.element_size()
+                        num_groups += 1
+                        if num_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                            grouped_send(grouped_send_ops)
+                            num_groups = 0
+
+                    grouped_send(grouped_send_ops)
+                finally:
+                    if self.config.policy.lora is not None:
+                        # Always attempt to unmerge to restore training state
+                        unmerge_lora_weights_(self.model)
+
+                if command.trainable_only:
+                    if not hasattr(self, "synced_trainable_params"):
+                        self.synced_trainable_params = transferred_params_cnt
+                    else:
+                        assert (
+                            self.synced_trainable_params == transferred_params_cnt
+                        ), "Trainable synced params count must match at each weight sync."
 
         # make sure all the send operations of all ranks are finished
         time_eclapsed = time.time() - st
         logger.debug(
-            f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent."
+            f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent. While {skipped_params_cnt} non-trainable splitted params skipped and {transferred_params_cnt} splitted params transferred."
         )
         return False
 
@@ -1156,6 +1216,8 @@ class GRPOTrainer(Trainer):
             minibatch["logprob_masks"],
             logits,
             is_full_logits=is_full_logits,
+            label_packing_mask=minibatch.get("label_packing_mask", None),
+            input_packing_mask=minibatch.get("input_packing_mask", None),
         )
 
     @torch.no_grad()
@@ -1314,6 +1376,13 @@ class GRPOTrainer(Trainer):
                                     computed_max_len=computed_max_len,
                                 )
                             )
+                            packing_seq = self.config.train.sequence_packing
+                            if packing_seq:
+                                if self.parallel_dims.pp_enabled:
+                                    packing_seq = False
+                                    logger.debug(
+                                        "[Policy] Packing sequence is disabled due to incompatible dimensions."
+                                    )
 
                             # TP/CP will shard the sequence dimension into n-ranks.
                             # The interested_tokens will be unevenly distributed across ranks.
@@ -1339,6 +1408,30 @@ class GRPOTrainer(Trainer):
                             position_ids, input_ids, pos_seq_dim = (
                                 self.model.get_position_ids(**user_mini_batch)
                             )
+
+                            if packing_seq:
+                                # Prepare for the sequence packing information.
+                                packed_args = pack_sequences_info_collect(
+                                    input_ids,
+                                    pad_token_id=self.tokenizer.pad_token_id,
+                                    seq_len_multiple=self.seq_len_multiple,
+                                )
+                                user_mini_batch.update(packed_args)
+                                packed_args = pack_sequences_for_masks(
+                                    user_mini_batch["valid_input_len"],
+                                    user_mini_batch["valid_input_len"],
+                                )
+                                user_mini_batch.update(packed_args)
+                                packed_args = pack_sequences_for_logprobs(
+                                    user_mini_batch["logprob_masks"],
+                                    user_mini_batch["valid_input_len"],
+                                    advantages=advantages_t[i:end],
+                                )
+                                user_mini_batch.update(packed_args)
+                                minibatched_advantages = user_mini_batch.pop(
+                                    "advantages"
+                                )
+
                             acc_n_tokens += np.prod(input_ids.shape)
                             user_mini_batch["position_ids"] = position_ids
                             padding_mask = user_mini_batch.get("padding_mask", None)
@@ -1347,17 +1440,23 @@ class GRPOTrainer(Trainer):
                             position_ids_before_cp = user_mini_batch["position_ids"]
                             padding_mask_before_cp = padding_mask
 
-                            if self.parallel_dims.cp_enabled:
+                            if self.parallel_dims.cp_enabled and not packing_seq:
                                 [input_ids, position_ids, padding_mask] = (
                                     slice_inputs_for_ulysses(
                                         [input_ids, position_ids, padding_mask],
                                         self.parallel_dims.mesh["cp"],
+                                        seq_dims=[1, pos_seq_dim, 1],
                                     )
                                 )
                                 user_mini_batch["position_ids"] = position_ids
                                 user_mini_batch["input_ids"] = input_ids
                                 if padding_mask is not None:
                                     user_mini_batch["padding_mask"] = padding_mask
+                            if self.parallel_dims.cp_enabled and packing_seq:
+                                # Slice for cp after embedding generation and sequence packing in the model forward later.
+                                user_mini_batch["cp_mesh"] = self.parallel_dims.mesh[
+                                    "cp"
+                                ]
 
                             if self.parallel_dims.pp_enabled:
                                 if pp_last_stage:
@@ -1494,6 +1593,14 @@ class GRPOTrainer(Trainer):
                                 # returned shape:
                                 # current_per_token_logprobs: [n_tokens_of_logprobs]
                                 # cu_seqlens: [batch_size + 1]
+                                if packing_seq:
+                                    # Pack sequences for inputs to match the logits from model forward.
+                                    packed_args = pack_sequences_for_inputs(
+                                        user_mini_batch["input_ids"],
+                                        user_mini_batch["valid_input_len"],
+                                    )
+                                    user_mini_batch["input_ids"] = packed_args["inputs"]
+
                                 current_per_token_logprobs, cu_seqlens = (
                                     self.compute_logprobs(
                                         user_mini_batch,

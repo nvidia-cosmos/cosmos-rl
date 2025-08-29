@@ -751,12 +751,16 @@ class ParallelTopoMapper:
             )
 
     def determine_tp_dim(
-        self, part: torch.nn.Module, param: torch.Tensor, param_name: str, is_bias: bool
+        self,
+        part: torch.nn.Module,
+        param: torch.Tensor,
+        param_name: str,
+        is_bias: bool,
+        leaf_name: str,
     ) -> Tuple[int, Dict[str, Any], Dict[str, List[str]]]:
         packed_modules_mapping = self.weight_mapper.packed_modules_mapping
         dims_rank_info = None
         tp_dim = None
-
         if self.backend == "vllm":
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
@@ -808,6 +812,9 @@ class ParallelTopoMapper:
                 assert (
                     "Parallel" not in part.__class__.__name__
                 ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                logger.warning(
+                    f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
+                )
         elif self.backend == "trtllm":
             # for trtllm
             try:
@@ -880,10 +887,8 @@ class ParallelTopoMapper:
                         elif part_name == "mm_input_projection_weight":
                             # Gemma has mm_input_projection_weight
                             is_bias = True
-                        else:
-                            logger.warning(
-                                f"Part {part_name} is not a Parameter. Skipping."
-                            )
+                        elif part_name == "weight_scale":
+                            # Currently weight scale should be skipped not for weight sync.
                             should_skip = True
                         break
                     part = getattr(part, part_name)
@@ -895,8 +900,9 @@ class ParallelTopoMapper:
                 continue
             dims_map = {}
             tp_dim, dims_rank_info, packed_modules_mapping = self.determine_tp_dim(
-                part, param, param_name, is_bias
+                part, param, param_name, is_bias, part_name
             )
+
             if tp_dim is not None:
                 dims_map["tp"] = tp_dim
 
@@ -1141,6 +1147,7 @@ class ParallelizedShardMapper:
                 # Each group has already been sorted in replica.
                 self.param_groups.add(tuple(group))
             self.sorted_params_all_rank_policy = policy_info["sorted_params"]
+            self.trainable_params = policy_info["trainable_params"]
             self.rollout_all_rank_shard_infos = rollout_info["shard_infos"]
             for group in rollout_info["param_groups"]:
                 for param_name in group:
@@ -1298,15 +1305,19 @@ class ParallelizedShardMapper:
                                 p_rank, r, p_tensor_split_strategys
                             ).__dict__
                         )
-            insts_for_group.append(
-                WeightSyncInstructionsPerParam(dest_name, insts_for_param_name).__dict__
-            )
-            policy_to_rollout_insts.append(
-                WeightSyncInstructionsGroup(insts_for_group).__dict__
-            )
-            if not insts_for_param_name:
+            if insts_for_param_name:
+                insts_for_group.append(
+                    WeightSyncInstructionsPerParam(
+                        dest_name, insts_for_param_name
+                    ).__dict__
+                )
+            else:
                 logger.warning(
                     f"[Policy] No send instructions generated for parameter {dest_name} in sorted_params, policy rank {p_rank}."
+                )
+            if insts_for_group:
+                policy_to_rollout_insts.append(
+                    WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
         for group in self.param_groups:
             insts_for_group = []
@@ -1354,18 +1365,20 @@ class ParallelizedShardMapper:
                                     p_rank, r, p_tensor_split_strategys
                                 ).__dict__
                             )
-                insts_for_group.append(
-                    WeightSyncInstructionsPerParam(
-                        dest_name, insts_for_param_name
-                    ).__dict__
-                )
-                if not insts_for_param_name:
-                    logger.warning(
-                        f"[Policy] No send instructions generated for parameter {dest_name} in param_groups, policy rank {p_rank}."
+                if insts_for_param_name:
+                    insts_for_group.append(
+                        WeightSyncInstructionsPerParam(
+                            dest_name, insts_for_param_name
+                        ).__dict__
                     )
-            policy_to_rollout_insts.append(
-                WeightSyncInstructionsGroup(insts_for_group).__dict__
-            )
+                else:
+                    logger.warning(
+                        f"No send instructions generated for parameter {dest_name} in policy rank {p_rank}."
+                    )
+            if insts_for_group:
+                policy_to_rollout_insts.append(
+                    WeightSyncInstructionsGroup(insts_for_group).__dict__
+                )
         if len(name_in_group) > 0:
             logger.warning(
                 f"[Policy] No send instructions generated for parameters {name_in_group} in policy rank {p_rank}."
@@ -1551,8 +1564,8 @@ class ParallelizedShardMapper:
                         ).__dict__
                     )
                 else:
-                    logger.warning(
-                        f"[Rollout] No recv instructions generated for parameter {dest_name} in param_groups rollout rank {r_rank}."
+                    raise ValueError(
+                        f"No recv instructions generated for parameter {dest_name} in rollout rank {r_rank}."
                     )
             if insts_for_group:
                 rollout_from_policy_insts.append(

@@ -108,16 +108,6 @@ class CommMixin:
         self.init_data_packer(metadata)
 
     def init_data_packer(self, metadata: Dict[str, Any]):
-        # `sft_user_dataset` is only used in SFT mode when the user provides a dataset
-        self.sft_user_dataset = None
-        sft_user_dataset = metadata.get("sft_user_dataset", None)
-        if sft_user_dataset:
-            sft_user_dataset = base64.b64decode(sft_user_dataset)
-            sft_user_dataset = cloudpickle.loads(sft_user_dataset)
-            if hasattr(sft_user_dataset, "setup"):
-                sft_user_dataset.setup(self.config, self.tokenizer)
-            self.sft_user_dataset = sft_user_dataset
-
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
         )

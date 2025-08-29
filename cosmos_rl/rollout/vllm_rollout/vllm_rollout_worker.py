@@ -41,6 +41,7 @@ from cosmos_rl.dispatcher.command import (
     RolloutToRolloutBroadcastCommand,
     Command,
 )
+from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
@@ -65,6 +66,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_VALIDATION_REPORT_SUFFIX,
     COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
+    COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
 
 from vllm import SamplingParams
@@ -452,13 +454,51 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         nccl_group_id = b64_to_list(base64_nccl_group_id)
         return nccl_group_id
 
+    def prepare_trainable_params(self):
+        if not hasattr(self, "trainable_params"):
+            if self.global_rank == 0:
+                try:
+                    trainable_meta = make_request_with_retry(
+                        partial(
+                            requests.get,
+                        ),
+                        self.get_alternative_urls(
+                            COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX
+                        ),
+                        max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                    )
+                    trainable_params = trainable_meta.json()["trainable_params"]
+                except Exception as e:
+                    raise RuntimeError(
+                        f"[Rollout] Failed in fetching trainable params from controller after retries {e}."
+                    )
+            else:
+                trainable_params = None
+            trainable_params = dist_utils.broadcast_object_cpu(
+                trainable_params,
+            )
+            self.trainable_params = set(trainable_params)
+            logger.info(
+                f"[Rollout] Finished fetching {len(self.trainable_params)} trainable params from controller."
+            )
+            # The splitted and unsplited version of param names should both added to handle for P2R and R2R cases separately.
+            for p in trainable_params:
+                self.trainable_params.add(
+                    self.weight_mapper.get_unsplited_weight_name(p)
+                )
+            logger.info(
+                f"[Rollout] Obtained {len(self.trainable_params)} trainable params after weight unsplit."
+            )
+
     def recv_weight_shard(
         self,
         global_rank_of_rollout: int,
         insts_group: WeightSyncInstructionsGroup,
         communicator_index: int,
+        trainable_only: bool,
         do_weight_sync_check: bool = False,
     ):
+        target_dtype = str2torch_dtype(self.config.train.transfer_dtype)
         check_inside_group = do_weight_sync_check
         if self.quantization_type is not None:
             inst_group_weight_name = (
@@ -504,20 +544,28 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         def update_tensor_view(
             vllm_tensor_view: torch.Tensor,
             recv_tensor: torch.Tensor,
-            inplace: bool,
             inst_dest_name: str,
         ):
-            if not inplace:
-                tmp_recv_tensor = recv_tensor.to(vllm_tensor_view.dtype)
-                if "down_proj_bias" in inst_dest_name and self.global_rank != 0:
-                    tmp_recv_tensor.zero_()
-                vllm_tensor_view.copy_(tmp_recv_tensor)
+            tmp_recv_tensor = recv_tensor.to(vllm_tensor_view.dtype)
+            if "down_proj_bias" in inst_dest_name and self.global_rank != 0:
+                tmp_recv_tensor.zero_()
+            vllm_tensor_view.copy_(tmp_recv_tensor)
+
+        skipped_params_cnt = 0
 
         for insts_for_per_param in insts_group.param_instructions:
             # insts_for_per_param: WeightSyncInstructionsPerParam -> inst collection for a single tensor
             insts = insts_for_per_param.instructions
             # insts: List[Tuple[int, int, Dict[int, Any]]]
             inst_dest_name = insts_for_per_param.param_name
+
+            if inst_dest_name not in self.trainable_params and trainable_only:
+                logger.debug(
+                    f"[Rollout] Skip {inst_dest_name} in P2R recv due to non trainable."
+                )
+                skipped_params_cnt += 1
+                continue
+
             target_tensor = self.vllm_weight_inplace_view_map[inst_dest_name]
 
             if check_inside_group:
@@ -531,15 +579,17 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 tensor_split_strategys = inst.slice_strategy
                 assert r_rank == global_rank_of_rollout
                 vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
-
                 recv_tensor, inplace = recv_tensor_creator(vllm_tensor_view)
-
+                logger.debug(
+                    f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape} with dtype {vllm_tensor_view.dtype}."
+                )
                 nccl_recv(recv_tensor, p_rank, communicator_index)
 
                 # inplace copy
-                all_tensor_views_to_copy.append(
-                    (vllm_tensor_view, recv_tensor, inplace, inst_dest_name)
-                )
+                if not inplace:
+                    all_tensor_views_to_copy.append(
+                        (vllm_tensor_view, recv_tensor, inst_dest_name)
+                    )
 
                 total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
 
@@ -555,7 +605,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         def completion_lambda(
             all_tensor_views_to_copy, tensors_to_check, post_process_list_for_lowp
         ):
-            for view, recv_tensor, inplace, inst_dest_name in all_tensor_views_to_copy:
+            for view, recv_tensor, inst_dest_name in all_tensor_views_to_copy:
                 update_tensor_view(view, recv_tensor, inplace, inst_dest_name)
 
             all_tensor_views_to_copy.clear()
@@ -566,11 +616,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 insts,
                 inst_dest_name,
             ) in tensors_to_check:
-                # Some corner cases that we should not do weight sync check.
-                # do_check = self.weight_mapper.weight_sync_check_filter(
-                #     self.parallel_dims, inst_dest_name
-                # )
-                # if do_check:
+                cloned_target_tensor = cloned_target_tensor.to(target_dtype).to(
+                    cloned_target_tensor.dtype
+                )
                 if not torch.allclose(cloned_target_tensor, target_tensor):
                     raise ValueError(
                         f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
@@ -738,11 +786,15 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # For non-fp8/mxfp4 weights and fp8/mxfp4 not enabled cases, we just do nothing
                 pass
 
-        return total_bytes_received, partial(
-            completion_lambda,
-            all_tensor_views_to_copy,
-            tensors_to_check,
-            post_process_list_for_lowp,
+        return (
+            total_bytes_received,
+            partial(
+                completion_lambda,
+                all_tensor_views_to_copy,
+                tensors_to_check,
+                post_process_list_for_lowp,
+            ),
+            skipped_params_cnt,
         )
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
@@ -803,6 +855,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
 
         if not hasattr(self, "policy_to_rollout_recv_insts"):
+            assert (
+                not command.trainable_only
+            ), "all params must be transferred at the first time P2R"
             logger.info(
                 "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
             )
@@ -832,6 +887,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             logger.info(
                 "[Rollout] Finished policy_to_rollout_recv_insts from controller."
             )
+        else:
+            assert (
+                command.trainable_only
+            ), "only trainable params should be transferred at the not first time P2R"
+
+        self.prepare_trainable_params()
 
         total_recvs = 0
         total_params = 0
@@ -841,6 +902,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 total_recvs += len(insts_for_per_param.instructions)
 
         copy_stream = torch.cuda.Stream()
+
+        assert total_params == len(
+            self.recv_param_key_n_rank_list
+        ), "Mismatch in total params and received param keys"
 
         with torch.cuda.stream(self.inference_stream):
             logger.info(
@@ -869,15 +934,46 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             nccl_group_start(communicator_index)
 
+            skipped_params_cnt = 0
+            transferred_params_cnt = 0
+            skipped_groups_cnt = 0
+            transferred_groups_cnt = 0
+
             for insts_group in self.policy_to_rollout_recv_insts:
                 # insts_group: WeightSyncInstructionsGroup -> inst collection for a full weight tensor
                 # handle inst group
-                bytes_received, completion_fn = self.recv_weight_shard(
+                (
+                    bytes_received,
+                    completion_fn,
+                    skipped_cnt,
+                ) = self.recv_weight_shard(
                     self.global_rank,
                     insts_group,
                     communicator_index,
+                    command.trainable_only,
                     command.do_weight_sync_check,
                 )
+                skipped_params_cnt += skipped_cnt
+                transferred_params_cnt += (
+                    len(insts_group.param_instructions) - skipped_cnt
+                )
+                if (
+                    self.weight_mapper.get_unsplited_weight_name(
+                        insts_group.param_instructions[0].param_name
+                    )
+                    != insts_group.param_instructions[0].param_name
+                ):
+                    # The params in the group of this case originally belong to the same param.
+                    # The following counts related with `groups` measure the original params before split.
+                    # The count related with `groups` match the count in R2R which is without split.
+                    skipped_groups_cnt += 1 if skipped_cnt > 0 else 0
+                    transferred_groups_cnt += 0 if skipped_cnt > 0 else 1
+                else:
+                    skipped_groups_cnt += skipped_cnt
+                    transferred_groups_cnt += (
+                        len(insts_group.param_instructions) - skipped_cnt
+                    )
+
                 pending_bytes[0] += bytes_received
                 pending_completions.append(completion_fn)
                 total_bytes_received += bytes_received
@@ -902,8 +998,16 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             time_eclapsed = time.time() - st
             logger.info(
-                f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
+                f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received. While {skipped_params_cnt} non-trainable splitted params skipped and {transferred_params_cnt} trainable splitted params transferred."
             )
+
+            if command.trainable_only:
+                if not hasattr(self, "synced_trainable_params"):
+                    self.synced_trainable_params = transferred_groups_cnt
+                else:
+                    assert (
+                        self.synced_trainable_params == transferred_groups_cnt
+                    ), f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.synced_trainable_params}."
 
             self.state.set_weight_synced()
 
@@ -937,6 +1041,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.prepare_shard_infos_for_weight_sync_insts()
 
         if len(dst_replica_names) > 1:
+            self.prepare_trainable_params()
+            skipped_params_cnt = 0
+            transferred_params_cnt = 0
             logger.info("Starting broadcasting of parameters to all replicas.")
             # Only do broadcast if there are more than one rollout replicas.
             with torch.cuda.stream(self.inference_stream):
@@ -949,7 +1056,19 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
                 src_rank = self.replica_name_to_rank[src_replica_name]
 
-                for parameter in self.get_underlying_model().state_dict().values():
+                for name, parameter in self.get_underlying_model().state_dict().items():
+                    name = self.weight_mapper._rollout_vllm_name_to_hf(name)
+                    if (
+                        name not in self.trainable_params
+                        and broadcast_command.trainable_only
+                    ):
+                        logger.debug(
+                            f"[Rollout] Skip {name} in R2R due to non trainable."
+                        )
+                        skipped_params_cnt += 1
+                        continue
+                    transferred_params_cnt += 1
+
                     recv_tensor = parameter
                     if not parameter.is_contiguous():
                         recv_tensor = parameter.contiguous()
@@ -960,8 +1079,19 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         parameter.copy_(recv_tensor)
 
                 if not self.state.weight_synced():
+                    assert not broadcast_command.trainable_only, "[Rollout] Trainable only must be set to False for the first broadcast."
                     self.state.set_weight_synced()
-            logger.info("Finished broadcasting of parameters to all replicas.")
+
+            logger.info(
+                f"[Rollout] Finished broadcasting of parameters to all replicas. While {skipped_params_cnt} unsplitted non-trainable params skipped and {transferred_params_cnt} unsplitted params transferred."
+            )
+            if broadcast_command.trainable_only:
+                if not hasattr(self, "synced_trainable_params"):
+                    self.synced_trainable_params = transferred_params_cnt
+                else:
+                    assert (
+                        self.synced_trainable_params == transferred_params_cnt
+                    ), f"Trainable synced params count in R2R {transferred_params_cnt} must match the synced_trainable_params attribute {self.synced_trainable_params}."
 
         current_step = broadcast_command.weight_step
         if current_step is not None:
@@ -1117,7 +1247,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         current_command = dist_utils.broadcast_object_cpu(current_command)
 
         if current_command is not None:
-            logger.info(f"[Rollout] Current command: {current_command}")
             handler = self.get_rollout_command_handler(type(current_command))
             if handler is None:
                 raise Exception(

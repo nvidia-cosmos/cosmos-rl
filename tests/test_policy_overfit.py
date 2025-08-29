@@ -68,8 +68,11 @@ class TestPolicyOverfit(unittest.TestCase):
             "--rdzv_backend=c10d",
             "--rdzv_endpoint=localhost:0",
             os.path.join(cur_dir, "launch_test_worker.py"),
+            "--shm_name",
             "-1",
+            "--shm_size",
             "-1",
+            "--mode",
             "test_overfit",
         ]
         policy_env = dict(os.environ)

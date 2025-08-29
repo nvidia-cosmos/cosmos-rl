@@ -67,8 +67,11 @@ class TestProcessFlow(unittest.TestCase):
             "--rdzv_backend=c10d",
             "--rdzv_endpoint=localhost:0",
             os.path.join(cur_dir, "launch_test_worker.py"),
+            "--shm_name",
             "-1",
+            "--shm_size",
             "-1",
+            "--mode",
             "dummy_policy",
         ]
         rollout_cmd = [
@@ -79,8 +82,11 @@ class TestProcessFlow(unittest.TestCase):
             "--rdzv_backend=c10d",
             "--rdzv_endpoint=localhost:0",
             os.path.join(cur_dir, "launch_test_worker.py"),
+            "--shm_name",
             "-1",
+            "--shm_size",
             "-1",
+            "--mode",
             "dummy_rollout",
         ]
         policy_env = dict(os.environ)
@@ -153,8 +159,11 @@ class TestProcessFlow(unittest.TestCase):
             "--rdzv_backend=c10d",
             "--rdzv_endpoint=localhost:0",
             os.path.join(cur_dir, "launch_test_worker.py"),
+            "--shm_name",
             "-1",
+            "--shm_size",
             "-1",
+            "--mode",
             "dummy_policy",
         ]
         policy_env = dict(os.environ)

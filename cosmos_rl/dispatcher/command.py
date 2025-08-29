@@ -230,6 +230,7 @@ class PolicyToRolloutUnicastCommand(Command):
         src_replica_size: int,
         dst_replica_size: int,
         do_weight_sync_check: bool = False,
+        trainable_only: bool = False,
         weight_step: Optional[int] = None,
         total_steps: Optional[int] = None,
         **kwargs,
@@ -242,6 +243,8 @@ class PolicyToRolloutUnicastCommand(Command):
         self.src_replica_size = src_replica_size
         self.dst_replica_size = dst_replica_size
         self.do_weight_sync_check = do_weight_sync_check
+        # Only transfer the trainable params.
+        self.trainable_only = trainable_only
         self.weight_step = weight_step
         self.total_steps = total_steps
 
@@ -250,6 +253,7 @@ class PolicyToRolloutUnicastCommand(Command):
     src_replica_size: int
     dst_replica_size: int
     do_weight_sync_check: bool
+    trainable_only: bool
     weight_step: Optional[int]
     total_steps: Optional[int]
 
@@ -270,6 +274,7 @@ class PolicyToRolloutUnicastCommand(Command):
             src_replica_size,
             dst_replica_size,
             cls._do_weight_sync_check_flag,
+            dst_replica.weights_loaded_in_view_of_command,
             weight_step,
             total_steps,
         )
@@ -296,6 +301,7 @@ class RolloutToRolloutBroadcastCommand(Command):
         dst_replica_names: List[str],
         weight_step: Optional[int],
         total_steps: Optional[int],
+        trainable_only: bool,
         **kwargs,
     ):
         kwargs["scope"] = CommandScope.GLOBAL
@@ -305,11 +311,14 @@ class RolloutToRolloutBroadcastCommand(Command):
         self.dst_replica_names = dst_replica_names
         self.weight_step = weight_step
         self.total_steps = total_steps
+        # Only transfer the trainable params.
+        self.trainable_only = trainable_only
 
     src_replica_name: str
     dst_replica_names: List[str]
     weight_step: Optional[int]
     total_steps: Optional[int]
+    trainable_only: bool
 
     @classmethod
     def trigger(
@@ -328,6 +337,9 @@ class RolloutToRolloutBroadcastCommand(Command):
             [replica.name for replica in dst_replicas],
             weight_step,
             total_steps,
+            all(
+                [replica.weights_loaded_in_view_of_command for replica in dst_replicas]
+            ),
         )
         for replica in dst_replicas:
             if not replica.in_mesh:

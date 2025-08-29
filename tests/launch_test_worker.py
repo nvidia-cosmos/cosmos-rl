@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import sys
 import torch
 import time
 from multiprocessing import shared_memory
@@ -26,7 +25,6 @@ import cosmos_rl.utils.util as util
 from transformers import AutoTokenizer
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 import msgpack
-
 import threading
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.trainer import Trainer
@@ -65,7 +63,24 @@ from cosmos_rl.utils.pynccl import (
     nccl_broadcast,
 )
 import cosmos_rl.utils.distributed as dist_util
+from cosmos_rl.utils.logging import logger
 import asyncio
+from cosmos_rl.dispatcher.data.packer import (
+    DecoderOnlyLLMDataPacker,
+)
+import cosmos_rl.utils.distributed as dist_utils
+import uuid
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_info_collect,
+    pack_sequences_for_masks,
+    pack_sequences_for_labels,
+)
+from torch.utils.data import DataLoader, DistributedSampler, Sampler
+from cosmos_rl.policy.trainer.sft_trainer import collate_fn, construct_dataset
+
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -76,7 +91,7 @@ class TestModel:
     model_path = "Qwen/Qwen2.5-3B-Instruct"
     num_hidden_layers = 16
 
-    def __init__(self, device, parallel_dims):
+    def __init__(self, device, parallel_dims, freeze_params: bool = False):
         self.sorted_hf_key_n_rank = [
             ("model.layers.9.input_layernorm.weight", torch.Size([1024])),
             ("model.layers.9.mlp.down_proj.weight", torch.Size([1024, 11008])),
@@ -113,6 +128,16 @@ class TestModel:
             ("model.embed_tokens.weight", {"tp": 0}),
         ]
 
+        self.keys_to_freeze = (
+            [
+                "model.layers.9.mlp.down_proj.weight",
+                "model.layers.9.mlp.gate_proj.weight",
+                "model.layers.9.mlp.up_proj.weight",
+            ]
+            if freeze_params
+            else []
+        )
+
         self.sorted_hf_key_n_rank.sort(key=lambda x: x[0])
 
         self.config = AutoConfig.from_pretrained(self.model_path)
@@ -121,10 +146,19 @@ class TestModel:
         self.tensors = [
             (
                 k,
-                torch.arange(v.numel(), dtype=torch.float32, device=self.device)
-                .reshape(v)
-                .to(self.device)
-                * 0.001,
+                (
+                    torch.arange(v.numel(), dtype=torch.float32, device=self.device)
+                    .reshape(v)
+                    .to(self.device)
+                    * 0.001
+                ).requires_grad_(True)
+                if k not in self.keys_to_freeze
+                else (
+                    torch.arange(v.numel(), dtype=torch.float32, device=self.device)
+                    .reshape(v)
+                    .to(self.device)
+                    * 0.001
+                ).requires_grad_(False),
             )
             for k, v in self.sorted_hf_key_n_rank
         ]
@@ -138,9 +172,18 @@ class TestModel:
         ]
         self.weight_mapper = GPTWeightMapper(self.config)
 
+    def get_trainable_params(self):
+        trainable_params = set()
+        for k, v in self.sharded_tensors.items():
+            if v.requires_grad:
+                trainable_params.add(k)
+        return trainable_params
+
 
 class TestPolicy:
-    def __init__(self, name, policy_world_size, rollouts_comm):
+    def __init__(
+        self, name, policy_world_size, rollouts_comm, freeze_params: bool = False
+    ):
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
@@ -153,7 +196,7 @@ class TestPolicy:
             policy_parallelism_dims,
         )
         self.parallel_dims.build_mesh(device_type="cuda")
-        self.model = TestModel(self.device, self.parallel_dims)
+        self.model = TestModel(self.device, self.parallel_dims, freeze_params)
         self.parallel_mapper = ParallelTopoMapperGroup(
             self.parallel_dims,
             self.model.config,
@@ -171,15 +214,22 @@ class TestPolicy:
         self.config = CosmosConfig()
         self.config.train.param_dtype = "float32"
 
+        self.prepare_trainable_params()
+
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
 
     def pre_P2R_collect_parameters(self):
         return {}
 
+    def prepare_trainable_params(self):
+        self.trainable_params = self.model.get_trainable_params()
+
 
 class TestRollout:
-    def __init__(self, name, rollout_world_size, policies_comm):
+    def __init__(
+        self, name, rollout_world_size, policies_comm, freeze_params: bool = False
+    ):
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
@@ -194,7 +244,7 @@ class TestRollout:
             rollout_parallelism_config,
         )
         self.parallel_dims.build_mesh(device_type="cuda")
-        self.model = TestModel(self.device, self.parallel_dims)
+        self.model = TestModel(self.device, self.parallel_dims, freeze_params)
         self.parallel_mapper = ParallelTopoMapperGroup(
             self.parallel_dims,
             self.model.config,
@@ -215,7 +265,7 @@ class TestRollout:
         self.config.train.param_dtype = "float32"  # keep the same as policy above.
 
         self.vllm_weight_inplace_view_map = compatibale_map
-        self.recv_key_n_rank_list = compatibale_list
+        self.recv_param_key_n_rank_list = compatibale_list
         self.vllm_quantized_weight_map = {}
         self.vllm_hp_weight_map = {}
 
@@ -236,11 +286,16 @@ class TestRollout:
 
         self.rollout = vLLMRollout(self.config, tokenizer)
 
+        self.prepare_trainable_params()
+
     def get_underlying_model(self):
         return None
 
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
+
+    def prepare_trainable_params(self):
+        self.trainable_params = self.model.get_trainable_params()
 
 
 async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
@@ -327,6 +382,7 @@ async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank:
         "shard_infos": local_shards_p,
         "param_groups": [],
         "sorted_params": p_params,
+        "trainable_params": list(model.get_trainable_params()),
     }
     p_data = msgpack.packb(p_body)
     r_body = {
@@ -350,7 +406,7 @@ async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank:
     return policy_to_rollout_insts
 
 
-async def run_policy_send_to_rollout(shm_name, shm_size, rank):
+async def run_policy_send_to_rollout(shm_name, shm_size, rank, trainable_param_sync):
     """Run as a test policy process to send to rollout process"""
     # Set up NCCL communicator
     policy_name = "policy"
@@ -360,7 +416,11 @@ async def run_policy_send_to_rollout(shm_name, shm_size, rank):
     shm = shared_memory.SharedMemory(name=shm_name)
 
     command = PolicyToRolloutUnicastCommand(
-        policy_name, rollout_name, POLICY_WORLD_SIZE, ROLLOUT_WORLD_SIZE, ""
+        policy_name,
+        rollout_name,
+        POLICY_WORLD_SIZE,
+        ROLLOUT_WORLD_SIZE,
+        trainable_only=trainable_param_sync,
     )
 
     try:
@@ -386,6 +446,7 @@ async def run_policy_send_to_rollout(shm_name, shm_size, rank):
             policy_name,
             POLICY_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
+            trainable_param_sync,
         )
         policy.policy_to_rollout_insts = await generate_send_recv_insts(
             policy.model, True, rank
@@ -401,7 +462,7 @@ async def run_policy_send_to_rollout(shm_name, shm_size, rank):
         shm.close()
 
 
-async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
+async def run_rollout_recv_from_policy(shm_name, shm_size, rank, trainable_param_sync):
     """Run as a rollout process to receive from policy process"""
     # Set up NCCL communicator
     policy_name = "policy"
@@ -411,7 +472,11 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
     shm = shared_memory.SharedMemory(name=shm_name)
 
     command = PolicyToRolloutUnicastCommand(
-        policy_name, rollout_name, POLICY_WORLD_SIZE, ROLLOUT_WORLD_SIZE, ""
+        policy_name,
+        rollout_name,
+        POLICY_WORLD_SIZE,
+        ROLLOUT_WORLD_SIZE,
+        trainable_only=trainable_param_sync,
     )
     try:
         # Get NCCL UID from shared memory
@@ -429,6 +494,7 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank):
             rollout_name,
             ROLLOUT_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
+            trainable_param_sync,
         )
         rollout.policy_to_rollout_recv_insts = await generate_send_recv_insts(
             rollout.model, False, rank
@@ -648,7 +714,6 @@ def run_policy_broadcast_to_policy(shm_names, shm_size, rank, total_rep, self_re
 
 def run_overfitting_policy():
     from cosmos_rl.policy.train import main as policy_main
-    from cosmos_rl.utils.logging import logger
     from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 
     N_STEPS = 30
@@ -1098,6 +1163,7 @@ async def parallel_map_check():
         "shard_infos": local_shards_p,
         "param_groups": [],
         "sorted_params": p_params,
+        "trainable_params": [x[0] for x in layers],
     }
     p_data = msgpack.packb(p_body)
     r_body = {
@@ -1168,11 +1234,229 @@ async def parallel_map_check():
                     p_rank_max = p_rank
 
 
+def run_sft_for_sequence_packing(fsdp, tp, cp):
+    def train_test(self, packing_seq):
+        train_dataset, _ = construct_dataset(
+            config.train.train_policy,
+            tokenizer=self.tokenizer,
+            data_packer=self.data_packer,
+            user_provided_dataset=None,
+        )
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=self.dp_world_size,
+            rank=self.dp_rank,
+            shuffle=False,
+            drop_last=False,
+        )
+
+        def get_train_data_loader(sampler: Sampler[int]):
+            return DataLoader(
+                train_dataset,
+                batch_size=config.train.train_batch_per_replica,
+                shuffle=False,
+                num_workers=config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                sampler=sampler,
+                collate_fn=collate_fn,
+                drop_last=False,
+            )
+
+        self.train_data_loader = get_train_data_loader(train_sampler)
+        losses = []
+        for global_batch in self.train_data_loader:
+            acc_loss = torch.zeros(1, device=self.device)
+            self.optimizers.zero_grad()
+            global_batch_size = len(global_batch)
+            # split global_batch into mini_batches
+            mini_batch_begin_idxs = list(
+                range(
+                    0,
+                    global_batch_size,
+                    self.config.train.train_policy.mini_batch,
+                )
+            )
+            for i in mini_batch_begin_idxs:
+                raw_batch = global_batch[
+                    i : i + self.config.train.train_policy.mini_batch
+                ]
+                max_len = min(
+                    self.config.policy.model_max_length,
+                    self.data_packer.sft_compute_max_len(raw_batch),
+                )
+                if self.seq_len_multiple > 1:
+                    max_len = (
+                        (max_len + self.seq_len_multiple - 1)
+                        // self.seq_len_multiple
+                        * self.seq_len_multiple
+                    )
+                batch = self.data_packer.sft_collate_fn(
+                    raw_batch,
+                    computed_max_len=max_len,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    ignore_label_id=-100,
+                )
+                self.model.train()
+                for k, v in batch.items():
+                    batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
+                labels = batch.pop("label_ids")
+                position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
+                    **batch
+                )
+                batch["position_ids"] = position_ids
+                padding_mask = batch.get("padding_mask", None)
+                if packing_seq:
+                    # Prepare for the sequence packing information.
+                    packed_args = pack_sequences_info_collect(
+                        batch["input_ids"],
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        label_ids=labels,
+                        ignore_label_id=-100,
+                        seq_len_multiple=self.seq_len_multiple,
+                    )
+                    batch.update(packed_args)
+                    labels = pack_sequences_for_labels(labels, batch["valid_input_len"])
+                    packed_args = pack_sequences_for_masks(
+                        batch["valid_input_len"], batch["valid_input_len"]
+                    )
+                    batch.update(packed_args)
+
+                if self.parallel_dims.cp_enabled and not packing_seq:
+                    [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
+                        [input_ids, position_ids, padding_mask],
+                        self.parallel_dims.mesh["cp"],
+                        seq_dims=[1, pos_seq_dim, 1],
+                    )
+                    batch["input_ids"] = input_ids
+                    batch["position_ids"] = position_ids
+                    if padding_mask is not None:
+                        batch["padding_mask"] = padding_mask
+
+                if self.parallel_dims.cp_enabled and packing_seq:
+                    # Slice for cp after embedding generation and sequence packing in the model forward later.
+                    batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
+                logits = self.model(**batch)
+
+                loss = self.loss_fn(
+                    logits,
+                    labels,
+                    output_packing_mask=batch.get("input_packing_mask", None),
+                    target_packing_mask=batch.get("label_packing_mask", None),
+                    loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
+                )
+                loss.backward()
+                acc_loss += loss.detach()
+                all_params = [
+                    p
+                    for m in [model for model in self.model_parts if model is not None]
+                    for p in m.parameters()
+                ]
+                dist_util.gradient_norm_clipping(
+                    all_params,
+                    self.config.train.optm_grad_norm_clip,
+                    foreach=True,
+                    pp_mesh=self.parallel_dims.mesh["pp"]
+                    if self.parallel_dims.pp_enabled
+                    else None,
+                    return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+                )
+                self.optimizers.step()
+                self.lr_schedulers.step()
+                self.train_step += 1
+                if (
+                    self.parallel_dims.dp_replicate_enabled
+                    or self.parallel_dims.dp_shard_enabled
+                    or self.parallel_dims.cp_enabled
+                ):
+                    global_avg_loss, global_max_loss = (  # noqa: F841
+                        dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                        dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                    )
+                else:
+                    global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
+
+                if util.is_master_rank(self.parallel_dims, self.global_rank):
+                    losses.append(global_avg_loss)
+                if self.train_step >= 8:
+                    return losses
+        return losses
+
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_sft.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.policy.parallelism.dp_shard_size = fsdp
+    config.policy.parallelism.tp_size = tp
+    config.policy.parallelism.cp_size = cp
+    logger.info(f"[Test] sequence packing with fsdp {fsdp}, tp {tp}, cp {cp}")
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        hf_config = util.retry(AutoConfig.from_pretrained)(
+            self.config.policy.model_name_or_path, trust_remote_code=True
+        )
+        model_type = hf_config.model_type
+        logger.info(f"model type {model_type}")
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        self.remote_hosts = ["0.0.0.0:8000"]
+        pass
+
+    CommMixin.init_comm = dummy
+    trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
+    non_packing_losses = train_test(trainer, False)
+    trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
+    packing_losses = train_test(trainer, True)
+    if util.is_master_rank(trainer.parallel_dims, trainer.global_rank):
+        assert len(non_packing_losses) == 8
+        assert len(packing_losses) == 8
+        logger.info(f"[Test] non_packing_losses: {non_packing_losses}")
+        logger.info(f"[Test] packing_losses: {packing_losses}")
+        assert np.allclose(non_packing_losses, packing_losses, atol=1e-3, rtol=1e-3)
+
+
 async def main():
     # Get shared memory name and size from command line arguments
-    shm_name = sys.argv[1]
-    shm_size = int(sys.argv[2])
-    mode = sys.argv[3]
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--shm_name", type=str)  # 1st arg
+    parser.add_argument("--shm_size", type=int)  # 2nd arg
+    parser.add_argument("--mode", type=str, required=True)  # 3rd arg
+    parser.add_argument(
+        "--parallel_config",
+        type=str,
+        required=False,
+        default="",
+        help="Parallel dimensions to use for the test. Format: fsdp;tp;pp",
+    )
+    parser.add_argument(
+        "--trainable_param_sync",
+        type=bool,
+        required=False,
+        default=False,
+        help="If only trainable params are synced. If set, part of the params will be frozen.",
+    )  # 4th arg
+    args = parser.parse_args()
+    mode = args.mode
+    shm_name = args.shm_name
+    shm_size = args.shm_size
+    mode = args.mode
+    trainable_param_sync = (
+        args.trainable_param_sync
+    )  # If only trainable params are synced
 
     if mode == "dummy_policy":
         os.environ["COSMOS_ROLE"] = "Policy"
@@ -1186,6 +1470,14 @@ async def main():
         exit(0)
     elif mode == "test_overfit":
         run_overfitting_policy()
+        exit(0)
+    elif mode == "sft_for_sequence_packing":
+        sepc = args.parallel_config
+        fsdp, tp, cp = sepc.split(";")
+        fsdp = int(fsdp.split(":")[1])
+        tp = int(tp.split(":")[1])
+        cp = int(cp.split(":")[1])
+        run_sft_for_sequence_packing(fsdp, tp, cp)
         exit(0)
 
     # Initialize distributed environment
@@ -1205,12 +1497,14 @@ async def main():
         assert (
             world_size == POLICY_WORLD_SIZE
         ), "World size must match POLICY_WORLD_SIZE for policy process"
-        await run_policy_send_to_rollout(shm_name, shm_size, rank)
+        await run_policy_send_to_rollout(shm_name, shm_size, rank, trainable_param_sync)
     elif mode == "rollout_recv_from_policy":
         assert (
             world_size == ROLLOUT_WORLD_SIZE
         ), "World size must match ROLLOUT_WORLD_SIZE for rollout process"
-        await run_rollout_recv_from_policy(shm_name, shm_size, rank)
+        await run_rollout_recv_from_policy(
+            shm_name, shm_size, rank, trainable_param_sync
+        )
     elif mode == "policy_send_to_policy":
         run_policy_unicast_to_policy(shm_name, shm_size, rank, True)
     elif mode == "policy_recv_from_policy":
@@ -1220,14 +1514,14 @@ async def main():
         self_rep = int(mode.split(",")[2])
         run_policy_broadcast_to_policy(shm_name, shm_size, rank, total_rep, self_rep)
     elif mode == "policy_parallelism_extract":
-        sepc = sys.argv[4]
+        sepc = args.parallel_config
         fsdp, tp, pp = sepc.split(";")
         fsdp = int(fsdp.split(":")[1])
         tp = int(tp.split(":")[1])
         pp = int(pp.split(":")[1])
         run_policy_parallelism_extract(rank, fsdp, tp, pp)
     elif mode == "rollout_parallelism_extract":
-        sepc = sys.argv[4]
+        sepc = args.parallel_config
         fsdp, tp, pp = sepc.split(";")
         fsdp = int(fsdp.split(":")[1])
         tp = int(tp.split(":")[1])

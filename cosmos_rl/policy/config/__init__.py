@@ -112,7 +112,7 @@ class SFTDataConfig(BaseModel):
     )
 
     dataloader_shuffle: bool = Field(
-        default=False,
+        default=True,
         description="Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.",
     )
     enable_dataset_cache: bool = Field(
@@ -471,6 +471,11 @@ class TrainingConfig(BaseModel):
         description="The data type for forward/backward. Outside forward/backward, params are in `master_dtype`",
         choices=["bfloat16", "float16", "float32"],
     )
+    transfer_dtype: str = Field(
+        default=None,
+        description="The data type for transfer parameters between Policy and Rollout.",
+        choices=["bfloat16", "float16", "float32"],
+    )
 
     fsdp_reduce_dtype: str = Field(
         default="float32",
@@ -546,6 +551,11 @@ class TrainingConfig(BaseModel):
     max_num_steps: Optional[int] = Field(
         default=None,
         description="Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.",
+    )
+
+    sequence_packing: bool = Field(
+        default=False,
+        description="Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.",
     )
 
     @model_validator(mode="after")
@@ -932,10 +942,30 @@ class Config(BaseModel):
                 == 0
             ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
 
+        # Validate constraints for GRPO with LoRA
+        if (
+            isinstance(self.train.train_policy, GrpoConfig)
+            and self.policy.lora is not None
+        ):
+            # compile must be disabled due to known incompatibilities
+            if self.train.compile:
+                raise ValueError(
+                    "Invalid config: GRPO with LoRA requires train.compile=False."
+                )
+            # TP must be 1 to avoid unsupported/distributed behaviors
+            if self.policy.parallelism.tp_size != 1:
+                raise ValueError(
+                    "Invalid config: GRPO with LoRA requires policy.parallelism.tp_size == 1."
+                )
+
         if self.train.train_policy.type == "grpo":
             # Handle for evaludation configuration.
             if isinstance(self.validation.dataset.split, str):
                 self.validation.dataset.split = [self.validation.dataset.split]
+
+        if self.train.transfer_dtype is None:
+            # Default use param_dtype as transfer_dtype
+            self.train.transfer_dtype = self.train.param_dtype
         return self
 
 
