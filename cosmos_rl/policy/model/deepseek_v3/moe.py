@@ -311,7 +311,6 @@ class MoE(nn.Module):
     Attributes:
         dim (int): Dimensionality of input features.
         n_routed_experts (int): Total number of experts in the model.
-        n_local_experts (int): Number of experts handled locally in distributed systems.
         n_activated_experts (int): Number of experts activated for each input.
         gate (nn.Module): Gating mechanism to route inputs to experts.
         experts (nn.ModuleList): List of expert modules.
@@ -350,7 +349,6 @@ class MoE(nn.Module):
                 dim=args.dim,
                 inter_dim=args.moe_inter_dim,
                 n_routed_experts=args.n_activated_experts,
-                n_activated_experts=args.n_activated_experts,
             )
         self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
 
