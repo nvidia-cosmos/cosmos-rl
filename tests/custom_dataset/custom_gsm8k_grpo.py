@@ -10,7 +10,6 @@ from cosmos_rl.tools.dataset.gsm8k_grpo import (
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 from torch.utils.data import Dataset
-import sys
 
 
 class MinimalGSM8kDataset(GSM8kDataset):
@@ -41,9 +40,9 @@ if __name__ == "__main__":
         args = parser.parse_args()
         assert args.x_arg == "cosmos_rl"
         assert args.foo == "cosmos"
-    except Exception as e:
-        logger.error(f"Error parsing arguments: {e}")
-        sys.exit(1)
+    except SystemExit as e:
+        logger.error("Error parsing arguments.")
+        raise e
 
     def get_dataset(config: CosmosConfig) -> Dataset:
         return MinimalGSM8kDataset()
