@@ -75,7 +75,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import DataPacker, worker_entry_parser
 from fastapi.responses import Response
 from fastapi import Request
 
@@ -600,6 +600,7 @@ def main(
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
+    args: Optional[argparse.Namespace] = None,
     **kwargs,
 ):
     if kwargs:
@@ -627,39 +628,25 @@ def main(
             run_rollout()
         return
 
-    parser = argparse.ArgumentParser(
-        description="Run the web panel for the dispatcher."
-    )
-    parser.add_argument(
-        "--port", type=int, default=8000, help="Port to run the web panel on."
-    )
-    parser.add_argument(
-        "--redis-port", type=int, default=12800, help="Port to run the web panel on."
-    )
-    parser.add_argument(
-        "--config-file",
-        type=str,
-        default=None,
-        required=True,
-        help="Path to TOML configuration file to load.",
-    )
-    parser.add_argument(
-        "--redis-logfile-path",
-        type=str,
-        default="/tmp/redis.log",
-        help="The redis server log file path.",
-    )
-    args = parser.parse_args()
+    if args is None:
+        # This means that args are not parsed in dataset entry script
+        # So we need to parse the args manually
+        parser = worker_entry_parser()
+        try:
+            args = parser.parse_args()
+        except SystemExit as e:
+            logger.error(
+                "Error when parsing args. Did you use custom arguments in your script? If so, please check your custom script and pass `args` to this main function."
+            )
+            raise e
 
     # Load config from file if provided
     loaded_config = None
-    assert os.path.exists(
-        args.config_file
-    ), f"Config file {args.config_file} does not exist."
+    assert os.path.exists(args.config), f"Config file {args.config} does not exist."
 
     try:
-        logger.info(f"Attempting to load configuration from {args.config_file}")
-        with open(args.config_file, "r") as f:
+        logger.info(f"Attempting to load configuration from {args.config}")
+        with open(args.config, "r") as f:
             config_dict = toml.load(f)
 
         # Ensure CosmosConfig is available (it's imported at the top now)
@@ -694,12 +681,12 @@ def main(
             val_data_packer=val_data_packer,
             custom_logger_fns=custom_logger_fns,
         )
-        logger.info(f"Successfully loaded configuration from {args.config_file}")
+        logger.info(f"Successfully loaded configuration from {args.config}")
     except FileNotFoundError:
-        raise FileNotFoundError(f"Config file not found: {args.config_file}")
+        raise FileNotFoundError(f"Config file not found: {args.config}")
     except Exception as e:
         raise RuntimeError(
-            f"Failed to load or parse config file {args.config_file}: {e}.",
+            f"Failed to load or parse config file {args.config}: {e}.",
             exc_info=True,
         )
 

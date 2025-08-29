@@ -7,6 +7,7 @@ LOG_RANKS=""
 TYPE=""
 RDZV_ENDPOINT="localhost:0"
 SCRIPT=""
+SCRIPT_ARGS=()
 CONFIG=""
 BACKEND="vllm"
 
@@ -77,9 +78,8 @@ while [[ $# -gt 0 ]]; do
     exit 0
     ;;
   *)
-    echo "Unknown option: $1"
-    print_help
-    exit 1
+    SCRIPT_ARGS+=("$1")
+    shift
     ;;
   esac
 done
@@ -185,9 +185,15 @@ if [ -n "$SCRIPT" ]; then
     LAUNCH_CMD+=(
       -m "$SCRIPT"
     )
+    LAUNCH_CMD+=(
+      "${SCRIPT_ARGS[@]}"
+    )
   else
     LAUNCH_CMD+=(
       "$SCRIPT"
+    )
+    LAUNCH_CMD+=(
+      "${SCRIPT_ARGS[@]}"
     )
   fi
 else
