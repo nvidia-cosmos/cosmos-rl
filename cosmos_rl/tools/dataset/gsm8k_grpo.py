@@ -227,6 +227,7 @@ class GSM8kDataPacker(DataPacker):
 
 
 if __name__ == "__main__":
+
     def get_dataset(config: CosmosConfig) -> Dataset:
         return GSM8kDataset()
 

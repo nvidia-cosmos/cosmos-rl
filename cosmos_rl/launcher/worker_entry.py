@@ -6,6 +6,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from torch.utils.data import Dataset
 import argparse
 
+
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     data_packer: Optional[DataPacker] = None,

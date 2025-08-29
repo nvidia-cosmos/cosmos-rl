@@ -80,21 +80,27 @@ dp_replicate_size = 1
 
 """
 
+
 class TestCustomArgs(unittest.TestCase):
     def test_custom_args(self):
         # save the config file to a temp file
-        with tempfile.NamedTemporaryFile(mode="w+", suffix=".toml", delete=False) as tmpfile:
+        with tempfile.NamedTemporaryFile(
+            mode="w+", suffix=".toml", delete=False
+        ) as tmpfile:
             tmpfile.write(config_content)
             tmpfile_toml = tmpfile.name
 
         current_dir = os.path.dirname(os.path.abspath(__file__))
         config_file = f"{tmpfile_toml}"
-        custom_dataset_script = os.path.join(current_dir, "custom_dataset/custom_gsm8k_grpo.py")
+        custom_dataset_script = os.path.join(
+            current_dir, "custom_dataset/custom_gsm8k_grpo.py"
+        )
         cmd = f"cosmos-rl --config {config_file} {custom_dataset_script} --foo cosmos cosmos_rl"
         process = subprocess.Popen(cmd, shell=True)
 
         process.wait()
         self.assertEqual(process.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

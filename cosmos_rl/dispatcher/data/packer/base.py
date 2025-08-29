@@ -18,8 +18,8 @@ from typing import Any, List, Dict, Type, Union
 from transformers import AutoTokenizer
 from cosmos_rl.policy.config import Config
 
-from argparse import REMAINDER
 import argparse
+
 
 def worker_entry_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the replica entrypoint.")
@@ -44,6 +44,7 @@ def worker_entry_parser() -> argparse.ArgumentParser:
         help="The redis server log file path.",
     )
     return parser
+
 
 class DataPacker(ABC):
     _MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY: Dict[str, Type["DataPacker"]] = {}

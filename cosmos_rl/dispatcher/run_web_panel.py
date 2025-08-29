@@ -426,9 +426,9 @@ async def validation_report(request: ValidationReportRequest):
 async def put_rollout_group(rollout: RolloutRequest):
     try:
         if rollout.is_end:
-            assert len(rollout.prompt_idxs) == 0, (
-                "Prompt idxs should be empty if is_end is True"
-            )
+            assert (
+                len(rollout.prompt_idxs) == 0
+            ), "Prompt idxs should be empty if is_end is True"
             logger.info(
                 f"[Controller] Received rollout end signal from {rollout.src_replica_name}"
             )
@@ -518,9 +518,9 @@ async def put_rollout_group(rollout: RolloutRequest):
                     )
                 )
                 for shared_prefix, rollout_indices in shared_prefix_groups.items():
-                    assert len(rollout_indices) > 1, (
-                        "Shared prefix group should not be empty"
-                    )
+                    assert (
+                        len(rollout_indices) > 1
+                    ), "Shared prefix group should not be empty"
                     # Check if the shared prefix holds different rewards
                     rewards = [rollouts_group[i].reward for i in rollout_indices]
                     if len(set(rewards)) > 1:
@@ -693,9 +693,9 @@ def main(
                 )
 
         if data_packer is not None:
-            assert isinstance(data_packer, DataPacker), (
-                "data_packer should be a DataPacker instance"
-            )
+            assert isinstance(
+                data_packer, DataPacker
+            ), "data_packer should be a DataPacker instance"
         controller.setup(
             loaded_config,
             redis_port=args.redis_port,
