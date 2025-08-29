@@ -426,9 +426,9 @@ async def validation_report(request: ValidationReportRequest):
 async def put_rollout_group(rollout: RolloutRequest):
     try:
         if rollout.is_end:
-            assert (
-                len(rollout.prompt_idxs) == 0
-            ), "Prompt idxs should be empty if is_end is True"
+            assert len(rollout.prompt_idxs) == 0, (
+                "Prompt idxs should be empty if is_end is True"
+            )
             logger.info(
                 f"[Controller] Received rollout end signal from {rollout.src_replica_name}"
             )
@@ -518,9 +518,9 @@ async def put_rollout_group(rollout: RolloutRequest):
                     )
                 )
                 for shared_prefix, rollout_indices in shared_prefix_groups.items():
-                    assert (
-                        len(rollout_indices) > 1
-                    ), "Shared prefix group should not be empty"
+                    assert len(rollout_indices) > 1, (
+                        "Shared prefix group should not be empty"
+                    )
                     # Check if the shared prefix holds different rewards
                     rewards = [rollouts_group[i].reward for i in rollout_indices]
                     if len(set(rewards)) > 1:
@@ -641,7 +641,10 @@ def main(
             "--port", type=int, default=8000, help="Port to run the web panel on."
         )
         parser.add_argument(
-            "--redis-port", type=int, default=12800, help="Port to run the web panel on."
+            "--redis-port",
+            type=int,
+            default=12800,
+            help="Port to run the web panel on.",
         )
         parser.add_argument(
             "--config",
@@ -656,13 +659,17 @@ def main(
             default="/tmp/redis.log",
             help="The redis server log file path.",
         )
-        args = parser.parse_args()
+        try:
+            args = parser.parse_args()
+        except SystemExit as e:
+            logger.error(
+                "Error when parsing args. Did you use custom arguments in your script? If so, please check your custom script and pass `args` to this main function."
+            )
+            raise e
 
     # Load config from file if provided
     loaded_config = None
-    assert os.path.exists(
-        args.config
-    ), f"Config file {args.config} does not exist."
+    assert os.path.exists(args.config), f"Config file {args.config} does not exist."
 
     try:
         logger.info(f"Attempting to load configuration from {args.config}")
@@ -686,9 +693,9 @@ def main(
                 )
 
         if data_packer is not None:
-            assert isinstance(
-                data_packer, DataPacker
-            ), "data_packer should be a DataPacker instance"
+            assert isinstance(data_packer, DataPacker), (
+                "data_packer should be a DataPacker instance"
+            )
         controller.setup(
             loaded_config,
             redis_port=args.redis_port,
