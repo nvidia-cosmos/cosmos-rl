@@ -246,7 +246,7 @@ class DeepseekV3MoEModel(BaseModel):
                 if expert_id is not None:
                     # Convert expert_id to local_expert_id
                     n_local_experts = (
-                        self.model_args.n_experts
+                        self.config.n_routed_experts
                         // parallel_dims.tp
                         // parallel_dims.dp_shard
                     )
