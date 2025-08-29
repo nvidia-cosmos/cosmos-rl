@@ -75,7 +75,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import DataPacker, worker_entry_parser
 from fastapi.responses import Response
 from fastapi import Request
 
@@ -633,32 +633,9 @@ def main(
         return
 
     if args is None:
-        # This means we should parse the args manually
-        parser = argparse.ArgumentParser(
-            description="Run the web panel for the dispatcher."
-        )
-        parser.add_argument(
-            "--port", type=int, default=8000, help="Port to run the web panel on."
-        )
-        parser.add_argument(
-            "--redis-port",
-            type=int,
-            default=12800,
-            help="Port to run the web panel on.",
-        )
-        parser.add_argument(
-            "--config",
-            type=str,
-            default=None,
-            required=True,
-            help="Path to TOML configuration file to load.",
-        )
-        parser.add_argument(
-            "--redis-logfile-path",
-            type=str,
-            default="/tmp/redis.log",
-            help="The redis server log file path.",
-        )
+        # This means that args are not parsed in dataset entry script
+        # So we need to parse the args manually
+        parser = worker_entry_parser()
         try:
             args = parser.parse_args()
         except SystemExit as e:
