@@ -108,9 +108,6 @@ class CommMixin:
         self.init_data_packer(metadata)
 
     def init_data_packer(self, metadata: Dict[str, Any]):
-        # `sft_user_dataset` is only used in SFT mode when the user provides a dataset
-        self.sft_user_dataset = None
-
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
         )

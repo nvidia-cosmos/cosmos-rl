@@ -512,7 +512,6 @@ class SFTTrainer(Trainer):
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
                     val_logits = self.model(**val_batch)
-
                     # recover from ulysses if cp is enabled
                     if self.parallel_dims.cp_enabled:
                         val_batch["input_ids"] = input_ids_before_cp

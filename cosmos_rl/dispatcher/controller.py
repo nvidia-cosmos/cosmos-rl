@@ -135,7 +135,6 @@ class Controller:
         if val_dataset is not None and isinstance(val_dataset, Callable):
             val_dataset = val_dataset(config)
 
-        self.sft_user_dataset = dataset if not self.is_rl else None
         self.user_data_packer = data_packer
         self.user_val_data_packer = val_data_packer
         self.dataset = None

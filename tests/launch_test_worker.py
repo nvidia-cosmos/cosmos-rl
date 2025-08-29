@@ -1239,7 +1239,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
             config.train.train_policy,
             tokenizer=self.tokenizer,
             data_packer=self.data_packer,
-            user_provided_dataset=self.sft_user_dataset,
+            user_provided_dataset=None,
         )
         train_sampler = DistributedSampler(
             train_dataset,
@@ -1403,8 +1403,6 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
-        # `sft_user_dataset` is only used in SFT mode when the user provides a dataset
-        self.sft_user_dataset = None
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
         )
