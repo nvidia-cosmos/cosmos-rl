@@ -307,9 +307,6 @@ class HFModel(BaseModel):
             info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
         model_type = self.hf_config.model_type
-        logger.info(
-            f"Loading weights from {model_name_or_path} with revision {revision} {self.model_class=}"
-        )
         model_with_weights = self.model_class.from_pretrained(
             model_name_or_path,
             revision=revision,
