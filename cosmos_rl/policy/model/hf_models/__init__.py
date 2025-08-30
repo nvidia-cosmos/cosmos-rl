@@ -307,12 +307,14 @@ class HFModel(BaseModel):
             info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
         model_type = self.hf_config.model_type
+        dtype = self.hf_config.torch_dtype
+        self.model = self.model.to(dtype=dtype)
         model_with_weights = self.model_class.from_pretrained(
             model_name_or_path,
             revision=revision,
             config=self.hf_config,
             trust_remote_code=True,
-        ).to("cpu")
+        ).to(device="cpu", dtype=dtype)
 
         self.reset_named_buffers(model_with_weights)
 

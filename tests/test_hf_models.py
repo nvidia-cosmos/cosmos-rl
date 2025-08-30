@@ -63,7 +63,8 @@ class TestHFModel(unittest.TestCase):
     def test_post_to_empty_hook(self):
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
-            "google/gemma-3-12b-it",
+            "llava-hf/llava-1.5-7b-hf",
+            # "google/gemma-3-12b-it", Need access to the repo
             "mistralai/Mistral-7B-Instruct-v0.3",
             "microsoft/phi-4",
         ]:
@@ -78,6 +79,7 @@ class TestHFModel(unittest.TestCase):
                 # Load config
                 config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
                 config.max_position_embeddings = max_position_embeddings
+                config.torch_dtype = dtype
                 # Load cosmos hf model
                 cosmos_hf_model = None
                 with torch.device("meta"):
@@ -96,8 +98,8 @@ class TestHFModel(unittest.TestCase):
 
                 # Load hf model
                 hf_model = cosmos_hf_model.model_class.from_pretrained(
-                    model_id, trust_remote_code=True, torch_dtype=dtype, config=config
-                ).to("cuda")
+                    model_id, trust_remote_code=True, config=config
+                ).to("cuda", dtype=dtype)
                 hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
 
                 for name, cosmos_hf_buffer in cosmos_hf_model.model.named_buffers():
@@ -119,11 +121,13 @@ class TestHFModel(unittest.TestCase):
                 del cosmos_hf_model
                 del hf_model
                 del hf_named_buffers
+                torch.cuda.empty_cache()
 
     def test_forward(self):
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
-            "google/gemma-3-12b-it",
+            "llava-hf/llava-1.5-7b-hf",
+            # "google/gemma-3-12b-it", # Need access to the repo
             "mistralai/Mistral-7B-Instruct-v0.3",
             "microsoft/phi-4",
         ]:
@@ -132,6 +136,7 @@ class TestHFModel(unittest.TestCase):
             config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
             config.max_position_embeddings = max_position_embeddings
             config._attn_implementation = "eager"
+            config.torch_dtype = dtype
             cosmos_hf_model = None
             with torch.device("meta"):
                 with cosmos_default_dtype(dtype):
@@ -148,8 +153,8 @@ class TestHFModel(unittest.TestCase):
             )
 
             hf_model = cosmos_hf_model.model_class.from_pretrained(
-                model_id, trust_remote_code=True, torch_dtype=dtype, config=config
-            ).to("cuda")
+                model_id, trust_remote_code=True, config=config
+            ).to("cuda", dtype=dtype)
             processor = AutoProcessor.from_pretrained(
                 model_id, trust_remote_code=True, use_fast=True
             )
