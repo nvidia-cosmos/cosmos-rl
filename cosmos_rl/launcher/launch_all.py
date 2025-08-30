@@ -26,8 +26,6 @@ import argparse
 from typing import List, Dict, Optional, Any, Callable
 import toml
 import tempfile
-import cosmos_rl.utils.network_util as network_util
-from cosmos_rl.policy.config import Config as CosmosConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")
@@ -675,8 +673,7 @@ def main():
         os.environ["COSMOS_LOG_LEVEL"] = "DEBUG"
 
     # Check if the config file is provided
-    cosmos_config = CosmosConfig.from_dict(read_config(args.config))
-
+    cosmos_config = read_config(args.config)
     if args.script is not None and args.script.endswith(".py"):
         # If the script is a Python file, we need to make sure it is absolute path
         # so that it can be found by the launched processes
@@ -686,35 +683,32 @@ def main():
 
     # Get the number of GPUs required for policy and rollout
     # and the number of replicas for each
-    policy_parallelism = cosmos_config.policy.parallelism
-    rollout_parallelism = cosmos_config.rollout.parallelism
+    policy_parallelism = cosmos_config.get("policy", {}).get("parallelism", {})
+    rollout_parallelism = cosmos_config.get("rollout", {}).get("parallelism", {})
     # Calculate the minimum number of GPUs required for policy and rollout
     # based on the parallelism settings in the configuration
     # Treat dp_shard_size as 1 if it is not set
     min_n_gpus_policy = (
-        policy_parallelism.tp_size
-        * policy_parallelism.dp_replicate_size
-        * policy_parallelism.pp_size
-        * policy_parallelism.cp_size
+        policy_parallelism.get("tp_size", 1)
+        * policy_parallelism.get("dp_replicate_size", 1)
+        * policy_parallelism.get("pp_size", 1)
+        * policy_parallelism.get("cp_size", 1)
     )
     min_n_gpus_rollout = (
-        rollout_parallelism.tp_size
-        * rollout_parallelism.dp_replicate_size
-        * rollout_parallelism.pp_size
-        * rollout_parallelism.cp_size
+        rollout_parallelism.get("tp_size", 1)
+        * rollout_parallelism.get("dp_replicate_size", 1)
+        * rollout_parallelism.get("pp_size", 1)
+        * rollout_parallelism.get("cp_size", 1)
     )
-    policy_dp_shard_size = (
-        policy_parallelism.dp_shard_size if policy_parallelism.dp_shard_size > 0 else 1
-    )
-    min_n_gpus_policy = min_n_gpus_policy * policy_dp_shard_size
-    rollout_dp_shard_size = (
-        rollout_parallelism.dp_shard_size
-        if rollout_parallelism.dp_shard_size > 0
-        else 1
-    )
-    min_n_gpus_rollout = min_n_gpus_rollout * rollout_dp_shard_size
-
-    backend = cosmos_config.rollout.backend  # default is vllm
+    if policy_parallelism.get("dp_shard_size", 1) >= 1:
+        min_n_gpus_policy = min_n_gpus_policy * policy_parallelism.get(
+            "dp_shard_size", 1
+        )
+    if rollout_parallelism.get("dp_shard_size", 1) >= 1:
+        min_n_gpus_rollout = min_n_gpus_rollout * rollout_parallelism.get(
+            "dp_shard_size", 1
+        )
+    backend = cosmos_config.get("rollout", {}).get("backend", "vllm")
     logger.info(f"Using rollout backend: {backend}")
 
     if args.p2r_ratio is not None:
@@ -751,16 +745,19 @@ def main():
         )
 
     if args.policy is None:
-        n_policy = policy_parallelism.n_init_replicas
+        n_policy = policy_parallelism.get("n_init_replicas", 1)
     else:
         n_policy = args.policy
     if args.rollout is None:
-        n_rollouts = rollout_parallelism.n_init_replicas
+        n_rollouts = rollout_parallelism.get("n_init_replicas", 1)
     else:
         n_rollouts = args.rollout
 
     # If the training type is SFT, set n_rollouts to 0
-    if cosmos_config.train.train_policy.type == "sft":
+    if (
+        cosmos_config.get("train", {}).get("train_policy", {}).get("type", "grpo")
+        == "sft"
+    ):
         n_rollouts = 0
 
     # Handle Lepton mode
@@ -796,9 +793,11 @@ def main():
 
         # Construct the original launch_processes command
         # Update policy and rollout numbers in the lepton config
-        cosmos_config.policy.parallelism.n_init_replicas = n_policy
-        cosmos_config.rollout.parallelism.n_init_replicas = n_rollouts
-        config_content = toml.dumps(cosmos_config.model_dump())
+        if "policy" in cosmos_config and "parallelism" in cosmos_config["policy"]:
+            cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
+        if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
+            cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
+        config_content = toml.dumps(cosmos_config)
         launch_cmd = f"""\
 cat >config.toml <<EOF
 {config_content}
@@ -1108,6 +1107,8 @@ cosmos-rl --config config.toml"""
         )
         subdomain = os.environ.get("LEPTON_SUBDOMAIN", "")
         hostname = f"{prefix}-{cur_work_idx}.{subdomain}"
+        import cosmos_rl.utils.network_util as network_util
+
         ips = network_util.get_eth_ips()
         assert len(ips) > 0, "No IPs found for the current machine"
         logger.info(
@@ -1166,7 +1167,7 @@ cosmos-rl --config config.toml"""
     with tempfile.NamedTemporaryFile(
         mode="w+", suffix=".toml", delete=False
     ) as tmpfile:
-        toml.dump(cosmos_config.model_dump(), tmpfile)
+        toml.dump(cosmos_config, tmpfile)
         tmpfile_toml = tmpfile.name
 
     if control_url is None:

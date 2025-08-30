@@ -553,6 +553,11 @@ class TrainingConfig(BaseModel):
         description="Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.",
     )
 
+    sequence_packing: bool = Field(
+        default=False,
+        description="Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.async_tp_enabled and not self.compile:

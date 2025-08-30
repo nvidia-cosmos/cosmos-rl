@@ -148,10 +148,6 @@ async def meta():
     meta = {
         "config": controller.config,
     }
-    if not controller.is_rl and controller.sft_user_dataset is not None:
-        meta["sft_user_dataset"] = base64.b64encode(
-            cloudpickle.dumps(controller.sft_user_dataset)
-        ).decode("utf-8")
     if controller.user_data_packer is not None:
         meta["user_data_packer"] = base64.b64encode(
             cloudpickle.dumps(controller.user_data_packer)
@@ -525,10 +521,14 @@ async def put_rollout_group(rollout: RolloutRequest):
                     rewards = [rollouts_group[i].reward for i in rollout_indices]
                     if len(set(rewards)) > 1:
                         n_ignore_prefix_tokens = len(shared_prefix)
+                        prefix_str = controller.tokenizer.decode(shared_prefix)
                         for rollout_index in rollout_indices:
-                            rollouts_group[
-                                rollout_index
-                            ].n_ignore_prefix_tokens = n_ignore_prefix_tokens
+                            # Only do this if shared_prefix != rollout.completion
+                            # Else the whole sample will be ignored, which cause training issues.
+                            if prefix_str != rollouts_group[rollout_index].completion:
+                                rollouts_group[
+                                    rollout_index
+                                ].n_ignore_prefix_tokens = n_ignore_prefix_tokens
                 valid_rollouts_list.append(rollouts_group)
             else:
                 # If the rewards are all the same, we need to sample one rollout from the group
