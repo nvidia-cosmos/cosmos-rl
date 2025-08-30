@@ -281,9 +281,9 @@ class HFModel(BaseModel):
         """
         assert False, "Pipeline split is not supported for HFModel"
 
-    def reset_named_buffers(self, model_with_weights):
-        # copy named buffers from model_with_weights to self.model
-        hf_named_buffers = {k: v for k, v in model_with_weights.named_buffers()}
+    def reset_named_buffers(self, hf_model):
+        # copy named buffers from hf_model to self.model
+        hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
         for name, cosmos_hf_buffer in self.model.named_buffers():
             assert name in hf_named_buffers, f"Buffer {name} not found in hf model"
             hf_buf = hf_named_buffers[name].to(
@@ -309,16 +309,16 @@ class HFModel(BaseModel):
         model_type = self.hf_config.model_type
         dtype = self.hf_config.torch_dtype
         self.model = self.model.to(dtype=dtype)
-        model_with_weights = self.model_class.from_pretrained(
+        hf_model = self.model_class.from_pretrained(
             model_name_or_path,
             revision=revision,
             config=self.hf_config,
             trust_remote_code=True,
         ).to(device="cpu", dtype=dtype)
 
-        self.reset_named_buffers(model_with_weights)
+        self.reset_named_buffers(hf_model)
 
-        state_dict = model_with_weights.state_dict()
+        state_dict = hf_model.state_dict()
         self_state_dict = self.model.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         all_tensor_names = self_state_dict.keys()
@@ -366,7 +366,7 @@ class HFModel(BaseModel):
                 ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
                 with torch.no_grad():
                     local_view.data.copy_(shared_weight.to(device))
-        del model_with_weights
+        del hf_model
 
         # Enable gradient checkpointing
         if self._gradient_checkpointing_enabled:
