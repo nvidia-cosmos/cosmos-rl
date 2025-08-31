@@ -44,10 +44,6 @@ from cosmos_rl.policy.model.gpt import GPTArgs
 from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoEBlock,
     Qwen3MoeArgs,
-    # FeedForward as Qwen3MoEFeedForward,
-    # FakeLinear as Qwen3MoEFakeLinear,
-    # MoEGate as Qwen3MoEMoEGate,
-    # Attention as Qwen3MoEAttention,
     RotaryEmbedding as Qwen3MoERotaryEmbedding,
     build_norm as qwen3_moe_build_norm,
 )
@@ -65,56 +61,6 @@ class InternVL_Args:
     lm_args: InternVL_LM_Args
     encoder_args: InternVL_Encoder_Args
     hf_config: AutoConfig = None
-
-
-# class Qwen3MoERotaryEmbedding(nn.Module):
-#     def __init__(self, args: Qwen3MoeArgs, device=None):
-#         super().__init__()
-#         self.args = args
-#         self.rope_init_fn = ROPE_INIT_FUNCTIONS[args.rope_type]
-#         self.device = device
-#         self.config = args
-#         self.reset_inv_freq(device=device)
-
-#     def reset_inv_freq(self, device: torch.device = None):
-#         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, self.device)
-#         if not hasattr(self, "inv_freq"):
-#             self.register_buffer("inv_freq", inv_freq, persistent=False)
-#         else:
-#             self.inv_freq.to(torch.float32)
-#             with torch.no_grad():
-#                 self.inv_freq.data.copy_(inv_freq)
-
-#     @torch.no_grad()
-#     def forward(self, x, position_ids):
-#         if self.inv_freq.dtype != torch.float32:
-#             self.reset_inv_freq(device=x.device)
-#             assert self.inv_freq.dtype == torch.float32
-
-#         inv_freq_expanded = (
-#             self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-#         )
-#         position_ids_expanded = position_ids[:, None, :].float()
-#         # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-#         device_type = x.device.type
-#         device_type = (
-#             device_type
-#             if isinstance(device_type, str) and device_type != "mps"
-#             else "cpu"
-#         )
-#         with torch.autocast(device_type=device_type, enabled=False):
-#             freqs = (
-#                 inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()
-#             ).transpose(1, 2)
-#             emb = torch.cat((freqs, freqs), dim=-1)
-#             cos = emb.cos()
-#             sin = emb.sin()
-
-#         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
-#         cos = cos * self.attention_scaling
-#         sin = sin * self.attention_scaling
-
-#         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 class Qwen3MoE(nn.Module):
@@ -357,9 +303,6 @@ class InternVLChatModel(BaseModel):
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         self.model.rotary_emb.to(torch.cuda.current_device())
         self.model.rotary_emb.reset_inv_freq()
-        if self.visual is not None:
-            self.visual.rotary_pos_emb.to(torch.cuda.current_device())
-            self.visual.rotary_pos_emb.reset_inv_freq()
 
     def apply_pipeline_split(self, pp_rank, pp_size):
         """
