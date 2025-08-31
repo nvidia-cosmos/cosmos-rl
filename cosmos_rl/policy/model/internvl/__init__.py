@@ -364,8 +364,8 @@ class InternVLChatModel(BaseModel):
             parallel_dims (ParallelDims): Parallel dimensions definition.
         """
         # Load all safetensors from `model_path`
-        pass
         model_type = self.hf_config.model_type
+        lm_type = self.hf_config.llm_config.model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
         safetensors_files = [
             f for f in os.listdir(model_path) if f.endswith(".safetensors")
@@ -395,10 +395,14 @@ class InternVLChatModel(BaseModel):
                     ckpt_tensor = ckpt.get_tensor(name)
                     weights_of_ckpt[name] = ckpt_tensor
 
+                n_experts = (
+                    self.config.lm_args.n_experts if lm_type == "qwen3_moe" else 0
+                )
+
                 for name in weights_of_ckpt.keys():
                     tensor = weights_of_ckpt[name]
                     dest_name, shared_weight = convert_weight_from_hf(
-                        tensor, name, model_type, parallel_dims
+                        tensor, name, model_type, lm_type, n_experts, parallel_dims
                     )
                     if dest_name in lm_state_dict:
                         target_tensor = lm_state_dict[dest_name]
