@@ -396,7 +396,6 @@ class InternVLChatModel(BaseModel):
         ]
 
         # Load LM weights
-        # model.safetensors.index.json
         lm_state_dict = self.model.state_dict()
         lm_state_dict = {clear_weight_name(k): v for k, v in lm_state_dict.items()}
         # print(f"lm_state_dict: {lm_state_dict.keys()}")
@@ -476,7 +475,7 @@ class InternVLChatModel(BaseModel):
                         local_view.data.copy_(shared_weight)
 
     def separate_model_parts(self) -> List[nn.Module]:
-        return [self.model, self.visual]
+        return [self.model, self.visual, self.mlp1]
 
     @property
     def parallelize_fn(self) -> Tuple[Callable, nn.Module]:
