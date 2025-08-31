@@ -28,6 +28,8 @@ def map_key_from_hf(name: str, src_model_type: str) -> str:
             prefix = "language_model."
         elif name.startswith("mlp1."):
             prefix = "mlp1."
+        elif name.startswith("vision_model."):
+            prefix = "vision_model."
         else:
             raise ValueError(f"Unsupported weight: {name}")
         return name.replace(prefix, "")
@@ -242,7 +244,8 @@ def convert_weight_from_hf(
         return multi_modal_projector_name, multi_modal_projector_shard
 
     # For Visual
-    assert name.startswith("visual."), f"Unsupported weight: {name}"
+    visual_prefix = "vision_model."
+    assert name.startswith(visual_prefix), f"Unsupported weight: {name}"
 
     if (
         parallel_dims.dp_shard_enabled
@@ -255,9 +258,9 @@ def convert_weight_from_hf(
         dp_shard_rank = 0
         dp_shard_size = 1
 
-    dest_name = name.replace("visual.", "")
+    dest_name = name.replace(visual_prefix, "")
     shard = tensor
-    # TODO(cjx): Only FSDP sharding is supported for visual part
+    # Do FSDP sharding only for visual part
     shard = shard.contiguous()
     if shard.shape[0] % dp_shard_size == 0:
         shard = shard.tensor_split(dp_shard_size, dim=0)
