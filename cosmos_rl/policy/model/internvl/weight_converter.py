@@ -26,6 +26,8 @@ def map_key_from_hf(name: str, src_model_type: str) -> str:
             prefix = "language_model.model."
         elif name.startswith("language_model."):
             prefix = "language_model."
+        elif name.startswith("mlp1."):
+            prefix = "mlp1."
         else:
             raise ValueError(f"Unsupported weight: {name}")
         return name.replace(prefix, "")
@@ -33,12 +35,45 @@ def map_key_from_hf(name: str, src_model_type: str) -> str:
         raise ValueError(f"Unsupported model type: {src_model_type}")
 
 
-def qwen3_moe_lm_weight_from_hf(
+def multi_modal_projector_weight_from_hf(
     tensor: torch.Tensor,
     name: str,
     src_model_type: str,
     parallel_dims: ParallelDims,
+    ignore_unknown_weights: bool = False,
+) -> Tuple[str, torch.Tensor]:
+    tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
+    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+        dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
+        dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
+    else:
+        dp_shard_rank = 0
+        dp_shard_size = 1
+
+    dest_name = map_key_from_hf(name, src_model_type)
+
+    if dest_name.startswith("0."):
+        # multi_modal_projector.layer_norm
+        shard = tensor
+    elif dest_name.startswith("1.") or dest_name.startswith("3."):
+        # multi_modal_projector.linear_1 / multi_modal_projector.linear_2
+        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
+    elif not ignore_unknown_weights:
+        raise ValueError(f"Unsupported weight: {dest_name}")
+    else:
+        return None, None
+    # Do FSDP sharding
+    shard = shard.contiguous()
+    shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
+    return dest_name, shard.contiguous()
+
+
+def qwen3_moe_lm_weight_from_hf(
+    tensor: torch.Tensor,
+    name: str,
+    src_model_type: str,
     n_experts: int,
+    parallel_dims: ParallelDims,
     ignore_unknown_weights: bool = False,
 ) -> Tuple[str, torch.Tensor]:
     tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
@@ -176,14 +211,15 @@ def convert_weight_from_hf(
     parallel_dims: ParallelDims,
     ignore_unknown_weights: bool = False,
 ) -> Tuple[str, torch.Tensor]:
+    # For LM
     lm_part_name, lm_part_shard = None, None
     if lm_type == "qwen3_moe":
         lm_part_name, lm_part_shard = qwen3_moe_lm_weight_from_hf(
             tensor,
             name,
             src_model_type,
-            parallel_dims,
             n_experts,
+            parallel_dims,
             ignore_unknown_weights=True,
         )
     else:
@@ -191,6 +227,21 @@ def convert_weight_from_hf(
 
     if lm_part_name is not None:
         return lm_part_name, lm_part_shard
+
+    # For Multi-Modal Projector
+    multi_modal_projector_name, multi_modal_projector_shard = (
+        multi_modal_projector_weight_from_hf(
+            tensor,
+            name,
+            src_model_type,
+            parallel_dims,
+            ignore_unknown_weights=True,
+        )
+    )
+    if multi_modal_projector_name is not None:
+        return multi_modal_projector_name, multi_modal_projector_shard
+
+    # For Visual
     assert name.startswith("visual."), f"Unsupported weight: {name}"
 
     if (

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Callable, Union
 import torch
@@ -195,6 +196,29 @@ class InternVLChatModel(BaseModel):
         self.visual = InternVisionModel(config.encoder_args)
         self.vocab_size = config.lm_args.vocab_size
 
+        image_size = (
+            self.hf_config.force_image_size or self.hf_config.vision_config.image_size
+        )
+        patch_size = self.hf_config.vision_config.patch_size
+        self.patch_size = patch_size
+        self.select_layer = self.hf_config.select_layer
+        self.template = self.hf_config.template
+        self.num_image_token = int(
+            (image_size // patch_size) ** 2 * (self.hf_config.downsample_ratio**2)
+        )
+        self.downsample_ratio = self.hf_config.downsample_ratio
+        vit_hidden_size = self.hf_config.vision_config.hidden_size
+        llm_hidden_size = self.hf_config.llm_config.hidden_size
+
+        self.mlp1 = nn.Sequential(
+            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio) ** 2),
+            nn.Linear(
+                vit_hidden_size * int(1 / self.downsample_ratio) ** 2, llm_hidden_size
+            ),
+            nn.GELU(),
+            nn.Linear(llm_hidden_size, llm_hidden_size),
+        )
+
     def get_language_model(self):
         if architecture := self.lm_arch == "Qwen3MoeForCausalLM":
             return Qwen3MoE(self.config.lm_args)
@@ -375,6 +399,7 @@ class InternVLChatModel(BaseModel):
         # model.safetensors.index.json
         lm_state_dict = self.model.state_dict()
         lm_state_dict = {clear_weight_name(k): v for k, v in lm_state_dict.items()}
+        # print(f"lm_state_dict: {lm_state_dict.keys()}")
         # Rename dict to remove all `._orig_mod` in keys
         if self.visual is not None:
             visual_state_dict = self.visual.state_dict()
@@ -383,6 +408,11 @@ class InternVLChatModel(BaseModel):
             }
         else:
             visual_state_dict = {}
+
+        multi_modal_projector_state_dict = self.mlp1.state_dict()
+        multi_modal_projector_state_dict = {
+            clear_weight_name(k): v for k, v in multi_modal_projector_state_dict.items()
+        }
 
         with torch.device(self.current_device()):
             for f in safetensors_files:
@@ -404,10 +434,27 @@ class InternVLChatModel(BaseModel):
                     dest_name, shared_weight = convert_weight_from_hf(
                         tensor, name, model_type, lm_type, n_experts, parallel_dims
                     )
+                    # For MoE LM
+                    expert_id = None
+                    if match := re.search(  # noqa: F841
+                        r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
+                        dest_name,
+                    ):
+                        # remove `experts.$ID.` from dest_name
+                        expert_id = int(match.group(2))
+                        dest_name = dest_name.replace(f"experts.{expert_id}.", "")
+                        # Convert expert_id to local_expert_id
+                        n_local_experts = (
+                            n_experts // parallel_dims.tp // parallel_dims.dp_shard
+                        )
+                        expert_id = expert_id % n_local_experts
+
                     if dest_name in lm_state_dict:
                         target_tensor = lm_state_dict[dest_name]
                     elif dest_name in visual_state_dict:
                         target_tensor = visual_state_dict[dest_name]
+                    elif dest_name in multi_modal_projector_state_dict:
+                        target_tensor = multi_modal_projector_state_dict[dest_name]
                     elif parallel_dims.pp_enabled:
                         # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
                         continue
@@ -416,6 +463,9 @@ class InternVLChatModel(BaseModel):
                     is_dist_tensor = isinstance(
                         target_tensor, torch.distributed.tensor.DTensor
                     )
+                    # Write to the correct expert of the target tensor
+                    if expert_id is not None:
+                        target_tensor = target_tensor[expert_id]
                     local_view = (
                         target_tensor.to_local() if is_dist_tensor else target_tensor
                     )
