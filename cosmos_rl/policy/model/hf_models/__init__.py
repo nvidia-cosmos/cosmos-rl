@@ -594,7 +594,7 @@ class HFModel(BaseModel):
             max_position_embeddings = hf_config.max_position_embeddings
         else:
             hf_config.max_position_embeddings = max_position_embeddings
-        _ = sync_model_vocab(model_name_or_path)
+        # _ = sync_model_vocab(model_name_or_path)
 
         return cls.from_model_args(hf_config)
 
