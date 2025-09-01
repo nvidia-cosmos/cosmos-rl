@@ -83,6 +83,8 @@ class vLLMRollout(RolloutBase):
         self._model_param_map = None  # key: compatible name, value: param
         self.is_vlm = getattr(self.model_config, "vision_config", None) is not None
 
+        self.preset_vllm_env()
+
     def init_engine(
         self,
         quantization: Optional[str] = None,
@@ -96,9 +98,6 @@ class vLLMRollout(RolloutBase):
             model_path = self.config.policy.model_name_or_path
 
             rollout_parallelism = self.rollout_config.parallelism
-
-            # disable VLLM_DISABLE_COMPILE_CACHE
-            os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
             tp_size = rollout_parallelism.tp_size
             pp_size = rollout_parallelism.pp_size
@@ -315,3 +314,40 @@ class vLLMRollout(RolloutBase):
             param_map[compatible_name] = param
         self._model_param_map = param_map
         return self._model_param_map
+
+    def preset_vllm_env(self):
+        def log_env(env_name: str, env_value: str):
+            logger.info(f"[Rollout] Setting vLLM {env_name} to {env_value}")
+            os.environ[env_name] = env_value
+
+        # disable VLLM_DISABLE_COMPILE_CACHE
+        log_env("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+        # if flashinfer config is not enabled, avoid importing flashinfer
+        if self.config.rollout.vllm_use_flashinfer:
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.vllm_use_flashinfer setting."
+                )
+            else:
+                log_env("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+
+        if self.config.rollout.sampling_config.use_flashinfer:
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.sampling_config.use_flashinfer setting."
+                )
+            else:
+                log_env("VLLM_USE_FLASHINFER_SAMPLER", "1")
+
+        # Model specific logic
+        model_type = self.model_config.model_type
+        if model_type == "gpt_oss" and self.config.rollout.quantization == "mxfp4":
+            # We disable flashinfer kernel for now temporarily in mxfp4 quantization
+            log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0")
+            log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0")
+            log_env("VLLM_MXFP4_USE_MARLIN", "0")
