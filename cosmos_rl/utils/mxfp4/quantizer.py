@@ -64,7 +64,6 @@ def genereate_dim_rank_info(
         scale_factor = 2
         tp_dim = 1
     elif "w2_bias" in param_name:
-        # FIXME: (lms) handle w2_bias later.
         # for w2_bias, each rank will take full shards.
         # But only rank 0 will load the full weight, other ranks will set w2_bias to zeros.
         # shape: [num_experts, hidden_size]
@@ -73,18 +72,14 @@ def genereate_dim_rank_info(
         pass
 
     # determin the lenght of dimsliceinfo
-    intermediate_size_block = intermediate_size // mxfp4_block  # 90
+    intermediate_size_block = intermediate_size // mxfp4_block
     per_rank_intermediate_size_block = cdiv(intermediate_size_block, tp_size)
-    # 736
     per_rank_intermediate_size = per_rank_intermediate_size_block * mxfp4_block
 
     tp_rank_start = tp_rank * per_rank_intermediate_size
     tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
     length = tp_rank_end - tp_rank_start
-    # 720
-    # 768
-    # 736, 736, 736, 672
     weight_shape = param.shape
     for idx, g_size in enumerate(weight_shape):
         if idx == tp_dim:

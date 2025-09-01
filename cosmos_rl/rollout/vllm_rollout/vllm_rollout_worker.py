@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import torch
 import requests
 import threading
@@ -128,27 +127,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self._prompt_queue: Queue[List[List[int, str]]] = Queue()
         self.current_weight_version = 0
 
-        # if flashinfer config is not enabled, avoid importing flashinfer
-        if self.config.rollout.vllm_use_flashinfer:
-            try:
-                import flashinfer  # noqa: F401
-            except ImportError:
-                logger.warning(
-                    "[Rollout] flashinfer is not installed, ignore rollout.vllm_use_flashinfer setting."
-                )
-            else:
-                os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
-
-        if self.config.rollout.sampling_config.use_flashinfer:
-            try:
-                import flashinfer  # noqa: F401
-            except ImportError:
-                logger.warning(
-                    "[Rollout] flashinfer is not installed, ignore rollout.sampling_config.use_flashinfer setting."
-                )
-            else:
-                os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "1"
-
         # determine the quantization type
         self.quantization_type = None
         if self.config.rollout.quantization != "none":
@@ -233,6 +211,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
 
     def prepare_shard_infos_for_weight_sync_insts(self):
+        logger.info(
+            f"LMS: prepare_shard_infos_for_weight_sync_insts: {self.quantization_type}"
+        )
         if self.quantization_type == "fp8":
             from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
                 cache_weight_of_quantized_module,
@@ -246,6 +227,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 cache_weight_of_quantized_module,
                 replace_weight_of_quantized_module,
             )
+
+            logger.info("LMS: mxfp4 post_process_view_map_for_lowp")
             from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import (
                 post_process_view_map_for_mxfp4 as post_process_view_map_for_lowp,
             )
@@ -270,7 +253,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
 
         self.vllm_weight_inplace_view_map, grouped_recv_param_key_n_rank_list = (
-            self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+            self.weight_mapper.cosmos_rollout_prepare_recv(self.get_underlying_model())
         )
         self.recv_param_key_n_rank_list = []
         param_groups = []
@@ -526,6 +509,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             # )
             recv_tensor = None
             inplace = True
+
             if vllm_tensor_view.is_contiguous():
                 recv_tensor = vllm_tensor_view
             else:
@@ -534,6 +518,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     torch.empty_like(vllm_tensor_view).to(promotion_dtype).contiguous()
                 )
                 inplace = False
+
+            # inplace = False
+            # recv_tensor = (
+            #         torch.empty_like(vllm_tensor_view).to(promotion_dtype).contiguous()
+            #     )
 
             if vllm_tensor_view.dtype != promotion_dtype:
                 recv_tensor = recv_tensor.to(promotion_dtype)
@@ -606,7 +595,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             all_tensor_views_to_copy, tensors_to_check, post_process_list_for_lowp
         ):
             for view, recv_tensor, inst_dest_name in all_tensor_views_to_copy:
-                update_tensor_view(view, recv_tensor, inplace, inst_dest_name)
+                update_tensor_view(view, recv_tensor, inst_dest_name)
 
             all_tensor_views_to_copy.clear()
 
@@ -903,9 +892,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         copy_stream = torch.cuda.Stream()
 
-        assert total_params == len(
-            self.recv_param_key_n_rank_list
-        ), "Mismatch in total params and received param keys"
+        assert (
+            total_params == len(self.recv_param_key_n_rank_list)
+        ), f"Mismatch in total params and received param keys: {total_params} != {len(self.recv_param_key_n_rank_list)}"
 
         with torch.cuda.stream(self.inference_stream):
             logger.info(
@@ -1344,8 +1333,15 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
-                # if self.global_rank == 0:
-                #     logger.info(f"[Rollout] prompt: {prompts[0][1]}, completions: {completions[0][0]}")
+                if self.global_rank == 0:
+                    for i, completion in enumerate(completions):
+                        user_prompt = prompts[i][1]
+                        logger.info(f"LMS: prompt is: {user_prompt}")
+                        for j, gen in enumerate(completion):
+                            logger.info(
+                                f"LMS: [generated text {j}/{len(completion)}]: {gen}"
+                            )
+                    # logger.info(f"[Rollout] prompt: {prompts[0][1]}, completions: {completions[0][0]}")
                 # Remove empty completions
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []

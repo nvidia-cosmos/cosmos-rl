@@ -725,3 +725,37 @@ class WeightMapper(ABC):
         self.backend = backend
         if backend not in WeightMapper._WEIGHT_MAPPER_BACKEND_SUPPORTED:
             raise ValueError(f"Backend {backend} is not supported by weight mapper.")
+
+    def rollout_prepare_recv_filter(self, key: str) -> bool:
+        """ "
+        Filter the weights that are not needed to be synced when generating recv key and shape list
+        """
+        if "_scale" in key:
+            # Filter weight scale
+            return True
+        return False
+
+    def cosmos_rollout_prepare_recv(
+        self,
+        vllm_model: Any,
+    ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
+        vllm_weight_inplace_view_map, recv_key_n_shape_list = self.rollout_prepare_recv(
+            vllm_model
+        )
+        final_vllm_weight_inplace_view_map = {}
+        final_recv_key_n_shape_list = []
+        for key, value in vllm_weight_inplace_view_map.items():
+            if self.rollout_prepare_recv_filter(key):
+                continue
+            final_vllm_weight_inplace_view_map[key] = value
+        total_count = 0
+        for group_keys in recv_key_n_shape_list:
+            group_key = group_keys[0][0]
+            if self.rollout_prepare_recv_filter(group_key):
+                continue
+            final_recv_key_n_shape_list.append(group_keys)
+            total_count += len(group_keys)
+        assert (
+            len(final_vllm_weight_inplace_view_map) == total_count
+        ), f"{len(final_vllm_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
+        return final_vllm_weight_inplace_view_map, final_recv_key_n_shape_list
