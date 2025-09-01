@@ -376,7 +376,8 @@ class SFTTrainer(Trainer):
         self.train_data_loader = get_train_data_loader(train_sampler)
         self.val_data_loader = DataLoader(
             val_dataset,
-            batch_size=config.validation.batch_size or config.train.train_batch_per_replica,
+            batch_size=config.validation.batch_size
+            or config.train.train_batch_per_replica,
             num_workers=config.train.train_policy.dataloader_num_workers,
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=val_sampler,
