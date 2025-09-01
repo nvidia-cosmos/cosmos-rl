@@ -211,9 +211,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
 
     def prepare_shard_infos_for_weight_sync_insts(self):
-        logger.info(
-            f"LMS: prepare_shard_infos_for_weight_sync_insts: {self.quantization_type}"
-        )
         if self.quantization_type == "fp8":
             from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
                 cache_weight_of_quantized_module,
@@ -228,7 +225,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 replace_weight_of_quantized_module,
             )
 
-            logger.info("LMS: mxfp4 post_process_view_map_for_lowp")
             from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import (
                 post_process_view_map_for_mxfp4 as post_process_view_map_for_lowp,
             )
@@ -502,11 +498,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         tensors_to_check = []
 
         def recv_tensor_creator(vllm_tensor_view: torch.Tensor):
-            promotion_dtype = util.str2torch_dtype(self.config.train.param_dtype)
-            # Keep alignment with Policy in grpo_trainer.py:
-            # local_view = local_view.to(
-            #   str2torch_dtype(self.config.train.param_dtype)
-            # )
             recv_tensor = None
             inplace = True
 
@@ -514,9 +505,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 recv_tensor = vllm_tensor_view
             else:
                 # new a temp tensor
-                recv_tensor = (
-                    torch.empty_like(vllm_tensor_view).to(promotion_dtype).contiguous()
-                )
+                recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
                 inplace = False
 
             # inplace = False
@@ -524,8 +513,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             #         torch.empty_like(vllm_tensor_view).to(promotion_dtype).contiguous()
             #     )
 
-            if vllm_tensor_view.dtype != promotion_dtype:
-                recv_tensor = recv_tensor.to(promotion_dtype)
+            if vllm_tensor_view.dtype != target_dtype:
+                recv_tensor = recv_tensor.to(target_dtype)
                 inplace = False
 
             return recv_tensor, inplace
