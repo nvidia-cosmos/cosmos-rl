@@ -348,9 +348,9 @@ class InternVisionEncoder(nn.Module):
     def __init__(self, config: InternVL_Encoder_Args):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList(
-            [InternVisionEncoderLayer(config) for _ in range(config.num_hidden_layers)]
-        )
+        self.layers = torch.nn.ModuleDict()
+        for layer_id in range(config.num_hidden_layers):
+            self.layers[str(layer_id)] = InternVisionEncoderLayer(config)
         self.gradient_checkpointing = True
 
     def forward(
@@ -370,7 +370,7 @@ class InternVisionEncoder(nn.Module):
         encoder_states = () if output_hidden_states else None
         hidden_states = inputs_embeds
 
-        for idx, encoder_layer in enumerate(self.layers):
+        for idx, encoder_layer in self.layers.items():
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
             if self.gradient_checkpointing and self.training:

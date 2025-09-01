@@ -31,10 +31,6 @@ from safetensors import safe_open
 from cosmos_rl.policy.model.internvl.weight_converter import (
     convert_weight_from_hf,
 )
-
-# from cosmos_rl.dispatcher.data.packer.internvl_vlm_data_packer import (
-#     Internvl_Chat_DataPacker,
-# )
 from cosmos_rl.policy.model.internvl.weight_mapper import InternVLWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -53,6 +49,9 @@ from cosmos_rl.policy.model.vision_encoder.internvl import (
     InternVL_Encoder_Args,
     InternVisionModel,
 )
+# from cosmos_rl.dispatcher.data.packer.internvl_data_packer import (
+#     InternVL_DataPacker,
+# )
 
 InternVL_LM_Args = Union[Qwen3MoeArgs, GPTArgs]
 
@@ -463,6 +462,9 @@ class InternVLChatModel(BaseModel):
                     dest_name, shared_weight = convert_weight_from_hf(
                         tensor, name, model_type, lm_type, n_experts, parallel_dims
                     )
+                    if dest_name is None:
+                        # This is due to the expert parallelism grouping
+                        continue
                     # For MoE LM
                     expert_id = None
                     if match := re.search(  # noqa: F841
