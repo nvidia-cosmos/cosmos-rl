@@ -727,7 +727,7 @@ class ValidationConfig(BaseModel):
     )
     batch_size: Optional[int] = Field(
         default=None,
-        description="Batch size for validation.",
+        description="Batch size for validation, will use the same batch size as training if not set.",
     )
     dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
