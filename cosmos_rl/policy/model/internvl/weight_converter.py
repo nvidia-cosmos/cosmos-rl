@@ -224,11 +224,12 @@ def convert_weight_from_hf(
             parallel_dims,
             ignore_unknown_weights=True,
         )
+        if lm_part_name is not None:
+            return lm_part_name, lm_part_shard
+        elif "experts" in name:
+            return None, None
     else:
         raise ValueError(f"Unsupported LM type: {lm_type}")
-
-    if lm_part_name is not None:
-        return lm_part_name, lm_part_shard
 
     # For Multi-Modal Projector
     multi_modal_projector_name, multi_modal_projector_shard = (

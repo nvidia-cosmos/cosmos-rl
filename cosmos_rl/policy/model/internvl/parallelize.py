@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import os
 import torch
 import torch.nn as nn
-from torch.distributed._composable.replicate import replicate
-
+from typing import Callable, Optional
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed._composable.replicate import replicate
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
@@ -29,6 +29,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
+from cosmos_rl.utils.distributed import ReplicateParallel
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
@@ -39,8 +40,6 @@ from cosmos_rl.utils.ulysses import (
     swizzle_cp_forward,
     ulysses_attn_func_varlen,
 )
-import os
-from typing import Callable, Optional
 
 
 def parallelize(
@@ -61,7 +60,7 @@ def parallelize(
     pipeline_parallelize(model, parallel_dims, config)
 
     if parallel_dims.tp_enabled:
-        apply_tp(
+        apply_tp_ep(
             model,
             world_mesh["tp"],
             enable_float8_tensorwise_tp=config.train.fp8.enable_fp8
@@ -100,7 +99,7 @@ def parallelize(
         fsdp_config = {"mesh": world_mesh["dp_cp_tp"], "mp_policy": mp_policy}
         if config.train.fsdp_offload:
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
-        for layer_id, transformer_block in model.visual.blocks.items():
+        for layer_id, transformer_block in model.visual.encoder.layers.items():
             if reshard_after_forward_policy == "always":
                 reshard_after_forward = True
             elif reshard_after_forward_policy == "never":
@@ -113,7 +112,9 @@ def parallelize(
                 else:
                     # As an optimization, do not reshard after forward for the last
                     # transformer block since FSDP would prefetch it immediately
-                    reshard_after_forward = int(layer_id) < len(model.visual.blocks) - 1
+                    reshard_after_forward = (
+                        int(layer_id) < len(model.visual.encoder.layers) - 1
+                    )
             else:
                 raise ValueError(
                     f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
@@ -290,9 +291,9 @@ def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
     swizzle_cp_forward(model, parallel_dims)
 
 
-def apply_tp(
+def apply_tp_ep(
     model: nn.Module,
-    tp_mesh: DeviceMesh,
+    tp_ep_mesh: DeviceMesh,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
     parallel_dims: ParallelDims,
@@ -323,7 +324,7 @@ def apply_tp(
 
     parallelize_module(
         model.model,
-        tp_mesh,
+        tp_ep_mesh,
         tp_plan,
     )
 
@@ -349,42 +350,148 @@ def apply_tp(
             PrepareModuleInput,
         )
 
-    # Apply tensor + sequence parallelism to every transformer block
-    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
-    #       by folding (and unfolding) the batch dimension and the sequence dimension.
-    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    # - Apply tensor + sequence parallelism to self-attention
+    # - Apply expert parallelism to MLP
     for layer_id, transformer_block in model.model.layers.items():
         layer_plan = {
             "input_layernorm": SequenceParallel(),
             "self_attn": prepare_module_input(
-                input_layouts=(Shard(1), None),
-                desired_input_layouts=(Replicate(), None),
+                input_layouts=(
+                    Shard(1),
+                    None,
+                ),  # The input from ``input_layernorm`` is sharded over the sequence dimension, so we set the input layout to Shard(1)
+                desired_input_layouts=(
+                    Replicate(),
+                    None,
+                ),  # Attn OP needs the input to be replicated over the sequence dimension so that all sequence can be attended to
             ),
             "self_attn.q_proj": colwise_parallel(),
             "self_attn.k_proj": colwise_parallel(),
+            "self_attn.q_norm": ReplicateParallel(),
+            "self_attn.k_norm": ReplicateParallel(),
             "self_attn.v_proj": colwise_parallel(),
             "self_attn.o_proj": rowwise_parallel(output_layouts=Shard(1)),
-            "post_attention_layernorm": SequenceParallel(),
-            "mlp": prepare_module_input(
-                input_layouts=(Shard(1),),
-                desired_input_layouts=(Replicate(),),
+            "post_attention_layernorm": SequenceParallel(use_local_output=True),
+            # "mlp.gate": ReplicateParallel(),
+            "mlp.reshard_helper_layer": PrepareModuleOutput(
+                output_layouts=Shard(1),
+                desired_output_layouts=Shard(1),
+                use_local_output=True,
             ),
-            "mlp.gate_proj": colwise_parallel(),
-            "mlp.down_proj": rowwise_parallel(output_layouts=Shard(1)),
-            "mlp.up_proj": colwise_parallel(),
         }
+        transformer_block.mlp.ep_group = tp_ep_mesh.get_group()
+        transformer_block.mlp.ep_size = tp_ep_mesh.size()
+        assert (
+            transformer_block.mlp.total_experts % tp_ep_mesh.size() == 0
+        ), "number of experts must be divisible by tp_ep_mesh.size()"
+        transformer_block.mlp.local_experts = (
+            transformer_block.mlp.total_experts // tp_ep_mesh.size()
+        )
+
+        transformer_block.mlp.up_proj.register_parameter(
+            "weight",
+            nn.Parameter(
+                torch.distributed.tensor.DTensor.from_local(
+                    nn.Parameter(
+                        torch.empty(
+                            transformer_block.mlp.local_experts,
+                            transformer_block.mlp.intermediate_dim,
+                            transformer_block.mlp.dim,
+                            dtype=transformer_block.mlp.up_proj.weight.dtype,
+                            device=transformer_block.mlp.up_proj.weight.device,
+                        )
+                    ),
+                    tp_ep_mesh,
+                    [Shard(0)],
+                    run_check=False,
+                )
+            ),
+        )
+        transformer_block.mlp.down_proj.register_parameter(
+            "weight",
+            nn.Parameter(
+                torch.distributed.tensor.DTensor.from_local(
+                    nn.Parameter(
+                        torch.empty(
+                            transformer_block.mlp.local_experts,
+                            transformer_block.mlp.dim,
+                            transformer_block.mlp.intermediate_dim,
+                            dtype=transformer_block.mlp.down_proj.weight.dtype,
+                            device=transformer_block.mlp.down_proj.weight.device,
+                        )
+                    ),
+                    tp_ep_mesh,
+                    [Shard(0)],
+                    run_check=False,
+                )
+            ),
+        )
+        transformer_block.mlp.gate_proj.register_parameter(
+            "weight",
+            nn.Parameter(
+                torch.distributed.tensor.DTensor.from_local(
+                    nn.Parameter(
+                        torch.empty(
+                            transformer_block.mlp.local_experts,
+                            transformer_block.mlp.intermediate_dim,
+                            transformer_block.mlp.dim,
+                            dtype=transformer_block.mlp.gate_proj.weight.dtype,
+                            device=transformer_block.mlp.gate_proj.weight.device,
+                        )
+                    ),
+                    tp_ep_mesh,
+                    [Shard(0)],
+                    run_check=False,
+                )
+            ),
+        )
+        assert (
+            transformer_block.mlp.gate_proj.weight.to_local().shape[0]
+            == transformer_block.mlp.local_experts
+        ), f"gate_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.gate_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
+        assert (
+            transformer_block.mlp.up_proj.weight.to_local().shape[0]
+            == transformer_block.mlp.local_experts
+        ), f"up_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.up_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
+        assert (
+            transformer_block.mlp.down_proj.weight.to_local().shape[0]
+            == transformer_block.mlp.local_experts
+        ), f"down_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.down_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
 
         parallelize_module(
             module=transformer_block,
-            device_mesh=tp_mesh,
+            device_mesh=tp_ep_mesh,
             parallelize_plan=layer_plan,
+        )
+    if model.mlp1 is not None:
+        # For multimodalprojector
+        multimodal_projector_tp_plan = {
+            "0": SequenceParallel(),
+            "1": colwise_parallel(),
+            "2": prepare_module_input(
+                input_layouts=(
+                    Shard(1),
+                    None,
+                ),
+                desired_input_layouts=(
+                    Replicate(),
+                    None,
+                ),
+            ),
+            "3": rowwise_parallel(output_layouts=Shard(1)),
+        }
+        logger.info("Applying Tensor Parallelism to the multimodal projector")
+        parallelize_module(
+            module=model.mlp1,
+            device_mesh=tp_ep_mesh,
+            parallelize_plan=multimodal_projector_tp_plan,
         )
 
     if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
         torch._inductor.config._micro_pipeline_tp = True
-        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
+        enable_symm_mem_for_group(tp_ep_mesh.get_group().group_name)
 
     logger.info(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
@@ -415,11 +522,11 @@ def apply_compile(model: nn.Module, fullgraph: bool = True):
 
     # ``model.visual`` could get deleted by pipeline split
     if model.visual is not None:
-        for layer_id, transformer_block in model.visual.blocks.named_children():
+        for layer_id, transformer_block in model.visual.encoder.layers.named_children():
             transformer_block = torch.compile(
                 transformer_block, fullgraph=fullgraph, dynamic=True
             )
-            model.visual.blocks.register_module(layer_id, transformer_block)
+            model.visual.encoder.layers.register_module(layer_id, transformer_block)
 
     logger.info("Each TransformerBlock compiled with torch.compile")
 
@@ -482,6 +589,8 @@ def apply_fsdp(
         )
     if model.model.embed_tokens is not None:
         fully_shard(model.model.embed_tokens, **fsdp_config, reshard_after_forward=True)
+    if model.mlp1 is not None:
+        fully_shard(model.mlp1, **fsdp_config, reshard_after_forward=True)
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
 
 
