@@ -153,7 +153,7 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
             self.weight_mapper.setup_rollout_backend("trtllm")
 
             self.cosmos_model_config = hf_config
-            self.enable_validation = self.config.train.enable_validation
+            self.enable_validation = self.config.validation.enable
             self.inference_stream = torch.cuda.current_stream()
 
             self._engine_initialized = False
@@ -616,8 +616,8 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
         current_step = broadcast_command.weight_step
         if current_step is not None and current_step > 0:
-            should_do_validation = self.config.train.enable_validation and (
-                current_step % self.config.train.validation_step == 0
+            should_do_validation = self.config.validation.enable and (
+                current_step % self.config.validation.freq == 0
                 or current_step == broadcast_command.total_steps
             )
             if should_do_validation:

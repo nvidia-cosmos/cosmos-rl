@@ -248,7 +248,7 @@ class Controller:
             )
             self.train_dataloader_iter = iter(self.train_dataloader)
 
-            if config.train.enable_validation:
+            if config.validation.enable:
                 if val_dataset is not None:
                     assert isinstance(val_dataset, Dataset)
                     self.val_dataset = CosmosValidationDataset(

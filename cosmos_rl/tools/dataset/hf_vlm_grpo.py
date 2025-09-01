@@ -137,7 +137,7 @@ class HFVLMGRPOValDataset(HFVLMGRPODataset):
     """
 
     def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        if not config.train.enable_validation:
+        if not config.validation.enable:
             logger.warning(
                 "Validation is not enabled in the config. Skipping setup for CosmosGRPOValDataset."
             )
@@ -244,7 +244,7 @@ if __name__ == "__main__":
         return HFVLMGRPODataset()
 
     def get_val_dataset(config: CosmosConfig) -> Dataset:
-        return HFVLMGRPOValDataset() if config.train.enable_validation else None
+        return HFVLMGRPOValDataset() if config.validation.enable else None
 
     launch_worker(
         dataset=get_dataset,

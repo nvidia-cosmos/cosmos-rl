@@ -112,8 +112,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         )
         self.batch_size = self.config.rollout.batch_size
 
-        if self.config.train.enable_validation:
-            self.val_batch_size = self.config.rollout.val_batch_size or self.batch_size
+        if self.config.validation.enable:
+            self.val_batch_size = self.config.validation.batch_size or self.batch_size
             assert (
                 self.val_batch_size > 0
             ), "[Rollout] val_batch_size should be greater than 0."
