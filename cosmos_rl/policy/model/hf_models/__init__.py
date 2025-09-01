@@ -176,6 +176,7 @@ class HFModel(BaseModel):
                 "vision_model.encoder.layers",  # SiglipVisionModel(Gemma)
                 "transformer.layers",  # PixtralVisionModel（Mistral）
                 "model.layers",  # Llama4VisionModel
+                "encoder.layers",  # InternVL3_5VisionModel
             ]:
                 vision_layers = safe_deep_getattr(self.vision_model, path, None)
                 if vision_layers is not None:
@@ -212,9 +213,15 @@ class HFModel(BaseModel):
     def text_config(self):
         text_config = None
         if self.is_vlm:
-            text_config = getattr(self.hf_config, "text_config", None)
-            if text_config is None:
+            if hasattr(self.hf_config, "text_config"):
+                text_config = self.hf_config.text_config
+            elif hasattr(self.hf_config, "llm_config"):
+                # InternVL3_5 has llm_config
+                text_config = self.hf_config.llm_config
+            else:
+                logger.warning(f"Can not get text config from {self.hf_config}. Use hf_config instead.")
                 text_config = self.hf_config
+
         else:
             text_config = self.hf_config
         return text_config
