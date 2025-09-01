@@ -203,6 +203,7 @@ class InternVLChatModel(BaseModel):
         self.patch_size = patch_size
         self.select_layer = self.hf_config.select_layer
         self.template = self.hf_config.template
+        self.ps_version = self.hf_config.ps_version
         self.num_image_token = int(
             (image_size // patch_size) ** 2 * (self.hf_config.downsample_ratio**2)
         )
@@ -227,32 +228,69 @@ class InternVLChatModel(BaseModel):
                 f"{architecture} is not implemented for InternVLChatModel."
             )
 
+    def pixel_shuffle(self, x, scale_factor=0.5):
+        n, w, h, c = x.size()
+        # N, W, H, C --> N, W, H * scale, C // scale
+        x = x.view(n, w, int(h * scale_factor), int(c / scale_factor))
+        # N, W, H * scale, C // scale --> N, H * scale, W, C // scale
+        x = x.permute(0, 2, 1, 3).contiguous()
+        # N, H * scale, W, C // scale --> N, H * scale, W * scale, C // (scale ** 2)
+        x = x.view(
+            n,
+            int(h * scale_factor),
+            int(w * scale_factor),
+            int(c / (scale_factor * scale_factor)),
+        )
+        if self.ps_version == "v1":
+            logger.warning(
+                "In ps_version 'v1', the height and width have not been swapped back, "
+                "which results in a transposed image."
+            )
+        else:
+            x = x.permute(0, 2, 1, 3).contiguous()
+        return x
+
+    def extract_feature(self, pixel_values):
+        vit_embeds = self.visual(
+            pixel_values=pixel_values, select_layer=self.select_layer
+        )
+        vit_embeds = vit_embeds[:, 1:, :]
+
+        h = w = int(vit_embeds.shape[1] ** 0.5)
+        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+        vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
+        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
+        vit_embeds = self.mlp1(vit_embeds)
+        return vit_embeds
+
     def _process_vision_embeddings(
-        self, inputs_embeds, input_ids, pixel_values, grid_thw, pad_token_id
+        self, input_embeds, input_ids, pixel_values, pad_token_id
     ):
         """Helper function to process vision embeddings (images or videos)"""
-        n_tokens = (input_ids == pad_token_id).sum().item()
-        if n_tokens > 0:
-            vision_embeds = self.visual(pixel_values, grid_thw=grid_thw)
-            assert (
-                vision_embeds.shape[0] == n_tokens
-            ), "vision_embeds.shape[0] must be equal to n_tokens"
-            mask = input_ids == pad_token_id
-            mask_unsqueezed = mask.unsqueeze(-1)
-            mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
-            vision_mask = mask_expanded.to(inputs_embeds.device)
 
-            vision_embeds = vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(vision_mask, vision_embeds)
-        return inputs_embeds
+        vision_embeds = self.extract_feature(pixel_values)
+        batch, seq_len, feature_dim = input_embeds.shape
+        input_embeds = input_embeds.reshape(batch * seq_len, feature_dim)
+        input_ids = input_ids.reshape(batch * seq_len)
+        selected = input_ids == self.image_token_id
+        n_image_tokens_in_input_ids = selected.sum()
+        n_image_tokens_in_vision_embeds = vision_embeds.reshape(-1, feature_dim).shape[
+            0
+        ]
+        assert (
+            n_image_tokens_in_input_ids == n_image_tokens_in_vision_embeds
+        ), f"{n_image_tokens_in_input_ids} != {n_image_tokens_in_vision_embeds}"
+        input_embeds[selected] = vision_embeds.reshape(-1, feature_dim).to(
+            input_embeds.device
+        )
+        input_embeds = input_embeds.reshape(batch, seq_len, feature_dim)
+
+        return input_embeds
 
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
-        pixel_values_videos: Optional[torch.Tensor] = None,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-        video_grid_thw: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         **kwargs,
     ):
@@ -263,32 +301,14 @@ class InternVLChatModel(BaseModel):
             ], "input_ids must be of type int32 or int64"
             inputs_embeds = self.model.embed_tokens(input_ids)
             n_image_tokens = (input_ids == self.image_token_id).sum().item()
-            n_video_tokens = (input_ids == self.video_token_id).sum().item()
-
-            # print(f"inputs_embeds: {inputs_embeds.shape}, input_ids: {input_ids.shape}, n_image_tokens: {n_image_tokens}, n_video_tokens: {n_video_tokens}")
+            # print(f"inputs_embeds: {inputs_embeds.shape}, input_ids: {input_ids.shape}, n_image_tokens: {n_image_tokens}")
             # get vision embeddings as tokens for next phase
             if n_image_tokens > 0:
-                assert (
-                    image_grid_thw is not None
-                ), "image_grid_thw must be provided if there are image tokens"
                 inputs_embeds = self._process_vision_embeddings(
                     inputs_embeds,
                     input_ids,
                     pixel_values,
-                    image_grid_thw,
                     self.image_token_id,
-                )
-
-            if n_video_tokens > 0:
-                assert (
-                    video_grid_thw is not None
-                ), "video_grid_thw must be provided if there are video tokens"
-                inputs_embeds = self._process_vision_embeddings(
-                    inputs_embeds,
-                    input_ids,
-                    pixel_values_videos,
-                    video_grid_thw,
-                    self.video_token_id,
                 )
         else:
             assert (
@@ -301,7 +321,7 @@ class InternVLChatModel(BaseModel):
         outputs = self.model(
             inputs_embeds=inputs_embeds,
             # Permute back to [3, batch_size, seq_len] for Pipeline Parallelism micro batch
-            position_ids=position_ids.permute(1, 0, 2).contiguous(),
+            position_ids=position_ids,
             interested_tokens=kwargs.pop("interested_tokens", None),
             **kwargs,  # Additional arguments for compatibility
         )
@@ -309,20 +329,30 @@ class InternVLChatModel(BaseModel):
 
     @property
     def image_token_id(self):
-        return self.config.hf_config.image_token_id
+        # TODO: fix this
+        # <IMG_CONTEXT> is a special token for image context
+        return 151671
 
     @property
     def video_token_id(self):
-        return self.config.hf_config.video_token_id
+        # TODO: fix this
+        # <IMG_CONTEXT> is a special token for video context
+        return 151671
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        seq_dim_idx = 2
-        assert "position_ids" in kwargs, "position_ids must be provided"
-        return (
-            kwargs["position_ids"].permute(1, 0, 2).contiguous(),
-            kwargs["input_ids"],
-            seq_dim_idx,
-        )
+        if self.lm_arch == "Qwen3MoeForCausalLM":
+            seq_dim_idx = 1
+            inputs = kwargs["input_ids"]
+            position_ids = (
+                torch.arange(inputs.size(-1), dtype=torch.long, device=inputs.device)
+                .unsqueeze(0)
+                .expand_as(inputs)
+            )
+            return position_ids, inputs, seq_dim_idx
+        else:
+            raise NotImplementedError(
+                f"{self.lm_arch} is not implemented for get_position_ids"
+            )
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         self.model.rotary_emb.to(torch.cuda.current_device())
@@ -413,7 +443,7 @@ class InternVLChatModel(BaseModel):
             clear_weight_name(k): v for k, v in multi_modal_projector_state_dict.items()
         }
 
-        with torch.device(self.current_device()):
+        with torch.device(device):
             for f in safetensors_files:
                 weights_of_ckpt = {}
                 ckpt = safe_open(
@@ -479,7 +509,7 @@ class InternVLChatModel(BaseModel):
 
     @property
     def parallelize_fn(self) -> Tuple[Callable, nn.Module]:
-        from cosmos_rl.policy.model.internvl_chat.parallelize import parallelize
+        from cosmos_rl.policy.model.internvl.parallelize import parallelize
 
         return parallelize, self
 

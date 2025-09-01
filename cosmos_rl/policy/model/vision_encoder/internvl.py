@@ -356,7 +356,7 @@ class InternVisionEncoder(nn.Module):
     def forward(
         self,
         inputs_embeds,
-        output_hidden_states: Optional[bool] = None,
+        select_layer: Optional[int] = None,
     ) -> Union[Tuple, torch.Tensor]:
         r"""
         Args:
@@ -366,12 +366,7 @@ class InternVisionEncoder(nn.Module):
                 Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
                 for more detail.
         """
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
-        )
-
+        output_hidden_states = select_layer != -1
         encoder_states = () if output_hidden_states else None
         hidden_states = inputs_embeds
 
@@ -388,9 +383,7 @@ class InternVisionEncoder(nn.Module):
                 )
             hidden_states = layer_outputs
 
-        if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states,)
-        return tuple(v for v in [hidden_states, encoder_states] if v is not None)
+        return hidden_states if select_layer == -1 else encoder_states[select_layer]
 
 
 class InternVisionModel(nn.Module):
@@ -404,12 +397,9 @@ class InternVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: Optional[torch.FloatTensor] = None,
-        output_hidden_states: Optional[bool] = None,
         pixel_embeds: Optional[torch.FloatTensor] = None,
+        select_layer: Optional[int] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor]]:
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else False
-        )
         if pixel_values is None and pixel_embeds is None:
             raise ValueError("You have to specify pixel_values or pixel_embeds")
 
@@ -420,13 +410,10 @@ class InternVisionModel(nn.Module):
                 hidden_states = self.embeddings(pixel_values)
             else:
                 raise ValueError(f"wrong pixel_values size: {pixel_values.shape}")
-        encoder_outputs = self.encoder(
+        return self.encoder(
             inputs_embeds=hidden_states,
-            output_hidden_states=output_hidden_states,
+            select_layer=select_layer,
         )
-        last_hidden_state = encoder_outputs.last_hidden_state
-        pooled_output = last_hidden_state[:, 0, :]
-        return (last_hidden_state, pooled_output) + encoder_outputs[1:]
 
     def _get_nparams_and_flops_fn(self) -> Callable[[int], tuple[int, int]]:
         nparams = sum(p.numel() for p in self.parameters())
