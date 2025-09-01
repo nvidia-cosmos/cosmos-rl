@@ -485,11 +485,13 @@ class ModelRegistry:
         return model_type in ModelRegistry._MODEL_REGISTRY
 
     @classmethod
-    def build_model(cls, config: CosmosConfig):
+    def build_model(cls, config: CosmosConfig, hf_config_args: Dict[str, Any] = {}):
         model_name_or_path = config.policy.model_name_or_path
         model = None
         hf_config = util.retry(AutoConfig.from_pretrained)(
-            model_name_or_path, trust_remote_code=True
+            model_name_or_path, trust_remote_code=True,
+            **hf_config_args
+
         )
         model_type = hf_config.model_type
         is_supported_model_type = model_type in ModelRegistry._MODEL_REGISTRY
@@ -497,7 +499,11 @@ class ModelRegistry:
             logger.info(
                 f"Model type {hf_config.model_type} not registered, using {COSMOS_HF_MODEL_TYPES} instead."
             )
+            # print(f"Model type {hf_config.model_type} not registered, using {COSMOS_HF_MODEL_TYPES} instead.")
             model_type = COSMOS_HF_MODEL_TYPES
+        else:
+            logger.info(f"Model type {hf_config.model_type} is registered, using it.")
+            # print(f"Model type {hf_config.model_type} is registered, using it.")
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 

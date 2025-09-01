@@ -19,7 +19,6 @@ import inspect
 from typing import Tuple, List, Optional, Callable
 from transformers import AutoConfig
 from cosmos_rl.utils.util import (
-    sync_model_vocab,
     clear_weight_name,
     safe_deep_getattr,
     load_model_class_by_config,
@@ -176,6 +175,7 @@ class HFModel(BaseModel):
                 "vision_model.encoder.layers",  # SiglipVisionModel(Gemma)
                 "transformer.layers",  # PixtralVisionModel（Mistral）
                 "model.layers",  # Llama4VisionModel
+                "encoder.layer",  # InternVL3_5VisionModel
             ]:
                 vision_layers = safe_deep_getattr(self.vision_model, path, None)
                 if vision_layers is not None:
@@ -212,9 +212,15 @@ class HFModel(BaseModel):
     def text_config(self):
         text_config = None
         if self.is_vlm:
-            text_config = getattr(self.hf_config, "text_config", None)
-            if text_config is None:
+            if hasattr(self.hf_config, "text_config"):
+                text_config = self.hf_config.text_config
+            elif hasattr(self.hf_config, "llm_config"):
+                # InternVL3_5 has llm_config
+                text_config = self.hf_config.llm_config
+            else:
+                logger.warning(f"Can not get text config from {self.hf_config}. Use hf_config instead.")
                 text_config = self.hf_config
+
         else:
             text_config = self.hf_config
         return text_config
@@ -285,9 +291,9 @@ class HFModel(BaseModel):
             rope_init_fn = getattr(rotary_emb, "rope_init_fn", None)
             if rope_init_fn is not None:
                 inv_freq, rotary_emb.attention_scaling = rope_init_fn(
-                    self.text_config, device=current_device
+                    self.text_config, device=None  # Since some HF model run rope init function on None device.
                 )
-                rotary_emb.register_buffer("inv_freq", inv_freq, persistent=False)
+                rotary_emb.register_buffer("inv_freq", inv_freq.to(current_device), persistent=False)
             else:
                 logger.warning(
                     "rotary_emb does not have rope_init_fn, cannot reset inv_freq."
@@ -594,7 +600,6 @@ class HFModel(BaseModel):
             max_position_embeddings = hf_config.max_position_embeddings
         else:
             hf_config.max_position_embeddings = max_position_embeddings
-        _ = sync_model_vocab(model_name_or_path)
 
         return cls.from_model_args(hf_config)
 
