@@ -20,6 +20,7 @@ from typing import List, Optional, Tuple, Callable, Union
 import torch
 import torch.nn as nn
 from transformers import AutoConfig
+import torch.distributed._symmetric_memory as symm_mem
 from cosmos_rl.utils.util import (
     resolve_model_path,
     IdentityLayer,
@@ -32,6 +33,7 @@ from cosmos_rl.policy.model.internvl.weight_converter import (
     convert_weight_from_hf,
 )
 from cosmos_rl.policy.model.internvl.weight_mapper import InternVLWeightMapper
+from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
@@ -41,6 +43,7 @@ from cosmos_rl.policy.model.gpt import GPTArgs
 from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoEBlock,
     Qwen3MoeArgs,
+    FeedForward,
     RotaryEmbedding as Qwen3MoERotaryEmbedding,
     build_norm as qwen3_moe_build_norm,
 )
@@ -155,6 +158,49 @@ class Qwen3MoE(nn.Module):
             h = self.lm_head(self.norm(h))
         return h
 
+    def current_device(self):
+        return next(self.parameters()).device
+
+    def post_to_empty_hook(self, cosmos_config: CosmosConfig):
+        for layer in self.layers.values():
+            layer.mlp.gate.weight.requires_grad_(False)
+
+        # rotary.inv_freq could get deleted and not re-initialized
+        # so we need to delete it manually
+        current_device = torch.cuda.current_device()
+        self.rotary_emb.to(current_device)
+        self.rotary_emb.reset_inv_freq()
+        # Basically, max_seq_len * 2 is enough for all-to-all-v communication.
+        overflow = 2
+
+        MAX_BATCH_MUL_SEQ_LEN = (
+            self.model_args.max_seq_len
+            * cosmos_config.train.train_batch_per_replica
+            * self.model_args.hf_config.num_experts_per_tok
+        )
+
+        OnDeviceAllToAllV.max_output_len = MAX_BATCH_MUL_SEQ_LEN * overflow
+        # Init MoE kernel related buffers
+        if FeedForward.token_send_buf is None:
+            dtype = self.model_args.hf_config.torch_dtype
+
+            # Input buffer for DP-to-EP shuffle
+            FeedForward.token_send_buf = symm_mem.empty(
+                MAX_BATCH_MUL_SEQ_LEN,
+                self.model_args.dim,  # hidden dim
+                dtype=dtype,
+                device=self.current_device(),
+            )
+            FeedForward.token_send_buf.zero_()
+            # Input buffer for EP-to-DP shuffle
+            FeedForward.token_gather_buf = symm_mem.empty(
+                MAX_BATCH_MUL_SEQ_LEN * overflow,
+                self.model_args.dim,  # hidden dim
+                dtype=dtype,
+                device=self.current_device(),
+            )
+            FeedForward.token_gather_buf.zero_()
+
     @cached_property
     def _get_nparams_and_flops_fn(self) -> Callable[[int], tuple[int, int]]:
         nparams = sum(p.numel() for p in self.parameters())
@@ -172,8 +218,8 @@ class Qwen3MoE(nn.Module):
         # 4. we follow the convention and do not account for sparsity in causal attention
         layers, heads, head_dim = (
             len(self.layers),
-            self.config.n_heads,
-            self.config.dim // self.config.n_heads,
+            self.model_args.n_heads,
+            self.model_args.dim // self.model_args.n_heads,
         )
         return lambda seq_len: (
             nparams,
@@ -357,8 +403,7 @@ class InternVLChatModel(BaseModel):
             )
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
-        self.model.rotary_emb.to(torch.cuda.current_device())
-        self.model.rotary_emb.reset_inv_freq()
+        self.model.post_to_empty_hook(cosmos_config)
 
     def apply_pipeline_split(self, pp_rank, pp_size):
         """
