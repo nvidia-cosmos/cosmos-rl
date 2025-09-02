@@ -494,12 +494,13 @@ class InternVLChatModel(BaseModel):
                     is_dist_tensor = isinstance(
                         target_tensor, torch.distributed.tensor.DTensor
                     )
-                    # Write to the correct expert of the target tensor
-                    if expert_id is not None:
-                        target_tensor = target_tensor[expert_id]
                     local_view = (
                         target_tensor.to_local() if is_dist_tensor else target_tensor
                     )
+                    # Write to the correct expert of the target tensor
+                    if expert_id is not None:
+                        local_view = local_view[expert_id]
+
                     assert (
                         local_view.shape == shared_weight.shape
                     ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
