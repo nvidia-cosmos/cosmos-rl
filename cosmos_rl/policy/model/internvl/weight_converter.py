@@ -44,7 +44,6 @@ def multi_modal_projector_weight_from_hf(
     parallel_dims: ParallelDims,
     ignore_unknown_weights: bool = False,
 ) -> Tuple[str, torch.Tensor]:
-    tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
     if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
         dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
         dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
@@ -53,19 +52,14 @@ def multi_modal_projector_weight_from_hf(
         dp_shard_size = 1
 
     dest_name = map_key_from_hf(name, src_model_type)
-
-    if dest_name.startswith("0."):
-        # multi_modal_projector.layer_norm
+    if dest_name.startswith(("0.", "1.", "3.")):
+        # multi_modal_projector.layer_norm/linear_1/linear_2
         shard = tensor
-    elif dest_name.startswith("1.") or dest_name.startswith("3."):
-        # multi_modal_projector.linear_1 / multi_modal_projector.linear_2
-        shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
     elif not ignore_unknown_weights:
         raise ValueError(f"Unsupported weight: {dest_name}")
     else:
         return None, None
     # Do FSDP sharding
-    shard = shard.contiguous()
     shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
     return dest_name, shard.contiguous()
 

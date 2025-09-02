@@ -463,29 +463,6 @@ def apply_tp_ep(
             device_mesh=tp_ep_mesh,
             parallelize_plan=layer_plan,
         )
-    if model.mlp1 is not None:
-        # For multimodalprojector
-        multimodal_projector_tp_plan = {
-            "0": SequenceParallel(),
-            "1": colwise_parallel(),
-            "2": prepare_module_input(
-                input_layouts=(
-                    Shard(1),
-                    None,
-                ),
-                desired_input_layouts=(
-                    Replicate(),
-                    None,
-                ),
-            ),
-            "3": rowwise_parallel(output_layouts=Shard(1)),
-        }
-        logger.info("Applying Tensor Parallelism to the multimodal projector")
-        parallelize_module(
-            module=model.mlp1,
-            device_mesh=tp_ep_mesh,
-            parallelize_plan=multimodal_projector_tp_plan,
-        )
 
     if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group

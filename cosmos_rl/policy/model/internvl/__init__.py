@@ -279,8 +279,11 @@ class InternVLChatModel(BaseModel):
         assert (
             n_image_tokens_in_input_ids == n_image_tokens_in_vision_embeds
         ), f"{n_image_tokens_in_input_ids} != {n_image_tokens_in_vision_embeds}"
-        input_embeds[selected] = vision_embeds.reshape(-1, feature_dim).to(
-            input_embeds.device
+        input_embeds = input_embeds.clone()
+        input_embeds[selected] = (
+            vision_embeds.reshape(-1, feature_dim)
+            .clone()
+            .to(input_embeds.device, input_embeds.dtype)
         )
         input_embeds = input_embeds.reshape(batch, seq_len, feature_dim)
 
