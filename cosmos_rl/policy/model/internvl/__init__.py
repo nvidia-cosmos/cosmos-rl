@@ -183,7 +183,6 @@ class Qwen3MoE(nn.Module):
         # Init MoE kernel related buffers
         if FeedForward.token_send_buf is None:
             dtype = self.model_args.hf_config.torch_dtype
-
             # Input buffer for DP-to-EP shuffle
             FeedForward.token_send_buf = symm_mem.empty(
                 MAX_BATCH_MUL_SEQ_LEN,
@@ -593,6 +592,9 @@ class InternVLChatModel(BaseModel):
         else:
             hf_config.max_position_embeddings = max_position_embeddings
 
+        torch_dtype = hf_config.torch_dtype
+        hf_config.llm_config.torch_dtype = torch_dtype
+        hf_config.vision_config.torch_dtype = torch_dtype
         vocab_size = sync_model_vocab(model_name_or_path)
 
         lm_args = None
