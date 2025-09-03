@@ -1693,11 +1693,13 @@ class GRPOTrainer(Trainer):
                                 == 0
                             ) and local_mini_step > 1:
                                 all_reduced = True
-                                grad_norm_sum += self.execute_all_reduce()
+                                # grad_norm_sum += self.execute_all_reduce()
+                                grad_norm_sum += 0
                             else:
                                 all_reduced = False
                         if not is_computing_ref and not all_reduced:
-                            grad_norm_sum += self.execute_all_reduce()
+                            # grad_norm_sum += self.execute_all_reduce()
+                            grad_norm_sum += 0
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()

@@ -520,17 +520,16 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
                 inplace = False
 
-            # inplace = False
-            # recv_tensor = (
-            #         torch.empty_like(vllm_tensor_view).to(promotion_dtype).contiguous()
-            #     )
-
             if vllm_tensor_view.dtype != target_dtype:
                 recv_tensor = recv_tensor.to(target_dtype)
                 inplace = False
             # Hold these recv_tensor, in case of buffer reusing by torch
             self.total_temp_tensor_pool.append(recv_tensor)
 
+            inplace = False
+            recv_tensor = (
+                torch.empty_like(vllm_tensor_view).to(target_dtype).contiguous()
+            )
             return recv_tensor, inplace
 
         skipped_params_cnt = 0
@@ -563,9 +562,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 assert r_rank == global_rank_of_rollout
                 vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
                 recv_tensor, inplace = recv_tensor_creator(vllm_tensor_view)
-                logger.debug(
-                    f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape} with dtype {vllm_tensor_view.dtype}."
-                )
+                if self.global_rank == 0:
+                    logger.info(
+                        f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape} with dtype {vllm_tensor_view.dtype}."
+                    )
                 nccl_recv(recv_tensor, p_rank, communicator_index)
 
                 # inplace copy
