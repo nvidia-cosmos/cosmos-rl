@@ -594,6 +594,7 @@ class Controller:
         return mesh_names, group_sizes
 
     def replica_heartbeat(self, replica_name: str):
+        logger.info(f"=== replica heart beat for {replica_name}")
         if replica_name in self.policy_status_manager:
             self.policy_status_manager.heartbeat(replica_name)
         elif replica_name in self.rollout_status_manager:
