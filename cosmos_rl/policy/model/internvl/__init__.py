@@ -105,7 +105,6 @@ class Qwen3MoE(nn.Module):
         interested_tokens: Optional[torch.BoolTensor] = None,
         **kwargs,  # Additional arguments for compatibility
     ):
-        pass
         h = self.identity_layer(inputs_embeds)
 
         position_embeddings = self.rotary_emb(h, position_ids)
@@ -131,7 +130,6 @@ class Qwen3MoE(nn.Module):
             h = updated_kwargs.pop("inputs")
             h = self.identity_layer(h)
             kwargs.update(updated_kwargs)
-
         for layer in self.layers.values():
             if (
                 hasattr(layer, "_gradient_checkpointing_enabled")
