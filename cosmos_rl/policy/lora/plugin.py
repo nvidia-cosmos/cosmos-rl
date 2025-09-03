@@ -128,13 +128,11 @@ class LoraInjectedLinear(nn.Linear):
     def merge_adapters_(self) -> None:
         if self.r == 0 or self.merged:
             return
-        # Backup original weights to ensure bitwise restoration if deterministic is enabled
+
         if getattr(self, "_deterministic", False) and self._weight_backup is None:
-            # Only back up for non-DTensor to avoid incompatibility with copy_
             if not isinstance(self.weight, torch.distributed.tensor.DTensor):
                 self._weight_backup = self.weight.detach().clone()
             else:
-                # Backup local shard for DTensor and reconstruct on unmerge
                 self._weight_backup = self.weight.to_local().detach().clone()
         lora_A = (
             self.lora_A.weight.full_tensor()
