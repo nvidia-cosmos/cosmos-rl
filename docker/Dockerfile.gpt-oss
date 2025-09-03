@@ -135,18 +135,21 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 ## Image target: cosmos_rl
 FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 
-COPY . /workspace/cosmos_rl
-RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
+# temporarily install vllm+0.10.1+gptoss to install the triton depends.
+RUN source /opt/venv/cosmos_rl/bin/activate && \
+    pip uninstall -y  torchao vllm && \
+    pip install uv && \
+    uv pip install --pre vllm==0.10.1+gptoss torchao --extra-index-url https://wheels.vllm.ai/gpt-oss/ --extra-index-url https://download.pytorch.org/whl/nightly/cu128  --index-strategy unsafe-best-match && \
+    pip install accelerate kernels
 
+# Update to nightly version of vLLM.
+RUN source /opt/venv/cosmos_rl/bin/activate && \
+    uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly && \
+    pip uninstall -y flash-attn && \
+    pip cache purge && \
+    pip install flash-attn --no-build-isolation
 
 FROM package AS gpt-oss-base
 
-RUN source /opt/venv/cosmos_rl/bin/activate && \
-    pip uninstall -y flash-attn torchao vllm && \
-    pip install uv && \
-    uv pip install --pre vllm==0.10.1+gptoss torchao --extra-index-url https://wheels.vllm.ai/gpt-oss/ --extra-index-url https://download.pytorch.org/whl/nightly/cu128  --index-strategy unsafe-best-match && \
-    pip cache purge && \
-    pip install flash-attn --no-build-isolation && \
-    pip install accelerate kernels
-
-
+COPY . /workspace/cosmos_rl
+RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl

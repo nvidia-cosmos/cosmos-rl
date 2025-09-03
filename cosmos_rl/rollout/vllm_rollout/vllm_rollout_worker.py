@@ -1322,15 +1322,20 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
+                # if self.global_rank == 0:
+                #     for i, completion in enumerate(completions):
+                #         if len(prompts[i] > 1):
+                #             user_prompt = prompts[i][1]
+                #             logger.info(f"LMS: prompt is: {user_prompt}")
+                #             for j, gen in enumerate(completion):
+                #                 logger.info(
+                #                     f"LMS: [generated text {j}/{len(completion)}]: {gen}"
+                #                 )
                 if self.global_rank == 0:
-                    for i, completion in enumerate(completions):
-                        user_prompt = prompts[i][1]
-                        logger.info(f"LMS: prompt is: {user_prompt}")
-                        for j, gen in enumerate(completion):
-                            logger.info(
-                                f"LMS: [generated text {j}/{len(completion)}]: {gen}"
-                            )
-                    # logger.info(f"[Rollout] prompt: {prompts[0][1]}, completions: {completions[0][0]}")
+                    if len(completions) > 0:
+                        logger.info(
+                            f"[Rollout] prompt: {prompts[0][1]}, completions: {completions[0][0]}"
+                        )
                 # Remove empty completions
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []

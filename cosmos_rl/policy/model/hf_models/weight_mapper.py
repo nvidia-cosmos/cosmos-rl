@@ -54,9 +54,7 @@ class HFModelWeightMapper(WeightMapper):
             # Some special cases for GPT-OSS.
             gpt_oss_rename_mapping = {
                 # Please do not change the order of the keys.
-                "attn.norm.weight": "input_layernorm.weight",
                 "attn": "self_attn",
-                "mlp.norm.weight": "post_attention_layernorm.weight",
                 "embedding": "embed_tokens",
             }
             for key, value in gpt_oss_rename_mapping.items():

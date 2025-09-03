@@ -790,31 +790,39 @@ class ParallelTopoMapper:
                     not is_bias
                 ), f"VocabParallelEmbedding {param_name} should not have bias."
                 tp_dim = output_dim
-            elif "gpt_oss" in self.hf_config.model_type:
-                # special cases for gpt-oss model.
-                assert hasattr(
-                    vllm_model_classes, "gpt_oss"
-                ), "gpt-oss is not supported for this version of vllm."
-                from cosmos_rl.utils.mxfp4.quantizer import genereate_dim_rank_info
-
-                if isinstance(part, vllm_model_classes.gpt_oss.OAIAttention):
-                    if "sinks" in param_name:
-                        tp_dim = 0  # sinks has shape [num_heads]
-                elif isinstance(part, FusedMoE):
-                    # This temporarily for mxfp4 gpt-oss model. un-even sharding.
-                    dims_rank_info, _tp_dim = genereate_dim_rank_info(
-                        part, param_name, param, self.hf_config, self.parallelism
-                    )
-                    if _tp_dim > 0:
-                        tp_dim = _tp_dim
-                    packed_modules_mapping = {}
             else:
-                assert (
-                    "Parallel" not in part.__class__.__name__
-                ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
-                logger.warning(
-                    f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
-                )
+                if "gpt_oss" in self.hf_config.model_type:
+                    # special cases for gpt-oss model.
+                    assert hasattr(
+                        vllm_model_classes, "gpt_oss"
+                    ), "gpt-oss is not supported for this version of vllm."
+                    from cosmos_rl.utils.mxfp4.quantizer import genereate_dim_rank_info
+
+                    if isinstance(part, vllm_model_classes.gpt_oss.OAIAttention):
+                        if "sinks" in param_name:
+                            tp_dim = 0  # sinks has shape [num_heads]
+                    elif isinstance(part, FusedMoE):
+                        # This temporarily for mxfp4 gpt-oss model. un-even sharding.
+                        dims_rank_info, _tp_dim = genereate_dim_rank_info(
+                            part, param_name, param, self.hf_config, self.parallelism
+                        )
+                        if _tp_dim > 0:
+                            tp_dim = _tp_dim
+                        packed_modules_mapping = {}
+                    else:
+                        assert (
+                            "Parallel" not in part.__class__.__name__
+                        ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                        logger.warning(
+                            f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
+                        )
+                else:
+                    assert (
+                        "Parallel" not in part.__class__.__name__
+                    ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                    logger.warning(
+                        f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
+                    )
         elif self.backend == "trtllm":
             # for trtllm
             try:
