@@ -13,27 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Tuple
 from abc import ABC, abstractmethod
-from typing import List
 
-from cosmos_rl.rollout.schema import RolloutResult
-
-from cosmos_rl.policy.config import Config as CosmosConfig
-from transformers import AutoTokenizer
+from .schema import OpenAIFunctionCallSchema
 
 
-class RolloutBase(ABC):
-    def __init__(self, config: CosmosConfig, tokenizer: AutoTokenizer):
-        self.config = config
-        self.tokenizer = tokenizer
-        self.pad_token_id = self.tokenizer.pad_token_id
-
+class ToolParser(ABC):
     @abstractmethod
-    def rollout_generation(self, prompts, *args, **kwargs) -> List[RolloutResult]:
-        """Generate sequences"""
-        pass
+    def extract_tool_calls(
+        self, text: str
+    ) -> Tuple[str, list[OpenAIFunctionCallSchema]]:
+        """Extract tool calls from the text.
 
-    @abstractmethod
-    def init_engine(self, quantization: str, seed: int, load_format: str):
-        """Initialize the engine"""
-        pass
+        Args:
+            text (str): The responses text.
+
+        Returns:
+            Tuple[str, List[OpenAIFunctionCallSchema]]: Content and extracted tool calls.
+        """
+        raise NotImplementedError
