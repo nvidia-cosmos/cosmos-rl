@@ -868,7 +868,7 @@ class RolloutConfig(BaseModel):
     )
 
     multi_turn_config: MultiTurnRolloutConfig = Field(
-        default=MultiTurnRolloutConfig,
+        default_factory=MultiTurnRolloutConfig,
         description="Configuration for multi-turn rollout.",
     )
 
