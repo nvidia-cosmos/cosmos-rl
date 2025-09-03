@@ -23,13 +23,14 @@ To design a powerfull prompt, you can refer https://huggingface.co/docs/transfor
 import copy
 
 from transformers import AutoTokenizer
-from typing import List
+from typing import List, Optional
 from cosmos_rl.dispatcher.data.schema import ConversationType, ChatMessage
 
 
 def get_token_ids_and_loss_mask_from_conversation(
     tokenizer: AutoTokenizer,
     conversation: ConversationType,
+    chat_template: Optional[str] = None,
     enable_thinking: bool = False,
     tools: list[dict] = None,
     unmasked_roles: List[str] = ["assistant"],
@@ -57,6 +58,7 @@ def get_token_ids_and_loss_mask_from_conversation(
     full_token_ids = tokenizer.apply_chat_template(
         conversation,
         tokenize=True,
+        chat_template=chat_template,
         add_generation_prompt=False,
         enable_thinking=enable_thinking,
         tools=tools,
@@ -88,6 +90,7 @@ def get_token_ids_and_loss_mask_from_conversation(
     token_ids_template = tokenizer.apply_chat_template(
         conversation,
         tokenize=True,
+        chat_template=chat_template,
         add_generation_prompt=False,
         enable_thinking=enable_thinking,
         tools=tools,

@@ -743,8 +743,11 @@ class MultiTurnRolloutConfig(BaseModel):
     enable_thinking: bool = Field(
         default=False, description="Whether to enable thinking in multi-turn rollout."
     )
+    custom_chat_template_path: Optional[str] = Field(
+        default=None, description="The path to the custom chat template in chat."
+    )
     max_assistant_turns: int = Field(
-        default=100, description="Max assistant turn count for multi-turn rollout."
+        default=5, description="Max assistant turn count for multi-turn rollout."
     )
     add_generation_prompt: bool = Field(
         default=True,

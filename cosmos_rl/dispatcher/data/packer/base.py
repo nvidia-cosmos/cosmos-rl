@@ -22,6 +22,7 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
     add_assistant_message,
 )
+from cosmos_rl.utils.logging import logger
 
 import argparse
 
@@ -102,7 +103,6 @@ class DataPacker(ABC):
         self,
         config: Config,
         tokenizer: AutoTokenizer,
-        tool_agent: Optional[ToolAgent] = None,
         *args,
         **kwargs,
     ):
@@ -113,8 +113,18 @@ class DataPacker(ABC):
         assert tokenizer is not None, "tokenizer should be set"
         self.config = config
         self.tokenizer = tokenizer
-        if tool_agent is not None:
-            self.tool_agent = tool_agent
+        self.custom_chat_template = None
+        if self.config.rollout.multi_turn_config.custom_chat_template_path:
+            try:
+                with open(
+                    self.config.rollout.multi_turn_config.custom_chat_template_path, "r"
+                ) as f:
+                    self.custom_chat_template = f.read()
+            except FileNotFoundError:
+                logger.warning(
+                    f"Custom chat template file not found: {self.config.rollout.multi_turn_config.custom_chat_template_path}, use model default template instead."
+                )
+                self.custom_chat_template = None
 
     @abstractmethod
     def get_rollout_input(self, item: Any) -> Any:

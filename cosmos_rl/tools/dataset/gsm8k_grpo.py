@@ -157,13 +157,13 @@ class GSM8kTool(BaseTool):
                 "type": "function",
                 "function": {
                     "name": _tool_name,
-                    "description": "A tool for calculating the reward of gsm8k",
+                    "description": "A tool for calculating the reward of gsm8k. (1.0 if parsed answer is correct, 0.0 if parsed answer is incorrect or not correctly parsed)",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "answer": {
                                 "type": "string",
-                                "description": "The answer to the question",
+                                "description": "The model's answer to the GSM8K math problem, must be a digits",
                             },
                         },
                         "required": ["answer"],
@@ -209,11 +209,17 @@ class GSM8kTool(BaseTool):
     def function(self, answer: str) -> ToolResponse:
         # model may generate tool call with answer like "### 123" or "123",
         # so we set flexible method to extract the answer.
+        answer = self._extract_solution(answer, method="flexible")
         truth_answer = self._extract_solution(self.groud_truth, method="flexible")
         if truth_answer is None:
             truth_answer = ""
-
-        return ToolResponse(text=f"Current parsed #### {truth_answer}")
+        try:
+            reward = 1.0 if answer == truth_answer else 0.0
+        except Exception:
+            reward = 0.0
+        return ToolResponse(
+            text=f"Current parsed is answer={truth_answer}, reward={reward}"
+        )
 
 
 def custom_logger_fn(data: dict, step: int) -> None:
