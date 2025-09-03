@@ -44,7 +44,8 @@ class GSM8kDataset(Dataset):
             self.dataset = modelscope_dataset_if_enabled
 
     def __len__(self):
-        return len(self.dataset)
+        # return len(self.dataset)
+        return 2
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
         """
@@ -60,6 +61,7 @@ class GSM8kDataset(Dataset):
         ]
         ```
         """
+        idx = 0
         assert hasattr(
             self, "tokenizer"
         ), "`self.tokenizer` should be set by the launcher"
@@ -85,6 +87,7 @@ class GSM8kDataset(Dataset):
         """
         This is mandatory for GRPO to get a reference answer for reward computation.
         """
+        idx = 0
         return self.dataset[idx]["answer"]
 
 

@@ -25,8 +25,8 @@ sync_weight_interval = 1
 [rollout]
 gpu_memory_utilization = 0.5
 enable_chunked_prefill = true
-n_generation = 16
-batch_size = 8
+n_generation = 4
+batch_size = 1
 quantization = "mxfp4"
 max_response_length = 1024
 
@@ -37,7 +37,8 @@ model_max_length = 4096
 model_gradient_checkpointing = true
 
 [logging]
-logger = ['console', 'wandb']
+# logger = ['console', 'wandb']
+logger = []
 project_name = "cosmos_rl"
 experiment_name = "None"
 
@@ -60,7 +61,7 @@ on_policy = true
 
 
 [train.ckpt]
-enable_checkpoint = true
+enable_checkpoint = false
 save_freq = 30000
 save_mode = "async"
 
