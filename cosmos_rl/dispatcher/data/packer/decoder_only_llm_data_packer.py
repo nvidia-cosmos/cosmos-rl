@@ -46,6 +46,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             prompt = self.tokenizer.apply_chat_template(
                 sample,
                 tools=self.tool_agent.tool_schemas(),
+                chat_template=self.custom_chat_template,
                 tokenize=False,
                 add_generation_prompt=self.config.rollout.multi_turn_config.add_generation_prompt,
                 continue_final_message=self.config.rollout.multi_turn_config.continue_final_message,
@@ -89,6 +90,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             input_ids, loss_mask = get_token_ids_and_loss_mask_from_conversation(
                 self.tokenizer,
                 sample,
+                chat_template=self.custom_chat_template,
                 enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
                 tools=self.tool_agent.tool_schemas(),
             )
