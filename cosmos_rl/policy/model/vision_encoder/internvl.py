@@ -351,7 +351,6 @@ class InternVisionEncoder(nn.Module):
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(config.num_hidden_layers):
             self.layers[str(layer_id)] = InternVisionEncoderLayer(config)
-        self.gradient_checkpointing = True
 
     def forward(
         self,
@@ -373,7 +372,10 @@ class InternVisionEncoder(nn.Module):
         for idx, encoder_layer in self.layers.items():
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
-            if self.gradient_checkpointing and self.training:
+            if (
+                hasattr(encoder_layer, "_gradient_checkpointing_enabled")
+                and encoder_layer._gradient_checkpointing_enabled
+            ):
                 layer_outputs = torch.utils.checkpoint.checkpoint(
                     encoder_layer, hidden_states
                 )
@@ -382,7 +384,8 @@ class InternVisionEncoder(nn.Module):
                     hidden_states,
                 )
             hidden_states = layer_outputs
-
+        if output_hidden_states:
+            encoder_states = encoder_states + (hidden_states,)
         return hidden_states if select_layer == -1 else encoder_states[select_layer]
 
 
