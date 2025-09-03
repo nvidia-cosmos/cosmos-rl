@@ -58,8 +58,15 @@ def main(*args, **kwargs):
                 trainer = GRPOTrainer(config=cosmos_config, parallel_dims=parallel_dims)
                 trainer.main_loop()
             elif policy_type == "sft":
+                custom_sft_dataset = kwargs.get("dataset")
+                custom_sft_data_packer = kwargs.get("data_packer")
                 logger.info("Starting SFT training...")
-                trainer = SFTTrainer(config=cosmos_config, parallel_dims=parallel_dims)
+                trainer = SFTTrainer(
+                    config=cosmos_config,
+                    parallel_dims=parallel_dims,
+                    dataset=custom_sft_dataset,
+                    data_packer=custom_sft_data_packer,
+                )
                 trainer.train()
             else:
                 raise ValueError(f"Unknown policy type: {policy_type}")

@@ -41,6 +41,7 @@ from cosmos_rl.dispatcher.command import (
     RolloutToRolloutBroadcastCommand,
     Command,
 )
+from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
@@ -176,8 +177,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.policy_to_rollout_nccl_communicators = {}
 
         self.batch_size = self.config.rollout.batch_size
-        if self.config.train.enable_validation:
-            self.val_batch_size = self.config.rollout.val_batch_size or self.batch_size
+        if self.config.validation.enable:
+            self.val_batch_size = self.config.validation.batch_size or self.batch_size
             assert (
                 self.val_batch_size > 0
             ), "[Rollout] val_batch_size should be greater than 0."
@@ -486,6 +487,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         trainable_only: bool,
         do_weight_sync_check: bool = False,
     ):
+        target_dtype = str2torch_dtype(self.config.train.transfer_dtype)
         check_inside_group = do_weight_sync_check
         if self.quantization_type == "fp8":
             inst_group_weight_name = (
@@ -533,17 +535,23 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 assert r_rank == global_rank_of_rollout
                 vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
                 recv_tensor = None
-                if vllm_tensor_view.is_contiguous():
+                no_need_buffer = (
+                    vllm_tensor_view.is_contiguous()
+                    and vllm_tensor_view.dtype == target_dtype
+                )
+                if no_need_buffer:
                     recv_tensor = vllm_tensor_view
                 else:
                     # new a temp tensor
-                    recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
+                    recv_tensor = (
+                        torch.empty_like(vllm_tensor_view).contiguous().to(target_dtype)
+                    )
                 logger.debug(
                     f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape} with dtype {vllm_tensor_view.dtype}."
                 )
                 nccl_recv(recv_tensor, p_rank, communicator_index)
                 # inplace copy
-                if not vllm_tensor_view.is_contiguous():
+                if not no_need_buffer:
                     all_cloned_target_tensors.append((vllm_tensor_view, recv_tensor))
 
                 total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
@@ -556,7 +564,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         def completion_lambda(all_cloned_target_tensors, tensors_to_check):
             for view, recv_tensor in all_cloned_target_tensors:
                 view.copy_(
-                    recv_tensor,
+                    recv_tensor.to(view.dtype),
                 )
             all_cloned_target_tensors.clear()
 
@@ -566,6 +574,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 insts,
                 inst_dest_name,
             ) in tensors_to_check:
+                cloned_target_tensor = cloned_target_tensor.to(target_dtype).to(
+                    cloned_target_tensor.dtype
+                )
                 if not torch.allclose(cloned_target_tensor, target_tensor):
                     raise ValueError(
                         f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
@@ -635,7 +646,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             _patch_vllm_rollout_locked_step(
                 self.rollout,
                 self.consume_command,
-                self.config.train.enable_validation,
+                self.config.validation.enable,
             )
             self.prepare_shard_infos_for_weight_sync_insts()
 
@@ -850,7 +861,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 _patch_vllm_rollout_locked_step(
                     self.rollout,
                     self.consume_command,
-                    self.config.train.enable_validation,
+                    self.config.validation.enable,
                 )
                 self.prepare_shard_infos_for_weight_sync_insts()
 
@@ -915,8 +926,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.current_weight_version = current_step
 
         if current_step is not None and current_step > 0:
-            should_do_validation = self.config.train.enable_validation and (
-                current_step % self.config.train.validation_step == 0
+            should_do_validation = self.config.validation.enable and (
+                current_step % self.config.validation.freq == 0
                 or current_step == broadcast_command.total_steps
             )
             validation_queue = Queue()

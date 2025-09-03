@@ -167,7 +167,6 @@ class LoraInjectedLinear(nn.Linear):
     def unmerge_adapters_(self) -> None:
         if self.r == 0 or not self.merged:
             return
-        # If deterministic and we have a backup, restore directly for exactness
         if getattr(self, "_deterministic", False) and self._weight_backup is not None:
             if not isinstance(self.weight, torch.distributed.tensor.DTensor):
                 self.weight.copy_(self._weight_backup)
@@ -175,7 +174,6 @@ class LoraInjectedLinear(nn.Linear):
                 self.merged = False
                 return
             else:
-                # Rebuild a DTensor from local backup and restore deterministically
                 dt_backup = torch.distributed.tensor.DTensor.from_local(
                     self._weight_backup,
                     device_mesh=self.weight.device_mesh,
@@ -186,7 +184,6 @@ class LoraInjectedLinear(nn.Linear):
                 self._weight_backup = None
                 self.merged = False
                 return
-            # Fallback to delta subtraction for DTensor weights
 
         lora_A = (
             self.lora_A.weight.full_tensor()

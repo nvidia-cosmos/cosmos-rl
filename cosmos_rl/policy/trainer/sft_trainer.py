@@ -40,10 +40,17 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from tqdm import tqdm
-from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
 from functools import partial
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_info_collect,
+    pack_sequences_for_masks,
+    pack_sequences_for_labels,
+)
 
 
 def async_safe_ce(
@@ -51,11 +58,22 @@ def async_safe_ce(
     target: torch.LongTensor,
     ignore_index: int = -100,
     loss_scaling_factor: float = 1.0,
+    output_packing_mask: Optional[torch.Tensor] = None,
+    target_packing_mask: Optional[torch.Tensor] = None,
     dp_group: Optional[torch.distributed.ProcessGroup] = None,
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> torch.Tensor:
-    target = target[:, 1:].contiguous().view(-1)
-    output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+    if output_packing_mask is not None:
+        output = (
+            output[output_packing_mask].contiguous().view(-1, output.size(-1)).float()
+        )
+    else:
+        output = output[:, :-1].contiguous().view(-1, output.size(-1)).float()
+
+    if target_packing_mask is not None:
+        target = target[target_packing_mask].contiguous().view(-1)
+    else:
+        target = target[:, 1:].contiguous().view(-1)
 
     if cp_group is not None and cp_group.size() > 1:
         # Fallback to unbalance loss
@@ -125,17 +143,6 @@ def construct_dataset(
         train_dataset = concatenate_datasets(dataset_list)
     logger.info(f"Final dataset size = {len(train_dataset)}")
 
-    # try:
-    #     if dataset is not None:
-    #         dataset_list = []
-    #         for split_name in config.dataset.split:
-    #             dataset_list.append(dataset[split_name])
-    #         test_dataset = concatenate_datasets(dataset_list)
-    #         if len(test_dataset) == 0:
-    #             raise ValueError("Test dataset is empty")
-    #     else:
-    #         raise ValueError("Test dataset is empty")
-    # except Exception:
     if isinstance(train_dataset, torch.utils.data.Dataset):
         # Define the split ratio (e.g., 80% train, 20% test)
         if config.dataset.test_size is None:
@@ -240,11 +247,17 @@ class SFTDataset(Dataset):
 
 
 class SFTTrainer(Trainer):
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
+    def __init__(
+        self,
+        config: CosmosConfig,
+        parallel_dims: ParallelDims,
+        dataset: Optional[Dataset] = None,
+        data_packer: Optional[DataPacker] = None,
+    ):
         super(SFTTrainer, self).__init__(config, parallel_dims)
 
         # Enlarge the compile cache size for validation
-        if config.train.compile and config.train.enable_validation:
+        if config.train.compile and config.validation.enable:
             torch._dynamo.config.cache_size_limit = 64
 
         self.dp_rank, self.dp_world_size = 0, 1
@@ -296,18 +309,26 @@ class SFTTrainer(Trainer):
             )
         self.model.train()
 
+        if isinstance(dataset, Callable):
+            # Incase it is a factory function, we need to call it to get the dataset
+            dataset = dataset(self.config)
+            dataset.setup(self.config, self.tokenizer)
+        if data_packer:
+            data_packer.setup(self.config, self.tokenizer)
+            self.data_packer = data_packer
+
         # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
             config.train.train_policy,
             tokenizer=self.tokenizer,
             data_packer=self.data_packer,
-            user_provided_dataset=self.sft_user_dataset,
+            user_provided_dataset=dataset,
         )
         train_sampler = DistributedSampler(
             train_dataset,
             num_replicas=self.dp_world_size,
             rank=self.dp_rank,
-            shuffle=True,
+            shuffle=config.train.train_policy.dataloader_shuffle,
             drop_last=False,
         )
 
@@ -355,7 +376,8 @@ class SFTTrainer(Trainer):
         self.train_data_loader = get_train_data_loader(train_sampler)
         self.val_data_loader = DataLoader(
             val_dataset,
-            batch_size=config.train.validation_batch_per_replica,
+            batch_size=config.validation.batch_size
+            or config.train.train_batch_per_replica,
             num_workers=config.train.train_policy.dataloader_num_workers,
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=val_sampler,
@@ -381,8 +403,8 @@ class SFTTrainer(Trainer):
                 self.optimizers, self.config, self.total_steps
             )
 
-        if self.parallel_dims.dp_enabled:
-            dp_group = self.parallel_dims.mesh["dp"].get_group()
+        if self.parallel_dims.dp_shard_enabled:
+            dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
         else:
             dp_group = None
 
@@ -398,6 +420,11 @@ class SFTTrainer(Trainer):
         )
 
     def validate(self):
+        if not self.config.validation.enable:
+            return
+        if self.parallel_dims.dp_replicate_coord[0] != 0:
+            return
+
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
         self.model.eval()
         with torch.no_grad():
@@ -451,6 +478,7 @@ class SFTTrainer(Trainer):
                         slice_inputs_for_ulysses(
                             [val_inputs, val_position_ids, val_padding_mask],
                             self.parallel_dims.mesh["cp"],
+                            seq_dims=[1, val_pos_seq_dim, 1],
                         )
                     )
 
@@ -485,7 +513,6 @@ class SFTTrainer(Trainer):
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
                     val_logits = self.model(**val_batch)
-
                     # recover from ulysses if cp is enabled
                     if self.parallel_dims.cp_enabled:
                         val_batch["input_ids"] = input_ids_before_cp
@@ -546,6 +573,15 @@ class SFTTrainer(Trainer):
                             // self.seq_len_multiple
                             * self.seq_len_multiple
                         )
+
+                    packing_seq = self.config.train.sequence_packing
+                    if packing_seq:
+                        if self.parallel_dims.pp_enabled:
+                            packing_seq = False
+                            logger.debug(
+                                "[Policy] Packing sequence is disabled due to incompatible dimensions."
+                            )
+
                     batch = self.data_packer.sft_collate_fn(
                         raw_batch,
                         computed_max_len=max_len,
@@ -587,7 +623,25 @@ class SFTTrainer(Trainer):
                     batch["position_ids"] = position_ids
                     padding_mask = batch.get("padding_mask", None)
 
-                    if self.parallel_dims.cp_enabled:
+                    if packing_seq:
+                        # Prepare for the sequence packing information.
+                        packed_args = pack_sequences_info_collect(
+                            batch["input_ids"],
+                            pad_token_id=self.tokenizer.pad_token_id,
+                            label_ids=labels,
+                            ignore_label_id=-100,
+                            seq_len_multiple=self.seq_len_multiple,
+                        )
+                        batch.update(packed_args)
+                        labels = pack_sequences_for_labels(
+                            labels, batch["valid_input_len"]
+                        )
+                        packed_args = pack_sequences_for_masks(
+                            batch["valid_input_len"], batch["valid_input_len"]
+                        )
+                        batch.update(packed_args)
+
+                    if self.parallel_dims.cp_enabled and not packing_seq:
                         input_ids_before_cp = input_ids
                         position_ids_before_cp = position_ids
                         padding_mask_before_cp = padding_mask
@@ -596,6 +650,7 @@ class SFTTrainer(Trainer):
                             slice_inputs_for_ulysses(
                                 [input_ids, position_ids, padding_mask],
                                 self.parallel_dims.mesh["cp"],
+                                seq_dims=[1, pos_seq_dim, 1],
                             )
                         )
 
@@ -603,6 +658,13 @@ class SFTTrainer(Trainer):
                         batch["position_ids"] = position_ids
                         if padding_mask is not None:
                             batch["padding_mask"] = padding_mask
+
+                    if self.parallel_dims.cp_enabled and packing_seq:
+                        # Slice for cp after embedding generation and sequence packing in the model forward later.
+                        batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
+                        input_ids_before_cp = input_ids
+                        position_ids_before_cp = position_ids
+                        padding_mask_before_cp = padding_mask
 
                     if self.parallel_dims.pp_enabled:
                         pp_last_stage = (
@@ -636,7 +698,7 @@ class SFTTrainer(Trainer):
                             else torch.tensor([-1.0], device=self.device)
                         )
                     else:
-                        # # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
+                        # This code is just for debugging purposes, where we can test whether the model can generate tokens correctly
                         # last_token_ids = []
                         # with torch.no_grad():
                         #     N_NEW_TOKENS = 100
@@ -655,13 +717,15 @@ class SFTTrainer(Trainer):
                         #         token_ids = torch.argmax(logits[:, -1:, :], dim=-1)
                         #         last_token_ids.append(token_ids)
                         #     if self.global_rank == 0:
-                        #         for i in range(len(last_token_ids)):
-                        #             print(
-                        #                 f"generated tokens at sample {i}: {self.tokenizer.decode(torch.cat(last_token_ids, dim=-1)[i])}"
-                        #             )
-
-                        #     return
-                        # #########################################################################################
+                        #         text = ''
+                        #         new_last_token_ids = torch.cat(last_token_ids, dim=-1).squeeze(0)
+                        #         logger.info(f'{new_last_token_ids=}')
+                        #         text = self.tokenizer.decode(new_last_token_ids)
+                        #         logger.info(
+                        #             f"generated tokens at sample : {text}"
+                        #         )
+                        # return
+                        #########################################################################################
 
                         logits = self.model(**batch)
 
@@ -675,9 +739,10 @@ class SFTTrainer(Trainer):
                         loss = self.loss_fn(
                             logits,
                             labels,
+                            output_packing_mask=batch.get("input_packing_mask", None),
+                            target_packing_mask=batch.get("label_packing_mask", None),
                             loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
                         )
-
                         # # Hint FSDP to do all-reduce on the last backward pass
                         # if hasattr(self.model, "set_is_last_backward"):
                         #     print(f"set_is_last_backward: {i == mini_batch_begin_idxs[-1]}")
@@ -778,10 +843,7 @@ class SFTTrainer(Trainer):
 
                 val_score = None
                 # validation
-                if (
-                    self.config.train.enable_validation
-                    and self.train_step % self.config.train.validation_step == 0
-                ):
+                if self.train_step % self.config.validation.freq == 0:
                     val_score = self.validate()
 
                 # save checkpoint
@@ -789,6 +851,7 @@ class SFTTrainer(Trainer):
                     self.config.train.ckpt.enable_checkpoint
                     and self.train_step % self.config.train.ckpt.save_freq == 0
                     and self.train_step > 0
+                    and self.parallel_dims.dp_replicate_coord[0] == 0
                 ):
                     # TODO(dinghaoy): support export safetensors asynchronously.
                     if self.config.train.ckpt.export_safetensors:
@@ -829,9 +892,11 @@ class SFTTrainer(Trainer):
                 break  # break outer epoch loop
 
         # process the final step
-        if self.config.train.enable_validation:
-            val_score = self.validate()
-        if self.config.train.ckpt.export_safetensors:
+        val_score = self.validate()
+        if (
+            self.config.train.ckpt.export_safetensors
+            and self.parallel_dims.dp_replicate_coord[0] == 0
+        ):
             logger.info(
                 f"Saving final huggingface checkpoint to {self.config.train.output_dir}..."
             )
@@ -859,7 +924,7 @@ class SFTTrainer(Trainer):
             )
             self.ckpt_manager.save_check(
                 step=self.train_step,
-                val_score=val_score if self.config.train.enable_validation else -1,
+                val_score=val_score if self.config.validation.enable else -1,
                 pp_enabled=self.parallel_dims.pp_enabled,
                 pp_last_stage=pp_last_stage,
                 pp_master_rank=self.parallel_dims.world_size
@@ -877,8 +942,8 @@ class SFTTrainer(Trainer):
         loss_scaling_factor = (
             mini_batch_size / self.config.train.train_batch_per_replica
         )
-        if self.parallel_dims.dp_enabled:
-            dp_group = self.parallel_dims.mesh["dp"].get_group()
+        if self.parallel_dims.dp_shard_enabled:
+            dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
         else:
             dp_group = None
 

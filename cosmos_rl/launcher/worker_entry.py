@@ -4,6 +4,7 @@ from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 from torch.utils.data import Dataset
+import argparse
 
 
 def main(
@@ -13,7 +14,8 @@ def main(
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,
-    *args,
+    custom_logger_fns: Optional[List[Callable]] = None,
+    args: Optional[argparse.Namespace] = None,
     **kwargs,
 ):
     if kwargs:
@@ -31,11 +33,13 @@ def main(
             val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
             val_data_packer=val_data_packer,
+            custom_logger_fns=custom_logger_fns,
+            args=args,
         )
     elif role == "Policy":
         from cosmos_rl.policy.train import main as policy_main
 
-        policy_main()
+        policy_main(dataset=dataset, data_packer=data_packer)
         return
     else:
         from cosmos_rl.rollout.rollout_entrance import run_rollout

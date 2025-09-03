@@ -119,7 +119,6 @@ class BaseModel(torch.nn.Module, ABC):
         ):
             def merged_local_view() -> torch.Tensor:
                 with torch.no_grad():
-                    # Base local view (DTensor -> local shard)
                     if isinstance(param, torch.distributed.tensor.DTensor):
                         base_local = param.to_local()
                     else:
@@ -134,7 +133,6 @@ class BaseModel(torch.nn.Module, ABC):
 
                     delta_w = module.scaling * (lora_B @ lora_A)
 
-                    # Slice global delta to local shard if param is DTensor
                     if isinstance(param, torch.distributed.tensor.DTensor):
                         chunk_meta_list = param.__create_chunk_list__()
                         assert (

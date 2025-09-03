@@ -959,6 +959,8 @@ def compute_logprobs(
     logprob_masks: torch.Tensor,  # [batch_size, max_len],
     logits: torch.Tensor,  # [batch_size, max_len, vocab_size] or [n_logprob_tokens, vocab_size] if is_full_logits is False
     is_full_logits: bool = False,
+    label_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
+    input_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the per-token log probabilities and advantages
@@ -974,9 +976,17 @@ def compute_logprobs(
         cu_seqlens: the cumulative sequence lengths of the logps
     """
     # Shift token_ids
-    shifted_input_ids = torch.empty_like(input_ids_batch)
-    shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
-    shifted_input_ids[:, -1] = 0
+    if label_packing_mask is not None:
+        assert (
+            input_packing_mask is not None
+        ), "input_packing_mask must be provided if label_packing_mask is used"
+        shifted_input_ids = torch.zeros_like(input_ids_batch)
+        shifted_input_ids[input_packing_mask] = input_ids_batch[label_packing_mask]
+    else:
+        shifted_input_ids = torch.empty_like(input_ids_batch)
+        shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
+        shifted_input_ids[:, -1] = 0
+
     if is_full_logits:
         assert (
             logits.shape[:2] == shifted_input_ids.shape[:2]
@@ -1019,23 +1029,30 @@ def dynamic_import_module(path: str, attr: Optional[str] = None) -> Dict[str, An
 
     Returns the imported module object.
     """
-    path = os.path.abspath(path)
-    if os.path.isdir(path):
-        # it's a package dir
-        pkg_dir = path
-        if not os.path.isfile(os.path.join(pkg_dir, "__init__.py")):
-            raise ImportError(f"{pkg_dir!r} is not a package (no __init__.py)")
-        module_name = os.path.basename(pkg_dir)
-        parent_dir = os.path.dirname(pkg_dir)
+    if os.path.exists(path):
+        path = os.path.abspath(path)
+        if os.path.isdir(path):
+            # it's a package dir
+            pkg_dir = path
+            if not os.path.isfile(os.path.join(pkg_dir, "__init__.py")):
+                raise ImportError(f"{pkg_dir!r} is not a package (no __init__.py)")
+            module_name = os.path.basename(pkg_dir)
+            parent_dir = os.path.dirname(pkg_dir)
+        else:
+            # it's a single .py file
+            if not path.lower().endswith(".py"):
+                raise ImportError(
+                    f"{path!r} is neither a .py file nor a package directory"
+                )
+            parent_dir, filename = os.path.split(path)
+            module_name = os.path.splitext(filename)[0]
+        # Ensure the parent directory is on sys.path
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
     else:
-        # it's a single .py file
-        if not path.lower().endswith(".py"):
-            raise ImportError(f"{path!r} is neither a .py file nor a package directory")
-        parent_dir, filename = os.path.split(path)
-        module_name = os.path.splitext(filename)[0]
-    # Ensure the parent directory is on sys.path
-    if parent_dir not in sys.path:
-        sys.path.insert(0, parent_dir)
+        # Direct python module
+        module_name = path
+
     # Now import by name – normal import machinery applies
     module = importlib.import_module(module_name)
 
