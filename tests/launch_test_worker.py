@@ -881,6 +881,7 @@ def run_dummy_rollout():
     def dummy_rollout2rollout_broadcast(self, broadcast_command):
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
 
     def dummy(self):
         pass

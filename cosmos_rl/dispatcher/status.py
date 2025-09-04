@@ -663,9 +663,9 @@ class PolicyStatusManager:
             # If the current step is the last step, we need to sync weight always to act as ending signal
             need_sync_weight = need_sync_weight or step == total_steps
             # If validation is enabled, we need to sync weight every validation step
-            if self.config.train.enable_validation:
+            if self.config.validation.enable:
                 need_sync_weight = need_sync_weight or (
-                    step % self.config.train.validation_step == 0
+                    step % self.config.validation.freq == 0
                 )
 
             if profile_finished:
@@ -836,8 +836,8 @@ class PolicyStatusManager:
             # From controller's perspective, the training step is already increased
             self.current_step += 1
 
-            if self.config.train.enable_validation and (
-                self.current_step % self.config.train.validation_step == 0
+            if self.config.validation.enable and (
+                self.current_step % self.config.validation.freq == 0
                 or self.current_step == self.total_steps
             ):
                 self.validation_activate_dataloader(self.current_step)

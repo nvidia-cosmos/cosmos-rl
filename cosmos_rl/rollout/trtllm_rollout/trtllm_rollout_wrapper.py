@@ -112,8 +112,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         )
         self.batch_size = self.config.rollout.batch_size
 
-        if self.config.train.enable_validation:
-            self.val_batch_size = self.config.rollout.val_batch_size or self.batch_size
+        if self.config.validation.enable:
+            self.val_batch_size = self.config.validation.batch_size or self.batch_size
             assert (
                 self.val_batch_size > 0
             ), "[Rollout] val_batch_size should be greater than 0."
@@ -400,6 +400,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     f"[Rollout] Received shutdown instruction of {self.replica_name}, setting shutdown signal"
                 )
                 self.shutdown_signal.set()
+                self.shutdown_mp_signal.set()
             elif isinstance(inst, ValidationInstruction):
                 self.validation_event.set()
                 self.validation_step = inst.validation_step
@@ -426,6 +427,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             self._shutdown_handled = True
             if not self.shutdown_signal.is_set():
                 self.shutdown_signal.set()
+            if not self.shutdown_mp_signal.is_set():
+                self.shutdown_mp_signal.set()
             if self.life_control_thread is not None:
                 # Don't wait for life_control_thread to finish
                 # self.life_control_thread.join()

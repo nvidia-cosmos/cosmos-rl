@@ -48,6 +48,7 @@ from cosmos_rl.utils.api_suffix import (
 import base64
 import cloudpickle
 from transformers import AutoConfig
+import multiprocessing as mp
 
 
 class CommMixin:
@@ -207,19 +208,20 @@ class CommMixin:
         dist.barrier()  # wait all the atoms registered.
 
         self.shutdown_signal = threading.Event()
+        self.shutdown_mp_signal = mp.Event()  # Must be a multiprocessing event
 
         if self.global_rank == 0:
             logger.info(
                 f"{self.role} Replica {self.replica_name} registered to controller"
             )
             # Start the thread with daemon=True, so it will exit when the main program exits.
-            thread = threading.Thread(
+            process = mp.Process(
                 target=self.heartbeat_trigger,
-                args=(self.shutdown_signal,),
-                daemon=True,
+                args=(self.shutdown_mp_signal,),
+                daemon=True,  # Dies when main process exits
             )
-            thread.start()
-            self.heartbeat_thread = thread
+            process.start()
+            self.heartbeat_thread = process
         else:
             self.heartbeat_thread = None
 

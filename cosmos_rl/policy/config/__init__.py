@@ -498,21 +498,6 @@ class TrainingConfig(BaseModel):
         description="The batch size for training per iteration in one replica, this is the local batch size for each gradient accumulation step",
     )
 
-    # --------- Validation ---------
-
-    enable_validation: bool = Field(
-        default=False,
-        description="Enable validation during training.",
-    )
-    validation_step: int = Field(
-        default=20,
-        description="Validation frequency during training, in terms of training steps",
-    )
-    validation_batch_per_replica: int = Field(
-        default=24,
-        description="The batch size for validation per iteration in one replica.",
-    )
-
     # --------- Engineering ---------
 
     fp8: FP8Config = Field(default_factory=FP8Config)
@@ -732,6 +717,18 @@ class SamplingConfig(BaseModel):
 
 
 class ValidationConfig(BaseModel):
+    enable: bool = Field(
+        default=False,
+        description="Enable validation during training.",
+    )
+    freq: int = Field(
+        default=20,
+        description="Validation frequency during training, in terms of training steps",
+    )
+    batch_size: Optional[int] = Field(
+        default=None,
+        description="Batch size for validation, will use the same batch size as training if not set.",
+    )
     dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
         description="Dataset configuration for validation. It includes dataset name, subset, revision and test split.",
@@ -799,10 +796,6 @@ class RolloutConfig(BaseModel):
     )
 
     batch_size: int = Field(default=1, description="Batch size for rollout.")
-    val_batch_size: Optional[int] = Field(
-        default=None,
-        description="Batch size for rollout generation during validation.",
-    )
 
     quantization: str = Field(
         default="none",

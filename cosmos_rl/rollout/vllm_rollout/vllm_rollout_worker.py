@@ -177,8 +177,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.policy_to_rollout_nccl_communicators = {}
 
         self.batch_size = self.config.rollout.batch_size
-        if self.config.train.enable_validation:
-            self.val_batch_size = self.config.rollout.val_batch_size or self.batch_size
+        if self.config.validation.enable:
+            self.val_batch_size = self.config.validation.batch_size or self.batch_size
             assert (
                 self.val_batch_size > 0
             ), "[Rollout] val_batch_size should be greater than 0."
@@ -342,6 +342,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     f"[Rollout] shutdown instruction of {self.replica_name}, setting shutdown signal"
                 )
                 self.shutdown_signal.set()
+            if not self.shutdown_mp_signal.is_set():
+                self.shutdown_mp_signal.set()
             if self.background_thread is not None:
                 self.background_thread.join()
                 self.background_thread = None
@@ -646,7 +648,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             _patch_vllm_rollout_locked_step(
                 self.rollout,
                 self.consume_command,
-                self.config.train.enable_validation,
+                self.config.validation.enable,
             )
             self.prepare_shard_infos_for_weight_sync_insts()
 
@@ -861,7 +863,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 _patch_vllm_rollout_locked_step(
                     self.rollout,
                     self.consume_command,
-                    self.config.train.enable_validation,
+                    self.config.validation.enable,
                 )
                 self.prepare_shard_infos_for_weight_sync_insts()
 
@@ -926,8 +928,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.current_weight_version = current_step
 
         if current_step is not None and current_step > 0:
-            should_do_validation = self.config.train.enable_validation and (
-                current_step % self.config.train.validation_step == 0
+            should_do_validation = self.config.validation.enable and (
+                current_step % self.config.validation.freq == 0
                 or current_step == broadcast_command.total_steps
             )
             validation_queue = Queue()
@@ -993,6 +995,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
 
     def query_command_from_controller(self):
         """Background task to check commands from the controller"""

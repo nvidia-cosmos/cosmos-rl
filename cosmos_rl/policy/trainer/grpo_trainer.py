@@ -360,6 +360,7 @@ class GRPOTrainer(Trainer):
             self._handle_shutdown_called = True
 
             self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
             self.inter_policy_nccl.shutdown()
             if self.fetch_rollouts_thread is not None:
                 self.fetch_rollouts_thread.join()

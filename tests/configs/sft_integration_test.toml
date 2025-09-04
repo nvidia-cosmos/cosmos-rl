@@ -21,8 +21,10 @@ fsdp_offload = false
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 8
 sync_weight_interval = 1
-enable_validation = true
-validation_step = 100
+
+[validation]
+enable = true
+freq = 100
 
 [policy]
 model_name_or_path = "Qwen/Qwen2.5-3B-Instruct"
