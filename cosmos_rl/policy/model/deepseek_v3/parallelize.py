@@ -40,12 +40,17 @@ from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, MoE
 from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_model import (
     pipeline_model,
 )
+<<<<<<< HEAD
 from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
+=======
+from cosmos_rl.utils.parallelism import ParallelDims
+>>>>>>> 79c95ac (PP WIP)
 from cosmos_rl.utils.ulysses import swizzle_cp_forward, ulysses_attn_func
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 
+<<<<<<< HEAD
 # TODO: (lms) remove the context manager after this PR is released: https://github.com/NVIDIA/TransformerEngine/pull/1913
 from contextlib import contextmanager
 from importlib.metadata import version as get_pkg_version, PackageNotFoundError
@@ -72,6 +77,8 @@ def importlib_metadata_version_context():
 with importlib_metadata_version_context():
     from transformer_engine.pytorch.attention import DotProductAttention
 
+=======
+>>>>>>> 79c95ac (PP WIP)
 
 def _get_dp_mesh(
     world_mesh: DeviceMesh, parallel_dims: ParallelDims

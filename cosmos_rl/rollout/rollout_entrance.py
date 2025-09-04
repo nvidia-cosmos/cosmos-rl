@@ -16,9 +16,20 @@
 import sys
 
 from cosmos_rl.policy.config import Config as RolloutConfig
+<<<<<<< HEAD
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker import vLLMRolloutWorker
 from cosmos_rl.dispatcher.api.client import APIClient
+=======
+from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker import vLLMRolloutWorker
+from cosmos_rl.utils.distributed import (
+    destroy_distributed,
+    get_controller_metadata,
+    init_distributed,
+)
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.parallelism import ParallelDims
+>>>>>>> 79c95ac (PP WIP)
 
 
 def run_rollout(*args, **kwargs):

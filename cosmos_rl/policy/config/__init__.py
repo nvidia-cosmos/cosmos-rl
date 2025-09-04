@@ -23,6 +23,7 @@ from cosmos_rl.utils.modelscope import update_config_if_modelscope
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import core_schema
+<<<<<<< HEAD
 from datetime import datetime
 from typing import Any, Dict, Union, Optional, List, Literal
 import os
@@ -30,6 +31,8 @@ import json
 import hashlib
 from cosmos_rl.utils.modelscope import update_config_if_modelscope
 from cosmos_rl.utils.logging import logger
+=======
+>>>>>>> 79c95ac (PP WIP)
 
 
 def config_hash(config: BaseModel) -> str:
@@ -885,8 +888,13 @@ class ParallelismConfig(BaseModel):
         description="Pipeline parallelism schedule",
         choices=["Interleaved1F1B"],
     )
+<<<<<<< HEAD
     pp_layers_per_stage: Optional[int] = Field(
         default=None,
+=======
+    pp_layers_per_stage: int = Field(
+        default=2,
+>>>>>>> 79c95ac (PP WIP)
         description="Number of MOE layers per PP stage",
     )
 

@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import contextlib
+<<<<<<< HEAD
 import functools
 import inspect
+=======
+>>>>>>> 79c95ac (PP WIP)
 import math
 import os
 from dataclasses import dataclass
@@ -84,7 +87,10 @@ class ParallelDims:
     pp_micro_batch_size: int
     pp_schedule: str
     pp_layers_per_stage: int
+<<<<<<< HEAD
     enable_loss_parallel: bool = False
+=======
+>>>>>>> 79c95ac (PP WIP)
     ep: int = 1
     # When ep is enabled, we can have different dp shard for the MoE module.
     # For example, suppose we have 64 GPUs, then we can have dp_shard equal
@@ -432,6 +438,7 @@ class ParallelDims:
                 self.mesh[tuple(("dp_shard_cp",))].get_local_rank(),
                 self.mesh[tuple(("dp_shard_cp",))].size(),
             )
+<<<<<<< HEAD
 
     @property
     def mp_coord(self):
@@ -450,6 +457,8 @@ class ParallelDims:
             return self.mesh[tuple(("pp_cp_tp",))].get_local_rank(), self.mesh[
                 tuple(("pp_cp_tp",))
             ].size()
+=======
+>>>>>>> 79c95ac (PP WIP)
 
     def build_mesh_info(self):
         dims = ["pp", "dp_replicate", "dp_shard", "cp", "tp"]
