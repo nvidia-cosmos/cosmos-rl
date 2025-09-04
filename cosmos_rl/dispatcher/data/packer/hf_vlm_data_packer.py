@@ -206,7 +206,7 @@ class HFVLMDataPacker(DataPacker):
             pad_token_id = self.tokenizer.pad_token_id
             eos_token_id = self.tokenizer.eos_token_id
             pad_run_length = 10
-            assistant_content = []
+            assistant_contents = []
             messages = None
             # SFT
             if "messages" in conversation:
@@ -216,13 +216,13 @@ class HFVLMDataPacker(DataPacker):
                         content = message["content"]
                         new_content = content.copy()
                         if isinstance(new_content, str):
-                            assistant_content.append(new_content)
+                            assistant_contents.append(new_content)
                             new_content = pad_token * pad_run_length
                         elif isinstance(new_content, dict):
                             assert (
                                 "text" in new_content
                             ), f"text not in content: {content}"
-                            assistant_content.append(new_content["text"])
+                            assistant_contents.append(new_content["text"])
                             new_content["text"] = pad_token * pad_run_length
                         elif isinstance(content, list):
                             for i, item in enumerate(content):
@@ -230,7 +230,7 @@ class HFVLMDataPacker(DataPacker):
                                     assert (
                                         "text" in item
                                     ), f"text not in content: {item}"
-                                    assistant_content.append(item["text"])
+                                    assistant_contents.append(item["text"])
                                     new_content[i]["text"] = pad_token * pad_run_length
                                 else:
                                     raise ValueError(
@@ -286,7 +286,7 @@ class HFVLMDataPacker(DataPacker):
             input_ids = inputs["input_ids"][0].tolist()
             label_ids = [IGNORE_LABEL_ID] * len(input_ids)
 
-            for assistant_content in assistant_content:
+            for assistant_content in assistant_contents:
                 replacement_ids = self.tokenizer.encode(
                     assistant_content, add_special_tokens=False
                 )

@@ -382,16 +382,16 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             pad_token_id = self.tokenizer.pad_token_id
             eos_token_id = self.tokenizer.eos_token_id
             pad_run_length = 10
-            assistant_content = []
+            assistant_contents = []
             conversation = copy.deepcopy(conversation)
             for message in conversation:
                 if message["role"] == "assistant":
                     content = message["content"]
                     if isinstance(content, str):
-                        assistant_content.append(content)
+                        assistant_contents.append(content)
                     elif isinstance(content, dict):
                         assert "text" in content, f"text not in content: {content}"
-                        assistant_content.append(content["text"])
+                        assistant_contents.append(content["text"])
                     else:
                         raise ValueError(f"Unsupported content type: {type(content)}")
                     message["content"] = pad_token * pad_run_length
@@ -412,7 +412,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             input_ids = inputs["input_ids"][0].tolist()
             label_ids = [IGNORE_LABEL_ID] * len(input_ids)
 
-            for assistant_content in assistant_content:
+            for assistant_content in assistant_contents:
                 replacement_ids = self.tokenizer.encode(
                     assistant_content, add_special_tokens=False
                 )
