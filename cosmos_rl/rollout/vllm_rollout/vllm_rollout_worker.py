@@ -879,7 +879,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 total_params += 1
                 total_recvs += len(insts_for_per_param.instructions)
 
-        copy_stream = torch.cuda.Stream()
+        # copy_stream = torch.cuda.Stream()
+        copy_stream = self.inference_stream
 
         assert (
             total_params == len(self.recv_param_key_n_rank_list)

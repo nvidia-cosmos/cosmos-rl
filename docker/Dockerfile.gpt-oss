@@ -137,19 +137,21 @@ FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 
 # temporarily install vllm+0.10.1+gptoss to install the triton depends.
 RUN source /opt/venv/cosmos_rl/bin/activate && \
-    pip uninstall -y  torchao vllm && \
+    pip uninstall -y vllm && \
     pip install uv && \
-    uv pip install --pre vllm==0.10.1+gptoss torchao --extra-index-url https://wheels.vllm.ai/gpt-oss/ --extra-index-url https://download.pytorch.org/whl/nightly/cu128  --index-strategy unsafe-best-match && \
+    uv pip install --pre vllm==0.10.1+gptoss --extra-index-url https://wheels.vllm.ai/gpt-oss/ --extra-index-url https://download.pytorch.org/whl/nightly/cu128  --index-strategy unsafe-best-match && \
     pip install accelerate kernels
 
 # Update to nightly version of vLLM.
+# Install the torchao 0.13.0.dev20250814, the latest version will cause torch crash.
 RUN source /opt/venv/cosmos_rl/bin/activate && \
     uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly && \
-    pip uninstall -y flash-attn && \
+    pip uninstall -y torchao flash-attn && \
+    uv pip install torchao==0.13.0.dev20250814 --extra-index-url https://download.pytorch.org/whl/nightly/cu128 && \
     pip cache purge && \
     pip install flash-attn --no-build-isolation
 
 FROM package AS gpt-oss-base
 
 COPY . /workspace/cosmos_rl
-RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
+RUN pip install /workspace/cosmos_rl --no-deps && rm -rf /workspace/cosmos_rl
