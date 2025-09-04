@@ -145,9 +145,9 @@ RUN source /opt/venv/cosmos_rl/bin/activate && \
 # Update to nightly version of vLLM.
 # Install the torchao 0.13.0.dev20250814, the latest version will cause torch crash.
 RUN source /opt/venv/cosmos_rl/bin/activate && \
-    uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly && \
+    uv pip install -U vllm --torch-backend=cu128 --extra-index-url https://wheels.vllm.ai/nightly && \
     pip uninstall -y torchao flash-attn && \
-    uv pip install torchao==0.13.0.dev20250814 --extra-index-url https://download.pytorch.org/whl/nightly/cu128 && \
+    uv pip install torchao==0.13.0 \
     pip cache purge && \
     pip install flash-attn --no-build-isolation
 
