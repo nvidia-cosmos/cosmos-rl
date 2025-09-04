@@ -321,8 +321,7 @@ async def get_trainable_params():
                 controller.policy_to_rollout_shard_mapper.trainable_params
             )
         }
-    except Exception as e:
-        logger.error(f"[Controller] Error getting trainable params: {e}")
+    except Exception:
         return create_error_response(
             constant.ErrorCode.INTERNAL_ERROR,
             "Error getting trainable params",

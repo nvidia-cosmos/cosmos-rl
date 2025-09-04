@@ -400,6 +400,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     f"[Rollout] Received shutdown instruction of {self.replica_name}, setting shutdown signal"
                 )
                 self.shutdown_signal.set()
+                self.shutdown_mp_signal.set()
             elif isinstance(inst, ValidationInstruction):
                 self.validation_event.set()
                 self.validation_step = inst.validation_step
@@ -426,6 +427,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             self._shutdown_handled = True
             if not self.shutdown_signal.is_set():
                 self.shutdown_signal.set()
+            if not self.shutdown_mp_signal.is_set():
+                self.shutdown_mp_signal.set()
             if self.life_control_thread is not None:
                 # Don't wait for life_control_thread to finish
                 # self.life_control_thread.join()

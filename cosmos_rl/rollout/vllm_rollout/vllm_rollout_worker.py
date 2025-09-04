@@ -342,6 +342,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     f"[Rollout] shutdown instruction of {self.replica_name}, setting shutdown signal"
                 )
                 self.shutdown_signal.set()
+            if not self.shutdown_mp_signal.is_set():
+                self.shutdown_mp_signal.set()
             if self.background_thread is not None:
                 self.background_thread.join()
                 self.background_thread = None
@@ -993,6 +995,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
 
     def query_command_from_controller(self):
         """Background task to check commands from the controller"""

@@ -629,6 +629,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             # trigger the shutdown signal to main process too.
             self.cosmos_weight_sync_queue.put(ShutdownInstruction())
             self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
 
     def query_command_from_controller(self):
         """Background task to check commands from the controller"""
@@ -704,6 +705,11 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             self._shutdown_handled = True
             if hasattr(self, "shutdown_signal") and not self.shutdown_signal.is_set():
                 self.shutdown_signal.set()
+            if (
+                hasattr(self, "shutdown_mp_signal")
+                and not self.shutdown_mp_signal.is_set()
+            ):
+                self.shutdown_mp_signal.set()
 
         if hasattr(self, "background_thread") and self.background_thread is not None:
             self.background_thread.join()
