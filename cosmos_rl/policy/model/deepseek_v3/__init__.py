@@ -165,6 +165,8 @@ class DeepseekV3MoEModel(BaseModel):
     def parallelize_fn(self):
         from cosmos_rl.policy.model.deepseek_v3.parallelize import parallelize_model
 
+        # from cosmos_rl.tools.model.deepseek_v3.parallelize import parallelize
+
         return parallelize_model, self
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
@@ -184,7 +186,35 @@ class DeepseekV3MoEModel(BaseModel):
         return position_ids, inputs, seq_dim_idx
 
     def apply_pipeline_split(self, pp_rank, pp_size):
-        raise NotImplementedError
+        """
+        Apply pipeline split to the model.
+        This typically involves splitting the model into multiple stages,
+        and moving each stage to a different device.
+        """
+        assert pp_size > 1
+        is_first = pp_rank == 0
+        is_last = pp_rank == pp_size - 1
+
+        # Compute the layers belonging to this stage
+
+        n_layers = len(self.model.model.layers)
+        layers_per_stage = n_layers // pp_size
+
+        if not is_first:
+            self.embed_tokens = None
+        if not is_last:
+            self.lm_head = None
+            self.norm = None
+
+        local_layers = torch.nn.ModuleDict()
+        for i in range(
+            pp_rank * layers_per_stage,
+            ((pp_rank + 1) * layers_per_stage) if not is_last else n_layers,
+        ):
+            local_layers[str(i)] = self.model.model.layers[str(i)]
+
+        # Reset the layers for pipeline splitting
+        self.layers = local_layers
 
     @cached_property
     def _get_nparams_and_flops_fn(self) -> Callable[[int], tuple[int, int]]:

@@ -14,24 +14,38 @@
 # limitations under the License.
 
 import os
+from typing import Callable, Optional
+
+import cosmos_rl.utils.util as util
 import torch
 import torch.nn as nn
+<<<<<<< HEAD:cosmos_rl/policy/model/internvl/parallelize.py
 from typing import Callable, Optional
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed._composable.replicate import replicate
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+=======
+from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.distributed import ReplicateParallel
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.parallelism import ParallelDims
+from torch.distributed._composable.replicate import replicate
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
+>>>>>>> 79c95ac (PP WIP):cosmos_rl/tools/model/deepseek_v3/parallelize.py
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
-    parallelize_module,
     PrepareModuleInput,
     PrepareModuleOutput,
     RowwiseParallel,
     SequenceParallel,
-    ParallelStyle,
+    parallelize_module,
 )
+<<<<<<< HEAD:cosmos_rl/policy/model/internvl/parallelize.py
 from cosmos_rl.utils.distributed import ReplicateParallel
-from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
+from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -41,11 +55,10 @@ from cosmos_rl.utils.ulysses import (
     swizzle_cp_forward,
     ulysses_attn_func_varlen,
 )
-from cosmos_rl.policy.kernel.moe.moe import MoE, GroupedExpertsDeepEP
-from torch.distributed.tensor import distribute_module, distribute_tensor
+=======
+>>>>>>> 79c95ac (PP WIP):cosmos_rl/tools/model/deepseek_v3/parallelize.py
 
 
-@pre_parallelize_sanity_check
 def parallelize(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -98,7 +111,7 @@ def parallelize(
         mp_policy = MixedPrecisionPolicy(
             param_dtype=str2torch_dtype(config.train.param_dtype),
             reduce_dtype=str2torch_dtype(config.train.fsdp_reduce_dtype),
-            cast_forward_inputs=True,
+            cast_forward_inputs=False,
         )
         fsdp_config = {"mesh": world_mesh["dp_cp_tp"], "mp_policy": mp_policy}
         if config.train.fsdp_offload:
@@ -190,13 +203,11 @@ def parallelize(
             == 0
         ), "train_batch must be divisible by pp_micro_batch_size"
         assert (
-            (
-                config.train.train_batch_per_replica
-                // config.policy.parallelism.pp_micro_batch_size
-            )
-            % pp_size
-            == 0
-        ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
+            config.train.train_batch_per_replica
+            // config.policy.parallelism.pp_micro_batch_size
+        ) % pp_size == 0, (
+            "train_batch / pp_micro_batch_size must be divisible by pp_size"
+        )
         assert pp_loss_fn is not None, "pp_loss_fn must be provided"
         n_microbatches = (
             config.train.train_batch_per_replica
@@ -209,6 +220,7 @@ def parallelize(
                 == 0
             ), "validation_batch must be divisible by pp_micro_batch_size"
             assert (
+<<<<<<< HEAD:cosmos_rl/policy/model/internvl/parallelize.py
                 (
                     config.validation.batch_size
                     // config.policy.parallelism.pp_micro_batch_size
@@ -216,6 +228,13 @@ def parallelize(
                 % pp_size
                 == 0
             ), "validation_batch / pp_micro_batch_size must be divisible by pp_size"
+=======
+                config.train.validation_batch_per_replica
+                // config.policy.parallelism.pp_micro_batch_size
+            ) % pp_size == 0, (
+                "validation_batch / pp_micro_batch_size must be divisible by pp_size"
+            )
+>>>>>>> 79c95ac (PP WIP):cosmos_rl/tools/model/deepseek_v3/parallelize.py
             n_val_microbatches = (
                 config.validation.batch_size
                 // config.policy.parallelism.pp_micro_batch_size
@@ -272,33 +291,11 @@ def parallelize(
         return None, None
 
 
-class _ExpertParallel(ParallelStyle):
-    """
-    ExpertParallel class is used to shard the MoE parameters on the EP mesh.
-    Dim `0` of each parameter is sharded since that is the expert dimension.
-    """
-
-    def _partition_fn(self, name, module, device_mesh):
-        # shard on the expert dimension
-        assert device_mesh.ndim == 1
-
-        for name, param in module.named_parameters(recurse=False):
-            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
-            module.register_parameter(name, dist_param)
-
-        if isinstance(module, GroupedExpertsDeepEP):
-            module.init_token_dispatcher(ep_mesh=device_mesh)
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        return distribute_module(
-            module,
-            device_mesh,
-            self._partition_fn,
-        )
-
-
 def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
     """Apply Context Parallel to the model."""
+    # check if cp is compatible with model
+    cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
+    model.check_cp_compatible(cp_size, tp_size)
 
     cp_mesh = parallel_dims.mesh["cp"]
     # For language
@@ -405,92 +402,84 @@ def apply_tp_ep(
                 use_local_output=True,
             ),
         }
+        transformer_block.mlp.ep_group = tp_ep_mesh.get_group()
+        transformer_block.mlp.ep_size = tp_ep_mesh.size()
+        assert (
+            transformer_block.mlp.total_experts % tp_ep_mesh.size() == 0
+        ), "number of experts must be divisible by tp_ep_mesh.size()"
+        transformer_block.mlp.local_experts = (
+            transformer_block.mlp.total_experts // tp_ep_mesh.size()
+        )
 
-        if isinstance(transformer_block.mlp, MoE):
-            parallelize_module(
-                module=transformer_block.mlp.experts,
-                device_mesh=tp_ep_mesh,
-                parallelize_plan=_ExpertParallel(),
-            )
-        else:
-            transformer_block.mlp.ep_group = tp_ep_mesh.get_group()
-            transformer_block.mlp.ep_size = tp_ep_mesh.size()
-            assert (
-                transformer_block.mlp.total_experts % tp_ep_mesh.size() == 0
-            ), "number of experts must be divisible by tp_ep_mesh.size()"
-            transformer_block.mlp.local_experts = (
-                transformer_block.mlp.total_experts // tp_ep_mesh.size()
-            )
-
-            transformer_block.mlp.up_proj.register_parameter(
-                "weight",
-                nn.Parameter(
-                    torch.distributed.tensor.DTensor.from_local(
-                        nn.Parameter(
-                            torch.empty(
-                                transformer_block.mlp.local_experts,
-                                transformer_block.mlp.intermediate_dim,
-                                transformer_block.mlp.dim,
-                                dtype=transformer_block.mlp.up_proj.weight.dtype,
-                                device=transformer_block.mlp.up_proj.weight.device,
-                            )
-                        ),
-                        tp_ep_mesh,
-                        [Shard(0)],
-                        run_check=False,
-                    )
-                ),
-            )
-            transformer_block.mlp.down_proj.register_parameter(
-                "weight",
-                nn.Parameter(
-                    torch.distributed.tensor.DTensor.from_local(
-                        nn.Parameter(
-                            torch.empty(
-                                transformer_block.mlp.local_experts,
-                                transformer_block.mlp.dim,
-                                transformer_block.mlp.intermediate_dim,
-                                dtype=transformer_block.mlp.down_proj.weight.dtype,
-                                device=transformer_block.mlp.down_proj.weight.device,
-                            )
-                        ),
-                        tp_ep_mesh,
-                        [Shard(0)],
-                        run_check=False,
-                    )
-                ),
-            )
-            transformer_block.mlp.gate_proj.register_parameter(
-                "weight",
-                nn.Parameter(
-                    torch.distributed.tensor.DTensor.from_local(
-                        nn.Parameter(
-                            torch.empty(
-                                transformer_block.mlp.local_experts,
-                                transformer_block.mlp.intermediate_dim,
-                                transformer_block.mlp.dim,
-                                dtype=transformer_block.mlp.gate_proj.weight.dtype,
-                                device=transformer_block.mlp.gate_proj.weight.device,
-                            )
-                        ),
-                        tp_ep_mesh,
-                        [Shard(0)],
-                        run_check=False,
-                    )
-                ),
-            )
-            assert (
-                transformer_block.mlp.gate_proj.weight.to_local().shape[0]
-                == transformer_block.mlp.local_experts
-            ), f"gate_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.gate_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
-            assert (
-                transformer_block.mlp.up_proj.weight.to_local().shape[0]
-                == transformer_block.mlp.local_experts
-            ), f"up_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.up_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
-            assert (
-                transformer_block.mlp.down_proj.weight.to_local().shape[0]
-                == transformer_block.mlp.local_experts
-            ), f"down_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.down_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
+        transformer_block.mlp.up_proj.register_parameter(
+            "weight",
+            nn.Parameter(
+                torch.distributed.tensor.DTensor.from_local(
+                    nn.Parameter(
+                        torch.empty(
+                            transformer_block.mlp.local_experts,
+                            transformer_block.mlp.intermediate_dim,
+                            transformer_block.mlp.dim,
+                            dtype=transformer_block.mlp.up_proj.weight.dtype,
+                            device=transformer_block.mlp.up_proj.weight.device,
+                        )
+                    ),
+                    tp_ep_mesh,
+                    [Shard(0)],
+                    run_check=False,
+                )
+            ),
+        )
+        transformer_block.mlp.down_proj.register_parameter(
+            "weight",
+            nn.Parameter(
+                torch.distributed.tensor.DTensor.from_local(
+                    nn.Parameter(
+                        torch.empty(
+                            transformer_block.mlp.local_experts,
+                            transformer_block.mlp.dim,
+                            transformer_block.mlp.intermediate_dim,
+                            dtype=transformer_block.mlp.down_proj.weight.dtype,
+                            device=transformer_block.mlp.down_proj.weight.device,
+                        )
+                    ),
+                    tp_ep_mesh,
+                    [Shard(0)],
+                    run_check=False,
+                )
+            ),
+        )
+        transformer_block.mlp.gate_proj.register_parameter(
+            "weight",
+            nn.Parameter(
+                torch.distributed.tensor.DTensor.from_local(
+                    nn.Parameter(
+                        torch.empty(
+                            transformer_block.mlp.local_experts,
+                            transformer_block.mlp.intermediate_dim,
+                            transformer_block.mlp.dim,
+                            dtype=transformer_block.mlp.gate_proj.weight.dtype,
+                            device=transformer_block.mlp.gate_proj.weight.device,
+                        )
+                    ),
+                    tp_ep_mesh,
+                    [Shard(0)],
+                    run_check=False,
+                )
+            ),
+        )
+        assert (
+            transformer_block.mlp.gate_proj.weight.to_local().shape[0]
+            == transformer_block.mlp.local_experts
+        ), f"gate_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.gate_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
+        assert (
+            transformer_block.mlp.up_proj.weight.to_local().shape[0]
+            == transformer_block.mlp.local_experts
+        ), f"up_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.up_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
+        assert (
+            transformer_block.mlp.down_proj.weight.to_local().shape[0]
+            == transformer_block.mlp.local_experts
+        ), f"down_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.down_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
 
         parallelize_module(
             module=transformer_block,
@@ -569,7 +558,7 @@ def apply_fsdp(
 
     """
     mp_policy = MixedPrecisionPolicy(
-        param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
+        param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=False
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:

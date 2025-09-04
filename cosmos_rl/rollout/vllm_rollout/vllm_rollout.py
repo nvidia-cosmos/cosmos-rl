@@ -170,7 +170,7 @@ class vLLMRollout(RolloutBase):
 
         model_path = policy_config.model_name_or_path
 
-        self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
+        self.model_config = util.retry(AutoConfig.from_pretrained)(model_path, trust_remote_code=True)
 
         hf_config_path = self.config.policy.model_name_or_path
         try:
@@ -286,6 +286,7 @@ class vLLMRollout(RolloutBase):
             self.quantization = quantization
 
             policy_config = self.config.policy
+            load_format = "dummy"
 
             self.rollout_engine = LLM(
                 model=model_path,

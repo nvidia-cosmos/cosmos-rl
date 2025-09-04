@@ -13,6 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
+import json
+import os
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional, Union
+
+from cosmos_rl.utils.modelscope import update_config_if_modelscope
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import core_schema
@@ -873,6 +880,15 @@ class ParallelismConfig(BaseModel):
         description="Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.",
         choices=[1],
     )
+    pp_schedule: str = Field(
+        default="Interleaved1F1B",
+        description="Pipeline parallelism schedule",
+        choices=["Interleaved1F1B"],
+    )
+    pp_layers_per_stage: int = Field(
+        default=2,
+        description="Number of MOE layers per PP stage",
+    )
 
     @property
     def world_size(self):
@@ -1605,13 +1621,11 @@ class Config(BaseModel):
             #   - 1F1B
             # But not correct for those `InterleavedXXX` style schedule
             assert (
-                (
-                    self.train.train_batch_per_replica
-                    // self.policy.parallelism.pp_micro_batch_size
-                )
-                % self.policy.parallelism.pp_size
-                == 0
-            ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
+                self.train.train_batch_per_replica
+                // self.policy.parallelism.pp_micro_batch_size
+            ) % self.policy.parallelism.pp_size == 0, (
+                "train_batch / pp_micro_batch_size must be divisible by pp_size"
+            )
 
         # Validate constraints for GRPO with LoRA
         if (

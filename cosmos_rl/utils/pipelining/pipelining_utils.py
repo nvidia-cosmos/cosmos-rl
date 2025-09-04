@@ -17,17 +17,18 @@ import math
 from typing import Callable
 
 import torch
-from torch import nn
-from torch.distributed.device_mesh import DeviceMesh
-
-from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_schedules import (
     PipelineScheduleSingle,
     ScheduleZBVZeroBubble,
     _PipelineSchedule,
     get_schedule_class,
 )
-from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_stage import PipelineStage
+from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_stage import (
+    PipelineStage,
+)
+from cosmos_rl.utils.logging import logger
+from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
 
 __all__ = ["build_pipeline_schedule", "generate_split_points", "stage_ids_this_rank"]
 
@@ -84,11 +85,15 @@ def generate_split_points(
         "dense": 0.5,
         "moe": 1.0,
     }
-    num_effective_layers = int(math.ceil(weights["dense"] * num_dense_layers + weights["moe"] * num_moe_layers))
+    num_effective_layers = int(
+        math.ceil(weights["dense"] * num_dense_layers + weights["moe"] * num_moe_layers)
+    )
 
     if num_layers_per_stage is not None:
         # num_stages must be a multiple of pp_size.
-        num_stages = (num_effective_layers + num_layers_per_stage - 1) // num_layers_per_stage
+        num_stages = (
+            num_effective_layers + num_layers_per_stage - 1
+        ) // num_layers_per_stage
         num_stages += (-num_stages) % pp_size
     else:
         num_layers_per_stage = (num_effective_layers + pp_size - 1) // pp_size
@@ -154,7 +159,8 @@ def generate_split_points(
 
     for layer_type in layer_types:
         assert num_layers_left[layer_type] == 0, (
-            f"Layer type {layer_type} must have 0 layers left after placement, " f"found {num_layers_left[layer_type]}"
+            f"Layer type {layer_type} must have 0 layers left after placement, "
+            f"found {num_layers_left[layer_type]}"
         )
 
     logger.info(
@@ -164,7 +170,9 @@ def generate_split_points(
         f"num_effective_layers: {num_effective_layers}, "
     )
 
-    logger.info(f"Here is the auto-generated split, which may be sub-optimal: {splits}.")
+    logger.info(
+        f"Here is the auto-generated split, which may be sub-optimal: {splits}."
+    )
     return splits
 
 
@@ -182,7 +190,9 @@ def stage_ids_this_rank(
     if schedule_class == ScheduleZBVZeroBubble:
         raise ValueError(f"Unsupported pipeline schedule {schedule_str}")
 
-    assert num_stages % pp_size == 0, f"num_stages {num_stages} must be evenly divisible by pp_size {pp_size}"
+    assert (
+        num_stages % pp_size == 0
+    ), f"num_stages {num_stages} must be evenly divisible by pp_size {pp_size}"
     stages_per_rank = num_stages // pp_size
     return tuple(pp_rank + s * pp_size for s in range(stages_per_rank))
 

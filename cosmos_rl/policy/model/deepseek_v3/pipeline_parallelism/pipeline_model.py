@@ -51,22 +51,29 @@ def pipeline_model(
         model_parts (list[nn.Module]): The list of model parts assigned to this
             PP rank.
     """
+
     pp_mesh = meshes["default"]["pp"]
     assert pp_mesh.size() == parallel_dims.pp
-    parallelize_fn = model.parallelize_fn
+    # parallelize_fn, _ = model.parallelize_fn
 
     model_parts = _pipeline_manual_split(
         whole_model=model,
         pp_mesh=pp_mesh,
+        parallel_dims=parallel_dims,
     )
 
-    # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
-    # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
-    # optimizer, and checkpointing
-    for i, m in enumerate(model_parts):
-        # apply SPMD-style PT-D techniques
-        m = parallelize_fn(m, meshes, parallel_dims)
-        model_parts[i] = m
+    # # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
+    # # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
+    # # optimizer, and checkpointing
+
+    # config = None
+    # pp_loss_fn = None
+
+    # for i, m in enumerate(model_parts):
+
+    #     # apply SPMD-style PT-D techniques
+    #     m = parallelize_fn(m, parallel_dims, config, pp_loss_fn)
+    #     model_parts[i] = m
 
     _setup_communication_channels(pp_mesh, device)
 
@@ -115,7 +122,7 @@ def _setup_communication_channels(pp_mesh: DeviceMesh, device: torch.device) -> 
         reqs = dist.batch_isend_irecv([send_op, recv_op])
         for req in reqs:
             req.wait()
-        logger.info(f"Forward pass setup received {recv_tensor}", rank0_only=False)
+        logger.info(f"Forward pass setup received {recv_tensor}")  # , rank0_only=False)
 
     def _setup_bwd():
         recv_tensor = torch.randn(2, dtype=torch.bfloat16, device=device)
@@ -134,15 +141,16 @@ def _setup_communication_channels(pp_mesh: DeviceMesh, device: torch.device) -> 
         reqs = dist.batch_isend_irecv([send_op, recv_op])
         for req in reqs:
             req.wait()
-        logger.info(f"Backward pass setup received {recv_tensor}", rank0_only=False)
+        logger.info(
+            f"Backward pass setup received {recv_tensor}"
+        )  # , rank0_only=False)
 
     _setup_fwd()
     _setup_bwd()
 
 
 def _pipeline_manual_split(
-    whole_model: nn.Module,
-    pp_mesh: DeviceMesh,
+    whole_model: nn.Module, pp_mesh: DeviceMesh, parallel_dims: ParallelDims
 ) -> list[nn.Module]:
     """
     This API extracts one torch.nn.Module objects for the parts of the model
@@ -163,19 +171,19 @@ def _pipeline_manual_split(
     pp_rank = pp_mesh.get_local_rank()
     pp_size = pp_mesh.size()
 
-    parallelism_config = whole_model.config.training
+    parallelism_config = parallel_dims
     num_dense_layers = whole_model.config.n_dense_layers
     num_moe_layers = whole_model.config.n_layers - num_dense_layers
+    schedule_str = parallelism_config.pp_schedule
 
     splits = generate_split_points(
-        schedule_str=parallelism_config.pipeline_parallel_schedule,
+        schedule_str=schedule_str,
         pp_size=pp_size,
-        num_layers_per_stage=parallelism_config.pipeline_parallel_layers_per_stage,
+        num_layers_per_stage=parallelism_config.pp_layers_per_stage,
         num_moe_layers=num_moe_layers,
         num_dense_layers=num_dense_layers,
     )
 
-    schedule_str = parallelism_config.pipeline_parallel_schedule
     num_stages = len(splits) - 1
 
     model_parts = []
@@ -190,7 +198,7 @@ def _pipeline_manual_split(
         logger.info(
             f"PP rank {pp_rank} is building stage_idx {stage_idx}"
             f" with start_layer {splits[stage_idx]}, stop_layer {splits[stage_idx + 1]}",
-            rank0_only=False,
+            # rank0_only=False,
         )
         model_parts.append(model_chunk)
     return model_parts
