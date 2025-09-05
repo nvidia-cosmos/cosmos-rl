@@ -520,11 +520,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
                 inplace = False
 
-            # inplace = False
-            # recv_tensor = (
-            #         torch.empty_like(vllm_tensor_view).to(promotion_dtype).contiguous()
-            #     )
-
             if vllm_tensor_view.dtype != target_dtype:
                 recv_tensor = recv_tensor.to(target_dtype)
                 inplace = False
@@ -1336,15 +1331,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
-                if self.global_rank == 0:
-                    for i, completion in enumerate(completions):
-                        if len(prompts[i]) > 1:
-                            user_prompt = prompts[i][1]
-                            logger.info(f"LMS: prompt is: {user_prompt}")
-                            for j, gen in enumerate(completion):
-                                logger.info(
-                                    f"LMS: [generated text {j}/{len(completion)}]: {gen}"
-                                )
                 # Remove empty completions
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []

@@ -56,7 +56,12 @@ class BaseModel(torch.nn.Module, ABC):
                 if not hasattr(module, "_gradient_checkpointing_enabled"):
                     setattr(module, "_gradient_checkpointing_enabled", enabled)
 
-    def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
+    def post_transform_of_local_view(
+        self, local_view: torch.Tensor, name: str
+    ) -> torch.Tensor:
+        """
+        Post-transform the local view of the tensor. In some cases, we need to transform the local view of the tensor before sending it to the rollout model.
+        """
         return local_view
 
     @cached_property
@@ -106,7 +111,10 @@ class BaseModel(torch.nn.Module, ABC):
                     trainable_params.append(name)
         return trainable_params
 
-    def get_local_view_transforms(self):
+    def gen_local_view_transforms(self) -> Dict[str, Union[torch.Tensor, Callable]]:
+        """
+        Generate the local view or transform function for a P2R weight sync inst.
+        """
         # 1. get all parameters, but not buffers
         named_parameters = {name: param for name, param in self.named_parameters()}
         keys = list(named_parameters.keys())
@@ -130,7 +138,7 @@ class BaseModel(torch.nn.Module, ABC):
         from cosmos_rl.utils.dim_slice_info import DimSliceInfo
 
         # 1. get all parameters, but not buffers
-        transforms = self.get_local_view_transforms()
+        transforms = self.gen_local_view_transforms()
 
         # 2. do 1->n decomposition on weights like qkv_proj.weight -> q.weight, k.weight, v.weight
         for name, param in self.named_parameters():
