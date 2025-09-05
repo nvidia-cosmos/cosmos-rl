@@ -15,7 +15,7 @@
 
 import os
 from functools import cached_property
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -23,22 +23,18 @@ from safetensors import safe_open
 from torch.nn.modules.module import _IncompatibleKeys
 from transformers import AutoConfig
 
-try:
-    from torch.distributed.tensor import DTensor
-except ImportError:
-    print("torch.distributed.tensor is not available. DeepSeek model will not work.")
-
-
 from cosmos_rl.dispatcher.data.packer.deepseek_data_packer import DeepSeek_DataPacker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.kernel.moe import moe
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.deepseek_v3 import deepseekv3_mapped
 from cosmos_rl.policy.model.deepseek_v3.checkpoint_planner import RenameLoadPlanner
-from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
-    DeepseekV3MoEWeightMapper,
+from cosmos_rl.policy.model.deepseek_v3.weight_converter import (
     convert_weight_from_hf,
     weight_dequant,
+)
+from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
+    DeepseekV3MoEWeightMapper,
 )
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -231,6 +227,34 @@ class DeepseekV3MoEModel(BaseModel):
             not os.path.exists(dcp_checkpoint_path)
             or len(os.listdir(dcp_checkpoint_path)) == 0
         ):
+            self_state_dict = self.state_dict()
+            self_state_dict = {
+                clear_weight_name(k): v for k, v in self_state_dict.items()
+            }
+
+            def _get_target_tensor_view(
+                dest_name: str,
+                expert_id: Optional[int],
+            ) -> Optional[torch.Tensor]:
+                if dest_name not in self_state_dict:
+                    return None
+
+                target_tensor = self_state_dict[dest_name]
+                if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                    target_tensor = target_tensor.to_local()
+
+                if expert_id is not None:
+                    # Convert expert_id to local_expert_id
+                    n_local_experts = (
+                        self.config.n_routed_experts
+                        // parallel_dims.tp
+                        // parallel_dims.dp_shard
+                    )
+                    expert_id = expert_id % n_local_experts
+                    target_tensor = target_tensor[expert_id]
+
+                return target_tensor
+
             # The checkpoint loading assumes bf16 checkpoints. The default deepseekv3 checkpoint is in fp8. We needs to convert the checkpoints from fp8 to bf16 first.
             # Can follow the instructions here: https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/deepseek.md
             # Load all safetensors from `model_path`
@@ -241,11 +265,6 @@ class DeepseekV3MoEModel(BaseModel):
             safetensors_files = [
                 f for f in os.listdir(model_path) if f.endswith(".safetensors")
             ]
-
-            self_state_dict = self.state_dict()
-            self_state_dict = {
-                clear_weight_name(k): v for k, v in self_state_dict.items()
-            }
 
             lm_head_weight_key = "model.lm_head.weight"
             embed_tokens_weight_key = "model.model.embed_tokens.weight"
@@ -309,29 +328,16 @@ class DeepseekV3MoEModel(BaseModel):
                     )
 
                     if dest_name is None:
-                        # This is due to the expert parallelism grouping
+                        # This is due to the expert parallelism grouping.
                         continue
 
-                    if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                        logger.info(
-                            f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
+                    target_tensor = _get_target_tensor_view(dest_name, expert_id)
+                    if target_tensor is None:
+                        assert parallel_dims.pp_enabled, (
+                            f"Weight `{dest_name}` is not found in the model. "
+                            "Pipeline parallelism is disabled, this is not allowed."
                         )
                         continue
-
-                    target_tensor = self_state_dict[dest_name]
-                    if isinstance(target_tensor, torch.distributed.tensor.DTensor):
-                        target_tensor = target_tensor.to_local()
-                    # Write to the correct expert of the target tensor
-                    if expert_id is not None:
-                        # Convert expert_id to local_expert_id
-                        n_local_experts = (
-                            self.config.n_routed_experts
-                            // parallel_dims.tp
-                            // parallel_dims.dp_shard
-                        )
-
-                        expert_id = expert_id % n_local_experts
-                        target_tensor = target_tensor[expert_id]
 
                     assert (
                         target_tensor.shape == shared_weight.shape
@@ -429,34 +435,12 @@ class DeepseekV3MoEModel(BaseModel):
                 )
         return _IncompatibleKeys(actual_missing_keys, unexpected_keys)
 
-    @cached_property
-    def weight_sync_transforms(
-        self,
-    ) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
-        # 1. get all parameters, but not buffers
-        transforms = {}
-
-        for local_name, param in self.named_parameters():
-            hf_name = self.weight_mapper.policy_map_local_key_to_hf_key(
-                clear_weight_name(local_name)
-            )
-
-            is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
-            transform_or_view = param.to_local() if is_dist_tensor else param
-
-            assert (
-                hf_name not in transforms
-            ), f"Duplicate key found in transforms: {hf_name}"
-            transforms[hf_name] = transform_or_view
-
-        return sorted(transforms.items())
-
 
 def _init_weights(module):
     std = 0.02
 
     def to_local(tensor):
-        if isinstance(tensor, DTensor):
+        if isinstance(tensor, torch.distributed.tensor.DTensor):
             return tensor.to_local()
         else:
             return tensor

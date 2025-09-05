@@ -23,17 +23,9 @@ from torch import nn
 from torch._utils import _get_available_device_type, _get_device_module
 from torch.distributed.device_mesh import DeviceMesh
 
-try:
-    from torch.distributed.tensor import Shard, distribute_module, distribute_tensor
-except ImportError:
-    print("torch.distributed.tensor is not available. DeepSeek model will not work.")
-
+from torch.distributed.tensor import Shard, distribute_module, distribute_tensor
 from torch.distributed.tensor.parallel import ParallelStyle, parallelize_module
-
-try:
-    from torch.distributed.fsdp import fully_shard
-except ImportError:
-    print("torch.distributed.fsdp is not available. DeepSeek model will not work.")
+from torch.distributed.fsdp import fully_shard
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
@@ -41,7 +33,8 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from transformer_engine.pytorch.attention import DotProductAttention
 
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, MoE
+from cosmos_rl.policy.kernel.moe.moe import GroupedExperts, GroupedExpertsDeepEP
+from cosmos_rl.policy.model.deepseek_v3.moe import MoE
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.ulysses import swizzle_cp_forward, ulysses_attn_func
 
@@ -122,6 +115,9 @@ class _ExpertParallel(ParallelStyle):
         for name, param in module.named_parameters(recurse=False):
             dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
             module.register_parameter(name, dist_param)
+
+        if isinstance(module, GroupedExperts):
+            module.setup_mesh(ep_mesh=device_mesh)
 
         if isinstance(module, GroupedExpertsDeepEP):
             module.init_token_dispatcher(ep_mesh=device_mesh)

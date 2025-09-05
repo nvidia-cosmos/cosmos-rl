@@ -21,17 +21,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-try:
-    from transformer_engine.pytorch.attention import DotProductAttention
-    from transformer_engine.pytorch.module.rmsnorm import RMSNorm as _RMSNorm
-except ImportError:
-    print("transformer_engine.pytorch is not available. DeepSeek model will not work.")
+from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.module.rmsnorm import RMSNorm as _RMSNorm
 
-    class _RMSNorm:
-        pass
-
-
-from cosmos_rl.policy.kernel.moe.moe import MoE
+from cosmos_rl.policy.model.deepseek_v3.moe import MoE
 
 
 @dataclass
