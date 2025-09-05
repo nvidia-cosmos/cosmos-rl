@@ -712,12 +712,6 @@ class WeightMapper(ABC):
         """
         return []
 
-    def weight_sync_check_filter(self, parallel_dims: ParallelDims, name: str) -> bool:
-        """
-        Sometimes we want to skip some weight sync check for certain weights or certain ranks.
-        """
-        return True
-
     def setup_rollout_backend(self, backend: str):
         """
         Setup the rollout backend for the weight mapper.
@@ -759,3 +753,21 @@ class WeightMapper(ABC):
             len(final_vllm_weight_inplace_view_map) == total_count
         ), f"{len(final_vllm_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
         return final_vllm_weight_inplace_view_map, final_recv_key_n_shape_list
+
+    def update_tensor_view(
+        self,
+        tensor_view: torch.Tensor,
+        recv_tensor: torch.Tensor,
+        inst_dest_name: str,
+        **kwargs,
+    ):
+        """
+        Update the tensor view with the recv tensor. This is called when weight sync is done, we want to update the
+        original tensor in rollout model.
+
+        @param tensor_view: the tensor view to be updated, this is from rollout model
+        @param recv_tensor: the recv tensor from policy model, data filled by NCCL recv of P2R.
+        @param inst_dest_name: the name of the tensor to be updated, compatible name.
+        """
+        tmp_recv_tensor = recv_tensor.to(tensor_view.dtype)
+        tensor_view.copy_(tmp_recv_tensor)

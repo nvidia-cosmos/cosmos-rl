@@ -468,6 +468,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.trainable_params.add(
                     self.weight_mapper.get_unsplited_weight_name(p)
                 )
+
+            # Add weight scale of quantized weights to trainable params
+            if self.quantization_type is not None:
+                for name, _ in self.rollout.model_param_map(self.weight_mapper).items():
+                    if name.endswith("_scale"):
+                        self.trainable_params.add(name)
+
             logger.info(
                 f"[Rollout] Obtained {len(self.trainable_params)} trainable params after weight unsplit."
             )
@@ -524,16 +531,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             return recv_tensor, inplace
 
-        def update_tensor_view(
-            vllm_tensor_view: torch.Tensor,
-            recv_tensor: torch.Tensor,
-            inst_dest_name: str,
-        ):
-            tmp_recv_tensor = recv_tensor.to(vllm_tensor_view.dtype)
-            if "down_proj_bias" in inst_dest_name and self.global_rank != 0:
-                tmp_recv_tensor.zero_()
-            vllm_tensor_view.copy_(tmp_recv_tensor)
-
         skipped_params_cnt = 0
 
         for insts_for_per_param in insts_group.param_instructions:
@@ -543,7 +540,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             inst_dest_name = insts_for_per_param.param_name
 
             if inst_dest_name not in self.trainable_params and trainable_only:
-                logger.debug(
+                logger.info(
                     f"[Rollout] Skip {inst_dest_name} in P2R recv due to non trainable."
                 )
                 skipped_params_cnt += 1
@@ -591,7 +588,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             all_tensor_views_to_copy, tensors_to_check, post_process_list_for_lowp
         ):
             for view, recv_tensor, inst_dest_name in all_tensor_views_to_copy:
-                update_tensor_view(view, recv_tensor, inst_dest_name)
+                self.weight_mapper.update_tensor_view(
+                    view, recv_tensor, inst_dest_name, parallel_dims=self.parallel_dims
+                )
 
             for (
                 cloned_target_tensor,
@@ -1042,28 +1041,31 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 ), "[Rollout] The vaild dst replicas num should match the replicas num that this worker holds."
 
                 src_rank = self.replica_name_to_rank[src_replica_name]
+                with torch.inference_mode():
+                    for name, parameter in self.rollout.model_param_map(
+                        self.weight_mapper
+                    ).items():
+                        if (
+                            name not in self.trainable_params
+                            and broadcast_command.trainable_only
+                        ):
+                            logger.info(
+                                f"[Rollout] Skip {name} in R2R due to non trainable."
+                            )
+                            skipped_params_cnt += 1
+                            continue
+                        transferred_params_cnt += 1
 
-                for name, parameter in self.get_underlying_model().state_dict().items():
-                    name = self.weight_mapper._rollout_vllm_name_to_hf(name)
-                    if (
-                        name not in self.trainable_params
-                        and broadcast_command.trainable_only
-                    ):
-                        logger.debug(
-                            f"[Rollout] Skip {name} in R2R due to non trainable."
+                        recv_tensor = parameter
+                        if not parameter.is_contiguous():
+                            recv_tensor = parameter.contiguous()
+
+                        nccl_broadcast(
+                            recv_tensor, src_rank, self.global_commnicator_idex
                         )
-                        skipped_params_cnt += 1
-                        continue
-                    transferred_params_cnt += 1
 
-                    recv_tensor = parameter
-                    if not parameter.is_contiguous():
-                        recv_tensor = parameter.contiguous()
-
-                    nccl_broadcast(recv_tensor, src_rank, self.global_commnicator_idex)
-
-                    if not parameter.is_contiguous():
-                        parameter.copy_(recv_tensor)
+                        if not parameter.is_contiguous():
+                            parameter.copy_(recv_tensor)
 
                 if not self.state.weight_synced():
                     assert not broadcast_command.trainable_only, "[Rollout] Trainable only must be set to False for the first broadcast."

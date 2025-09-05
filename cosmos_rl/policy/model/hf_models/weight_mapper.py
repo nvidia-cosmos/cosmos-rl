@@ -19,7 +19,6 @@ from typing import List, Tuple, Dict, Any
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils import util
 from transformers import AutoConfig
-from cosmos_rl.utils.parallelism import ParallelDims
 from functools import cached_property
 
 
@@ -340,12 +339,19 @@ class HFModelWeightMapper(WeightMapper):
                 return weight_key.replace(key, "qkv")
         return weight_key  # return full weight key
 
-    def weight_sync_check_filter(self, parallel_dims: ParallelDims, name: str) -> bool:
-        """
-        Sometimes we want to skip some weight sync check for certain weights or certain ranks.
-        """
-        if "gpt_oss" in self.config.model_type:
-            tp_rank, _ = parallel_dims.tp_coord
-            if "down_proj_bias" in name and tp_rank != 0:
-                return False
-        return True
+    def update_tensor_view(
+        self,
+        tensor_view: torch.Tensor,
+        recv_tensor: torch.Tensor,
+        inst_dest_name: str,
+        **kwargs,
+    ):
+        tmp_recv_tensor = recv_tensor.to(tensor_view.dtype)
+        if self.config.model_type == "gpt_oss" and "down_proj_bias" in inst_dest_name:
+            assert (
+                "parallel_dims" in kwargs
+            ), "parallel_dims is required for update_tensor_view"
+            tp_rank, _ = kwargs["parallel_dims"].tp_coord
+            if tp_rank != 0:
+                tmp_recv_tensor.zero_()
+        tensor_view.copy_(tmp_recv_tensor)

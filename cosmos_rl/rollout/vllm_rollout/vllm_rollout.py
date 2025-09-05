@@ -18,7 +18,7 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 
 import vllm
 import torch
-from typing import List, Tuple, Any, Optional
+from typing import List, Tuple, Any, Optional, Dict
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
@@ -304,14 +304,28 @@ class vLLMRollout(RolloutBase):
             swizzled_weight_scale_mxfp4.storage.data,
         )
 
-    def model_param_map(self, weight_mapper: WeightMapper):
+    def model_param_map(self, weight_mapper: WeightMapper) -> Dict[str, torch.Tensor]:
+        """
+        All the parameters of the rollout model:
+            - All the parameters of the model.
+            - All the scales of quantized weights.
+        """
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+
         if self._model_param_map:
             return self._model_param_map
         model = self.get_underlying_model()
         param_map = {}
-        for name, param in model.named_parameters():
+        for name, param in model.state_dict().items():
             compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
             param_map[compatible_name] = param
+
+        quantized_tensors = self.get_quantized_tensors(weight_mapper)
+        param_map.update(quantized_tensors)
+
         self._model_param_map = param_map
         return self._model_param_map
 
@@ -351,3 +365,45 @@ class vLLMRollout(RolloutBase):
             log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0")
             log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0")
             log_env("VLLM_MXFP4_USE_MARLIN", "0")
+
+    def get_quantized_tensors(
+        self, weight_mapper: WeightMapper
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Get the quantized tensors of the rollout model.
+        """
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+        model = self.get_underlying_model()
+        quantized_tensors = {}
+        # Handle special cases for some quantized models
+        if "gpt_oss" in self.model_config.model_type and self.quantization == "mxfp4":
+            # FIXME: (lms) generally handle all quantized cases when refactoring the rollout param cache.
+            # iterate all the modules in the model
+            for module_name, module in model.named_modules():
+                if hasattr(module, "w13_bias"):
+                    # this is a mxfp4 quant layer
+                    w13_weight_name = f"{module_name}.w13_weight"
+                    w2_weight_name = f"{module_name}.w2_weight"
+                    w13_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
+                        w13_weight_name
+                    )
+                    w2_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
+                        w2_weight_name
+                    )
+                    quantized_tensors[w13_compatible_name] = (
+                        module.quant_method.w13_weight_triton_tensor.storage.data
+                    )
+                    quantized_tensors[w2_compatible_name] = (
+                        module.quant_method.w2_weight_triton_tensor.storage.data
+                    )
+                    quantized_tensors[w13_compatible_name + "_scale"] = (
+                        module.quant_method.w13_precision_config.weight_scale.storage.data
+                    )
+                    quantized_tensors[w2_compatible_name + "_scale"] = (
+                        module.quant_method.w2_precision_config.weight_scale.storage.data
+                    )
+
+        return quantized_tensors
