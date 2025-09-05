@@ -345,6 +345,11 @@ class GrpoConfig(BaseModel):
         description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
     )
 
+    no_outdated_rollout: bool = Field(
+        default=False,
+        description="Disable outdated rollout. If set to True, the rollout engine will stop generating rollouts if the weight outdated.",
+    )
+
     min_filter_prefix_tokens: Optional[int] = Field(
         default=None,
         description="Minimum number of tokens to filter the prefix tokens for the rollouts inside the same group. "
