@@ -210,6 +210,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             detokenize=True,
         )
 
+        # Holding temp tensors created in `recv_tensor_creator`. Do not remove this, or
+        self.total_temp_tensor_pool = []
+
     def prepare_shard_infos_for_weight_sync_insts(self):
         if self.quantization_type == "fp8":
             from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
@@ -516,6 +519,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             if vllm_tensor_view.dtype != target_dtype:
                 recv_tensor = recv_tensor.to(target_dtype)
                 inplace = False
+            # Hold these recv_tensor, in case of buffer reusing by torch
+            self.total_temp_tensor_pool.append(recv_tensor)
 
             return recv_tensor, inplace
 
@@ -552,6 +557,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 target_tensor.zero_()
 
             for inst in insts:
+                # Inst for different part of a tensor between policy and rollout.
                 p_rank = inst.policy_rank
                 r_rank = inst.rollout_rank
                 tensor_split_strategys = inst.slice_strategy
@@ -577,6 +583,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 )
 
         post_process_list_for_lowp = []
+
         if not check_inside_group and self.quantization_type is not None:
             post_process_list_for_lowp.append(inst_group_full_weight_name)
 
@@ -585,8 +592,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         ):
             for view, recv_tensor, inst_dest_name in all_tensor_views_to_copy:
                 update_tensor_view(view, recv_tensor, inst_dest_name)
-
-            all_tensor_views_to_copy.clear()
 
             for (
                 cloned_target_tensor,
@@ -649,6 +654,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     elif self.quantization_type == "mxfp4":
                         # Note: For mxfp4, we don't do weight sync check for quantized weights.
                         if inst_group_full_weight_name in self.vllm_hp_weight_map:
+                            logger.info(
+                                f"LMS: inside mxfp4 quantization of {inst_group_full_weight_name}"
+                            )
                             if "gate_up_proj_bias" not in inst_group_full_weight_name:
                                 # Weight to quantize:
                                 # [local_num_experts, 2* local_intermediate_size, hidden_size] for gate_up_proj
@@ -879,8 +887,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 total_params += 1
                 total_recvs += len(insts_for_per_param.instructions)
 
-        # copy_stream = torch.cuda.Stream()
-        copy_stream = self.inference_stream
+        copy_stream = torch.cuda.Stream()
 
         assert (
             total_params == len(self.recv_param_key_n_rank_list)
@@ -974,6 +981,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             copy_finished.wait()
 
             torch.cuda.synchronize()
+            self.total_temp_tensor_pool.clear()
 
             time_eclapsed = time.time() - st
             logger.info(
@@ -1323,20 +1331,15 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
-                # if self.global_rank == 0:
-                #     for i, completion in enumerate(completions):
-                #         if len(prompts[i] > 1):
-                #             user_prompt = prompts[i][1]
-                #             logger.info(f"LMS: prompt is: {user_prompt}")
-                #             for j, gen in enumerate(completion):
-                #                 logger.info(
-                #                     f"LMS: [generated text {j}/{len(completion)}]: {gen}"
-                #                 )
                 if self.global_rank == 0:
-                    if len(completions) > 0:
-                        logger.info(
-                            f"[Rollout] prompt: {prompts[0][1]}, completions: {completions[0][0]}"
-                        )
+                    for i, completion in enumerate(completions):
+                        if len(prompts[i]) > 1:
+                            user_prompt = prompts[i][1]
+                            logger.info(f"LMS: prompt is: {user_prompt}")
+                            for j, gen in enumerate(completion):
+                                logger.info(
+                                    f"LMS: [generated text {j}/{len(completion)}]: {gen}"
+                                )
                 # Remove empty completions
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []
