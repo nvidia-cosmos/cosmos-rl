@@ -153,7 +153,7 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
             self.weight_mapper.setup_rollout_backend("trtllm")
 
             self.cosmos_model_config = hf_config
-            self.enable_validation = self.config.train.enable_validation
+            self.enable_validation = self.config.validation.enable
             self.inference_stream = torch.cuda.current_stream()
 
             self._engine_initialized = False
@@ -616,8 +616,8 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
         current_step = broadcast_command.weight_step
         if current_step is not None and current_step > 0:
-            should_do_validation = self.config.train.enable_validation and (
-                current_step % self.config.train.validation_step == 0
+            should_do_validation = self.config.validation.enable and (
+                current_step % self.config.validation.freq == 0
                 or current_step == broadcast_command.total_steps
             )
             if should_do_validation:
@@ -629,6 +629,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             # trigger the shutdown signal to main process too.
             self.cosmos_weight_sync_queue.put(ShutdownInstruction())
             self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
 
     def query_command_from_controller(self):
         """Background task to check commands from the controller"""
@@ -704,6 +705,11 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             self._shutdown_handled = True
             if hasattr(self, "shutdown_signal") and not self.shutdown_signal.is_set():
                 self.shutdown_signal.set()
+            if (
+                hasattr(self, "shutdown_mp_signal")
+                and not self.shutdown_mp_signal.is_set()
+            ):
+                self.shutdown_mp_signal.set()
 
         if hasattr(self, "background_thread") and self.background_thread is not None:
             self.background_thread.join()

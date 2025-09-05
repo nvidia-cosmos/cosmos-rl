@@ -257,7 +257,7 @@ class SFTTrainer(Trainer):
         super(SFTTrainer, self).__init__(config, parallel_dims)
 
         # Enlarge the compile cache size for validation
-        if config.train.compile and config.train.enable_validation:
+        if config.train.compile and config.validation.enable:
             torch._dynamo.config.cache_size_limit = 64
 
         self.dp_rank, self.dp_world_size = 0, 1
@@ -376,7 +376,8 @@ class SFTTrainer(Trainer):
         self.train_data_loader = get_train_data_loader(train_sampler)
         self.val_data_loader = DataLoader(
             val_dataset,
-            batch_size=config.train.validation_batch_per_replica,
+            batch_size=config.validation.batch_size
+            or config.train.train_batch_per_replica,
             num_workers=config.train.train_policy.dataloader_num_workers,
             prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
             sampler=val_sampler,
@@ -419,7 +420,7 @@ class SFTTrainer(Trainer):
         )
 
     def validate(self):
-        if not self.config.train.enable_validation:
+        if not self.config.validation.enable:
             return
         if self.parallel_dims.dp_replicate_coord[0] != 0:
             return
@@ -842,7 +843,7 @@ class SFTTrainer(Trainer):
 
                 val_score = None
                 # validation
-                if self.train_step % self.config.train.validation_step == 0:
+                if self.train_step % self.config.validation.freq == 0:
                     val_score = self.validate()
 
                 # save checkpoint
@@ -923,7 +924,7 @@ class SFTTrainer(Trainer):
             )
             self.ckpt_manager.save_check(
                 step=self.train_step,
-                val_score=val_score if self.config.train.enable_validation else -1,
+                val_score=val_score if self.config.validation.enable else -1,
                 pp_enabled=self.parallel_dims.pp_enabled,
                 pp_last_stage=pp_last_stage,
                 pp_master_rank=self.parallel_dims.world_size
