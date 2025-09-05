@@ -419,10 +419,10 @@ class Controller:
                 * len(self.policy_status_manager)
                 * self.config.train.train_batch_per_replica
             ):
+                n = 0 if self.config.train.train_policy.no_outdated_rollout else 1
                 logger.warning(
-                    f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}."
+                    f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                 )
-                n = 1
 
         for _ in range(n):
             payload = None
