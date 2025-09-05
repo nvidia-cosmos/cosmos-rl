@@ -109,11 +109,73 @@ class BaseModel(torch.nn.Module, ABC):
 
         # 1. get all parameters, but not buffers
         named_parameters = {name: param for name, param in self.named_parameters()}
+        module_map = dict(self.named_modules())
         keys = list(named_parameters.keys())
         keys = sorted(keys, key=lambda x: x[0])
         transforms = collections.OrderedDict()
+
+        def _make_lora_merged_local_view(
+            module: LoraInjectedLinear, param: torch.Tensor
+        ):
+            def merged_local_view() -> torch.Tensor:
+                with torch.no_grad():
+                    if isinstance(param, torch.distributed.tensor.DTensor):
+                        base_local = param.to_local()
+                    else:
+                        base_local = param
+
+                    lora_A = module.lora_A.weight
+                    lora_B = module.lora_B.weight
+                    if isinstance(lora_A, torch.distributed.tensor.DTensor):
+                        lora_A = lora_A.full_tensor()
+                    if isinstance(lora_B, torch.distributed.tensor.DTensor):
+                        lora_B = lora_B.full_tensor()
+
+                    delta_w = module.scaling * (lora_B @ lora_A)
+
+                    if isinstance(param, torch.distributed.tensor.DTensor):
+                        chunk_meta_list = param.__create_chunk_list__()
+                        assert (
+                            len(chunk_meta_list) == 1
+                        ), "Expect a single chunk meta for DTensor param"
+                        meta = chunk_meta_list[0]
+                        delta_local = delta_w
+                        for dim_index, (off, size) in enumerate(
+                            zip(meta.offsets, meta.sizes)
+                        ):
+                            off_i = int(off)
+                            size_i = int(size)
+                            if (
+                                size_i != int(delta_local.shape[dim_index])
+                                or off_i != 0
+                            ):
+                                delta_local = delta_local.narrow(
+                                    dim_index, off_i, size_i
+                                )
+                    else:
+                        delta_local = delta_w
+
+                    return base_local + delta_local
+
+            return merged_local_view
+
         for k in keys:
             v = named_parameters[k]
+            if ".lora_A.weight" in k or ".lora_B.weight" in k:
+                continue
+            parent_path, leaf_name = (k.rsplit(".", 1) + [""])[:2]
+            parent_module = module_map.get(parent_path, None)
+            if isinstance(parent_module, LoraInjectedLinear) and leaf_name == "weight":
+                dest_key = self.weight_mapper.policy_map_local_key_to_hf_key(
+                    util.clear_weight_name(k)
+                )
+                if not hasattr(self.weight_mapper, "pre_p2r_required_keys"):
+                    self.weight_mapper.pre_p2r_required_keys = set()
+                self.weight_mapper.pre_p2r_required_keys.add(dest_key)
+
+                transforms[dest_key] = _make_lora_merged_local_view(parent_module, v)
+                continue
+
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
             transforms[
@@ -665,6 +727,8 @@ class WeightMapper(ABC):
         Returns:
             bool: True if the tensor sync precollect is required, False otherwise.
         """
+        if hasattr(self, "pre_p2r_required_keys"):
+            return name in self.pre_p2r_required_keys
         return False
 
     @cached_property
