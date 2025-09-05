@@ -650,9 +650,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     elif self.quantization_type == "mxfp4":
                         # Note: For mxfp4, we don't do weight sync check for quantized weights.
                         if inst_group_full_weight_name in self.vllm_hp_weight_map:
-                            logger.info(
-                                f"LMS: inside mxfp4 quantization of {inst_group_full_weight_name}"
-                            )
                             if "gate_up_proj_bias" not in inst_group_full_weight_name:
                                 # Weight to quantize:
                                 # [local_num_experts, 2* local_intermediate_size, hidden_size] for gate_up_proj
