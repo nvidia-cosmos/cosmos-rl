@@ -777,6 +777,19 @@ def main():
         == "sft"
     ):
         n_rollouts = 0
+        if n_policy > 1:
+            logger.warning(
+                "Warning: n_init_replicas for rollout is set to 0 for SFT training, but n_init_replicas for policy is more than 1."
+            )
+            pre_dp_replicate_size = policy_parallelism.get("dp_replicate_size", 1)
+            cosmos_config["policy"]["parallelism"]["dp_replicate_size"] = (
+                pre_dp_replicate_size * n_policy
+            )
+            logger.info(
+                f"[Config ]SFT type job does not support n_init_replicas > 1, automatically set n_init_replicas from {n_policy} to 1 and scale up dp_replicate_size from {pre_dp_replicate_size} to {cosmos_config['policy']['parallelism']['dp_replicate_size']}."
+            )
+            min_n_gpus_policy = min_n_gpus_policy * n_policy
+            n_policy = 1
 
     # Handle Lepton mode
     if args.lepton_mode:
