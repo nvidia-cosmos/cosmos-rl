@@ -262,6 +262,7 @@ class TestRollout:
         self.ref_compatibale_map = compatibale_map
         self.quantization_type = None
         self.config = CosmosConfig()
+        self.config.train.param_dtype = "float32"  # keep the same as policy above.
 
         self.vllm_weight_inplace_view_map = compatibale_map
         self.recv_param_key_n_rank_list = compatibale_list
@@ -1029,7 +1030,7 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
     assert len(mapper.mapper_group) == 1, "Only one mapper group expected"
 
     recv_param_key_n_rank_list = []
-    _, grouped_recv_param_key_n_rank_list = weight_mapper.rollout_prepare_recv(
+    _, grouped_recv_param_key_n_rank_list = weight_mapper.cosmos_rollout_prepare_recv(
         rollout.get_underlying_model()
     )
     for group in grouped_recv_param_key_n_rank_list:
