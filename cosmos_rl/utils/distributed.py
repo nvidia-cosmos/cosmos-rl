@@ -177,7 +177,12 @@ def gradient_reduce_across_dp_replicas_(
             tmp_buffer = torch.cat(sub_bucket, dim=0).contiguous()
             # Convert to float32 to keep precision
             original_dtype = tmp_buffer.dtype
+            original_device = tmp_buffer.device
             tmp_buffer = tmp_buffer.float()
+
+            # Make sure the buffer is on GPU before calling nccl allreduce
+            if tmp_buffer.device == torch.device("cpu"):
+                tmp_buffer = tmp_buffer.cuda()
 
             # TODO a risk here, when comm is rebuilt, the reduce result will be wrong.
             # For the first time to build mesh, we set a longer timeout (30 minutes) to avoid lost some slower replicas
@@ -189,7 +194,7 @@ def gradient_reduce_across_dp_replicas_(
             comm.allreduce(
                 tmp_buffer, tmp_buffer, dist.ReduceOp.AVG, timeout_ms=timeout_ms
             )
-            tmp_buffer = tmp_buffer.to(original_dtype)
+            tmp_buffer = tmp_buffer.to(original_dtype).to(original_device)
 
             # copy the result back to original grad
             offset = 0
