@@ -91,6 +91,7 @@ RUN pip install \
     -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly \
     -U triton triton_kernels --pre --extra-index-url https://wheels.vllm.ai/gpt-oss/ \
     flashinfer-python \
+    transformer_engine[pytorch] \
     -r /workspace/cosmos_rl/requirements.txt
 
 ###################################################
