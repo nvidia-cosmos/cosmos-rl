@@ -83,12 +83,14 @@ RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url h
 
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
+# Install flash_attn separately
+RUN pip install flash_attn==2.8.2 --no-build-isolation
+
 RUN pip install \
     torchao==0.13.0 \
     -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly \
     -U triton triton_kernels --pre --extra-index-url https://wheels.vllm.ai/gpt-oss/ \
-    flash-attn==2.8.2 \
-    https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl \
+    flashinfer-python \
     -r /workspace/cosmos_rl/requirements.txt
 
 ###################################################
