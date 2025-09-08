@@ -286,6 +286,7 @@ class TestRollout:
 
         self.rollout = vLLMRollout(self.config, tokenizer)
 
+        self.total_temp_tensor_pool = []
         self.prepare_trainable_params()
 
     def get_underlying_model(self):
