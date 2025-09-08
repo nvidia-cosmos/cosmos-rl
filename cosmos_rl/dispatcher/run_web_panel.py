@@ -495,7 +495,8 @@ async def put_rollout_group(rollout: RolloutRequest):
         valid_rollouts_list: List[List[Rollout]] = []
         invalid_rollouts_list: List[List[Rollout]] = []
         for rollouts_group in rollouts_list:
-            if len(set([rollout.reward for rollout in rollouts_group])) > 1:
+            # Only filter_reward is considered for dynamic sampling
+            if len(set([rollout.filter_reward for rollout in rollouts_group])) > 1:
                 # Preprocess the valid rollouts to find if shared prefix exists
                 # If exists,
                 #   - if the shared prefix hold different rewards, the prefix may lead to bias
@@ -595,6 +596,7 @@ def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     data_packer: Optional[DataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
+    filter_reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,
@@ -674,6 +676,7 @@ def main(
             redis_logfile_path=args.redis_logfile_path,
             dataset=dataset,
             reward_fns=reward_fns,
+            filter_reward_fns=filter_reward_fns,
             data_packer=data_packer,
             val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
