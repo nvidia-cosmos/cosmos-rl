@@ -50,8 +50,8 @@ class FakeGroupMMBackwardCheck(torch.autograd.Function):
         # Handle inf and nan values in gradients
         # Fault due to grouped_gemm, where aligned memory is not used which may contains nan
         # Check https://github.com/pytorch/pytorch/issues/154557
-        grad_x = torch.nan_to_num(grad_x, nan=0.0, posinf=1e2, neginf=-1e2)
-        grad_w = torch.nan_to_num(grad_w, nan=0.0, posinf=1e2, neginf=-1e2)
+        grad_x = torch.nan_to_num(grad_x, nan=0.0, posinf=0.0, neginf=0.0)
+        grad_w = torch.nan_to_num(grad_w, nan=0.0, posinf=0.0, neginf=0.0)
 
         return grad_x, grad_w, None, None, None
 
@@ -87,8 +87,8 @@ class FallbackGroupedGemmImpl(torch.autograd.Function):
                 zero_expert_indices = torch.where(~valid_expert_mask)[0]
                 bgrad[zero_expert_indices] = 0.0
         # Fault due to grouped_gemm, where aligned memory is not used which may contains nan
-        agrad = torch.nan_to_num(agrad, nan=0.0)
-        bgrad = torch.nan_to_num(bgrad, nan=0.0)
+        agrad = torch.nan_to_num(agrad, nan=0.0, posinf=0.0, neginf=0.0)
+        bgrad = torch.nan_to_num(bgrad, nan=0.0, posinf=0.0, neginf=0.0)
         return agrad, bgrad, None, None
 
 
