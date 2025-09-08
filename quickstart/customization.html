@@ -274,7 +274,7 @@
 <section id="customized-data-packer">
 <h2>Customized Data Packer<a class="headerlink" href="#customized-data-packer" title="Link to this heading"></a></h2>
 <p>Check <a class="reference external" href="#">decoder_only_llm_packer.py</a> to see how to implement a customized data packer for your own model.</p>
-<p>Here we just reuse the pre-deined LLM data packer to demonstrate how to pass your data packer.</p>
+<p>Here we just reuse the pre-defined LLM data packer to demonstrate how to pass your data packer.</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Any</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Dict</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">torch.utils.data</span><span class="w"> </span><span class="kn">import</span> <span class="n">Dataset</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">datasets</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_dataset</span>
@@ -425,31 +425,21 @@
 <li><p>A <cite>DataPacker</cite> class that inherits from <cite>cosmos_rl.dispatcher.data.packer.DataPacker</cite></p></li>
 </ul>
 <p>Let’s take <cite>deepseek_v3</cite> as an example.</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.launcher.worker_entry</span><span class="w"> </span><span class="kn">import</span> <span class="n">main</span> <span class="k">as</span> <span class="n">launch_worker</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">deepseek_v3</span><span class="w"> </span><span class="kn">import</span> <span class="n">DeepseekV3MoEModel</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">deepseek_v3.weight_mapper</span><span class="w"> </span><span class="kn">import</span> <span class="n">DeepseekV3MoEWeightMapper</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
-    <span class="n">DecoderOnlyLLMDataPacker</span><span class="p">,</span>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.dispatcher.data.packer.deepseek_data_packer</span><span class="w"> </span><span class="kn">import</span> <span class="n">DeepSeek_DataPacker</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.model.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseModel</span><span class="p">,</span> <span class="n">ModelRegistry</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.model.deepseek_v3.weight_mapper</span><span class="w"> </span><span class="kn">import</span> <span class="n">DeepseekV3MoEWeightMapper</span>
+
+<span class="nd">@ModelRegistry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span>
+    <span class="n">DeepseekV3MoEWeightMapper</span><span class="p">,</span> <span class="n">default_data_packer_cls</span><span class="o">=</span><span class="n">DeepSeek_DataPacker</span>
 <span class="p">)</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.model.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">ModelRegistry</span>
-
-<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
-    <span class="c1"># Register the model into the registry</span>
-    <span class="n">ModelRegistry</span><span class="o">.</span><span class="n">register_model</span><span class="p">(</span>
-        <span class="c1"># Model class to register</span>
-        <span class="n">DeepseekV3MoEModel</span><span class="p">,</span>
-        <span class="c1"># Weight mapper for this model</span>
-        <span class="n">DeepseekV3MoEWeightMapper</span><span class="p">,</span>
-    <span class="p">)</span>
-
-    <span class="n">launch_worker</span><span class="p">()</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">DeepseekV3MoEModel</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+    <span class="o">...</span>
 </pre></div>
 </div>
-<p>First import the model class, weight mapper class, and data packer class from the external source code.</p>
-<p>Then register the model into the registry via <cite>ModelRegistry.register_model</cite>.</p>
-<p>User can launch a external model job with:</p>
-<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">cosmos</span><span class="o">-</span><span class="n">rl</span> <span class="o">--</span><span class="n">config</span> <span class="o">./</span><span class="n">configs</span><span class="o">/</span><span class="n">deepseek</span><span class="o">-</span><span class="n">v3</span><span class="o">/</span><span class="n">moonlight</span><span class="o">-</span><span class="n">moe</span><span class="o">-</span><span class="mi">13</span><span class="n">b</span><span class="o">-</span><span class="n">tp4</span><span class="o">-</span><span class="n">sft</span><span class="o">.</span><span class="n">toml</span>
-<span class="go">    cosmos_rl.tools.model.moonlight_launcher</span>
+<p>Import weight mapper class and data packer class from the external source code.</p>
+<p>Then register the model into the registry via <cite>ModelRegistry.register</cite> decorator.</p>
+<p>User can launch job with:</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">cosmos</span><span class="o">-</span><span class="n">rl</span> <span class="o">--</span><span class="n">config</span> <span class="o">./</span><span class="n">configs</span><span class="o">/</span><span class="n">deepseek</span><span class="o">-</span><span class="n">v3</span><span class="o">/</span><span class="n">deepseek</span><span class="o">-</span><span class="n">v3</span><span class="o">-</span><span class="n">moe</span><span class="o">-</span><span class="mi">670</span><span class="n">b</span><span class="o">-</span><span class="n">fsdp64</span><span class="o">-</span><span class="n">cp4</span><span class="o">-</span><span class="n">ep64</span><span class="o">-</span><span class="n">sft</span><span class="o">.</span><span class="n">toml</span>
 </pre></div>
 </div>
 </section>

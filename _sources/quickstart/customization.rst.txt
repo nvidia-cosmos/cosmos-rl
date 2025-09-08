@@ -169,7 +169,7 @@ Customized Data Packer
 ----------------------
 Check `decoder_only_llm_packer.py <#>`_ to see how to implement a customized data packer for your own model.
 
-Here we just reuse the pre-deined LLM data packer to demonstrate how to pass your data packer.
+Here we just reuse the pre-defined LLM data packer to demonstrate how to pass your data packer.
 
 .. code-block:: python
 
@@ -325,33 +325,24 @@ To customize the model, one needs to implement:
 Let's take `deepseek_v3` as an example.
 
 .. code-block:: python
+    
+    from cosmos_rl.dispatcher.data.packer.deepseek_data_packer import DeepSeek_DataPacker
+    from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
+    from cosmos_rl.policy.model.deepseek_v3.weight_mapper import DeepseekV3MoEWeightMapper
 
-    from cosmos_rl.launcher.worker_entry import main as launch_worker
-    from deepseek_v3 import DeepseekV3MoEModel
-    from deepseek_v3.weight_mapper import DeepseekV3MoEWeightMapper
-    from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
-        DecoderOnlyLLMDataPacker,
+    @ModelRegistry.register(
+        DeepseekV3MoEWeightMapper, default_data_packer_cls=DeepSeek_DataPacker
     )
-    from cosmos_rl.policy.model.base import ModelRegistry
+    class DeepseekV3MoEModel(BaseModel):
+        ...
 
-    if __name__ == "__main__":
-        # Register the model into the registry
-        ModelRegistry.register_model(
-            # Model class to register
-            DeepseekV3MoEModel,
-            # Weight mapper for this model
-            DeepseekV3MoEWeightMapper,
-        )
 
-        launch_worker()
+Import weight mapper class and data packer class from the external source code. 
 
-First import the model class, weight mapper class, and data packer class from the external source code. 
+Then register the model into the registry via `ModelRegistry.register` decorator.
 
-Then register the model into the registry via `ModelRegistry.register_model`.
+User can launch job with: 
 
-User can launch a external model job with: 
-
->>> cosmos-rl --config ./configs/deepseek-v3/moonlight-moe-13b-tp4-sft.toml 
-    cosmos_rl.tools.model.moonlight_launcher
+>>> cosmos-rl --config ./configs/deepseek-v3/deepseek-v3-moe-670b-fsdp64-cp4-ep64-sft.toml
 
 
