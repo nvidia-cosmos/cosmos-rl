@@ -75,7 +75,7 @@ RUN apt-get update -qq && \
 RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
-RUN pip install -U pip setuptools wheel packaging uv
+RUN pip install -U pip setuptools wheel packaging
 
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
