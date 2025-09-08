@@ -62,8 +62,8 @@ class RLInternalDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
-        payload: RLPayload = self.dataset[idx][self.prompt_column]
-        return idx, payload
+        prompt: str = self.dataset[idx][self.prompt_column]
+        return idx, RLPayload(prompt=prompt)
 
     def get_reference_answer(self, idx: int) -> Any:
         ref = self.dataset[idx][self.response_column]
