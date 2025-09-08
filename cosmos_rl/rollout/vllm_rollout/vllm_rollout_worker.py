@@ -439,6 +439,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         return nccl_group_id
 
     def prepare_trainable_params(self):
+        # TODO: (lms/feng) Refactor the param management logic for P2R and R2R, incluing trainable params for P2R and non-trainable params for R2R.
         if not hasattr(self, "trainable_params"):
             if self.global_rank == 0:
                 try:
@@ -473,9 +474,14 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             # Add weight scale of quantized weights to trainable params
             if self.quantization_type is not None:
+                # Trivial params:
+                # including tensors that need to be synced but not trainable in R2R. These
+                # tensors will not be synced from P2R, so we have to add them to trainable params.
+                self.misc_params = set()
                 for name, _ in self.rollout.model_param_map(self.weight_mapper).items():
                     if name.endswith("_scale"):
-                        self.trainable_params.add(name)
+                        self.misc_params.add(name)
+                self.trainable_params.update(self.misc_params)
 
             logger.info(
                 f"[Rollout] Obtained {len(self.trainable_params)} trainable params after weight unsplit."
@@ -982,12 +988,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
 
             if command.trainable_only:
-                if not hasattr(self, "p2r_synced_trainable_params"):
-                    self.p2r_synced_trainable_params = transferred_groups_cnt
-                else:
-                    assert (
-                        self.p2r_synced_trainable_params == transferred_groups_cnt
-                    ), f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params}."
+                if not hasattr(self, "p2r_synced_trainable_params_cnt"):
+                    self.p2r_synced_trainable_params_cnt = transferred_groups_cnt
+                assert (
+                    self.p2r_synced_trainable_params_cnt == transferred_groups_cnt
+                ), f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params_cnt}."
 
             self.state.set_weight_synced()
 
@@ -1069,12 +1074,14 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 f"[Rollout] Finished broadcasting of parameters to all replicas. While {skipped_params_cnt} unsplitted non-trainable params skipped and {transferred_params_cnt} unsplitted params transferred."
             )
             if broadcast_command.trainable_only:
-                if not hasattr(self, "r2r_synced_trainable_params"):
-                    self.r2r_synced_trainable_params = transferred_params_cnt
-                else:
+                if not hasattr(self, "r2r_synced_trainable_params_cnt"):
+                    self.r2r_synced_trainable_params_cnt = transferred_params_cnt
+                if hasattr(self, "p2r_synced_trainable_params_cnt"):
+                    # check in R2R sender side.
                     assert (
-                        self.r2r_synced_trainable_params == transferred_params_cnt
-                    ), f"Trainable synced params count in R2R {transferred_params_cnt} must match the synced_trainable_params attribute {self.r2r_synced_trainable_params}."
+                        self.r2r_synced_trainable_params_cnt
+                        == self.p2r_synced_trainable_params_cnt + len(self.misc_params)
+                    ), f"Synced params count in R2R {self.r2r_synced_trainable_params_cnt} must match the sum of count of attribute {self.p2r_synced_trainable_params_cnt} and {len(self.misc_params)}."
 
         current_step = broadcast_command.weight_step
         if current_step is not None:
