@@ -18,20 +18,20 @@ param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 32
+train_batch_per_replica = 128
 sync_weight_interval = 1
 
 [rollout]
 gpu_memory_utilization = 0.7
 enable_chunked_prefill = false
-max_response_length = 2048
+max_response_length = 1024
 n_generation = 16
 batch_size = 4
 quantization = "none"
 
 [rollout.multi_turn_config]
 enable = true
-enable_tools = false
+enable_tools = true
 enable_thinking = true
 custom_chat_template_path = "cosmos_rl/tools/chat_templates/gsm8k_tool_chat_template.jinja2"
 max_assistant_turns = 5

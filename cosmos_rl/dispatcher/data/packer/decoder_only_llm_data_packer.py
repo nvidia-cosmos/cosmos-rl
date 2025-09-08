@@ -42,10 +42,12 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             )
             return prompt
         else:
-            assert self.tool_agent is not None, "Tool agent is not set"
+            tool_schemas = (
+                self.tool_agent.tool_schemas() if self.tool_agent is not None else None
+            )
             prompt = self.tokenizer.apply_chat_template(
                 sample,
-                tools=self.tool_agent.tool_schemas(),
+                tools=tool_schemas,
                 chat_template=self.custom_chat_template,
                 tokenize=False,
                 add_generation_prompt=self.config.rollout.multi_turn_config.add_generation_prompt,
@@ -87,12 +89,15 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             )
         else:
             # ignore completion for multi-turn rollout, it already in the conversation
+            tool_schemas = (
+                self.tool_agent.tool_schemas() if self.tool_agent is not None else None
+            )
             input_ids, loss_mask = get_token_ids_and_loss_mask_from_conversation(
                 self.tokenizer,
                 sample,
                 chat_template=self.custom_chat_template,
                 enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
-                tools=self.tool_agent.tool_schemas(),
+                tools=tool_schemas,
             )
 
             assert any(

@@ -113,6 +113,9 @@ class DataPacker(ABC):
         assert tokenizer is not None, "tokenizer should be set"
         self.config = config
         self.tokenizer = tokenizer
+        if not self.config.rollout.multi_turn_config.enable:
+            self.tool_agent = None
+
         self.custom_chat_template = None
         if self.config.rollout.multi_turn_config.custom_chat_template_path:
             try:
