@@ -982,12 +982,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
 
             if command.trainable_only:
-                if not hasattr(self, "synced_trainable_params"):
-                    self.synced_trainable_params = transferred_groups_cnt
+                if not hasattr(self, "p2r_synced_trainable_params"):
+                    self.p2r_synced_trainable_params = transferred_groups_cnt
                 else:
                     assert (
-                        self.synced_trainable_params == transferred_groups_cnt
-                    ), f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.synced_trainable_params}."
+                        self.p2r_synced_trainable_params == transferred_groups_cnt
+                    ), f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params}."
 
             self.state.set_weight_synced()
 
@@ -1069,12 +1069,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 f"[Rollout] Finished broadcasting of parameters to all replicas. While {skipped_params_cnt} unsplitted non-trainable params skipped and {transferred_params_cnt} unsplitted params transferred."
             )
             if broadcast_command.trainable_only:
-                if not hasattr(self, "synced_trainable_params"):
-                    self.synced_trainable_params = transferred_params_cnt
+                if not hasattr(self, "r2r_synced_trainable_params"):
+                    self.r2r_synced_trainable_params = transferred_params_cnt
                 else:
                     assert (
-                        self.synced_trainable_params == transferred_params_cnt
-                    ), f"Trainable synced params count in R2R {transferred_params_cnt} must match the synced_trainable_params attribute {self.synced_trainable_params}."
+                        self.r2r_synced_trainable_params == transferred_params_cnt
+                    ), f"Trainable synced params count in R2R {transferred_params_cnt} must match the synced_trainable_params attribute {self.r2r_synced_trainable_params}."
 
         current_step = broadcast_command.weight_step
         if current_step is not None:
