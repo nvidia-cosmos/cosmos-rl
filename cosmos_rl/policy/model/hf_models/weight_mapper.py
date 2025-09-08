@@ -326,12 +326,12 @@ class HFModelWeightMapper(WeightMapper):
         return mapping_dict
 
     def get_unsplited_weight_name(self, weight_key: str) -> str:
-        for key in ["q_proj.", "k_proj.", "v_proj."]:
+        for key in ["q_proj", "k_proj", "v_proj"]:
             if key in weight_key:
                 if "gpt_oss" in self.config.model_type:
-                    return weight_key.replace(key, "qkv.")
+                    return weight_key.replace(key, "qkv")
                 else:
-                    return weight_key.replace(key, "qkv_proj.")
+                    return weight_key.replace(key, "qkv_proj")
         for key in ["gate_proj.weight", "up_proj.weight"]:
             if key in weight_key:
                 return weight_key.replace(key, "gate_up_proj.weight")
