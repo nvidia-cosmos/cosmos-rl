@@ -31,7 +31,7 @@ from typing import Dict, List, Optional, Callable, Tuple, Union
 from cosmos_rl.dispatcher.controller import Controller
 import cosmos_rl.utils.constant as constant
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
-from cosmos_rl.dispatcher.replica import Atom, RolloutGroup, Rollout, Replica
+from cosmos_rl.dispatcher.replica import Atom, RolloutGroup, Replica
 from cosmos_rl.dispatcher.protocol import (
     RegisterRequest,
     ErrorResponse,
@@ -77,6 +77,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
 from cosmos_rl.dispatcher.data.packer.base import DataPacker, worker_entry_parser
+from cosmos_rl.dispatcher.data.schema import Rollout
 from fastapi.responses import Response
 from fastapi import Request
 from concurrent.futures import ThreadPoolExecutor
@@ -408,14 +409,11 @@ async def validation_report(request: ValidationReportRequest):
             payload=payload,
             # Only report once per replica, so is_end is always True
             is_end=True,
-            completions=completions,
             reference_answer=controller.query_reference_answer(
                 prompt_idx, dataset_type="val"
             ),
         )
-        for prompt_idx, payload, completions in zip(
-            request.prompt_idxs, request.payloads, request.completions
-        )
+        for prompt_idx, payload in zip(request.prompt_idxs, request.payloads)
     ]
 
     rollouts_list: List[List[Rollout]] = [
@@ -488,13 +486,10 @@ async def put_rollout_group(rollout: RolloutRequest):
             RolloutGroup(
                 prompt_idx=prompt_idx,
                 payload=payload,
-                completions=completions,
                 is_end=rollout.is_end,
                 reference_answer=controller.query_reference_answer(prompt_idx),
             )
-            for prompt_idx, payload, completions in zip(
-                rollout.prompt_idxs, rollout.payloads, rollout.completions
-            )
+            for prompt_idx, payload in zip(rollout.prompt_idxs, rollout.payloads)
         ]
 
         rollouts_list: List[List[Rollout]] = [
@@ -559,7 +554,7 @@ async def put_rollout_group(rollout: RolloutRequest):
 
         if len(valid_rollouts) > 0:
             logger.debug(
-                f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.completions)} samples:"
+                f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
                 f"example: rollouts[0]\n{valid_rollouts[0]}"
             )
 

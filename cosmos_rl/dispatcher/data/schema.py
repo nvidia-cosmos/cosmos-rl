@@ -16,11 +16,6 @@
 from typing import List, Any, Dict, Optional, Tuple
 from pydantic import BaseModel, Field, model_validator
 
-ConversationType = List["ChatMessage"]
-
-# When we use iter(dataset), we can get the index of the payload in this way
-IdxAndRLPayload = Tuple[int, "RLPayload"]
-
 
 class ChatMessage(BaseModel):
     """
@@ -48,17 +43,20 @@ class ChatMessage(BaseModel):
     content: str | List[Dict[str, Any]] = ""
 
 
+ConversationType = List[ChatMessage]
+
+
 class RLPayload(BaseModel):
     """
     The payload schema of RL sample.
     """
 
     prompt: Optional[str] = Field(
-        default=None, description="The prompt for the rollout."
+        default=None, description="The input prompt for the rollout."
     )
 
     conversation: Optional[ConversationType] = Field(
-        default=None, description="The conversation for the rollout."
+        default=None, description="The input conversation for the rollout."
     )
 
     reference_answer: Optional[str] = Field(
@@ -69,6 +67,17 @@ class RLPayload(BaseModel):
         default=0, description="The weight version for the rollout."
     )
 
+    # For rollout generation result, we add following fields:
+    completions: Optional[List[str]] = Field(
+        default=None,
+        description="The generated completions for the prompt, In multi-turn conversation, it is a list of last message for each turn.",
+    )
+
+    completed_conversations: Optional[List[ConversationType]] = Field(
+        default=None,
+        description="The original input conversation for the rollout, In multi-turn conversation, it is a list of conversation history for each turn.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.prompt or self.conversation, "Must set prompt or conversation"
@@ -76,7 +85,7 @@ class RLPayload(BaseModel):
 
     @staticmethod
     def collate_fn(
-        batch: List[IdxAndRLPayload],
+        batch: List["IdxAndRLPayload"],
     ) -> tuple[List[int], List["RLPayload"]]:
         idx_list = []
         payload_list = []
@@ -86,3 +95,41 @@ class RLPayload(BaseModel):
             payload_list.append(payload)
 
         return idx_list, payload_list
+
+
+# When we use iter(dataset), we can get the index of the payload in this way
+IdxAndRLPayload = Tuple[int, RLPayload]
+
+
+class Rollout(BaseModel):
+    prompt: Optional[str] = Field(
+        default=None, description="The input prompt for the rollout."
+    )
+
+    conversation: Optional[ConversationType] = Field(
+        default=None, description="The input conversation for the rollout."
+    )
+
+    completion: str = Field(
+        default="", description="The generated completion for the rollout."
+    )
+
+    completed_conversation: Optional[ConversationType] = Field(
+        default=None, description="The generated conversation for the rollout."
+    )
+
+    is_end: bool = Field(
+        default=False, description="Whether the rollout is the last one."
+    )
+
+    reward: float = Field(default=0.0, description="The reward for the rollout.")
+
+    advantage: float = Field(default=0.0, description="The advantage for the rollout.")
+
+    prompt_idx: int = Field(
+        default=0, description="The index of the prompt for the rollout."
+    )
+
+    n_ignore_prefix_tokens: int = 0
+
+    filter_reward : float = Field(default=0.0, description="The filter reward for the rollout.")

@@ -15,15 +15,18 @@
 
 from typing import List, Optional
 from pydantic import BaseModel
-from cosmos_rl.dispatcher.data.schema import ChatMessage
+from cosmos_rl.dispatcher.data.schema import ConversationType
 
 
 class RolloutResult(BaseModel):
-    # the prompt for the result
+    # The input prompt for the completions
     prompt: Optional[str] = None
 
-    # the generated completions for the prompt
-    completions: Optional[List[str]] = None
+    # The original input prompt in conversation format
+    conversation: Optional[ConversationType] = None
 
-    # the conversation history, usualy for multi-turn conversation
-    conversation: Optional[List[ChatMessage]] = None
+    # The generated completions for the prompt, In multi-turn conversation, it is a list of last message for each turn.
+    completions: List[str]
+
+    # The generated conversation history for the prompt.
+    completed_conversations: Optional[List[ConversationType]] = None

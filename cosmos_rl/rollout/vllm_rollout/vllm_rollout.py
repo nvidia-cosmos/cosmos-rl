@@ -18,6 +18,7 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 
 import vllm
 import torch
+import copy
 from typing import List, Optional, Dict
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
@@ -264,12 +265,13 @@ class vLLMRollout(RolloutBase):
             )
         stream = torch.cuda.current_stream() if stream is None else stream
 
-        def generation_multi_turn_for_one_payload(payload: RLPayload):
+        def generation_multi_turn_for_one_payload(
+            current_conversation: ConversationType,
+        ):
             assistant_turn_count = 0
             assert (
                 payload.conversation is not None
             ), "Conversation should not be None for multi-turn rollout generation."
-            current_conversation = payload.conversation
             while (
                 assistant_turn_count
                 < self.rollout_config.multi_turn_config.max_assistant_turns
@@ -279,7 +281,6 @@ class vLLMRollout(RolloutBase):
                 prompts = data_packer.rollout_collate_fn(prompts)
 
                 with torch.cuda.stream(stream):
-                    # TODO(zjx): make it clear that how to stop genetate after a tool call invoked
                     results = self.rollout_engine.generate(
                         prompts=prompts,
                         sampling_params=sampling_params,
@@ -312,15 +313,25 @@ class vLLMRollout(RolloutBase):
             completion = current_conversation[-1].content
             return current_conversation, completion
 
+        n_generation = sampling_params.n
+        sampling_params = copy.deepcopy(sampling_params)
+        sampling_params.n = 1
         response: List[RolloutResult] = []
         for payload in payloads:
-            updated_conversation, completion = generation_multi_turn_for_one_payload(
-                payload
-            )
+            conversations = []
+            completions = []
+            for _ in range(n_generation):
+                new_conversation, completion = generation_multi_turn_for_one_payload(
+                    copy.deepcopy(payload.conversation)
+                )
+                conversations.append(new_conversation)
+                completions.append(completion)
+
             response.append(
                 RolloutResult(
-                    conversation=updated_conversation,
-                    completions=[completion],
+                    conversation=payload.conversation,
+                    completions=completions,
+                    completed_conversations=conversations,
                 )
             )
 
