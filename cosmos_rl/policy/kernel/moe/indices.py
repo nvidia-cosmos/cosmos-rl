@@ -181,6 +181,7 @@ def generate_permute_indices(
 
     # total tokens for each expert (sum over ranks)
     total_tokens_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
+    valid_expert_mask = total_tokens_per_expert > 0
 
     # pad out empty experts to alignment requirement
     total_tokens_per_expert = torch.clamp_min(total_tokens_per_expert, alignment)
@@ -217,7 +218,7 @@ def generate_permute_indices(
             total_size,
         )
 
-    return permuted_indices, m_sizes, m_offsets.to(torch.int32)
+    return permuted_indices, m_sizes, m_offsets.to(torch.int32), valid_expert_mask
 
 
 # Below is for testing only

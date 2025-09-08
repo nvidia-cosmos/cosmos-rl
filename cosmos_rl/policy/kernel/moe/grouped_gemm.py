@@ -27,14 +27,14 @@ except ImportError:
 
 class FakeGroupMMBackwardCheck(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, w, m_offsets, out_dtype):
-        ctx.save_for_backward(x, w, m_offsets)
+    def forward(ctx, x, w, m_offsets, valid_expert_mask, out_dtype):
+        ctx.save_for_backward(x, w, m_offsets, valid_expert_mask)
         ctx.out_dtype = out_dtype
         return torch._grouped_mm(x, w, m_offsets, out_dtype=out_dtype)
 
     @staticmethod
     def backward(ctx, grad_output):
-        x, w, m_offsets = ctx.saved_tensors
+        x, w, m_offsets, valid_expert_mask = ctx.saved_tensors
         out_dtype = ctx.out_dtype
 
         grad_x = torch._grouped_mm(
@@ -43,28 +43,34 @@ class FakeGroupMMBackwardCheck(torch.autograd.Function):
         grad_w = torch._grouped_mm(
             x.transpose(-2, -1), grad_output, m_offsets, out_dtype=out_dtype
         )
+        if not valid_expert_mask.all():
+            zero_expert_indices = torch.where(~valid_expert_mask)[0]
+            grad_w[zero_expert_indices] = 0.0
+
+        # Handle inf and nan values in gradients
         # Fault due to grouped_gemm, where aligned memory is not used which may contains nan
         # Check https://github.com/pytorch/pytorch/issues/154557
-        grad_x = torch.nan_to_num(grad_x, nan=0.0)
-        grad_w = torch.nan_to_num(grad_w, nan=0.0)
-        return grad_x, grad_w, None, None
+        grad_x = torch.nan_to_num(grad_x, nan=0.0, posinf=1e2, neginf=-1e2)
+        grad_w = torch.nan_to_num(grad_w, nan=0.0, posinf=1e2, neginf=-1e2)
+
+        return grad_x, grad_w, None, None, None
 
 
 class FallbackGroupedGemmImpl(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, a, b, batch_sizes, trans_b):
+    def forward(ctx, a, b, batch_sizes, valid_expert_mask, trans_b):
         assert backend is not None, "grouped_gemm is not available."
         assert (
             torch.count_nonzero(batch_sizes) != 0
         ), "Input batch_sizes should not be all zeros!"
-        ctx.save_for_backward(a, b, batch_sizes)
+        ctx.save_for_backward(a, b, batch_sizes, valid_expert_mask)
         ctx.trans_b = trans_b
         return backend.gmm(a, b, batch_sizes, trans_a=False, trans_b=trans_b)
 
     @staticmethod
     def backward(ctx, grad):
         grad = grad.contiguous()
-        a, b, batch_sizes = ctx.saved_tensors
+        a, b, batch_sizes, valid_expert_mask = ctx.saved_tensors
         trans_b = ctx.trans_b
 
         agrad = None
@@ -77,6 +83,9 @@ class FallbackGroupedGemmImpl(torch.autograd.Function):
         if ctx.needs_input_grad[1]:
             lhs, rhs = (grad, a) if trans_b else (a, grad)
             bgrad = backend.gmm(lhs, rhs, batch_sizes, trans_a=True, trans_b=False)
+            if not valid_expert_mask.all():
+                zero_expert_indices = torch.where(~valid_expert_mask)[0]
+                bgrad[zero_expert_indices] = 0.0
         # Fault due to grouped_gemm, where aligned memory is not used which may contains nan
         agrad = torch.nan_to_num(agrad, nan=0.0)
         bgrad = torch.nan_to_num(bgrad, nan=0.0)
@@ -84,12 +93,20 @@ class FallbackGroupedGemmImpl(torch.autograd.Function):
 
 
 def run_group_gemm_hopper(
-    contig_tokens, m_sizes, m_offsets, gate_weight, up_weight, down_weight, act_fn
+    contig_tokens,
+    m_sizes,
+    m_offsets,
+    valid_expert_mask,
+    gate_weight,
+    up_weight,
+    down_weight,
+    act_fn,
 ):
     gate_proj = FakeGroupMMBackwardCheck.apply(
         contig_tokens,
         gate_weight.transpose(-2, -1).contiguous(),
         m_offsets,
+        valid_expert_mask,
         torch.bfloat16,
     )
 
@@ -97,6 +114,7 @@ def run_group_gemm_hopper(
         contig_tokens,
         up_weight.transpose(-2, -1).contiguous(),
         m_offsets,
+        valid_expert_mask,
         torch.bfloat16,
     )
 
@@ -108,13 +126,21 @@ def run_group_gemm_hopper(
         hidden_outputs,
         down_weight.transpose(-2, -1).contiguous(),
         m_offsets,
+        valid_expert_mask,
         torch.bfloat16,
     )
     return hidden_outputs
 
 
 def run_group_gemm_3rd_party(
-    contig_tokens, m_sizes, m_offsets, gate_weight, up_weight, down_weight, act_fn
+    contig_tokens,
+    m_sizes,
+    m_offsets,
+    valid_expert_mask,
+    gate_weight,
+    up_weight,
+    down_weight,
+    act_fn,
 ):
     sizes_cpu = m_sizes.cpu().to(torch.int64)
 
@@ -122,6 +148,7 @@ def run_group_gemm_3rd_party(
         contig_tokens,
         gate_weight.transpose(-2, -1).contiguous(),
         sizes_cpu,
+        valid_expert_mask,
         False,
     )
 
@@ -129,6 +156,7 @@ def run_group_gemm_3rd_party(
         contig_tokens,
         up_weight.transpose(-2, -1).contiguous(),
         sizes_cpu,
+        valid_expert_mask,
         False,
     )
 
@@ -140,6 +168,7 @@ def run_group_gemm_3rd_party(
         hidden_outputs,
         down_weight.transpose(-2, -1).contiguous(),
         sizes_cpu,
+        valid_expert_mask,
         False,
     )
     return hidden_outputs

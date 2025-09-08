@@ -457,11 +457,13 @@ class FeedForward(nn.Module):
         # This part doesn't need gradient.
         with torch.no_grad():
             ALIGN_SIZE_M = 128
-            permuted_indices, m_sizes, m_offsets = generate_permute_indices(
-                tokens_per_expert_group,
-                self.local_experts,
-                self.ep_size,
-                ALIGN_SIZE_M,
+            permuted_indices, m_sizes, m_offsets, valid_expert_mask = (
+                generate_permute_indices(
+                    tokens_per_expert_group,
+                    self.local_experts,
+                    self.ep_size,
+                    ALIGN_SIZE_M,
+                )
             )
         # Permute the received tokens so that tokens for the same expert are contiguous.
         contig_tokens = token_gather_buf[permuted_indices]
@@ -471,6 +473,7 @@ class FeedForward(nn.Module):
             contig_tokens,
             m_sizes,
             m_offsets,
+            valid_expert_mask,
             self.gate_proj.weight.to_local(),
             self.up_proj.weight.to_local(),
             self.down_proj.weight.to_local(),
