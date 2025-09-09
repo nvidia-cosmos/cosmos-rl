@@ -17,7 +17,7 @@ import time
 import math
 from queue import Queue
 from strenum import StrEnum
-from typing import Dict, List, Iterator, Any, Optional
+from typing import Dict, List, Iterator, Any, Optional, Callable
 from torch.utils.data import DataLoader
 from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
@@ -125,6 +125,7 @@ class PolicyStatusManager:
         current_step: int = 0,
         val_dataloader: Optional[DataLoader] = None,
         max_num_steps: Optional[int] = None,
+        custom_logger_fns: Optional[List[Callable]] = None,
     ):
         self.redis_handler = redis_handler
         self.config = config
@@ -134,6 +135,9 @@ class PolicyStatusManager:
         self.current_step = current_step
         self.max_num_steps = max_num_steps
         self.recompute_total_steps()
+        self.custom_logger_fns = (
+            custom_logger_fns if custom_logger_fns is not None else []
+        )
 
     def n_atoms_per_replica(self) -> int:
         """
@@ -659,9 +663,9 @@ class PolicyStatusManager:
             # If the current step is the last step, we need to sync weight always to act as ending signal
             need_sync_weight = need_sync_weight or step == total_steps
             # If validation is enabled, we need to sync weight every validation step
-            if self.config.train.enable_validation:
+            if self.config.validation.enable:
                 need_sync_weight = need_sync_weight or (
-                    step % self.config.train.validation_step == 0
+                    step % self.config.validation.freq == 0
                 )
 
             if profile_finished:
@@ -729,6 +733,13 @@ class PolicyStatusManager:
                         logger.info(
                             f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
+                    for logger_fn in self.custom_logger_fns:
+                        try:
+                            logger_fn(self.train_report_data[train_step], train_step)
+                        except Exception as e:
+                            logger.warning(
+                                f"[Controller] Warning reporting customized training results: {e}"
+                            )
                 except Exception as e:
                     logger.warning(
                         f"[Controller] Warning reporting training results: {e}"
@@ -825,8 +836,8 @@ class PolicyStatusManager:
             # From controller's perspective, the training step is already increased
             self.current_step += 1
 
-            if self.config.train.enable_validation and (
-                self.current_step % self.config.train.validation_step == 0
+            if self.config.validation.enable and (
+                self.current_step % self.config.validation.freq == 0
                 or self.current_step == self.total_steps
             ):
                 self.validation_activate_dataloader(self.current_step)

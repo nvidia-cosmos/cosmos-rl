@@ -34,7 +34,11 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
-from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
+from cosmos_rl.utils.ulysses import (
+    ulysses_attn_func,
+    swizzle_cp_forward,
+    ulysses_attn_func_varlen,
+)
 import os
 from typing import Callable, Optional
 
@@ -193,22 +197,22 @@ def parallelize(
             config.train.train_batch_per_replica
             // config.policy.parallelism.pp_micro_batch_size
         )
-        if config.train.enable_validation:
+        if config.validation.enable:
             assert (
-                config.train.validation_batch_per_replica
+                config.validation.batch_size
                 % config.policy.parallelism.pp_micro_batch_size
                 == 0
             ), "validation_batch must be divisible by pp_micro_batch_size"
             assert (
                 (
-                    config.train.validation_batch_per_replica
+                    config.validation.batch_size
                     // config.policy.parallelism.pp_micro_batch_size
                 )
                 % pp_size
                 == 0
             ), "validation_batch / pp_micro_batch_size must be divisible by pp_size"
             n_val_microbatches = (
-                config.train.validation_batch_per_replica
+                config.validation.batch_size
                 // config.policy.parallelism.pp_micro_batch_size
             )
 
@@ -251,7 +255,7 @@ def parallelize(
             n_microbatches=n_microbatches,
             loss_fn=pp_loss_fn,
         )
-        if config.train.enable_validation:
+        if config.validation.enable:
             val_schedule = ScheduleGPipe(
                 stage=stage,
                 n_microbatches=n_val_microbatches,
@@ -276,14 +280,13 @@ def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
         transformer_block.self_attn.attn_func = ulysses_attn_func(
             original_attn_func, cp_mesh
         )
-    # For visual model
-    if model.visual is not None:
-        for _, transformer_block in model.visual.blocks.items():
-            original_attn_func = transformer_block.attn.attn_func
-            transformer_block.attn.attn_func = ulysses_attn_func(
-                original_attn_func, cp_mesh
-            )
+    for _, transformer_block in model.model.layers.items():
+        original_attn_func_varlen = transformer_block.self_attn.attn_func_varlen
+        transformer_block.self_attn.attn_func_varlen = ulysses_attn_func_varlen(
+            original_attn_func_varlen, cp_mesh
+        )
 
+    # For visual model since we merge cp into fsdp, no need handling.
     swizzle_cp_forward(model, parallel_dims)
 
 

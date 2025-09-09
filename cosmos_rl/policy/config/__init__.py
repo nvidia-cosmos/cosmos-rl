@@ -112,7 +112,7 @@ class SFTDataConfig(BaseModel):
     )
 
     dataloader_shuffle: bool = Field(
-        default=False,
+        default=True,
         description="Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.",
     )
     enable_dataset_cache: bool = Field(
@@ -471,6 +471,11 @@ class TrainingConfig(BaseModel):
         description="The data type for forward/backward. Outside forward/backward, params are in `master_dtype`",
         choices=["bfloat16", "float16", "float32"],
     )
+    transfer_dtype: str = Field(
+        default=None,
+        description="The data type for transfer parameters between Policy and Rollout.",
+        choices=["bfloat16", "float16", "float32"],
+    )
 
     fsdp_reduce_dtype: str = Field(
         default="float32",
@@ -491,21 +496,6 @@ class TrainingConfig(BaseModel):
     train_batch_per_replica: int = Field(
         default=8,
         description="The batch size for training per iteration in one replica, this is the local batch size for each gradient accumulation step",
-    )
-
-    # --------- Validation ---------
-
-    enable_validation: bool = Field(
-        default=False,
-        description="Enable validation during training.",
-    )
-    validation_step: int = Field(
-        default=20,
-        description="Validation frequency during training, in terms of training steps",
-    )
-    validation_batch_per_replica: int = Field(
-        default=24,
-        description="The batch size for validation per iteration in one replica.",
     )
 
     # --------- Engineering ---------
@@ -546,6 +536,11 @@ class TrainingConfig(BaseModel):
     max_num_steps: Optional[int] = Field(
         default=None,
         description="Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.",
+    )
+
+    sequence_packing: bool = Field(
+        default=False,
+        description="Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.",
     )
 
     @model_validator(mode="after")
@@ -722,6 +717,18 @@ class SamplingConfig(BaseModel):
 
 
 class ValidationConfig(BaseModel):
+    enable: bool = Field(
+        default=False,
+        description="Enable validation during training.",
+    )
+    freq: int = Field(
+        default=20,
+        description="Validation frequency during training, in terms of training steps",
+    )
+    batch_size: Optional[int] = Field(
+        default=None,
+        description="Batch size for validation, will use the same batch size as training if not set.",
+    )
     dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
         description="Dataset configuration for validation. It includes dataset name, subset, revision and test split.",
@@ -789,10 +796,6 @@ class RolloutConfig(BaseModel):
     )
 
     batch_size: int = Field(default=1, description="Batch size for rollout.")
-    val_batch_size: Optional[int] = Field(
-        default=None,
-        description="Batch size for rollout generation during validation.",
-    )
 
     quantization: str = Field(
         default="none",
@@ -952,6 +955,10 @@ class Config(BaseModel):
             # Handle for evaludation configuration.
             if isinstance(self.validation.dataset.split, str):
                 self.validation.dataset.split = [self.validation.dataset.split]
+
+        if self.train.transfer_dtype is None:
+            # Default use param_dtype as transfer_dtype
+            self.train.transfer_dtype = self.train.param_dtype
         return self
 
 

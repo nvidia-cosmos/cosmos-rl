@@ -84,7 +84,7 @@ class MathValDataset(MathDataset):
     """
 
     def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
-        if not config.train.enable_validation:
+        if not config.validation.enable:
             logger.warning(
                 "Validation is not enabled in the config. Skipping setup for MathValDataset."
             )

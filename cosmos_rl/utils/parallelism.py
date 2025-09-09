@@ -230,7 +230,9 @@ class ParallelDims:
         if self.dp_replicate_enabled:
             dp_mesh_dim_names.append("dp_replicate")
             dp_cp_mesh_dim_names.append("dp_replicate")
-            dp_cp_tp_mesh_dim_names.append("dp_replicate")
+            # Do not add dp_replicate to dp_cp_tp_mesh_dim_names,
+            # since each replica is independent of each other
+            # dp_cp_tp_mesh_dim_names.append("dp_replicate")
         if self.dp_shard_enabled:
             dp_mesh_dim_names.append("dp_shard")
             dp_shard_cp_mesh_dim_names.append("dp_shard")
