@@ -1339,6 +1339,14 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []
                 if len(completions):
+                    if self.global_rank == 0:
+                        result_text = (
+                            completions[0][0] if len(completions[0]) > 0 else "None"
+                        )
+                        logger.info(
+                            f"[Rollout] prompt: {prompts[0][1]}, completion:\n{result_text}"
+                        )
+                if len(completions):
                     batch_size = len(prompts)
                     assert (
                         len(completions) == batch_size
