@@ -166,6 +166,7 @@ def parallelize(
         )
 
     pp_rank, pp_size = parallel_dims.pp_coord
+    assert pp_size == 1, "Pipeline parallelism is not supported for InternVL currently."
     if pp_size > 1:
         proc_group = parallel_dims.mesh["pp"].get_group()
         # IMPORTANT:
