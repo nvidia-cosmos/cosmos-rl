@@ -166,7 +166,6 @@ def parallelize(
         )
 
     pp_rank, pp_size = parallel_dims.pp_coord
-    assert pp_size == 1, "Pipeline parallelism is not supported for InternVL currently."
     if pp_size > 1:
         proc_group = parallel_dims.mesh["pp"].get_group()
         # IMPORTANT:
@@ -596,6 +595,9 @@ def pipeline_parallelize(
     parallel_dims: ParallelDims,
     config: CosmosConfig,
 ):
+    assert (
+        not parallel_dims.pp_enabled
+    ), "Pipeline parallelism is not supported for InternVL currently."
     if parallel_dims.pp_enabled:
         pp_rank, pp_size = parallel_dims.pp_coord
         model.apply_pipeline_split(pp_rank, pp_size)
