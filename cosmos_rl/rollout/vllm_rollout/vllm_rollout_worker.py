@@ -212,6 +212,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # Holding temp tensors created in `recv_tensor_creator`. Do not remove this, or
         self.total_temp_tensor_pool = []
+        self.misc_params = set()
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         if self.quantization_type == "fp8":
@@ -477,7 +478,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # Trivial params:
                 # including tensors that need to be synced but not trainable in R2R. These
                 # tensors will not be synced from P2R, so we have to add them to trainable params.
-                self.misc_params = set()
                 for name, _ in self.rollout.model_param_map(self.weight_mapper).items():
                     if name.endswith("_scale"):
                         self.misc_params.add(name)

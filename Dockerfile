@@ -72,6 +72,7 @@ RUN apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
     python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv
 ## Create a virtual environment
+
 RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
@@ -84,12 +85,18 @@ RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url h
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
 # Install flash_attn separately
-RUN pip install flash_attn==2.8.2 --no-build-isolation
+RUN pip cache purge && MAX_JOBS=128 pip install flash_attn==2.8.2 --no-build-isolation
 
+
+# TODO: remove nightly version of vllm and triton in later vllm release.
+# Here we install nightly version of triton in pytorch nightly index.
+# and install triton_kernels from vllm gpt-oss index, because vllm gpt-oss needs 
+# some triton kernels.
 RUN pip install \
     torchao==0.13.0 \
+    -U triton --pre --extra-index-url https://download.pytorch.org/whl/nightly \
+    -U triton_kernels --extra-index-url https://wheels.vllm.ai/gpt-oss/ --no-deps \
     -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly \
-    -U triton triton_kernels --pre --extra-index-url https://wheels.vllm.ai/gpt-oss/ \
     flashinfer-python \
     transformer_engine[pytorch] \
     -r /workspace/cosmos_rl/requirements.txt
