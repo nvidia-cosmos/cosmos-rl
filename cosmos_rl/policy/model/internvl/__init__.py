@@ -173,7 +173,7 @@ class Qwen3MoE(nn.Module):
 
         MAX_BATCH_MUL_SEQ_LEN = (
             self.model_args.max_seq_len
-            * cosmos_config.train.train_batch_per_replica
+            * cosmos_config.train.mini_batch
             * self.model_args.hf_config.num_experts_per_tok
         )
 
