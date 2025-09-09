@@ -99,6 +99,7 @@ class Controller:
         redis_logfile_path: str,
         dataset: Optional[Dataset] = None,
         reward_fns: Optional[List[Callable]] = None,
+        filter_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[DataPacker] = None,
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
@@ -158,6 +159,7 @@ class Controller:
                     tokenier=self.tokenizer,
                     reward_function=config.train.train_policy.reward_function,
                     explicit_reward_fn=reward_fns,
+                    explicit_filter_reward_fn=filter_reward_fns,
                 ),
                 unbiased=config.train.train_policy.unbiased_advantage,
             )
@@ -419,10 +421,12 @@ class Controller:
                 * len(self.policy_status_manager)
                 * self.config.train.train_batch_per_replica
             ):
-                logger.warning(
-                    f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}."
-                )
-                n = 1
+                n = 0 if self.config.train.train_policy.no_outdated_rollout else 1
+                if not self.config.train.train_policy.no_outdated_rollout:
+                    # Log only when n is reduced but not when set to 0 since 0 is logged too frequently
+                    logger.warning(
+                        f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
+                    )
 
         for _ in range(n):
             payload = None

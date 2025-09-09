@@ -466,9 +466,9 @@ class GRPOTrainer(Trainer):
         Extract the object from cuda tensor for sync parameters using nccl.
         """
         if isinstance(obj, torch.distributed.tensor.DTensor):
-            assert (
-                obj.device == self.device
-            ), "DTensor is not on the same device as the model."
+            if obj.device != self.device:
+                local_shard = obj.to_local()
+                local_shard.copy_(tensor)
         elif isinstance(obj, torch.Tensor):
             if obj.device != self.device:
                 obj.copy_(tensor)

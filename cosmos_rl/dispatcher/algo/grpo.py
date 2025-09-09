@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo, _register_rule_based_algo
-from typing import Callable, List
+from typing import Callable, List, Tuple
 import numpy as np
 from cosmos_rl.utils.constant import Algo
 
@@ -28,7 +28,9 @@ class GRPO(RuleBasedAlgo):
         self.unbiased = unbiased
         self.eps = eps
 
-    def compute_reward(self, to_be_evaluated: str, reference: str) -> float:
+    def compute_reward(
+        self, to_be_evaluated: str, reference: str
+    ) -> Tuple[float, float]:
         return self.reward_fn.compute_reward(to_be_evaluated, reference)
 
     def compute_advantage(self, rewards: List[float]) -> List[float]:
