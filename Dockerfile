@@ -85,10 +85,12 @@ RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url h
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
 # Install flash_attn separately
-RUN pip cache purge && MAX_JOBS=128 pip install flash_attn==2.8.2 --no-build-isolation
+RUN pip cache purge && pip install flash_attn==2.8.2 --no-build-isolation
 
 
-# TODO: remove nightly version of vllm and triton in later vllm release.
+# Install triton and triton_kernels
+
+# TODO: (lms) remove nightly version of vllm and triton in later vllm release.
 # Here we install nightly version of triton in pytorch nightly index.
 # and install triton_kernels from vllm gpt-oss index, because vllm gpt-oss needs 
 # some triton kernels.
