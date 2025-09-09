@@ -25,6 +25,7 @@ import copy
 from transformers import AutoTokenizer
 from typing import List, Optional
 from cosmos_rl.dispatcher.data.schema import ConversationType, ChatMessage
+from cosmos_rl.utils.logging import logger
 
 
 def get_token_ids_and_loss_mask_from_conversation(
@@ -129,9 +130,14 @@ def get_token_ids_and_loss_mask_from_conversation(
     concat_token_ids.extend(token_ids_parts[-1])
     concat_loss_mask.extend([0] * len(token_ids_parts[-1]))
 
-    assert (
-        full_token_ids == concat_token_ids
-    ), "Full token ids and concat token ids should be the same"
+    if full_token_ids != concat_token_ids:
+        logger.warning(
+            "Full token ids and concat token ids are not the same, use concat token ids instead"
+        )
+        logger.debug(
+            f"Full token ids: {full_token_ids}\nConcat token ids: {concat_token_ids}"
+        )
+        full_token_ids = concat_token_ids
     return full_token_ids, concat_loss_mask
 
 
