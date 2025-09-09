@@ -682,7 +682,7 @@ class InternVLChatModel(BaseModel):
         return llm + visual
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
-        visual_n_heads = self.config.encoder_args.n_heads
+        visual_n_heads = self.config.encoder_args.num_attention_heads
         llm_n_heads = self.config.lm_args.n_heads
         cp_compatible = (
             visual_n_heads % (cp_size * tp_size) == 0
