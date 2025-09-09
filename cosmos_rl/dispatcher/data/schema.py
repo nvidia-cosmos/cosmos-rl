@@ -132,4 +132,6 @@ class Rollout(BaseModel):
 
     n_ignore_prefix_tokens: int = 0
 
-    filter_reward : float = Field(default=0.0, description="The filter reward for the rollout.")
+    filter_reward: float = Field(
+        default=0.0, description="The filter reward for the rollout."
+    )
