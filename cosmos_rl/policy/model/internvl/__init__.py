@@ -521,7 +521,9 @@ class InternVLChatModel(BaseModel):
                         dest_name = dest_name.replace(f"experts.{expert_id}.", "")
                         # Convert expert_id to local_expert_id
                         n_local_experts = (
-                            n_experts // parallel_dims.tp // parallel_dims.dp_shard
+                            n_experts
+                            // parallel_dims.tp
+                            // (parallel_dims.dp_shard * parallel_dims.cp)
                         )
                         expert_id = expert_id % n_local_experts
 

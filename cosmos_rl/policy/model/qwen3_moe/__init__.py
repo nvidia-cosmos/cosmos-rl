@@ -197,6 +197,8 @@ class Attention(nn.Module):
             bias="o_proj" in model_args.biases,
         )
         self.rope_func = rope.RotaryPositionEmbedding()
+        self.attn_func = modeling_utils.flash_attn_func
+        self.attn_func_varlen = modeling_utils.flash_attn_varlen_func
 
     def forward(
         self,
@@ -250,7 +252,7 @@ class Attention(nn.Module):
             xq = xq.view(seqlen, -1, self.head_dim)
             xk = xk.view(seqlen, -1, self.head_dim)
             xv = xv.view(seqlen, -1, self.head_dim)
-            output = modeling_utils.flash_attn_varlen_func(
+            output = self.attn_func_varlen(
                 xq,
                 xk,
                 xv,
@@ -261,7 +263,7 @@ class Attention(nn.Module):
                 causal=True,
             )
         else:
-            output = modeling_utils.flash_attn_func(xq, xk, xv, causal=True)
+            output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
