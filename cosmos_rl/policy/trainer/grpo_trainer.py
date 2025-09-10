@@ -506,6 +506,18 @@ class GRPOTrainer(Trainer):
         len_params = 0
         model_state_dict = [self.model.state_dict()]
 
+        def get_local_tensor(obj):
+            if isinstance(obj, torch.distributed.tensor.DTensor):
+                return obj.to_local().detach()
+            elif isinstance(obj, torch.Tensor):
+                return obj.detach()
+            else:
+                raise ValueError(f"Unsupported obj type: {type(obj)}")
+
+        for name, param in self.model.named_parameters():
+            if "lm_head" in name:
+                local_view = get_local_tensor(param)
+                logger.info(f"Local view of {name}: {local_view.flatten()[-20:]}")
         # If KL-divergence is enabled, we need to also sync the reference model state dict
         if self.config.train.train_policy.kl_beta != 0.0:
             if len(self.reference_state_dict) == 0:
@@ -517,14 +529,6 @@ class GRPOTrainer(Trainer):
                         value, device="cpu"
                     )
             model_state_dict.append(self.reference_state_dict)
-
-        def get_local_tensor(obj):
-            if isinstance(obj, torch.distributed.tensor.DTensor):
-                return obj.to_local().detach()
-            elif isinstance(obj, torch.Tensor):
-                return obj.detach()
-            else:
-                raise ValueError(f"Unsupported obj type: {type(obj)}")
 
         # 1. Sync all model states
         for state_to_sync in model_state_dict:
@@ -550,7 +554,7 @@ class GRPOTrainer(Trainer):
 
                 assert torch.allclose(
                     original_obj, local_view
-                ), f"The received tensor is not the same as the original tensor: {dest_name}"
+                ), f"The received tensor is not the same as the original tensor: {dest_name}, got\nreceived: {local_view.flatten()[-20:]}\noriginal: {original_obj.flatten()[-20:]}"
 
                 len_params += 1
 
