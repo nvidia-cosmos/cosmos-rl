@@ -24,6 +24,7 @@ from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.utils.modelscope import modelscope_load_dataset
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.decorators import monitor_status
 
 
 class GSM8kDataset(Dataset):
@@ -226,7 +227,8 @@ class GSM8kDataPacker(DataPacker):
         )
 
 
-if __name__ == "__main__":
+@monitor_status(name="Cosmos-RL GSM8k GRPO Dataset", mode="dataset")
+def main():
 
     def get_dataset(config: CosmosConfig) -> Dataset:
         return GSM8kDataset()
@@ -245,3 +247,7 @@ if __name__ == "__main__":
         val_data_packer=GSM8kDataPacker(),
         custom_logger_fns=[custom_logger_fn],
     )
+
+
+if __name__ == "__main__":
+    main()

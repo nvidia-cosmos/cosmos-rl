@@ -27,6 +27,7 @@ from cosmos_rl.policy.config import (
     Config,
     config_hash,
 )
+from cosmos_rl.utils.decorators import monitor_status
 
 
 # This dataset is used for SFT with raw text input, which is used for models like Mistral
@@ -88,7 +89,8 @@ class SFTRawTextDataset(Dataset):
         return raw_item
 
 
-if __name__ == "__main__":
+@monitor_status(name="Cosmos-RL Dummy SFT Dataset", mode="dataset")
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_known_args()[0]
@@ -111,3 +113,7 @@ if __name__ == "__main__":
     launch_dispatcher(
         dataset=SFTRawTextDataset(dataset=train_dataset),
     )
+
+
+if __name__ == "__main__":
+    main()

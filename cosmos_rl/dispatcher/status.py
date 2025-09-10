@@ -31,6 +31,11 @@ from cosmos_rl.utils.wandb_logger import (
     is_wandb_available,
     log_wandb,
 )
+from cosmos_rl.utils.status_logging import (
+    CosmosStatusLogger,
+    Status as StatusLevel,
+    Verbosity
+)
 from transformers import AutoTokenizer
 import numpy as np
 from tqdm import tqdm
@@ -111,6 +116,11 @@ class PolicyStatusManager:
         self.train_report_data = RollingDict(maxlen=20)
         self.replica_scaling_log = []
 
+        # Status logging integration
+        self._status_logger_enabled = False
+        self._status_log_file = None
+        self._status_logger = None
+
         # Validation
         self.val_iters: Dict[int, Iterator] = {}
         self.activated_val_iter: Optional[Iterator] = None
@@ -125,7 +135,8 @@ class PolicyStatusManager:
         current_step: int = 0,
         val_dataloader: Optional[DataLoader] = None,
         max_num_steps: Optional[int] = None,
-        custom_logger_fns: Optional[List[Callable]] = None,
+        status_log_file: Optional[str] = None,
+        enable_status_logging: bool = True,
     ):
         self.redis_handler = redis_handler
         self.config = config
@@ -137,6 +148,180 @@ class PolicyStatusManager:
         self.recompute_total_steps()
         self.custom_logger_fns = (
             custom_logger_fns if custom_logger_fns is not None else []
+        )
+
+        # Setup status logging if enabled
+        if enable_status_logging:
+            self.setup_status_logging(status_log_file)
+
+    def setup_status_logging(self, status_log_file: Optional[str] = None):
+        """Setup status logging for policy status manager."""
+        try:
+            logger.info(f"Setting up status logging to {status_log_file}")
+            logger.info(f"Config: {self.config}")
+            if status_log_file is None:
+                # Use default status log file location
+                import os
+                results_dir = getattr(self.config, 'results_dir', f'/results/{os.getenv("TAO_API_JOB_ID")}')
+                logger.info(f"Results dir: {results_dir}")
+                logger.info(f"TAO_API_JOB_ID: {os.getenv('TAO_API_JOB_ID')}")
+                os.makedirs(results_dir, exist_ok=True)
+                status_log_file = os.path.join(results_dir, 'status.json')
+
+            # Create and store the status logger directly
+            self._status_logger = CosmosStatusLogger(
+                filename=status_log_file,
+                is_master=True,
+                verbosity=Verbosity.INFO,
+                append=True,
+                enable_wandb='wandb' in getattr(self.config.logging, 'logger', [])
+            )
+            self._status_logger_enabled = True
+            self._status_log_file = status_log_file
+
+            # Log initialization
+            self.log_status(
+                message="Policy status manager initialized",
+                status_level=StatusLevel.STARTED,
+                step=self.current_step,
+                kpi={
+                    'total_steps': self.total_steps,
+                    'remain_samples': self.remain_samples_num,
+                    'n_replicas': len(self.policy_replicas)
+                }
+            )
+            logger.info(f"Status logging enabled, writing to: {status_log_file}")
+        except Exception as e:
+            logger.warning(f"Failed to setup status logging: {e}")
+            self._status_logger_enabled = False
+
+    def log_status(self,
+                   message: str,
+                   status_level: int = StatusLevel.RUNNING,
+                   verbosity_level: int = Verbosity.INFO,
+                   step: Optional[int] = None,
+                   epoch: Optional[int] = None,
+                   replica_name: Optional[str] = None,
+                   data: Optional[Dict[str, Any]] = None,
+                   kpi: Optional[Dict[str, Any]] = None):
+        """Log status information using the status logger.
+
+        Uses only kpi field for additional data (TAO Deploy/PyTorch compatible).
+        """
+        if not self._status_logger_enabled:
+            return
+
+        try:
+            # Use the direct status logger reference
+            if not hasattr(self, '_status_logger') or self._status_logger is None:
+                return
+
+            # Set KPI data only (TAO Deploy/PyTorch standard)
+            if kpi:
+                self._status_logger.kpi = kpi
+
+            self._status_logger.write(
+                data=data,
+                status_level=status_level,
+                verbosity_level=verbosity_level,
+                message=message,
+                step=step or self.current_step,
+                epoch=epoch,
+                replica_name=replica_name
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to log status: {e}")
+
+    # Training lifecycle logging methods (replacing separate training_logger.py)
+    def log_training_start(self, total_steps: int = None, max_epochs: int = None):
+        """Log training start event with comprehensive training setup."""
+        if not self._status_logger_enabled:
+            return
+
+        total_steps = total_steps or self.total_steps
+        setup_kpis = {
+            'total_steps': total_steps,
+            'max_epochs': max_epochs,
+            'policy_replicas': len(self.policy_replicas),
+            'training_phase': 'training_start',
+            'model_parallelism': self.n_atoms_per_replica(),
+            'data_parallelism': len(self.policy_replicas)
+        }
+
+        if hasattr(self.config, 'train'):
+            setup_kpis.update({
+                'batch_size_per_replica': getattr(self.config.train, 'train_batch_per_replica', None),
+                'learning_rate': getattr(self.config.train, 'learning_rate', None),
+                'warmup_steps': getattr(self.config.train, 'warmup_steps', None)
+            })
+
+        self.log_status(
+            message=f"Training started - Total steps: {total_steps}, Policy replicas: {len(self.policy_replicas)}",
+            status_level=StatusLevel.STARTED,
+            step=self.current_step,
+            kpi=setup_kpis
+        )
+
+    def log_training_end(self, final_step: int = None, success: bool = True):
+        """Log training completion with final metrics."""
+        if not self._status_logger_enabled:
+            return
+
+        final_step = final_step or self.current_step
+        completion_kpis = {
+            'final_step': final_step,
+            'total_steps': self.total_steps,
+            'training_completed': success,
+            'training_phase': 'training_end',
+            'completion_percentage': (final_step / max(self.total_steps, 1)) * 100.0
+        }
+
+        status_level = StatusLevel.SUCCESS if success else StatusLevel.FAILURE
+        message = f"Training {'completed successfully' if success else 'ended with errors'} at step {final_step}/{self.total_steps}"
+
+        self.log_status(
+            message=message,
+            status_level=status_level,
+            step=final_step,
+            kpi=completion_kpis
+        )
+
+    def log_epoch_start(self, epoch: int, steps_per_epoch: int = None):
+        """Log epoch start event."""
+        if not self._status_logger_enabled:
+            return
+
+        self.log_status(
+            message=f"Epoch {epoch} started",
+            status_level=StatusLevel.RUNNING,
+            step=self.current_step,
+            epoch=epoch,
+            kpi={
+                'epoch': epoch,
+                'steps_per_epoch': steps_per_epoch,
+                'training_phase': 'epoch_start'
+            }
+        )
+
+    def log_epoch_end(self, epoch: int, epoch_metrics: Dict[str, Any] = None):
+        """Log epoch completion with metrics."""
+        if not self._status_logger_enabled:
+            return
+
+        kpis = {
+            'epoch': epoch,
+            'training_phase': 'epoch_end'
+        }
+        if epoch_metrics:
+            kpis.update(epoch_metrics)
+
+        self.log_status(
+            message=f"Epoch {epoch} completed",
+            status_level=StatusLevel.RUNNING,
+            step=self.current_step,
+            epoch=epoch,
+            kpi=kpis
         )
 
     def n_atoms_per_replica(self) -> int:
@@ -176,7 +361,21 @@ class PolicyStatusManager:
         """
         Check if the training is finished.
         """
-        return self.current_step >= self.total_steps and self.total_steps > 0
+        finished = self.current_step >= self.total_steps and self.total_steps > 0
+        if finished and self._status_logger_enabled and not hasattr(self, '_training_completion_logged'):
+            # Log training completion once
+            self._training_completion_logged = True
+            self.log_status(
+                message="Training completed successfully",
+                status_level=StatusLevel.RUNNING,
+                step=self.current_step,
+                kpi={
+                    'total_steps': self.total_steps,
+                    'final_step': self.current_step,
+                    'n_replicas': len(self.policy_replicas)
+                }
+            )
+        return finished
 
     def maintain_life_status(self):
         """
@@ -195,16 +394,30 @@ class PolicyStatusManager:
         """
         Set the status of the policy.
         """
+        old_status = self.status.get(name)
         if name not in self.status:
             assert (
                 status == PolicyStatus.UNINITIALIZED
             ), "Policy status should be UNINITIALIZED when first created"
             self.status[name] = status
+            # Log status change
+            self.log_status(
+                message=f"Policy replica {name} status set to {status}",
+                replica_name=name,
+                kpi={'old_status': None, 'new_status': str(status)}
+            )
             return
         assert (
             status != PolicyStatus.UNINITIALIZED
         ), "Policy status should not be UNINITIALIZED when already created"
+
         self.status[name] = status
+        # Log status change
+        self.log_status(
+            message=f"Policy replica {name} status changed from {old_status} to {status}",
+            replica_name=name,
+            kpi={'old_status': str(old_status), 'new_status': str(status)}
+        )
 
     def recompute_total_steps(
         self, explicit_num_remaining_samples: Optional[int] = None
@@ -215,6 +428,9 @@ class PolicyStatusManager:
         if self.training_finished():
             # Training is finished, do not recompute total steps
             return
+
+        old_total_steps = self.total_steps
+
         # Update total_steps based on remaining samples and replicas
         num_policy_replicas = len(self.get_all_atoms_arrived_replicas())
         if num_policy_replicas == 0:
@@ -235,6 +451,20 @@ class PolicyStatusManager:
             self.total_steps = min(steps_by_dataset, self.config.train.max_num_steps)
         else:
             self.total_steps = steps_by_dataset
+
+        # Log total steps recomputation if changed significantly
+        if abs(self.total_steps - old_total_steps) > 1:
+            self.log_status(
+                message=f"Recomputed total training steps from {old_total_steps} to {self.total_steps}",
+                status_level=StatusLevel.RUNNING,
+                kpi={
+                    'old_total_steps': old_total_steps,
+                    'new_total_steps': self.total_steps,
+                    'current_step': self.current_step,
+                    'remaining_samples': num_remaining_samples,
+                    'active_replicas': num_policy_replicas
+                }
+            )
 
     def get_status(self, name: str) -> PolicyStatus:
         """
@@ -318,6 +548,19 @@ class PolicyStatusManager:
         self.status.pop(replica_name)
         self.replica_scaling_log.append(ReplicaScalingLog.down(replica))
 
+        # Log replica unregistration
+        self.log_status(
+            message=f"Policy replica {replica_name} unregistered",
+            status_level=StatusLevel.RUNNING,
+            replica_name=replica_name,
+            kpi={
+                'replica_type': 'policy',
+                'training_finished': self.training_finished(),
+                'remaining_replicas': len(self.policy_replicas),
+                'was_in_mesh': replica.in_mesh
+            }
+        )
+
         if self.training_finished():
             # This policy replica is normally finished
             # Do not trigger rebuild mesh since everything is gonna be finished shortly
@@ -362,6 +605,20 @@ class PolicyStatusManager:
             logger.info(
                 f"[Controller] All atoms of {Role.POLICY} Replica {replica.name} has been set."
             )
+
+            # Log policy replica registration
+            self.log_status(
+                message=f"Policy replica {replica.name} fully registered with all atoms",
+                status_level=StatusLevel.RUNNING,
+                replica_name=replica.name,
+                kpi={
+                    'replica_type': 'policy',
+                    'n_atoms': len(replica.atoms),
+                    'total_replicas': len(self.policy_replicas),
+                    'policy_init_done': self.policy_init_done
+                }
+            )
+
             self.set_status(replica.name, PolicyStatus.UNINITIALIZED)
             # Check total valid policy replicas
             valid_replicas = []
@@ -434,6 +691,18 @@ class PolicyStatusManager:
     def trigger_rebuild_mesh(self, valid_replicas: List[Replica]):
         # Always tell the policy to rebuild mesh even there is only one policy replica
         sorted_valid_replicas = sorted(valid_replicas, key=lambda x: x.start_time)
+
+        # Log mesh rebuilding
+        self.log_status(
+            message=f"Triggering policy mesh rebuild with {len(valid_replicas)} replicas",
+            status_level=StatusLevel.RUNNING,
+            kpi={
+                'replica_count': len(valid_replicas),
+                'replica_names': [r.name for r in valid_replicas],
+                'mesh_type': 'policy'
+            }
+        )
+
         command.BuildMeshCommand.trigger(
             sorted_valid_replicas, redis_handler=self.redis_handler
         )
@@ -597,9 +866,49 @@ class PolicyStatusManager:
                         "val/rollout_count": len(rewards),
                         "val/step": validation_step,
                     }
-                    logger.info(
-                        f"[Controller] Validation finished, average reward: {avg_reward}, total rollouts: {len(rewards)}, max reward: {max_reward}, min reward: {min_reward}, std reward: {std_reward} at step {validation_step}"
+                    # Comprehensive validation message
+                    validation_message = f"[Controller] Validation finished, average reward: {avg_reward}, total rollouts: {len(rewards)}, max reward: {max_reward}, min reward: {min_reward}, std reward: {std_reward} at step {validation_step}"
+
+                    # Comprehensive validation KPIs similar to vila config
+                    validation_kpis = {
+                        'val_reward_avg': float(avg_reward),
+                        'val_reward_std': float(std_reward),
+                        'val_reward_max': float(max_reward),
+                        'val_reward_min': float(min_reward),
+                        'val_rollout_count': len(rewards),
+                        'val_step': validation_step,
+                        'val_acc': float(avg_reward),  # Using reward as accuracy metric for RL
+                    }
+
+                    # Add completion length metrics if available
+                    completion_lengths = []
+                    for rollouts in all_rollouts_lists:
+                        for rollout in rollouts:
+                            if hasattr(rollout, 'completion') and rollout.completion:
+                                completion_lengths.append(len(rollout.completion))
+
+                    if completion_lengths:
+                        validation_kpis['val_completion_length_avg'] = float(np.mean(completion_lengths))
+                        validation_kpis['val_completion_length_std'] = float(np.std(completion_lengths))
+                        validation_kpis['val_completion_length_max'] = float(np.max(completion_lengths))
+                        validation_kpis['val_completion_length_min'] = float(np.min(completion_lengths))
+
+                    # Log comprehensive validation results to status logger
+                    self.log_status(
+                        message=validation_message,
+                        status_level=StatusLevel.RUNNING,
+                        step=validation_step,
+                        kpi={**validation_kpis, **{
+                            'validation_step': validation_step,
+                            'total_validation_rollouts': len(rewards),
+                            'validation_phase': 'validation_complete',
+                            'active_rollout_replicas': len(rollout_status_manager.rollout_replicas)
+                        }}
                     )
+
+                    # Also log to console
+                    logger.info(validation_message)
+
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
                             data=report_data,
@@ -637,7 +946,22 @@ class PolicyStatusManager:
             if self.tokenizer.eos_token is not None and rollout.completion is not None:
                 if not rollout.completion.endswith(self.tokenizer.eos_token):
                     rollout.completion = rollout.completion + self.tokenizer.eos_token
+
         self.rollout_buffer.put(rollout)
+
+        # Log rollout dispatching (but not too frequently to avoid spam)
+        if self.rollout_buffer.qsize() % 100 == 0 or self.rollout_buffer.qsize() <= 10:
+            self.log_status(
+                message=f"Rollout dispatched, buffer size: {self.rollout_buffer.qsize()}",
+                status_level=StatusLevel.RUNNING,
+                kpi={
+                    'rollout_buffer_size': self.rollout_buffer.qsize(),
+                    'rollout_reward': rollout.reward if rollout.reward is not None else 0,
+                    'rollout_prompt_length': len(rollout.prompt) if rollout.prompt else 0,
+                    'rollout_completion_length': len(rollout.completion) if rollout.completion else 0
+                }
+            )
+
         self.try_trigger_data_fetch_and_training()
 
     def train_ack(
@@ -653,6 +977,24 @@ class PolicyStatusManager:
             raise Exception(f"Replica {replica_name} not found")
 
         self.set_status(replica_name, PolicyStatus.REDUCED)
+
+        # Log training step completion
+        self.log_status(
+            message=f"Training step {step}/{total_steps} completed for replica {replica_name}",
+            step=step,
+            replica_name=replica_name,
+            kpi={
+                'loss_avg': report_data.get('train/loss_avg', 0),
+                'loss_max': report_data.get('train/loss_max', 0),
+                'learning_rate': report_data.get('train/learning_rate', 0),
+                'iteration_time': report_data.get('train/iteration_time', 0),
+                'kl_loss_avg': report_data.get('train/kl_loss_avg', 0),
+                'grad_norm': report_data.get('train/grad_norm', 0),
+                'total_steps': total_steps,
+                'profile_finished': profile_finished,
+                'progress_pct': (step / total_steps * 100) if total_steps > 0 else 0
+            }
+        )
 
         if not hasattr(self, "report_data_list"):
             self.report_data_list = []
@@ -729,17 +1071,71 @@ class PolicyStatusManager:
                             data=self.train_report_data[train_step],
                             step=train_step,
                         )
+                    # Log comprehensive training metrics to status logger with ALL KPIs
+                    training_metrics_log = f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
+
+                    # Comprehensive KPI logging similar to vila config metrics
+                    comprehensive_kpis = {
+                        # Core training metrics
+                        'train_loss_avg': float(total_loss_avg),
+                        'train_loss_max': float(total_loss_max),
+                        'learning_rate': float(total_learning_rate),
+                        'iteration_time': float(total_iter_time_avg),
+                        'train_steps_per_second': 1.0 / float(total_iter_time_avg) if total_iter_time_avg > 0 else 0.0,
+
+                        # Reward metrics
+                        'reward_mean': float(self.train_report_data[train_step]['train/reward_mean']),
+                        'reward_std': float(self.train_report_data[train_step]['train/reward_std']),
+                        'reward_max': float(self.train_report_data[train_step]['train/reward_max']),
+                        'reward_min': float(self.train_report_data[train_step]['train/reward_min']),
+
+                        # Completion length metrics
+                        'completion_length_mean': float(self.train_report_data[train_step]['train/completion_length_mean']),
+                        'completion_length_max': float(self.train_report_data[train_step]['train/completion_length_max']),
+
+                        # Progress metrics
+                        'training_progress': float(train_step) / float(total_steps) * 100.0,
+                        'remaining_steps': total_steps - train_step,
+                        'eta_seconds': (total_steps - train_step) * total_iter_time_avg if total_iter_time_avg > 0 else 0,
+                    }
+
+                    # Add gradient norm if available
+                    if 'train/grad_norm' in self.train_report_data[train_step]:
+                        comprehensive_kpis['grad_norm'] = float(self.train_report_data[train_step]['train/grad_norm'])
+
+                    # Add policy metrics if available
+                    if 'train/policy_loss' in self.train_report_data[train_step]:
+                        comprehensive_kpis['policy_loss'] = float(self.train_report_data[train_step]['train/policy_loss'])
+                    if 'train/value_loss' in self.train_report_data[train_step]:
+                        comprehensive_kpis['value_loss'] = float(self.train_report_data[train_step]['train/value_loss'])
+                    if 'train/kl_divergence' in self.train_report_data[train_step]:
+                        comprehensive_kpis['kl_divergence'] = float(self.train_report_data[train_step]['train/kl_divergence'])
+
+                    # Add additional training data metrics
+                    for key, value in self.train_report_data[train_step].items():
+                        if isinstance(value, (int, float)) and key.startswith('train/'):
+                            metric_name = key.replace('train/', '').replace('/', '_')
+                            if metric_name not in comprehensive_kpis:
+                                comprehensive_kpis[metric_name] = float(value)
+
+                    # Log to status logger with comprehensive KPIs and metadata
+                    self.log_status(
+                        message=training_metrics_log,
+                        status_level=StatusLevel.RUNNING,
+                        step=train_step,
+                        kpi={**comprehensive_kpis, **{
+                            'total_steps': total_steps,
+                            'current_step': train_step,
+                            'active_replicas': len(self.get_all_atoms_arrived_replicas()),
+                            'epoch': train_step // (len(self.policy_replicas) or 1),  # Approximate epoch
+                            'training_phase': 'training',
+                            'train_runtime': train_step * total_iter_time_avg if total_iter_time_avg > 0 else 0
+                        }}
+                    )
+
+                    # Also log to console if configured
                     if "console" in self.config.logging.logger:
-                        logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
-                        )
-                    for logger_fn in self.custom_logger_fns:
-                        try:
-                            logger_fn(self.train_report_data[train_step], train_step)
-                        except Exception as e:
-                            logger.warning(
-                                f"[Controller] Warning reporting customized training results: {e}"
-                            )
+                        logger.info(training_metrics_log)
                 except Exception as e:
                     logger.warning(
                         f"[Controller] Warning reporting training results: {e}"

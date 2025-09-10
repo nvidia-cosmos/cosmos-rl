@@ -22,6 +22,7 @@ from . import profiler
 from . import nccl
 from . import algo
 from .utils import console
+from cosmos_rl.utils.decorators import monitor_status
 
 
 @click.group()
@@ -47,5 +48,18 @@ def get_ip_from_hostname(hostname):
     return ip_address
 
 
+@monitor_status(name="Cosmos-RL CLI", mode="cli")
+def main():
+    """Main CLI entry point with status monitoring."""
+    try:
+        cosmos()
+    except (KeyboardInterrupt, SystemError) as e:
+        console.print(f"CLI was interrupted: {e}")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"CLI failed: {e}")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    cosmos()
+    main()

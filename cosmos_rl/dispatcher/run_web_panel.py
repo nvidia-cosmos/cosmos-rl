@@ -75,7 +75,8 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
-from cosmos_rl.dispatcher.data.packer.base import DataPacker, worker_entry_parser
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.utils.decorators import monitor_status
 from fastapi.responses import Response
 from fastapi import Request
 
@@ -591,6 +592,7 @@ def _serialize_replicas(replicas: Dict[str, Replica]) -> List[Dict]:
     return result
 
 
+@monitor_status(name="Cosmos-RL Controller", mode="controller")
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     data_packer: Optional[DataPacker] = None,
@@ -698,4 +700,15 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, SystemError) as e:
+        logger.error(f"Controller was interrupted: {e}")
+        if server:
+            server.should_exit = True
+        exit(1)
+    except Exception as e:
+        logger.error(f"Controller failed: {e}")
+        if server:
+            server.should_exit = True
+        exit(1)
