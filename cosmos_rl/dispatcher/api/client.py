@@ -60,8 +60,8 @@ class APIClient(object):
     def __init__(
         self,
         role: Role,
-        remote_ips: Optional[List[str]],
-        remote_port: Optional[int],
+        remote_ips: Optional[List[str]] = None,
+        remote_port: Optional[int] = None,
     ):
         self.role = role
 
