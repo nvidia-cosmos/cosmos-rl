@@ -518,6 +518,14 @@ class GRPOTrainer(Trainer):
                     )
             model_state_dict.append(self.reference_state_dict)
 
+        def get_local_tensor(obj):
+            if isinstance(obj, torch.distributed.tensor.DTensor):
+                return obj.to_local().detach()
+            elif isinstance(obj, torch.Tensor):
+                return obj.detach()
+            else:
+                raise ValueError(f"Unsupported obj type: {type(obj)}")
+
         # 1. Sync all model states
         for state_to_sync in model_state_dict:
             for dest_name in sorted(state_to_sync.keys()):
@@ -526,6 +534,7 @@ class GRPOTrainer(Trainer):
                 local_view = self.wrap_to_cuda_tensor(
                     dest_name, obj, in_place=obj.is_cuda
                 )
+                original_obj = torch.clone(get_local_tensor(obj))
                 if is_send:
                     send_hook(local_view)
                 else:
@@ -538,6 +547,11 @@ class GRPOTrainer(Trainer):
                     # Copy again for offloaded tensor since it is not inplace received
                     if not to_write.is_cuda:
                         to_write.copy_(local_view)
+
+                assert torch.allclose(
+                    original_obj, local_view
+                ), f"The received tensor is not the same as the original tensor: {dest_name}"
+
                 len_params += 1
 
         # 2. Sync optimizer states
