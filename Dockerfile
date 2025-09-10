@@ -23,6 +23,7 @@ RUN apt-get update -y && apt-get upgrade -y
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
     curl git gpg lsb-release tzdata wget
 RUN apt-get purge -y cuda-compat-*
+RUN apt-get update && apt-get install -y dnsutils
 
 #################################################
 ## Install NVIDIA GDRCopy

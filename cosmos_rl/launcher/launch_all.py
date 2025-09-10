@@ -21,6 +21,7 @@ import sys
 import logging
 import time
 import os
+import shutil
 import re
 import argparse
 from argparse import REMAINDER
@@ -698,7 +699,7 @@ def get_hostname_from_host(ip):
             hostname = output.rsplit("has address ", 2)[-1].strip()
             return hostname
         else:
-            return None  # or raise Exception("No hostname found")
+            return None
     except Exception as e:
         logger.error(f"Error: {e}")
         return None
@@ -1296,19 +1297,25 @@ cosmos-rl --config config.toml"""
             f"Setting hostname to {hostname} {ips[0]} for worker index {cur_work_idx}"
         )
         os.system(f"hostname {ips[0]}")
-        idx = 0
-        while idx < num_workers:
-            remote_host = f"{prefix}-{idx}.{subdomain}"
-            remote_hostname = get_hostname_from_host(remote_host)
-            pattern = r"^\d+\.\d+\.\d+\.\d+$"
-            if re.match(pattern, remote_hostname) is not None:
-                idx = idx + 1
-                continue
-            else:
-                logger.info(
-                    f"Waiting for hostname {remote_host} to be changed as ready, current: {remote_hostname}"
-                )
-                time.sleep(1)
+        if shutil.which("host") is not None:
+            # Do a blocking wait until the hostname is properly resolved
+            # Only do this if 'host' command is available
+            idx = 0
+            while idx < num_workers:
+                remote_host = f"{prefix}-{idx}.{subdomain}"
+                remote_hostname = get_hostname_from_host(remote_host)
+                pattern = r"^\d+\.\d+\.\d+\.\d+$"
+                if (
+                    remote_hostname is not None
+                    and re.match(pattern, remote_hostname) is not None
+                ):
+                    idx = idx + 1
+                    continue
+                else:
+                    logger.info(
+                        f"Waiting for hostname {remote_host} to be changed as ready, current: {remote_hostname}"
+                    )
+                    time.sleep(1)
     if (
         len(global_launch_settings) <= cur_work_idx
         or len(global_launch_settings[cur_work_idx]) == 0
