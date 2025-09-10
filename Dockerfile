@@ -104,7 +104,8 @@ RUN pip install \
 # Install triton and triton_kernels
 RUN pip uninstall -y triton triton_kernels && \
     pip install -U triton --pre --extra-index-url https://download.pytorch.org/whl/nightly --no-deps && \
-    pip install -U triton_kernels --extra-index-url https://wheels.vllm.ai/gpt-oss/ --no-deps
+    pip install -U triton_kernels --extra-index-url https://wheels.vllm.ai/gpt-oss/ --no-deps && \
+    pip install accelerate kernels
     
 ###################################################
 FROM no-efa-base AS efa-base
