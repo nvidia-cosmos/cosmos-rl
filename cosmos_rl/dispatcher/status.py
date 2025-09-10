@@ -844,9 +844,8 @@ class PolicyStatusManager:
 
             # Interleave-style data dispatch
             for _ in range(items_count):
-                rollout = self.rollout_buffer.get()
                 for replica in arrived_replicas:
-                    # rollout = self.rollout_buffer.get()
+                    rollout = self.rollout_buffer.get()
                     replica.put_rollout(rollout, self.redis_handler)
                     rollouts_of_this_step.append(rollout)
             for replica in arrived_replicas:
