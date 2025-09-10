@@ -20,23 +20,30 @@ from torch.distributed._composable.replicate import replicate
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import (
+    Replicate,
+    Shard,
+    distribute_module,
+    distribute_tensor,
+)
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
-    parallelize_module,
+    ParallelStyle,
     PrepareModuleInput,
     PrepareModuleOutput,
     RowwiseParallel,
     SequenceParallel,
+    parallelize_module,
 )
-from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import str2torch_dtype
-from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, GroupedExpertsSymmMem
 from typing import Callable, Optional
 from cosmos_rl.utils.distributed import ReplicateParallel
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
+from cosmos_rl.utils.util import str2torch_dtype
 
 
 def parallelize(
@@ -53,15 +60,18 @@ def parallelize(
     the model must fit on GPU or CPU memory.
     """
     world_mesh = parallel_dims.mesh
+
     pipeline_parallelize(model, parallel_dims, config)
+
     if parallel_dims.tp_enabled:
-        apply_tp_ep(
+        apply_tp(
             model,
             world_mesh["tp"],
             enable_float8_tensorwise_tp=config.train.fp8.enable_fp8
             and config.train.fp8.quant_recipe == "tensorwise",
             enable_async_tp=config.train.async_tp_enabled,
         )
+        apply_ep(model, world_mesh["tp"])
 
     if parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims)
@@ -192,9 +202,50 @@ def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
     swizzle_cp_forward(model, parallel_dims)
 
 
-def apply_tp_ep(
+class _ExpertParallel(ParallelStyle):
+    """
+    ExpertParallel class is used to shard the MoE parameters on the EP mesh.
+    Dim `0` of each parameter is sharded since that is the expert dimension.
+    """
+
+    def _partition_fn(self, name, module, device_mesh):
+        # shard on the expert dimension
+        assert device_mesh.ndim == 1
+
+        for name, param in module.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            module.register_parameter(name, dist_param)
+
+        if isinstance(module, GroupedExpertsSymmMem):
+            module.setup_mesh(ep_mesh=device_mesh)
+
+        if isinstance(module, GroupedExpertsDeepEP):
+            module.init_token_dispatcher(ep_mesh=device_mesh)
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            self._partition_fn,
+        )
+
+
+def apply_ep(model: nn.Module, ep_mesh: DeviceMesh):
+    """Apply expert parallelism."""
+    assert ep_mesh.size() > 1
+
+    for _, block in model.layers.items():
+        parallelize_module(
+            module=block.mlp.experts,
+            device_mesh=ep_mesh,
+            parallelize_plan=_ExpertParallel(),
+        )
+    logger.info("Applied Expert Parallelism to the model")
+
+
+def apply_tp(
     model: nn.Module,
-    tp_ep_mesh: DeviceMesh,
+    tp_mesh: DeviceMesh,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
 ):
@@ -205,7 +256,7 @@ def apply_tp_ep(
     # 3. Parallelize the final linear output layer
     parallelize_module(
         model,
-        tp_ep_mesh,
+        tp_mesh,
         {
             "embed_tokens": RowwiseParallel(
                 input_layouts=Replicate(),
@@ -253,7 +304,7 @@ def apply_tp_ep(
 
     # - Apply tensor + sequence parallelism to self-attention
     # - Apply expert parallelism to MLP
-    for layer_id, transformer_block in model.layers.items():
+    for _, transformer_block in model.layers.items():
         layer_plan = {
             "input_layernorm": SequenceParallel(),
             "self_attn": prepare_module_input(
@@ -280,125 +331,10 @@ def apply_tp_ep(
                 use_local_output=True,
             ),
         }
-        transformer_block.mlp.ep_group = tp_ep_mesh.get_group()
-        transformer_block.mlp.ep_size = tp_ep_mesh.size()
-        assert (
-            transformer_block.mlp.total_experts % tp_ep_mesh.size() == 0
-        ), "number of experts must be divisible by tp_ep_mesh.size()"
-        transformer_block.mlp.local_experts = (
-            transformer_block.mlp.total_experts // tp_ep_mesh.size()
-        )
-
-        transformer_block.mlp.up_proj.register_parameter(
-            "weight",
-            nn.Parameter(
-                torch.distributed.tensor.DTensor.from_local(
-                    nn.Parameter(
-                        torch.empty(
-                            transformer_block.mlp.local_experts,
-                            transformer_block.mlp.intermediate_dim,
-                            transformer_block.mlp.dim,
-                            dtype=transformer_block.mlp.up_proj.weight.dtype,
-                            device=transformer_block.mlp.up_proj.weight.device,
-                        )
-                    ),
-                    tp_ep_mesh,
-                    [Shard(0)],
-                    run_check=False,
-                )
-            ),
-        )
-        transformer_block.mlp.down_proj.register_parameter(
-            "weight",
-            nn.Parameter(
-                torch.distributed.tensor.DTensor.from_local(
-                    nn.Parameter(
-                        torch.empty(
-                            transformer_block.mlp.local_experts,
-                            transformer_block.mlp.dim,
-                            transformer_block.mlp.intermediate_dim,
-                            dtype=transformer_block.mlp.down_proj.weight.dtype,
-                            device=transformer_block.mlp.down_proj.weight.device,
-                        )
-                    ),
-                    tp_ep_mesh,
-                    [Shard(0)],
-                    run_check=False,
-                )
-            ),
-        )
-        transformer_block.mlp.gate_proj.register_parameter(
-            "weight",
-            nn.Parameter(
-                torch.distributed.tensor.DTensor.from_local(
-                    nn.Parameter(
-                        torch.empty(
-                            transformer_block.mlp.local_experts,
-                            transformer_block.mlp.intermediate_dim,
-                            transformer_block.mlp.dim,
-                            dtype=transformer_block.mlp.gate_proj.weight.dtype,
-                            device=transformer_block.mlp.gate_proj.weight.device,
-                        )
-                    ),
-                    tp_ep_mesh,
-                    [Shard(0)],
-                    run_check=False,
-                )
-            ),
-        )
-        assert (
-            transformer_block.mlp.gate_proj.weight.to_local().shape[0]
-            == transformer_block.mlp.local_experts
-        ), f"gate_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.gate_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
-        assert (
-            transformer_block.mlp.up_proj.weight.to_local().shape[0]
-            == transformer_block.mlp.local_experts
-        ), f"up_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.up_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
-        assert (
-            transformer_block.mlp.down_proj.weight.to_local().shape[0]
-            == transformer_block.mlp.local_experts
-        ), f"down_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.down_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
-
-        # transformer_block.mlp.up_proj.register_parameter(
-        #     "weight",
-        #     nn.Parameter(
-        #         torch.empty(
-        #             transformer_block.mlp.local_experts,
-        #             transformer_block.mlp.intermediate_dim,
-        #             transformer_block.mlp.dim,
-        #             dtype=transformer_block.mlp.up_proj.weight.dtype,
-        #             device=transformer_block.mlp.up_proj.weight.device,
-        #         )
-        #     ),
-        # )
-        # transformer_block.mlp.gate_proj.register_parameter(
-        #     "weight",
-        #     nn.Parameter(
-        #         torch.empty(
-        #             transformer_block.mlp.local_experts,
-        #             transformer_block.mlp.intermediate_dim,
-        #             transformer_block.mlp.dim,
-        #             dtype=transformer_block.mlp.gate_proj.weight.dtype,
-        #             device=transformer_block.mlp.gate_proj.weight.device,
-        #         )
-        #     ),
-        # )
-        # transformer_block.mlp.down_proj.register_parameter(
-        #     "weight",
-        #     nn.Parameter(
-        #         torch.empty(
-        #             transformer_block.mlp.local_experts,
-        #             transformer_block.mlp.dim,
-        #             transformer_block.mlp.intermediate_dim,
-        #             dtype=transformer_block.mlp.down_proj.weight.dtype,
-        #             device=transformer_block.mlp.down_proj.weight.device,
-        #         )
-        #     ),
-        # )
 
         parallelize_module(
             module=transformer_block,
-            device_mesh=tp_ep_mesh,
+            device_mesh=tp_mesh,
             parallelize_plan=layer_plan,
         )
 
@@ -406,7 +342,7 @@ def apply_tp_ep(
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
         torch._inductor.config._micro_pipeline_tp = True
-        enable_symm_mem_for_group(tp_ep_mesh.get_group().group_name)
+        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
     logger.info(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
