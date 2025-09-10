@@ -15,6 +15,7 @@
 
 import sys
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.decorators import monitor_status
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as RolloutConfig
 from cosmos_rl.utils.distributed import (
@@ -25,6 +26,7 @@ from cosmos_rl.utils.distributed import (
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker import vLLMRolloutWorker
 
 
+@monitor_status(name="Cosmos-RL Rollout", mode="rollout")
 def run_rollout(*args, **kwargs):
     ctrl_ip, ctrl_port, metadata = get_controller_metadata()
 
@@ -71,10 +73,14 @@ def run_rollout(*args, **kwargs):
         else:
             raise ValueError(f"Invalid rollout backend: {rollout_backend}")
         rollout_worker.work()
-    except Exception:
+    except (KeyboardInterrupt, SystemError) as e:
+        logger.warning(f"[Rollout] Rollout was interrupted: {str(e)}")
+        raise
+    except Exception as e:
         import traceback
-
         traceback.print_exc()
+        logger.error(f"[Rollout] Rollout failed: {str(e)}")
+        raise
     finally:
         destroy_distributed()
         logger.info("[Rollout] Destroy context of torch dist.")

@@ -23,6 +23,7 @@ from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.utils.modelscope import modelscope_load_dataset
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.decorators import monitor_status
 
 
 class MathDataset(Dataset):
@@ -378,7 +379,8 @@ class MathDataPacker(DataPacker):
         )
 
 
-if __name__ == "__main__":
+@monitor_status(name="Cosmos-RL Math GRPO Dataset", mode="dataset")
+def main():
 
     def get_dataset(config: CosmosConfig) -> Dataset:
         dataset = MathDataset()
@@ -397,3 +399,7 @@ if __name__ == "__main__":
         data_packer=MathDataPacker(),
         val_data_packer=MathDataPacker(),
     )
+
+
+if __name__ == "__main__":
+    main()

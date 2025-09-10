@@ -21,6 +21,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers import AutoTokenizer
 import argparse
 import toml
+from cosmos_rl.utils.decorators import monitor_status
 
 
 class HFVLMSFTDataset(Dataset):
@@ -64,7 +65,8 @@ class HFVLMSFTDataset(Dataset):
         return conversations
 
 
-if __name__ == "__main__":
+@monitor_status(name="Cosmos-RL HF VLM SFT Dataset", mode="dataset")
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_known_args()[0]
@@ -84,3 +86,7 @@ if __name__ == "__main__":
     launch_worker(
         dataset=get_dataset,
     )
+
+
+if __name__ == "__main__":
+    main()

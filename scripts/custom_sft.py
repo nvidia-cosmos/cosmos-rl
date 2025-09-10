@@ -27,6 +27,7 @@ import pydantic
 import toml
 import torch.utils.data
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.decorators import monitor_status
 
 from cosmos_reason1_utils.text import create_conversation
 from cosmos_reason1_utils.vision import VisionConfig
@@ -99,14 +100,15 @@ class CustomDataset(torch.utils.data.Dataset):
         return conversations
 
 
-if __name__ == "__main__":
+@monitor_status(name="Cosmos-RL Custom SFT", mode="sft")
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", type=str, required=True, help="Path to config file."
     )
     args = parser.parse_known_args()[0]
     # Load config
-    with open(args.config) as f:
+    with open(args.config, encoding="utf-8") as f:
         config_kwargs = toml.load(f)
     config = cosmos_rl.policy.config.Config.from_dict(config_kwargs)
     custom_config = CustomConfig.model_validate(config_kwargs["custom"])
@@ -137,3 +139,7 @@ if __name__ == "__main__":
     cosmos_rl.launcher.worker_entry.main(
         dataset=dataset,
     )
+
+
+if __name__ == "__main__":
+    main()

@@ -22,6 +22,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
 from transformers import AutoTokenizer
 from torch.utils.data import ConcatDataset
+from cosmos_rl.utils.decorators import monitor_status
 
 
 class MathDapoDataset(Dataset):
@@ -99,7 +100,8 @@ def custom_reward_fn(
     return reward
 
 
-if __name__ == "__main__":
+@monitor_status(name="Cosmos-RL Math DAPO Dataset", mode="dataset")
+def main():
 
     def get_dataset(config: CosmosConfig) -> Dataset:
         return MathDapoDataset()
@@ -111,3 +113,7 @@ if __name__ == "__main__":
         # Override the reward functions defined in toml
         reward_fns=[custom_reward_fn],
     )
+
+
+if __name__ == "__main__":
+    main()

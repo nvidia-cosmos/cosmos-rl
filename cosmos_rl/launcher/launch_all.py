@@ -27,6 +27,7 @@ from argparse import REMAINDER
 from typing import List, Dict, Optional, Any, Callable
 import toml
 import tempfile
+from cosmos_rl.utils.decorators import monitor_status
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")
@@ -690,6 +691,7 @@ def replica_placement(
     return global_launch_settings
 
 
+@monitor_status(name="Cosmos-RL Launcher", mode="launch")
 def main():
     args, parser = parse_args()
     if args.debug:
@@ -1394,4 +1396,11 @@ cosmos-rl --config config.toml"""
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, SystemError) as e:
+        logger.error(f"Launcher was interrupted: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Launcher failed: {e}")
+        sys.exit(1)

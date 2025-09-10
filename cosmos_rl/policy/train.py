@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.decorators import monitor_status
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import (
     init_distributed,
@@ -27,6 +28,7 @@ import torch
 from cosmos_rl.utils import util
 
 
+@monitor_status(name="Cosmos-RL Policy", mode="train")
 def main(*args, **kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     ctrl_ip, ctrl_port, metadata = get_controller_metadata()
@@ -70,11 +72,14 @@ def main(*args, **kwargs):
                 trainer.train()
             else:
                 raise ValueError(f"Unknown policy type: {policy_type}")
+    except (KeyboardInterrupt, SystemError) as e:
+        logger.warning(f"[Policy] Training was interrupted: {str(e)}")
+        raise
     except Exception as e:
         import traceback
-
         traceback.print_exc()
-        raise e
+        logger.error(f"[Policy] Training failed: {str(e)}")
+        raise
     finally:
         destroy_distributed()
         logger.info("Process group destroyed.")
