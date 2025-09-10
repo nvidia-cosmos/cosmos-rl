@@ -623,7 +623,6 @@ class GRPOTrainer(Trainer):
         logger.info(
             f"[Policy] Policy2Policy Broadcast {command.src_replica_name} to {command.dst_replica_names}"
         )
-        return False
         send = self.replica_name == command.src_replica_name
         recv = self.replica_name in command.dst_replica_names and not send
         if not send and not recv:
@@ -651,7 +650,6 @@ class GRPOTrainer(Trainer):
         logger.info(
             f"[Policy] Policy2Policy Unicast {command.src_replica_name} to {command.dst_replica_name}"
         )
-        return False
         send = self.replica_name == command.src_replica_name
         recv = self.replica_name == command.dst_replica_name
         if not send and not recv:
