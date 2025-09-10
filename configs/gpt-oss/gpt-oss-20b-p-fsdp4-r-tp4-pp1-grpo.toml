@@ -19,13 +19,13 @@ param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 fsdp_offload = true
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 4
+train_batch_per_replica = 8
 sync_weight_interval = 1
 
 [rollout]
 gpu_memory_utilization = 0.5
 enable_chunked_prefill = true
-n_generation = 4
+n_generation = 8
 batch_size = 1
 quantization = "mxfp4"
 max_response_length = 1024
@@ -65,7 +65,7 @@ save_mode = "async"
 
 [rollout.parallelism]
 n_init_replicas = 1
-tp_size = 2
+tp_size = 4
 cp_size = 1
 dp_shard_size = 1
 pp_size = 1
@@ -76,6 +76,6 @@ dp_replicate_size = 1
 n_init_replicas = 2
 tp_size = 1
 cp_size = 1
-dp_shard_size = 2
+dp_shard_size = 8
 pp_size = 1
 dp_replicate_size = 1

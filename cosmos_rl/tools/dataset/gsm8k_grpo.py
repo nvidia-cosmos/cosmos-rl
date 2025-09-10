@@ -45,7 +45,7 @@ class GSM8kDataset(Dataset):
 
     def __len__(self):
         # return len(self.dataset)
-        return 32
+        return 64
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
         """
