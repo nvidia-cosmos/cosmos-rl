@@ -964,6 +964,7 @@ class GRPOTrainer(Trainer):
                 current_step=command.global_step,
                 total_steps=command.total_steps,
                 remain_samples_num=command.remain_samples_num,
+                do_save_checkpoint=command.do_save,
             )
         else:
             report_data = {}
@@ -1239,7 +1240,11 @@ class GRPOTrainer(Trainer):
             return False, 0.0
 
     def train(
-        self, current_step: int, total_steps: int, remain_samples_num: int
+        self,
+        current_step: int,
+        total_steps: int,
+        remain_samples_num: int,
+        do_save_checkpoint: bool = False,
     ) -> Dict[str, Any]:
         pp_last_stage = (
             self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
@@ -1754,16 +1759,7 @@ class GRPOTrainer(Trainer):
                     for k, v in mfu.items():
                         report_data[f"train/{k}"] = v
         # checkpointing
-        if self.is_master_replica and (
-            (
-                self.config.train.ckpt.enable_checkpoint
-                and current_step % self.config.train.ckpt.save_freq == 0
-                and current_step > 0
-            )
-            or (
-                self.config.train.ckpt.enable_checkpoint and current_step == total_steps
-            )
-        ):
+        if self.is_master_replica and (do_save_checkpoint):
             if self.config.train.ckpt.export_safetensors:
                 logger.info(
                     f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."

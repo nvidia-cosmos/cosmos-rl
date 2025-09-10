@@ -121,6 +121,7 @@ class PolicyStatusManager:
         config: Config,
         redis_handler: RedisStreamHandler,
         remain_samples_num: int,
+        samples_per_epoch: int,
         tokenizer: AutoTokenizer,
         current_step: int = 0,
         val_dataloader: Optional[DataLoader] = None,
@@ -130,6 +131,7 @@ class PolicyStatusManager:
         self.redis_handler = redis_handler
         self.config = config
         self.remain_samples_num = remain_samples_num
+        self.samples_per_epoch = samples_per_epoch
         self.tokenizer = tokenizer
         self.val_dataloader = val_dataloader
         self.current_step = current_step
@@ -848,6 +850,38 @@ class PolicyStatusManager:
                     rollout = self.rollout_buffer.get()
                     replica.put_rollout(rollout, self.redis_handler)
                     rollouts_of_this_step.append(rollout)
+            # Decide whether to save checkpoint
+            # First check if we need to save checkpoint based on epoch
+            do_save = False
+            if self.current_step == self.total_steps:
+                # Always save checkpoint at the last step
+                do_save = True
+            elif self.config.train.ckpt.save_freq_in_epoch > 0:
+                # Checkpointing based on epoch if `save_freq_in_epoch` is set
+                if (
+                    self.remain_samples_num + required_rollouts - 1
+                ) // self.samples_per_epoch != (
+                    self.remain_samples_num - 1
+                ) // self.samples_per_epoch:
+                    # New epoch begins and old epoch ends
+                    # So check the epoch number against save_freq_in_epoch for saving checkpoint
+                    epoch = (
+                        self.config.train.epoch
+                        - (self.remain_samples_num + required_rollouts - 1)
+                        // self.samples_per_epoch
+                    )
+                    do_save = epoch % self.config.train.ckpt.save_freq_in_epoch == 0
+                    if do_save:
+                        logger.info(
+                            f"[Controller] Epoch {epoch} ends, triggering checkpoint saving at step {self.current_step}"
+                        )
+            else:
+                # Checkpointing based on step if `save_freq_in_epoch` is not set
+                do_save = (
+                    self.current_step % self.config.train.ckpt.save_freq == 0
+                    and self.current_step > 0
+                )
+
             for replica in arrived_replicas:
                 command.DataFetchCommand.trigger(
                     replica=replica,
@@ -856,6 +890,8 @@ class PolicyStatusManager:
                     total_steps=self.total_steps,
                     # `remain_samples_num` is just for checkpointing the training progress
                     remain_samples_num=self.remain_samples_num,
+                    # Only `do_save` when checkpointing is enabled
+                    do_save=do_save and self.config.train.ckpt.enable_checkpoint,
                     redis_handler=self.redis_handler,
                 )
                 self.set_status(replica.name, PolicyStatus.RUNNING)

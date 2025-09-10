@@ -152,6 +152,10 @@ class CheckpointConfig(BaseModel):
     save_freq: int = Field(
         default=20, description="Checkpoint save frequency for training steps"
     )
+    save_freq_in_epoch: int = Field(
+        default=0,
+        description="Checkpoint save frequency for training epochs. Default to 0 (disabled).",
+    )
     save_mode: str = Field(
         default="async",
         description="Checkpoint save mode for training steps",
@@ -203,8 +207,10 @@ class CheckpointConfig(BaseModel):
             raise ValueError(
                 f"Invalid save_mode: {self.save_mode}. Must be one of ['async', 'sync']"
             )
-        if self.save_freq <= 0:
-            raise ValueError(f"save_freq must be greater than 0, got {self.save_freq}")
+        if self.save_freq_in_epoch <= 0 and self.save_freq <= 0:
+            raise ValueError(
+                f"save_freq must be greater than 0 when save_freq_in_epoch disabled, got {self.save_freq}"
+            )
         return self
 
 

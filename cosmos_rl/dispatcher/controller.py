@@ -344,6 +344,9 @@ class Controller:
             config,
             self.redis_controller,
             remain_samples_num=remain_samples_num,
+            samples_per_epoch=len(self.dataset.train_set) * config.rollout.n_generation
+            if self.is_rl
+            else 0,
             tokenizer=self.tokenizer,
             val_dataloader=val_dataloader,
             current_step=self.ckpt_extra_info.get("step", 0),
