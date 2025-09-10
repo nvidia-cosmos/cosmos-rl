@@ -57,8 +57,8 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
             f"{q_lora_rank + kv_lora_rank + qk_rope_head_dim}"
         )
 
-        q_a_proj = weight[q_lora_rank:]
-        kv_a_proj_with_mqa = weight[:q_lora_rank]
+        q_a_proj = weight[:q_lora_rank]
+        kv_a_proj_with_mqa = weight[q_lora_rank:]
         return q_a_proj, kv_a_proj_with_mqa
 
     def _split_gate_up_proj_weight(self, weight: torch.Tensor):
