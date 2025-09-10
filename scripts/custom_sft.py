@@ -105,43 +105,6 @@ if __name__ == "__main__":
         "--config", type=str, required=True, help="Path to config file."
     )
     args = parser.parse_known_args()[0]
-
-    # Download and prepare data if not already present
-    data_dir = Path.cwd() / "data/sft"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Download annotations if not present
-    annotations_file = data_dir / "annotations.json"
-    if not annotations_file.exists():
-        logger.info("Downloading LLaVA-Instruct-150K annotations...")
-        import subprocess
-        subprocess.run([
-            "wget", 
-            "https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K/resolve/main/detail_23k.json", 
-            "-O", str(annotations_file)
-        ], check=True)
-        logger.info(f"Downloaded annotations to {annotations_file}")
-    else:
-        logger.info(f"Annotations already exist at {annotations_file}")
-    
-    # Download and extract media if not present
-    media_dir = data_dir / "train2017"
-    if not media_dir.exists():
-        logger.info("Downloading COCO train2017 images...")
-        import subprocess
-        media_zip = data_dir / "media.zip"
-        subprocess.run([
-            "wget", 
-            "http://images.cocodataset.org/zips/train2017.zip", 
-            "-O", str(media_zip)
-        ], check=True)
-        logger.info("Extracting media files...")
-        subprocess.run(["unzip", str(media_zip), "-d", str(data_dir)], check=True)
-        media_zip.unlink()  # Remove the zip file after extraction
-        logger.info(f"Media files extracted to {media_dir}")
-    else:
-        logger.info(f"Media files already exist at {media_dir}")
-
     # Load config
     with open(args.config) as f:
         config_kwargs = toml.load(f)

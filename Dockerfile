@@ -74,6 +74,12 @@ RUN apt-get update -qq && \
 ## Create a virtual environment
 RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv/cosmos_rl"
+
+# Create virtual environment activation for both interactive and non-interactive bash sessions
+RUN echo 'source /opt/venv/cosmos_rl/bin/activate' >> /root/.bashrc
+RUN echo 'source /opt/venv/cosmos_rl/bin/activate' > /etc/bash.bashrc
+ENV BASH_ENV=/etc/bash.bashrc
 
 RUN pip install -U pip setuptools wheel packaging
 
@@ -111,6 +117,7 @@ RUN apt-get remove -y --purge --allow-change-held-packages \
 ###################################################
 ## Install EFA installer
 RUN cd $HOME \
+    && apt-get update -y \
     && curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
     && tar -xf $HOME/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
     && cd aws-efa-installer \
@@ -148,7 +155,8 @@ RUN pip install -U git+https://github.com/nvidia-cosmos/cosmos-reason1.git#subdi
 RUN pip install -e .
 
 # Installing TAO-Core
-RUN cd tao-core && bash release/python/build_wheel.sh && \
+RUN . /opt/venv/cosmos_rl/bin/activate && \
+    cd tao-core && bash release/python/build_wheel.sh && \
     find dist/ -name "nvidia_tao_core*.whl" -type f | xargs -n 1 pip install && \
     cp nvidia_tao_core/microservices/nginx.conf /etc/nginx/ && \
     cd .. && rm -rf tao-core
