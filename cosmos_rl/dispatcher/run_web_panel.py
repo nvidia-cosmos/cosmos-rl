@@ -23,6 +23,7 @@ from torch.utils.data import Dataset
 import asyncio
 import base64
 import cloudpickle
+import threading
 
 
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -78,6 +79,7 @@ from cosmos_rl.utils.api_suffix import (
 from cosmos_rl.dispatcher.data.packer.base import DataPacker, worker_entry_parser
 from fastapi.responses import Response
 from fastapi import Request
+from concurrent.futures import ThreadPoolExecutor
 
 
 def create_error_response(
@@ -96,16 +98,25 @@ server = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async def monitor_replica_status():
-        while True:
+    shutdown_event = threading.Event()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_running_loop()
+
+    def monitor_replica_status():
+        while not shutdown_event.is_set():
+            # Run in separate process
             controller.policy_status_manager.maintain_life_status()
             controller.rollout_status_manager.maintain_life_status(
                 controller.policy_status_manager
             )
-            await asyncio.sleep(COSMOS_ROLLOUT_SCAN_INTERVAL)
+            if shutdown_event.wait(timeout=COSMOS_ROLLOUT_SCAN_INTERVAL):
+                break  # Exit early if shutdown signaled during sleep
 
-    util.create_async_task(monitor_replica_status())
+    task = loop.run_in_executor(executor, monitor_replica_status)
     yield
+    # Signal shutdown
+    shutdown_event.set()
+    await task
 
 
 app = FastAPI(lifespan=lifespan)
@@ -408,7 +419,7 @@ async def validation_report(request: ValidationReportRequest):
     ]
 
     rollouts_list: List[List[Rollout]] = [
-        rollout_group.compute_rollouts(controller.val_rl_algo)
+        await rollout_group.compute_rollouts(controller.val_rl_algo)
         for rollout_group in rollout_groups
     ]
     controller.policy_status_manager.validation_report_validation_results(
@@ -487,7 +498,7 @@ async def put_rollout_group(rollout: RolloutRequest):
         ]
 
         rollouts_list: List[List[Rollout]] = [
-            rollout_group.compute_rollouts(controller.rl_algo)
+            await rollout_group.compute_rollouts(controller.rl_algo)
             for rollout_group in rollout_groups
         ]
 

@@ -25,6 +25,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 import msgpack
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 
 @dataclass
@@ -83,17 +84,36 @@ class RolloutGroup:
         self.is_end: bool = is_end
         self.reference_answer: str = reference_answer
 
-    def compute_rollouts(self, algo: RuleBasedAlgo) -> List[Rollout]:
+    async def compute_rollouts(
+        self, algo: RuleBasedAlgo, executor: ProcessPoolExecutor = None
+    ) -> List[Rollout]:
         assert (
             self.reference_answer is not None
         ), "[RolloutGroup] Reference answer is not provided"
 
-        rewards = [
-            algo.compute_reward(completion, self.reference_answer)
-            for completion in self.completions
-        ]
+        if executor is not None:
+            loop = asyncio.get_running_loop()
+            rewards = await asyncio.gather(
+                *[
+                    loop.run_in_executor(
+                        executor, algo.compute_reward, completion, self.reference_answer
+                    )
+                    for completion in self.completions
+                ]
+            )
+        else:
+            rewards = [
+                algo.compute_reward(completion, self.reference_answer)
+                for completion in self.completions
+            ]
         logger.debug(f"[RolloutGroup] Rewards: {rewards}")
-        advantages = algo.compute_advantage([r[0] for r in rewards])
+        if executor is not None:
+            loop = asyncio.get_running_loop()
+            advantages = await loop.run_in_executor(
+                executor, algo.compute_advantage, [r[0] for r in rewards]
+            )
+        else:
+            advantages = algo.compute_advantage([r[0] for r in rewards])
         logger.debug(f"[RolloutGroup] Advantages: {advantages}")
 
         return [
