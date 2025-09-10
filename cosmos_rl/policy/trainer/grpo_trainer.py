@@ -293,6 +293,9 @@ class GRPOTrainer(Trainer):
         self.is_master_replica = True
         self.prepare_shard_infos_for_weight_sync_insts()
 
+        # load weight manually
+        self.execute_weight_resume(WeightResumeCommand())
+
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
         keys_n_ranks = []
@@ -518,6 +521,7 @@ class GRPOTrainer(Trainer):
             if "lm_head" in name:
                 local_view = get_local_tensor(param)
                 logger.info(f"Local view of {name}: {local_view.flatten()[-20:]}")
+
         # If KL-divergence is enabled, we need to also sync the reference model state dict
         if self.config.train.train_policy.kl_beta != 0.0:
             if len(self.reference_state_dict) == 0:
@@ -638,6 +642,7 @@ class GRPOTrainer(Trainer):
     def execute_policy_to_policy_broadcast(
         self, command: PolicyToPolicyBroadcastCommand
     ):
+        return False
         logger.info(
             f"[Policy] Policy2Policy Broadcast {command.src_replica_name} to {command.dst_replica_names}"
         )
@@ -665,6 +670,7 @@ class GRPOTrainer(Trainer):
 
     @Trainer.register_policy_command_handler(PolicyToPolicyUnicastCommand)
     def execute_policy_to_policy_unicast(self, command: PolicyToPolicyUnicastCommand):
+        return False
         logger.info(
             f"[Policy] Policy2Policy Unicast {command.src_replica_name} to {command.dst_replica_name}"
         )
