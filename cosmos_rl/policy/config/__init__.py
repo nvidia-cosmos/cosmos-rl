@@ -152,6 +152,10 @@ class CheckpointConfig(BaseModel):
     save_freq: int = Field(
         default=20, description="Checkpoint save frequency for training steps"
     )
+    save_freq_in_epoch: int = Field(
+        default=0,
+        description="Checkpoint save frequency for training epochs. Default to 0 (disabled).",
+    )
     save_mode: str = Field(
         default="async",
         description="Checkpoint save mode for training steps",
@@ -203,8 +207,10 @@ class CheckpointConfig(BaseModel):
             raise ValueError(
                 f"Invalid save_mode: {self.save_mode}. Must be one of ['async', 'sync']"
             )
-        if self.save_freq <= 0:
-            raise ValueError(f"save_freq must be greater than 0, got {self.save_freq}")
+        if self.save_freq_in_epoch <= 0 and self.save_freq <= 0:
+            raise ValueError(
+                f"save_freq must be greater than 0 when save_freq_in_epoch disabled, got {self.save_freq}"
+            )
         return self
 
 
@@ -262,6 +268,10 @@ class GrpoConfig(BaseModel):
     reward_function: Union[str, List[str], Dict[str, float]] = Field(
         default_factory=lambda: ["single_choice"],
         description="Reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. You can add weight to each reward function by passing a dict, e.g., {'single_choice': 0.9, 'format': 0.1}",
+    )
+    filter_reward_metric: Union[str, List[str]] = Field(
+        default_factory=list,
+        description="Reward function to filter in dynamic sampling for DAPO. If specified, only samples with different this rewards will be used for training. If None, no filtering will be applied.",
     )
     temperature: float = Field(
         default=1.0,
@@ -345,6 +355,11 @@ class GrpoConfig(BaseModel):
         description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
     )
 
+    no_outdated_rollout: bool = Field(
+        default=False,
+        description="Disable outdated rollout. If set to True, the rollout engine will stop generating rollouts if the weight outdated.",
+    )
+
     min_filter_prefix_tokens: Optional[int] = Field(
         default=None,
         description="Minimum number of tokens to filter the prefix tokens for the rollouts inside the same group. "
@@ -367,6 +382,8 @@ class GrpoConfig(BaseModel):
         assert (
             len(self.reward_function) > 0
         ), "reward_function must be a dict of reward functions"
+        if isinstance(self.filter_reward_metric, str):
+            self.filter_reward_metric = [self.filter_reward_metric]
         return self
 
 

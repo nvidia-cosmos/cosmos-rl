@@ -13,6 +13,7 @@ def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     data_packer: Optional[DataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
+    filter_reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,

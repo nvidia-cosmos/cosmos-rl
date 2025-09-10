@@ -112,6 +112,9 @@ def main():
         dataset=get_dataset,
         # Override the reward functions defined in toml
         reward_fns=[custom_reward_fn],
+        filter_reward_fns=[
+            direct_math_reward_fn
+        ],  # specify which reward function to filter
     )
 
 

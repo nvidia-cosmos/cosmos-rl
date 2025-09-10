@@ -98,7 +98,9 @@ def slice_tensor_with_strategy(
     """
 
     view = tensor
-    assert view.shape[idx] % tensor_split_strategy.total_size == 0
+    assert (
+        view.shape[idx] % tensor_split_strategy.total_size == 0
+    ), f"Tensor shape {view.shape} on dim {idx} must be divisible by {tensor_split_strategy.total_size}"
     start = (
         view.shape[idx]
         // tensor_split_strategy.total_size

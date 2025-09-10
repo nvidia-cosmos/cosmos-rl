@@ -371,6 +371,8 @@ class DataFetchCommand(Command):
         global_step: int,
         total_steps: int,
         remain_samples_num: int,
+        # For save checkpoint
+        do_save: bool = False,
         # For profiling
         do_profile: Optional[bool] = None,
         active_steps: Optional[int] = None,
@@ -390,6 +392,8 @@ class DataFetchCommand(Command):
         self.total_steps = total_steps
         self.remain_samples_num = remain_samples_num
 
+        self.do_save = do_save
+
         # Profling config
         self.do_profile = do_profile
         self.active_steps = active_steps
@@ -404,6 +408,8 @@ class DataFetchCommand(Command):
     global_step: Optional[int]
     total_steps: Optional[int]
     remain_samples_num: int
+
+    do_save: bool
 
     do_profile: bool
     active_steps: int
@@ -421,6 +427,7 @@ class DataFetchCommand(Command):
         global_step: Optional[int],
         total_steps: Optional[int],
         remain_samples_num: int,
+        do_save: bool,
         redis_handler: RedisStreamHandler,
     ):
         cmd = cls(
@@ -429,6 +436,7 @@ class DataFetchCommand(Command):
             global_step,
             total_steps,
             remain_samples_num,
+            do_save,
             replica.sub_profiler_config.do_profile,
             replica.sub_profiler_config.active_steps,
             replica.sub_profiler_config.rank_filter,

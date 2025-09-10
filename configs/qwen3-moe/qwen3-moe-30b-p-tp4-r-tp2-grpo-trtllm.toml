@@ -21,11 +21,13 @@ fsdp_offload = false
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 2
 sync_weight_interval = 1
+deterministic = true
+
 
 [rollout]
 gpu_memory_utilization = 0.7
 enable_chunked_prefill = false
-max_response_length = 512 
+max_response_length = 512
 n_generation = 16
 batch_size = 1
 quantization = "none"
