@@ -151,7 +151,7 @@ class Trainer(CommMixin):
             config,
             parallel_dims,
             replica_name=self.replica_name,
-            alternative_urls=self.get_alternative_urls(
+            alternative_urls=self.api_client.get_alternative_urls(
                 COSMOS_API_SET_TRACE_PATH_SUFFIX
             ),
         )

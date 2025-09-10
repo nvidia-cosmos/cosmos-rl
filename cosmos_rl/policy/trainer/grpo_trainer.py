@@ -26,7 +26,6 @@ import cosmos_rl.utils.distributed as dist_util
 import time
 import torch.distributed as dist
 import numpy as np
-import requests
 import threading
 import asyncio
 from queue import Queue, Empty
@@ -42,37 +41,26 @@ from cosmos_rl.dispatcher.command import (
 )
 import atexit
 from cosmos_rl.utils.util import (
-    list_to_b64,
     msgpack_c_long,
     msgunpack_c_long,
     fix_data_type_size,
-    sanitize,
     compute_mfu,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
-    WeightSyncInstructionsGroup,
 )
 from functools import cached_property
 from typing import List, Callable, Dict, Any, Tuple, Optional
 import types
 from functools import partial
 import msgpack
-from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
 )
 from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
-from cosmos_rl.dispatcher.data.schema import Rollout
-from cosmos_rl.utils.api_suffix import (
-    COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
-    COSMOS_API_POLICY_TRAIN_ACK_SUFFIX,
-    COSMOS_API_POLICY_SHARD_INFOS_SUFFIX,
-    COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
-)
-
+from cosmos_rl.dispatcher.replica import Rollout
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
@@ -245,7 +233,7 @@ class GRPOTrainer(Trainer):
         self.inter_policy_nccl = HighAvailabilitylNccl(
             replica_name=self.replica_name,
             global_rank=self.global_rank,
-            controller_hosts=self.remote_hosts,
+            api_client=self.api_client,
         )
         self.rollouts_comm = {}
         self.kv_store = dist_util.DistKVStore(
@@ -333,28 +321,12 @@ class GRPOTrainer(Trainer):
             logger.info(
                 f"[Policy] Parse {len(self.trainable_params)} trainable params to controller."
             )
-
-            body = {
-                "shard_infos": self.all_rank_local_shard_infos,
-                "param_groups": [],
-                "sorted_params": sorted_params_all_rank,
-                "trainable_params": list(self.trainable_params),
-            }
-            data = msgpack.packb(body)
-            try:
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        data=data,
-                        headers={"Content-Type": "application/msgpack"},
-                    ),
-                    self.get_alternative_urls(COSMOS_API_POLICY_SHARD_INFOS_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"[Policy] Failed to post policy shard infos to controller after retries {e}."
-                )
+            self.api_client.setPolicyShardInfo(
+                shard_infos=self.all_rank_local_shard_infos,
+                param_groups=[],
+                sorted_params=sorted_params_all_rank,
+                trainable_params=list(self.trainable_params),
+            )
 
     def handle_shutdown(self):
         if not hasattr(self, "_handle_shutdown_called"):
@@ -711,26 +683,8 @@ class GRPOTrainer(Trainer):
             if self.global_rank == 0:
                 # Only create nccl group id in rank 0.
                 nccl_uuid = create_nccl_uid()
-                base64_nccl_group_id = list_to_b64(nccl_uuid)
                 logger.debug(f"[Policy] mesh_key: {mesh_key}")
-                try:
-                    make_request_with_retry(
-                        partial(
-                            requests.post,
-                            json={
-                                "unique_pair_name": mesh_key,
-                                "handle_base64": base64_nccl_group_id,
-                            },
-                        ),
-                        self.get_alternative_urls(
-                            COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX
-                        ),
-                        max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                    )
-                except Exception as e:
-                    raise RuntimeError(
-                        f"[Policy] Failed in post nccl group_id to controller after retries {e}."
-                    )
+                self.api_client.setNcclCommInitiator(mesh_key, nccl_uuid)
             # broadcast the nccl group id to all ranks
             nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
             self.p2r_nccl_uuids[mesh_key] = nccl_uuid
@@ -759,27 +713,9 @@ class GRPOTrainer(Trainer):
 
         if self.policy_to_rollout_insts is None:
             self.policy_to_rollout_insts = []
-            try:
-                insts_meta = make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={
-                            "rank": self.global_rank,
-                        },
-                    ),
-                    self.get_alternative_urls(
-                        COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX
-                    ),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-                insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
-                self.policy_to_rollout_insts = [
-                    WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
-                ]
-            except Exception as e:
-                raise RuntimeError(
-                    f"[Policy] Failed in fetching policy to rollout insts from controller after retries {e}."
-                )
+            self.policy_to_rollout_insts = self.api_client.getPolicyShardSendInsts(
+                self.global_rank
+            )
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
         # There is a local-replica comm in training step
@@ -984,25 +920,13 @@ class GRPOTrainer(Trainer):
 
         # Train ACK
         if is_master_rank(self.parallel_dims, self.global_rank):
-            try:
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={
-                            "replica_name": self.replica_name,
-                            "weight_step": command.global_step,
-                            "total_steps": command.total_steps,
-                            "profile_finished": self.profiler.check_finished(),
-                            "report_data": sanitize(report_data),
-                        },
-                    ),
-                    self.get_alternative_urls(COSMOS_API_POLICY_TRAIN_ACK_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"[Policy] Failed in in send train ack to controller after retries {e}."
-                )
+            self.api_client.sendPolicyTrainAck(
+                self.replica_name,
+                command.global_step,
+                command.total_steps,
+                self.profiler.check_finished(),
+                report_data,
+            )
 
         logger.debug(f"[Policy] Train ack sent for global step {command.global_step}.")
         return command.replica_should_stop()
