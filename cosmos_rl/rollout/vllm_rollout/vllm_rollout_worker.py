@@ -1344,8 +1344,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
                 if len(completions):
                     if self.global_rank == 0:
+                        completion_text = (
+                            completions[0][-1]
+                            if len(completions[0]) > 0
+                            else "No completion"
+                        )
                         logger.info(
-                            f"[Rollout] prompt: {prompts[0][1]}, completion:\n{completions[0][0]}"
+                            f"[Rollout] prompt: {prompts[0][1]}\nlms completion:\n{completion_text}"
                         )
                 if len(completions):
                     batch_size = len(prompts)
