@@ -805,8 +805,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.config.validation.enable,
             )
             self.prepare_shard_infos_for_weight_sync_insts()
+
         if command.dst_replica_name != self.replica_name:
             return
+
         # get the nccl_unique_id from the controller
         communicator_index = {}
         nccl_unique_id_key = command.src_replica_name + "_" + command.dst_replica_name
@@ -1059,6 +1061,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         if not parameter.is_contiguous():
                             recv_tensor = parameter.contiguous()
 
+                        logger.info(f"[Rollout] Broadcasting {name} to all replicas.")
                         nccl_broadcast(
                             recv_tensor, src_rank, self.global_commnicator_idex
                         )
@@ -1338,6 +1341,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # Remove empty completions
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []
+
+                if len(completions):
+                    if self.global_rank == 0:
+                        logger.info(
+                            f"[Rollout] prompt: {prompts[0][1]}, completion:\n{completions[0][0]}"
+                        )
                 if len(completions):
                     batch_size = len(prompts)
                     assert (
