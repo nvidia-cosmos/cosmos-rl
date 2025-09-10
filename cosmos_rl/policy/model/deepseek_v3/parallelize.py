@@ -272,7 +272,7 @@ def _init_meshes(
 
 
 @pre_parallelize_sanity_check
-def parallelize_model(
+def parallelize(
     model: nn.Module,
     parallel_dims: ParallelDims,
     config: CosmosConfig,
