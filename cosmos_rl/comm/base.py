@@ -93,7 +93,7 @@ class CommMixin:
 
     def init_meta(self):
         # Fetch metadata from the controller
-        metadata = self.api_client.getControllerMetadata()
+        metadata = self.api_client.get_controller_metadata()
         self.init_data_packer(metadata)
 
     def init_data_packer(self, metadata: Dict[str, Any]):
@@ -243,7 +243,7 @@ class CommMixin:
 
     def heartbeat_trigger(self, shutdown_signal: threading.Event):
         while True:
-            self.api_client.triggerHeartbeat(self.replica_name)
+            self.api_client.send_heartbeat(self.replica_name)
 
             # If the heartbeat interval is greater than 1, we need to check the shutdown signal every second
             # for faster shutdown check

@@ -100,7 +100,7 @@ class APIClient(object):
             urls.append(urljoin(base_url, suffix))
         return urls
 
-    def getControllerMetadata(self) -> Dict[str, Any]:
+    def get_controller_metadata(self) -> Dict[str, Any]:
         """
         Get metadata from the controller with retry logic.
         """
@@ -172,7 +172,7 @@ class APIClient(object):
         except Exception as e:
             logger.error(f"Failed to unregister from controller: {e}")
 
-    def triggerHeartbeat(self, replica_name: str):
+    def send_heartbeat(self, replica_name: str):
         try:
             make_request_with_retry(
                 partial(
@@ -185,7 +185,7 @@ class APIClient(object):
         except Exception as e:
             logger.error(f"Failed to send heartbeat to controller: {e}")
 
-    def setNcclCommInitiator(self, unique_pair_name: str, nccl_uuid: List[int]):
+    def set_nccl_comm_initiator(self, unique_pair_name: str, nccl_uuid: List[int]):
         base64_nccl_group_id = list_to_b64(nccl_uuid)
         try:
             make_request_with_retry(
@@ -204,7 +204,7 @@ class APIClient(object):
                 f"[{self.role}] Failed in post nccl group_id to controller after retries {e}."
             )
 
-    def getNcclCommAcceptor(self, unique_pair_name: str) -> List[int]:
+    def get_nccl_comm_acceptor(self, unique_pair_name: str) -> List[int]:
         try:
             r = make_request_with_retry(
                 partial(
@@ -221,7 +221,7 @@ class APIClient(object):
                 f"[{self.role}] Failed in get nccl group_id from controller after retries {e}."
             )
 
-    def sendNcclCommError(self, replica_name: str, error: Exception):
+    def send_nccl_comm_error(self, replica_name: str, error: Exception):
         try:
             make_request_with_retry(
                 partial(
@@ -236,7 +236,7 @@ class APIClient(object):
                 f"[{self.role}] Failed in post nccl comm error to controller after retries {e}."
             )
 
-    def clearNcclCommStore(self, unique_pair_name: str):
+    def clear_nccl_comm_store(self, unique_pair_name: str):
         try:
             make_request_with_retry(
                 partial(
@@ -251,7 +251,7 @@ class APIClient(object):
                 f"[{self.role}] Failed in clear nccl comm store from controller after retries {e}."
             )
 
-    def setPolicyShardInfo(
+    def set_policy_shard_info(
         self,
         shard_infos: List[Dict[str, Any]],
         param_groups: List[List[str]],
@@ -281,7 +281,7 @@ class APIClient(object):
                 f"[Policy] Failed to post policy shard infos to controller after retries {e}."
             )
 
-    def setRolloutShardInfo(
+    def set_rollout_shard_info(
         self,
         shard_infos: List[Dict[str, Any]],
         param_groups: List[List[str]],
@@ -309,7 +309,9 @@ class APIClient(object):
                 f"[Rollout] Failed in post shard infos to controller after retries {e}."
             )
 
-    def getPolicyShardSendInsts(self, rank: int) -> List[WeightSyncInstructionsGroup]:
+    def get_policy_shard_send_insts(
+        self, rank: int
+    ) -> List[WeightSyncInstructionsGroup]:
         try:
             insts_meta = make_request_with_retry(
                 partial(
@@ -326,7 +328,9 @@ class APIClient(object):
                 f"[Policy] Failed in post policy shard send insts to controller after retries {e}."
             )
 
-    def getRolloutShardRecvInsts(self, rank: int) -> List[WeightSyncInstructionsGroup]:
+    def get_rollout_shard_recv_insts(
+        self, rank: int
+    ) -> List[WeightSyncInstructionsGroup]:
         try:
             insts_meta = make_request_with_retry(
                 partial(
@@ -343,7 +347,7 @@ class APIClient(object):
                 f"[Rollout] Failed in fetching rollout shard recv insts from controller after retries {e}."
             )
 
-    def sendPolicyTrainAck(
+    def send_policy_train_ack(
         self,
         replica_name: str,
         weight_step: int,
@@ -371,7 +375,7 @@ class APIClient(object):
                 f"[Policy] Failed in in send train ack to controller after retries {e}."
             )
 
-    def getTrainableParams(self) -> List[str]:
+    def get_trainable_params(self) -> List[str]:
         try:
             r = make_request_with_retry(
                 partial(
@@ -386,7 +390,7 @@ class APIClient(object):
                 f"[Rollout] Failed in fetching trainable params from controller after retries {e}."
             )
 
-    def sendValidationReport(self, report: ValidationReportRequest):
+    def send_validation_report(self, report: ValidationReportRequest):
         try:
             make_request_with_retry(
                 partial(
@@ -401,7 +405,7 @@ class APIClient(object):
                 f"[Rollout] Failed in sending validation report to controller after retries {e}."
             )
 
-    def getNextPrompt(
+    def get_next_prompt(
         self, batch_size: int, validation_step: Optional[int] = None
     ) -> Tuple[List[Tuple[int, str]], bool]:
         try:
@@ -423,7 +427,7 @@ class APIClient(object):
             )
             return [], False
 
-    def sendRolloutCompletion(self, response: RolloutRequest):
+    def send_rollout_completion(self, response: RolloutRequest):
         try:
             make_request_with_retry(
                 partial(

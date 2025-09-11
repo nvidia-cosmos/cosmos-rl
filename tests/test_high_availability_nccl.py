@@ -405,7 +405,7 @@ def main():
 
     # 3. init the tester
     api_client = APIClient(role="POLICY")
-    metadata = api_client.getControllerMetadata()
+    metadata = api_client.get_controller_metadata()
     cosmos_config = Config.from_dict(metadata["config"])
     tester = TestHANccl(api_client, cosmos_config)
     dist.barrier()
