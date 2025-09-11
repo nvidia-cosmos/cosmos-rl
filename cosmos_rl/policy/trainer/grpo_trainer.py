@@ -294,10 +294,14 @@ class GRPOTrainer(Trainer):
         self.prepare_shard_infos_for_weight_sync_insts()
 
         # load weight manually
-        self.execute_weight_resume(WeightResumeCommand(self.replica_name))
+        # self.execute_weight_resume(WeightResumeCommand(self.replica_name))
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
+        for name, tensor in self.model.state_dict().items():
+            logger.info(f"[Policy] State dict: {name} {tensor.shape}")
+
+        logger.info(f"[Policy] Model type: {type(self.model)}")
         keys_n_ranks = []
         trainable_params = self.model.trainable_params
         for name, tensor_or_callable in self.model.weight_sync_transforms:
