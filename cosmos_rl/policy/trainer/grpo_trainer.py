@@ -642,7 +642,6 @@ class GRPOTrainer(Trainer):
     def execute_policy_to_policy_broadcast(
         self, command: PolicyToPolicyBroadcastCommand
     ):
-        return False
         logger.info(
             f"[Policy] Policy2Policy Broadcast {command.src_replica_name} to {command.dst_replica_names}"
         )
@@ -670,7 +669,6 @@ class GRPOTrainer(Trainer):
 
     @Trainer.register_policy_command_handler(PolicyToPolicyUnicastCommand)
     def execute_policy_to_policy_unicast(self, command: PolicyToPolicyUnicastCommand):
-        return False
         logger.info(
             f"[Policy] Policy2Policy Unicast {command.src_replica_name} to {command.dst_replica_name}"
         )
