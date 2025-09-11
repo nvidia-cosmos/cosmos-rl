@@ -546,10 +546,59 @@ class ModelRegistry:
                         model.apply_trainable(config.policy.trainable_map)
 
                 except Exception as e:
-                    logger.error(
-                        f"Failed to load model {model_name_or_path} with error: {e}"
-                    )
-                    raise e
+                    if model_type == COSMOS_HF_MODEL_TYPES:
+                        raise e
+                    else:
+                        logger.warning(
+                            f"Failed to load model {model_name_or_path}, trying to load with {COSMOS_HF_MODEL_TYPES} instead."
+                        )
+                        model_type = COSMOS_HF_MODEL_TYPES
+                        model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
+
+                        try:
+                            model = model_cls.from_pretrained(
+                                hf_config,
+                                model_name_or_path,
+                                max_position_embeddings=config.policy.model_max_length,
+                            )
+                            # Apply LoRA to the model
+                            if config.policy.lora is not None:
+                                logger.info(
+                                    f"Applying LoRA to the model: {config.policy.lora}"
+                                )
+                                from cosmos_rl.policy.lora.plugin import (
+                                    inject_lora_adapters,
+                                    mark_only_lora_as_trainable,
+                                )
+
+                                model, _ = inject_lora_adapters(
+                                    model, config.policy.lora
+                                )
+                                mark_only_lora_as_trainable(model, config.policy.lora)
+
+                            if config.policy.enable_liger_kernel:
+                                util.replace_with_liger_equivalents(model)
+
+                            if config.policy.trainable_map is not None:
+                                if config.policy.lora is not None:
+                                    if any(
+                                        v for v in config.policy.trainable_map.values()
+                                    ):
+                                        raise RuntimeError(
+                                            "If LoRA is applied, only setting `requires_grad` to `False` inside `config.policy.trainable_map` can be combined with LoRA."
+                                            "Otherwise, please instead include the trainable modules in `config.policy.lora.modules_to_save`."
+                                        )
+                                model.apply_trainable(config.policy.trainable_map)
+
+                        except Exception as fallback_e:
+                            logger.error(
+                                f"Default fallback strategy also failed to load model {model_name_or_path}. "
+                                f"Original error: {e}. Fallback error: {fallback_e}"
+                            )
+                            raise RuntimeError(
+                                f"Both primary and fallback model loading strategies failed. "
+                                f"Primary: {e}, Fallback: {fallback_e}"
+                            ) from e
         if model is None:
             raise ValueError(f"Model {model_name_or_path} not supported.")
         return model
