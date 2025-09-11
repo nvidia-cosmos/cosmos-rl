@@ -19,10 +19,10 @@ from functools import wraps
 import os
 from typing import Optional, Dict, Any, Callable
 
-from cosmos_rl.utils.status_logging import (
+from nvidia_tao_core.loggers.logging import (
     set_status_logger,
     get_status_logger,
-    CosmosStatusLogger,
+    StatusLogger,
     Status,
     Verbosity
 )
@@ -32,7 +32,6 @@ from cosmos_rl.utils.logging import logger
 def monitor_status(name: str = 'Cosmos-RL',
                    mode: str = 'train',
                    results_dir: Optional[str] = None,
-                   enable_wandb: bool = False,
                    verbosity: int = None):
     """Status monitoring decorator for Cosmos-RL functions.
 
@@ -43,7 +42,6 @@ def monitor_status(name: str = 'Cosmos-RL',
         name: Name of the operation being monitored
         mode: Mode of operation (e.g., 'train', 'rollout', 'evaluate')
         results_dir: Directory to save status logs (auto-detects from config/TAO_API_JOB_ID)
-        enable_wandb: Whether to enable wandb logging integration
         verbosity: Logging verbosity level
     """
     def inner(runner: Callable) -> Callable:
@@ -80,12 +78,11 @@ def monitor_status(name: str = 'Cosmos-RL',
             # Setup status logging - single consolidated status.json file
             status_file = os.path.join(default_results_dir, "status.json")
             log_verbosity = verbosity if verbosity is not None else Verbosity.INFO
-            status_logger = CosmosStatusLogger(
+            status_logger = StatusLogger(
                 filename=status_file,
                 is_master=True,
                 verbosity=log_verbosity,
-                append=True,  # Append to consolidated status.json file
-                enable_wandb=enable_wandb
+                append=True  # Append to consolidated status.json file
             )
             set_status_logger(status_logger)
             s_logger = get_status_logger()
@@ -187,8 +184,7 @@ def log_step_progress(step_name: str = "step"):
             s_logger.kpi = {'step_name': step_name}
             s_logger.write(
                 status_level=Status.RUNNING,
-                message=f"Executing {step_name}",
-                step=step_num
+                message=f"Executing {step_name}"
             )
 
             try:
@@ -197,8 +193,7 @@ def log_step_progress(step_name: str = "step"):
                 s_logger.kpi = {'step_name': step_name, 'status': 'completed'}
                 s_logger.write(
                     status_level=Status.SUCCESS,
-                    message=f"{step_name} completed",
-                    step=step_num
+                    message=f"{step_name} completed"
                 )
 
                 return result
@@ -211,8 +206,7 @@ def log_step_progress(step_name: str = "step"):
                 }
                 s_logger.write(
                     status_level=Status.FAILURE,
-                    message=f"{step_name} failed: {str(e)}",
-                    step=step_num
+                    message=f"{step_name} failed: {str(e)}"
                 )
                 raise
 
@@ -246,8 +240,7 @@ def monitor_replica_lifecycle(replica_type: str = "replica"):
             }
             s_logger.write(
                 status_level=Status.RUNNING,
-                message=f"{replica_type} lifecycle event: {func.__name__}",
-                replica_name=replica_name
+                message=f"{replica_type} lifecycle event: {func.__name__}"
             )
 
             return func(*args, **kwargs)
@@ -258,7 +251,6 @@ def monitor_replica_lifecycle(replica_type: str = "replica"):
 
 def monitor_training(name: str = 'Cosmos-RL Training',
                     results_dir: Optional[str] = None,
-                    enable_wandb: bool = False,
                     verbosity: int = None,
                     track_timing: bool = True):
     """Training-specific monitoring decorator for Cosmos-RL.
@@ -270,7 +262,6 @@ def monitor_training(name: str = 'Cosmos-RL Training',
     Args:
         name: Name of the training operation
         results_dir: Directory to save training logs
-        enable_wandb: Whether to enable wandb logging integration
         verbosity: Logging verbosity level
         track_timing: Whether to track detailed timing information
     """
@@ -306,12 +297,11 @@ def monitor_training(name: str = 'Cosmos-RL Training',
 
             # Setup status logger - single consolidated status.json file
             log_verbosity = verbosity if verbosity is not None else Verbosity.INFO
-            status_logger = CosmosStatusLogger(
+            status_logger = StatusLogger(
                 filename=os.path.join(default_results_dir, 'status.json'),
                 is_master=True,
                 verbosity=log_verbosity,
-                append=True,  # Append to consolidated status.json file
-                enable_wandb=enable_wandb
+                append=True  # Append to consolidated status.json file
             )
             set_status_logger(status_logger)
             s_logger = get_status_logger()
@@ -331,8 +321,7 @@ def monitor_training(name: str = 'Cosmos-RL Training',
                 }
                 s_logger.write(
                     status_level=Status.STARTED,
-                    message=f"{name} started - Total steps: {total_steps}",
-                    step=current_step
+                    message=f"{name} started - Total steps: {total_steps}"
                 )
 
                 # Execute the training function
@@ -355,8 +344,7 @@ def monitor_training(name: str = 'Cosmos-RL Training',
                 s_logger.kpi = training_kpis
                 s_logger.write(
                     status_level=Status.RUNNING,
-                    message=f"{name} completed successfully",
-                    step=total_steps
+                    message=f"{name} completed successfully"
                 )
 
                 logger.info(f"{name} completed successfully")

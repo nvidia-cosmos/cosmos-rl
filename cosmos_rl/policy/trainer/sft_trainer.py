@@ -29,6 +29,7 @@ from cosmos_rl.utils.wandb_logger import (
     is_wandb_available,
     log_wandb,
 )
+from cosmos_rl.utils.tao_status_logger import log_tao_status
 import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, Sampler
@@ -536,6 +537,19 @@ class SFTTrainer(Trainer):
                 val_total_loss += val_loss.item() * val_inputs.size(0)
             val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
             logger.info(f"Validation loss: {val_avg_loss}")
+
+            # TAO status logging for validation
+            if self.config.logging.logger and "tao" in self.config.logging.logger:
+                validation_data = {
+                    "val/loss": float(val_avg_loss),
+                    "val/step": int(self.train_step)
+                }
+                log_tao_status(
+                    data=validation_data,
+                    step=int(self.train_step),
+                    component_name=f"{self.config.logging.experiment_name} SFT Validation",
+                    max_steps=int(self.total_steps)
+                )
         return val_avg_loss
 
     def train(self):
@@ -817,12 +831,10 @@ class SFTTrainer(Trainer):
 
                         report_data = {
                             "train/iteration_time": iter_time,
-                            "train/loss_avg": global_avg_loss,
-                            "train/loss_max": global_max_loss,
+                            "train/loss_avg": global_avg_loss.item() if isinstance(global_avg_loss, torch.Tensor) else global_avg_loss,
+                            "train/loss_max": global_max_loss.item() if isinstance(global_max_loss, torch.Tensor) else global_max_loss,
                             "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                            "train/grad_norm": grad_norm
-                            if grad_norm is not None
-                            else -1,
+                            "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else (grad_norm if grad_norm is not None else -1),
                         }
 
                         # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
@@ -836,7 +848,7 @@ class SFTTrainer(Trainer):
                                 dtype=self.config.train.param_dtype,
                             )
                             for k, v in mfu.items():
-                                report_data[f"train/{k}"] = v
+                                report_data[f"train/{k}"] = v.item() if isinstance(v, torch.Tensor) else v
                         if (
                             "wandb" in self.config.logging.logger
                             and is_wandb_available()
@@ -844,6 +856,13 @@ class SFTTrainer(Trainer):
                             log_wandb(
                                 data=report_data,
                                 step=self.train_step,
+                            )
+                        if "tao" in self.config.logging.logger:
+                            log_tao_status(
+                                data=report_data,
+                                step=int(self.train_step),
+                                component_name=f"{self.config.logging.experiment_name} SFT",
+                                max_steps=int(self.total_steps)
                             )
                         if "console" in self.config.logging.logger:
                             logger.info(
