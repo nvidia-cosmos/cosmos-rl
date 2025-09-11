@@ -267,7 +267,7 @@ class HFModel(BaseModel):
         multi_modal_projector = None
         if self.is_vlm:
             if hasattr(self.model, "multi_modal_projector", None):
-                multi_modal_projector = self.model.vision_tower
+                multi_modal_projector = self.model.multi_modal_projector
             elif hasattr(self.model, "mlp1", None):
                 # InternVL
                 multi_modal_projector = self.model.mlp1
