@@ -87,7 +87,7 @@ class APIClient(object):
                 r"^([a-zA-Z0-9_.-]+):([1-9][0-9]{0,4})$",
                 f"{remote_ip}:{self.remote_port}",
             ):
-                raise ValueError(f"Invalid remote host: {remote_ip}:{remote_port}")
+                raise ValueError(f"Invalid remote host: {remote_ip}:{self.remote_port}")
 
         self.base_urls = [
             f"http://{remote_ip}:{self.remote_port}{COSMOS_API_META_SUFFIX}"
