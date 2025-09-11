@@ -69,7 +69,7 @@ srun \
     # Start the controller
     export COSMOS_LOG_LEVEL=DEBUG
     cd $(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))")
-    ./cosmos_rl/launcher/launch_controller.sh --port ${CONTROLLER_PORT} --config /opt/tmp_config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]]
+    ./cosmos_rl/launcher/launch_controller.sh --port ${CONTROLLER_PORT} --config /opt/tmp_config/$(basename [[CONFIG_PATH]]) --script [[LAUNCHER]] [[LAUNCHER_ARGS]]
     ' \
     &
 pid_controller=$!
@@ -89,7 +89,7 @@ srun \
     bash -c \
     '
     cd $(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))")
-    python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type policy --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
+    python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type policy --config /opt/tmp_config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
     ' \
     &
 pid_policy=$!
@@ -110,7 +110,7 @@ if [[ ${NUM_ROLLOUT_NODES} -gt 0 ]]; then
         bash -c \
         '
         cd $(python -c "import cosmos_rl,os;print(os.path.dirname(os.path.dirname(cosmos_rl.__file__)))")
-        python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type rollout --script [[LAUNCHER]] --config /opt/tmp_config/$(basename [[CONFIG_PATH]])
+        python ./cosmos_rl/tools/slurm/cosmos_rl_slurm_launch.py --type rollout --config /opt/tmp_config/$(basename [[CONFIG_PATH]]) [[LAUNCHER]] [[LAUNCHER_ARGS]]
         ' \
         &
     pid_rollout=$!
