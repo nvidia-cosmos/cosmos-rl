@@ -26,6 +26,8 @@ import tempfile
 import subprocess
 import json
 import toml
+from argparse import REMAINDER
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -174,6 +176,8 @@ def main():
         help="The launcher to use, default is `cosmos_rl.dispatcher.run_web_panel`, a custom launcher can be provided for custom dataset and reward functions injection.",
     )
 
+    parser.add_argument("launcher_args", nargs=REMAINDER)
+
     args = parser.parse_args()
 
     with open(args.config_path, "r") as f:
@@ -224,6 +228,11 @@ def main():
         )
     n_rollout_nodes = len(rollout_node_launch_metadata)
 
+    if args.launcher_args is not None:
+        launcher_args = " ".join(args.launcher_args)
+    else:
+        launcher_args = ""
+
     # Template for the slurm script
     template_vars = {
         "TOTAL_NODES": f"{n_policy_nodes + n_rollout_nodes}",
@@ -234,6 +243,7 @@ def main():
         "SLURM_JOB_NAME": args.job_name,
         "CONFIG_PATH": config_tmpfile,
         "LAUNCHER": args.launcher,
+        "LAUNCHER_ARGS": launcher_args,
         "EXTRA_SBATCH_ARGS": "\n".join(
             f"#SBATCH {arg}" for arg in args.extra_sbatch_args
         ),
