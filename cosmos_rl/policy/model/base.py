@@ -508,42 +508,54 @@ class ModelRegistry:
             else config.train.param_dtype
         )
 
+        def _apply_model_post_processing(model, config):
+            """Apply LoRA, liger kernel, and trainable map configurations to the model."""
+            # Apply LoRA to the model
+            if config.policy.lora is not None:
+                logger.info(f"Applying LoRA to the model: {config.policy.lora}")
+                from cosmos_rl.policy.lora.plugin import (
+                    inject_lora_adapters,
+                    mark_only_lora_as_trainable,
+                )
+
+                model, _ = inject_lora_adapters(model, config.policy.lora)
+                mark_only_lora_as_trainable(model, config.policy.lora)
+
+            if config.policy.enable_liger_kernel:
+                util.replace_with_liger_equivalents(model)
+
+            # If we further need finer-grained control over trainable parameters, we need to apply trainable flags after LoRA is applied
+            if config.policy.trainable_map is not None:
+                if config.policy.lora is not None:
+                    # Only setting `requires_grad` to `False` can be combined with LoRA
+                    # This can be useful for:
+                    #  lora_config.target_modules is set to ['q_proj', 'k_proj', 'v_proj']
+                    # But there are both `q_proj` and `k_proj` in LLM and vision encoder,
+                    # If we only want to train lora on vision, we can disable grad on LLM by setting `config.policy.trainable_map` to `{"model.llm": False}`
+                    if any(v for v in config.policy.trainable_map.values()):
+                        raise RuntimeError(
+                            "If LoRA is applied, only setting `requires_grad` to `False` inside `config.policy.trainable_map` can be combined with LoRA."
+                            "Otherwise, please instead include the trainable modules in `config.policy.lora.modules_to_save`."
+                        )
+                model.apply_trainable(config.policy.trainable_map)
+
+            return model
+
+        def _load_model_with_config(model_cls, hf_config, model_name_or_path, config):
+            """Load model and apply post-processing configurations."""
+            model = model_cls.from_pretrained(
+                hf_config,
+                model_name_or_path,
+                max_position_embeddings=config.policy.model_max_length,
+            )
+            return _apply_model_post_processing(model, config)
+
         with torch.device("meta"):
             with util.cosmos_default_dtype(cosmos_default_dtype):
                 try:
-                    model = model_cls.from_pretrained(
-                        hf_config,
-                        model_name_or_path,
-                        max_position_embeddings=config.policy.model_max_length,
+                    model = _load_model_with_config(
+                        model_cls, hf_config, model_name_or_path, config
                     )
-                    # Apply LoRA to the model
-                    if config.policy.lora is not None:
-                        logger.info(f"Applying LoRA to the model: {config.policy.lora}")
-                        from cosmos_rl.policy.lora.plugin import (
-                            inject_lora_adapters,
-                            mark_only_lora_as_trainable,
-                        )
-
-                        model, _ = inject_lora_adapters(model, config.policy.lora)
-                        mark_only_lora_as_trainable(model, config.policy.lora)
-
-                    if config.policy.enable_liger_kernel:
-                        util.replace_with_liger_equivalents(model)
-
-                    # If we further need finer-grained control over trainable parameters, we need to apply trainable flags after LoRA is applied
-                    if config.policy.trainable_map is not None:
-                        if config.policy.lora is not None:
-                            # Only setting `requires_grad` to `False` can be combined with LoRA
-                            # This can be useful for:
-                            #  lora_config.target_modules is set to ['q_proj', 'k_proj', 'v_proj']
-                            # But there are both `q_proj` and `k_proj` in LLM and vision encoder,
-                            # If we only want to train lora on vision, we can disable grad on LLM by setting `config.policy.trainable_map` to `{"model.llm": False}`
-                            if any(v for v in config.policy.trainable_map.values()):
-                                raise RuntimeError(
-                                    "If LoRA is applied, only setting `requires_grad` to `False` inside `config.policy.trainable_map` can be combined with LoRA."
-                                    "Otherwise, please instead include the trainable modules in `config.policy.lora.modules_to_save`."
-                                )
-                        model.apply_trainable(config.policy.trainable_map)
 
                 except Exception as e:
                     if model_type == COSMOS_HF_MODEL_TYPES:
@@ -556,45 +568,10 @@ class ModelRegistry:
                         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
                         try:
-                            model = model_cls.from_pretrained(
-                                hf_config,
-                                model_name_or_path,
-                                max_position_embeddings=config.policy.model_max_length,
+                            model = _load_model_with_config(
+                                model_cls, hf_config, model_name_or_path, config
                             )
-                            # Apply LoRA to the model
-                            if config.policy.lora is not None:
-                                logger.info(
-                                    f"Applying LoRA to the model: {config.policy.lora}"
-                                )
-                                from cosmos_rl.policy.lora.plugin import (
-                                    inject_lora_adapters,
-                                    mark_only_lora_as_trainable,
-                                )
-
-                                model, _ = inject_lora_adapters(
-                                    model, config.policy.lora
-                                )
-                                mark_only_lora_as_trainable(model, config.policy.lora)
-
-                            if config.policy.enable_liger_kernel:
-                                util.replace_with_liger_equivalents(model)
-
-                            if config.policy.trainable_map is not None:
-                                if config.policy.lora is not None:
-                                    if any(
-                                        v for v in config.policy.trainable_map.values()
-                                    ):
-                                        raise RuntimeError(
-                                            "If LoRA is applied, only setting `requires_grad` to `False` inside `config.policy.trainable_map` can be combined with LoRA."
-                                            "Otherwise, please instead include the trainable modules in `config.policy.lora.modules_to_save`."
-                                        )
-                                model.apply_trainable(config.policy.trainable_map)
-
                         except Exception as fallback_e:
-                            logger.error(
-                                f"Default fallback strategy also failed to load model {model_name_or_path}. "
-                                f"Original error: {e}. Fallback error: {fallback_e}"
-                            )
                             raise RuntimeError(
                                 f"Both primary and fallback model loading strategies failed. "
                                 f"Primary: {e}, Fallback: {fallback_e}"

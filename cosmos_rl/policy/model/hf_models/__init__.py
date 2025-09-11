@@ -266,7 +266,12 @@ class HFModel(BaseModel):
     def multi_modal_projector(self):
         multi_modal_projector = None
         if self.is_vlm:
-            multi_modal_projector = getattr(self.model, "multi_modal_projector", None)
+            if hasattr(self.model, "multi_modal_projector", None):
+                multi_modal_projector = self.model.vision_tower
+            elif hasattr(self.model, "mlp1", None):
+                # InternVL
+                multi_modal_projector = self.model.mlp1
+
         return multi_modal_projector
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
