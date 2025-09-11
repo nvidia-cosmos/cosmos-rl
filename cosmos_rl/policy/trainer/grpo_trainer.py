@@ -537,6 +537,7 @@ class GRPOTrainer(Trainer):
         # 1. Sync all model states
         for state_to_sync in model_state_dict:
             for dest_name in sorted(state_to_sync.keys()):
+                logger.info(f"[Policy] Syncing model state: {dest_name}")
                 obj = state_to_sync[dest_name]
                 assert isinstance(obj, torch.Tensor)
                 local_view = self.wrap_to_cuda_tensor(
