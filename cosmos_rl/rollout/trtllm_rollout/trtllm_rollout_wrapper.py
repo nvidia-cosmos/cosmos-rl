@@ -131,7 +131,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         is_end = False
 
         if prompt_queue.empty():
-            payloads, is_end = self.api_client.getNextPrompt(batch_size, **kwargs)
+            payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
             prompts = payloads if len(payloads) > 0 else None
 
         if prompts is not None:
@@ -151,7 +151,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             is_end=True,
         )
         logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
-        self.api_client.sendRolloutCompletion(response)
+        self.api_client.send_rollout_completion(response)
 
     @torch.no_grad()
     def main_loop(self):
@@ -206,7 +206,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         completions=validation_results,
                         is_end=True,
                     )
-                    self.api_client.sendValidationReport(response)
+                    self.api_client.send_validation_report(response)
 
                 self.validation_event.clear()
             # 2. Rollout Generation
@@ -301,7 +301,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         completions=valid_completions,
                         is_end=False,
                     )
-                    self.api_client.sendRolloutCompletion(response)
+                    self.api_client.send_rollout_completion(response)
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()

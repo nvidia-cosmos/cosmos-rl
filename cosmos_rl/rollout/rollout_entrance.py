@@ -24,7 +24,7 @@ from cosmos_rl.dispatcher.api.client import APIClient
 
 def run_rollout(*args, **kwargs):
     api_client = APIClient(role="ROLLOUT")
-    metadata = api_client.getControllerMetadata()
+    metadata = api_client.get_controller_metadata()
 
     if metadata["config"] is None:
         raise RuntimeError(

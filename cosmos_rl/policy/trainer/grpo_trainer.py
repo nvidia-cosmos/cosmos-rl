@@ -321,7 +321,7 @@ class GRPOTrainer(Trainer):
             logger.info(
                 f"[Policy] Parse {len(self.trainable_params)} trainable params to controller."
             )
-            self.api_client.setPolicyShardInfo(
+            self.api_client.set_policy_shard_info(
                 shard_infos=self.all_rank_local_shard_infos,
                 param_groups=[],
                 sorted_params=sorted_params_all_rank,
@@ -684,7 +684,7 @@ class GRPOTrainer(Trainer):
                 # Only create nccl group id in rank 0.
                 nccl_uuid = create_nccl_uid()
                 logger.debug(f"[Policy] mesh_key: {mesh_key}")
-                self.api_client.setNcclCommInitiator(mesh_key, nccl_uuid)
+                self.api_client.set_nccl_comm_initiator(mesh_key, nccl_uuid)
             # broadcast the nccl group id to all ranks
             nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
             self.p2r_nccl_uuids[mesh_key] = nccl_uuid
@@ -713,7 +713,7 @@ class GRPOTrainer(Trainer):
 
         if self.policy_to_rollout_insts is None:
             self.policy_to_rollout_insts = []
-            self.policy_to_rollout_insts = self.api_client.getPolicyShardSendInsts(
+            self.policy_to_rollout_insts = self.api_client.get_policy_shard_send_insts(
                 self.global_rank
             )
         # sort the param list by the dest_name, same as rollout
@@ -920,7 +920,7 @@ class GRPOTrainer(Trainer):
 
         # Train ACK
         if is_master_rank(self.parallel_dims, self.global_rank):
-            self.api_client.sendPolicyTrainAck(
+            self.api_client.send_policy_train_ack(
                 self.replica_name,
                 command.global_step,
                 command.total_steps,
