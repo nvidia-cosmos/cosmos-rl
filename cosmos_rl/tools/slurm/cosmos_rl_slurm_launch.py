@@ -109,7 +109,7 @@ if __name__ == "__main__":
         if args.script:
             cmd += ["--script", args.script]
         if args.script_args:
-            cmd += [f" {' '.join(args.script_args)}"]
+            cmd.extend(args.script_args)
 
         cmds.append(cmd)
         envs.append(env)
