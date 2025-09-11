@@ -670,6 +670,12 @@ class GRPOTrainer(Trainer):
         logger.debug(
             f"[Policy] Policy2Policy Broadcast {len_params} parameters from {command.src_replica_name} (rank {self.inter_policy_nccl.get_replica_rank(command.src_replica_name)}) to {len(command.dst_replica_names)} replicas took {time_eclapsed:.3f} seconds."
         )
+
+        # lms Print inv_freq
+        from transformers.models.gpt_oss.modeling_gpt_oss import GptOssRotaryEmbedding
+        for name, module in self.model.named_modules():
+            if isinstance(module, GptOssRotaryEmbedding):
+                logger.info(f"Module {name} has inv_freq: {module.inv_freq}")
         return False
 
     @Trainer.register_policy_command_handler(PolicyToPolicyUnicastCommand)
