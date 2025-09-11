@@ -18,11 +18,12 @@ ARG PYTHON_VERSION=3.12
 
 ENV TZ=Etc/UTC
 
-RUN apt-get update -y && apt-get upgrade -y
-
-RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
-    curl git gpg lsb-release tzdata wget unzip nginx default-jre
-RUN apt-get purge -y cuda-compat-*
+RUN apt-get update -y && apt-get upgrade -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
+    curl git gpg lsb-release tzdata wget unzip nginx default-jre && \
+    apt-get purge -y cuda-compat-* && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 #################################################
 ## Install NVIDIA GDRCopy
@@ -41,17 +42,21 @@ ENV PATH=/opt/gdrcopy/bin:$PATH
 ## Install NCCL with specific version
 RUN apt-get remove -y --purge --allow-change-held-packages \
     libnccl2 \
-    libnccl-dev
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
-    && dpkg -i cuda-keyring_1.1-1_all.deb \
-    && rm cuda-keyring_1.1-1_all.deb \
-    && apt-get update -y \
-    && apt-get install -y libnccl2=${NCCL_VERSION} libnccl-dev=${NCCL_VERSION}
+    libnccl-dev && \
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    rm cuda-keyring_1.1-1_all.deb && \
+    apt-get update -y && \
+    apt-get install -y libnccl2=${NCCL_VERSION} libnccl-dev=${NCCL_VERSION} && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 ###################################################
 ## Install cuDNN
 RUN apt-get update -y && \
-    apt-get install -y libcudnn9-cuda-12 libcudnn9-dev-cuda-12
+    apt-get install -y libcudnn9-cuda-12 libcudnn9-dev-cuda-12 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 ###################################################
 ## Install redis
@@ -62,15 +67,20 @@ RUN curl -fsSL https://packages.redis.io/gpg  | gpg --dearmor -o /usr/share/keyr
 
 # Update package list
 RUN apt-get update -qq && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -qq -y redis-server
+    DEBIAN_FRONTEND=noninteractive apt-get install -qq -y redis-server && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 ###################################################
-RUN apt-get install -qq -y software-properties-common
-RUN add-apt-repository ppa:deadsnakes/ppa
 ## Install python
 RUN apt-get update -qq && \
+    apt-get install -qq -y software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update -qq && \
     DEBIAN_FRONTEND=noninteractive apt-get install -qq -y --allow-change-held-packages \
-    python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 ## Create a virtual environment
 RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
@@ -81,23 +91,33 @@ RUN echo 'source /opt/venv/cosmos_rl/bin/activate' >> /root/.bashrc
 RUN echo 'source /opt/venv/cosmos_rl/bin/activate' > /etc/bash.bashrc
 ENV BASH_ENV=/etc/bash.bashrc
 
-RUN pip install -U pip setuptools wheel packaging
+RUN pip install --no-cache-dir -U pip setuptools wheel packaging
 
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
-RUN pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+RUN pip install --no-cache-dir torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128 && \
+    pip cache purge
 
-WORKDIR /workspace/cosmos_rl
-
-COPY . .
-
-RUN pip install \
+# Install additional heavy dependencies
+RUN pip install --no-cache-dir \
     torchao==0.12.0 \
     vllm==0.10.0 \
     flash-attn==2.8.2 \
     transformer_engine[pytorch] \
-    https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl \
-    -r requirements.txt
+    https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl && \
+    pip cache purge
+
+WORKDIR /workspace/cosmos_rl
+
+# Copy requirements.txt first and install dependencies
+# This layer will be cached unless requirements.txt changes
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip cache purge
+
+# Copy source code last - this layer will rebuild when code changes
+# but pip installs above will be cached
+COPY . .
 
 ###################################################
 FROM no-efa-base AS efa-base
@@ -108,60 +128,80 @@ RUN rm -rf /opt/hpcx \
     && rm -f /etc/ld.so.conf.d/hpcx.conf \
     && ldconfig
 
-RUN apt-get remove -y --purge --allow-change-held-packages \
-    ibverbs-utils \
-    libibverbs-dev \
-    libibverbs1 \
-    libmlx5-1
+RUN for pkg in ibverbs-utils libibverbs-dev libibverbs1 libmlx5-1; do \
+        if dpkg -l | grep -q "^ii  $pkg "; then \
+            apt-get remove -y --purge --allow-change-held-packages $pkg; \
+        fi; \
+    done && \
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 ###################################################
 ## Install EFA installer
-RUN cd $HOME \
-    && apt-get update -y \
-    && curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
-    && tar -xf $HOME/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
-    && cd aws-efa-installer \
-    && ./efa_installer.sh -y -g -d --skip-kmod --skip-limit-conf --no-verify \
-    && rm -rf $HOME/aws-efa-installer
+RUN cd $HOME && \
+    apt-get update -y && \
+    curl -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
+    tar -xf $HOME/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
+    cd aws-efa-installer && \
+    ./efa_installer.sh -y -g -d --skip-kmod --skip-limit-conf --no-verify && \
+    cd $HOME && \
+    rm -rf $HOME/aws-efa-installer* && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 ###################################################
 ## Install AWS-OFI-NCCL plugin
-RUN DEBIAN_FRONTEND=noninteractive apt-get install -y libhwloc-dev
+RUN apt-get update -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y libhwloc-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 #Switch from sh to bash to allow parameter expansion
 SHELL ["/bin/bash", "-c"]
-RUN curl -OL https://github.com/aws/aws-ofi-nccl/releases/download/${AWS_OFI_NCCL_VERSION}/aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz \
-    && tar -xf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz \
-    && cd aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} \
-    && ./configure --prefix=/opt/aws-ofi-nccl/install \
+RUN curl -OL https://github.com/aws/aws-ofi-nccl/releases/download/${AWS_OFI_NCCL_VERSION}/aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz && \
+    tar -xf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz && \
+    cd aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} && \
+    ./configure --prefix=/opt/aws-ofi-nccl/install \
         --with-mpi=/opt/amazon/openmpi \
         --with-libfabric=/opt/amazon/efa \
         --with-cuda=/usr/local/cuda \
-        --enable-platform-aws \
-    && make -j $(nproc) \
-    && make install \
-    && cd .. \
-    && rm -rf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v} \
-    && rm aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}.tar.gz
+        --enable-platform-aws && \
+    make -j $(nproc) && \
+    make install && \
+    cd .. && \
+    rm -rf aws-ofi-nccl-${AWS_OFI_NCCL_VERSION//v}* && \
+    ldconfig
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/opt/aws-ofi-nccl/install/lib:/usr/local/lib:$LD_LIBRARY_PATH
 ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
 
 
 ###################################################
-## Image target: cosmos_rl
+## Image target: cosmos_rl (runtime optimized)
 FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 
-RUN pip install -U git+https://github.com/nvidia-cosmos/cosmos-reason1.git#subdirectory=cosmos_reason1_utils
-RUN pip install -e .
+# Clean up unnecessary packages to reduce image size
+RUN apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Install additional dependencies that depend on the source code
+# Use SETUPTOOLS_SCM_PRETEND_VERSION since .git is excluded from Docker context
+RUN pip install --no-cache-dir -U git+https://github.com/nvidia-cosmos/cosmos-reason1.git#subdirectory=cosmos_reason1_utils && \
+    SETUPTOOLS_SCM_PRETEND_VERSION=0.3.1 pip install --no-cache-dir -e . && \
+    pip cache purge
 
 # Installing TAO-Core
 RUN . /opt/venv/cosmos_rl/bin/activate && \
-    cd tao-core && bash release/python/build_wheel.sh && \
+    cd tao-core && \
+    bash release/python/build_wheel.sh && \
     find dist/ -name "nvidia_tao_core*.whl" -type f | xargs -n 1 pip install && \
     cp nvidia_tao_core/microservices/nginx.conf /etc/nginx/ && \
-    cd .. && rm -rf tao-core
+    cd .. && \
+    rm -rf tao-core
 
-ENV NVIDIA_PRODUCT_NAME "TAO Toolkit"
+ENV NVIDIA_PRODUCT_NAME="TAO Toolkit"
 ENV TAO_TOOLKIT_VERSION="6.25.7"
 ENV NVIDIA_TAO_TOOLKIT_VERSION="${TAO_TOOLKIT_VERSION}-PyTorch"
 
@@ -180,5 +220,3 @@ CMD if [ "$RUN_CLI" = "1" ]; then \
     else \
         /bin/bash $(get-microservice-script); \
     fi
-
-

@@ -5,17 +5,12 @@ datasets
 pydantic
 math_verify
 pybind11[global]
-vllm>=0.8.5
-torch>=2.6.0
-torchvision>=0.21.0
-torchao>=0.10.0
 tensordict==0.7.2
 toml
 StrEnum
 redis
 msgpack
 qwen_vl_utils
-flash-attn>=2.7.4.post1
 pynvml
 boto3
 modelscope
