@@ -672,9 +672,11 @@ class GRPOTrainer(Trainer):
         )
 
         # lms Print inv_freq
-        from transformers.models.gpt_oss.modeling_gpt_oss import GptOssRotaryEmbedding
         for name, module in self.model.named_modules():
-            if isinstance(module, GptOssRotaryEmbedding):
+            if hasattr(module, "inv_freq"):
+                inv_freq = module.inv_freq
+                if isinstance(inv_freq, torch.distributed.tensor.DTensor):
+                    inv_freq = inv_freq.to_local()
                 logger.info(f"Module {name} has inv_freq: {module.inv_freq}")
         return False
 
