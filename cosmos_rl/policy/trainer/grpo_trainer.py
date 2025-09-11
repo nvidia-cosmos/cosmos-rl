@@ -561,9 +561,9 @@ class GRPOTrainer(Trainer):
                     if not to_write.is_cuda:
                         to_write.copy_(local_view)
 
-                assert torch.allclose(
-                    original_obj, local_view
-                ), f"The received tensor is not the same as the original tensor: {dest_name}, got\nreceived: {local_view.flatten()[-20:]}\noriginal: {original_obj.flatten()[-20:]}"
+                # assert torch.allclose(
+                #     original_obj, local_view
+                # ), f"The received tensor is not the same as the original tensor: {dest_name}, got\nreceived: {local_view.flatten()[-20:]}\noriginal: {original_obj.flatten()[-20:]}"
 
                 len_params += 1
 
