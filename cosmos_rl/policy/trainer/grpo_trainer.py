@@ -511,7 +511,7 @@ class GRPOTrainer(Trainer):
         Sync all states of the model and optimizer.
         """
         len_params = 0
-        model_state_dict = [self.model.state_dict()]
+        model_state_dict = [self.model.state_dict(), dict(self.model.named_buffers())]
 
         def get_local_tensor(obj):
             if isinstance(obj, torch.distributed.tensor.DTensor):
