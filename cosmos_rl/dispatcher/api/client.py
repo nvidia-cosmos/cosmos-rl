@@ -25,27 +25,37 @@ from functools import partial
 from typing import Dict, Any, List, Tuple, Optional
 from urllib.parse import urljoin
 
-from cosmos_rl.dispatcher.protocol import Role, ValidationReportRequest, RolloutRequest
+from cosmos_rl.dispatcher.protocol import (
+    Role,
+    ValidationReportRequest,
+    RolloutRequest,
+    SetProfileRequest,
+    SetTracePathRequest,
+)
 from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.api_suffix import (
+    COSMOS_API_STATUS_SUFFIX,
     COSMOS_API_META_SUFFIX,
-    COSMOS_API_POLICY_SHARD_INFOS_SUFFIX,
-    COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
-    COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
-    COSMOS_API_POLICY_TRAIN_ACK_SUFFIX,
-    COSMOS_API_HEARTBEAT_SUFFIX,
     COSMOS_API_REGISTER_SUFFIX,
+    COSMOS_API_SET_PROFILE_SUFFIX,
+    COSMOS_API_SET_TRACE_PATH_SUFFIX,
     COSMOS_API_UNREGISTER_SUFFIX,
-    COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
+    COSMOS_API_HEARTBEAT_SUFFIX,
+    COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
     COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
-    COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
-    COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
-    COSMOS_API_VALIDATION_REPORT_SUFFIX,
-    COSMOS_API_NEXT_PROMPT_SUFFIX,
-    COSMOS_API_ROLLOUT_SUFFIX,
+    COSMOS_API_NCCL_COMM_GET_ALL_SUFFIX,
     COSMOS_API_NCCL_COMM_ERROR_SUFFIX,
     COSMOS_API_NCCL_COMM_STORE_CLEAR_SUFFIX,
+    COSMOS_API_NEXT_PROMPT_SUFFIX,
+    COSMOS_API_ROLLOUT_SUFFIX,
+    COSMOS_API_VALIDATION_REPORT_SUFFIX,
+    COSMOS_API_POLICY_TRAIN_ACK_SUFFIX,
+    COSMOS_API_POLICY_SHARD_INFOS_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
+    COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
+    COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
 from cosmos_rl.utils.parallelism_map import WeightSyncInstructionsGroup
 from cosmos_rl.utils.util import list_to_b64, sanitize, b64_to_list
@@ -185,6 +195,48 @@ class APIClient(object):
         except Exception as e:
             logger.error(f"Failed to send heartbeat to controller: {e}")
 
+    def get_status(self) -> Dict[str, Any]:
+        try:
+            r = make_request_with_retry(
+                partial(
+                    requests.get,
+                ),
+                self.get_alternative_urls(COSMOS_API_STATUS_SUFFIX),
+                max_retries=self.max_retries,
+            )
+            return r.json()
+        except Exception as e:
+            logger.error(f"Failed to get status from controller: {e}")
+            raise e
+
+    def set_profile(self, profile: SetProfileRequest):
+        try:
+            make_request_with_retry(
+                partial(
+                    requests.post,
+                    json=profile.model_dump(),
+                ),
+                self.get_alternative_urls(COSMOS_API_SET_PROFILE_SUFFIX),
+                max_retries=self.max_retries,
+            )
+        except Exception as e:
+            logger.error(f"Failed to set profile to controller: {e}")
+            raise e
+
+    def set_trace_path(self, trace_path: SetTracePathRequest):
+        try:
+            make_request_with_retry(
+                partial(
+                    requests.post,
+                    json=trace_path.model_dump(),
+                ),
+                self.get_alternative_urls(COSMOS_API_SET_TRACE_PATH_SUFFIX),
+                max_retries=self.max_retries,
+            )
+        except Exception as e:
+            logger.error(f"Failed to set trace path to controller: {e}")
+            raise e
+
     def set_nccl_comm_initiator(self, unique_pair_name: str, nccl_uuid: List[int]):
         base64_nccl_group_id = list_to_b64(nccl_uuid)
         try:
@@ -249,6 +301,28 @@ class APIClient(object):
         except Exception as e:
             raise RuntimeError(
                 f"[{self.role}] Failed in clear nccl comm store from controller after retries {e}."
+            )
+
+    def list_nccl_comm_infos(self) -> List[Dict[str, Any]]:
+        """
+        List all the NCCL communicators stored in the controller.
+        """
+        try:
+            r = make_request_with_retry(
+                partial(
+                    requests.get,
+                ),
+                self.get_alternative_urls(COSMOS_API_NCCL_COMM_GET_ALL_SUFFIX),
+                max_retries=self.max_retries,
+            )
+            comm_info = r.json()["comm_info"]
+            comm_dict = {}
+            for key, value in comm_info.items():
+                comm_dict[key] = str(b64_to_list(value))
+            return comm_dict
+        except Exception as e:
+            raise RuntimeError(
+                f"[{self.role}] Failed in list nccl comm from controller after retries {e}."
             )
 
     def set_policy_shard_info(
