@@ -90,7 +90,7 @@ COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
 RUN pip install \
     torchao==0.13.0 \
-    flash_attn==2.8.2 \
+    flash_attn==2.8.3 \
     -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly \
     flashinfer-python \
     transformer_engine[pytorch] \
