@@ -909,11 +909,18 @@ class SFTTrainer(Trainer):
                         logger.info(
                             f"Saving huggingface checkpoint at step {self.train_step} to {self.config.train.output_dir}..."
                         )
+                        # Use epoch-based naming for safetensors when save_freq_in_epoch is configured
+                        if self.config.train.ckpt.save_freq_in_epoch > 0:
+                            completed_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
+                            safetensors_identifier = f"epoch_{completed_epoch}"
+                        else:
+                            safetensors_identifier = f"step_{self.train_step}"
+
                         self.export_safetensors(
                             output_dir=self.config.train.output_dir,
                             rel_path=os.path.join(
                                 "safetensors",
-                                f"step_{self.train_step}",
+                                safetensors_identifier,
                             ),
                             trainable_only=False,
                             dtype=util.str2torch_dtype(self.config.train.param_dtype),
@@ -921,15 +928,19 @@ class SFTTrainer(Trainer):
                     logger.info(
                         f"Saving cosmos checkpoint at step {self.train_step}..."
                     )
+                    # Calculate the actual epoch being completed based on current step
+                    completed_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
                     self.ckpt_manager.save_checkpoint(
                         model=self.model,
                         optimizer=self.optimizers,
                         scheduler=self.lr_schedulers,
                         step=self.train_step,
                         total_steps=self.total_steps,
+                        epoch=completed_epoch,
                     )
                     self.ckpt_manager.save_check(
                         step=self.train_step,
+                        epoch=completed_epoch,
                         val_score=val_score,
                         pp_enabled=self.parallel_dims.pp_enabled,
                         pp_last_stage=pp_last_stage,
@@ -944,37 +955,61 @@ class SFTTrainer(Trainer):
 
         # process the final step
         val_score = self.validate()
+
+        # Check if we already saved at this step during regular checkpointing
+        already_saved_at_final_step = (
+            self.config.train.ckpt.enable_checkpoint
+            and self.train_step % self._save_freq == 0
+            and self.train_step > 0
+        )
+
         if (
             self.config.train.ckpt.export_safetensors
             and self.parallel_dims.dp_replicate_coord[0] == 0
+            and not already_saved_at_final_step  # Skip if we already exported safetensors
         ):
             logger.info(
                 f"Saving final huggingface checkpoint to {self.config.train.output_dir}..."
             )
+            # Use epoch-based naming for final safetensors when save_freq_in_epoch is configured
+            if self.config.train.ckpt.save_freq_in_epoch > 0:
+                final_safetensors_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
+                safetensors_identifier = f"epoch_{final_safetensors_epoch}"
+            else:
+                safetensors_identifier = f"step_{self.train_step}"
+
             self.export_safetensors(
                 output_dir=self.config.train.output_dir,
                 rel_path=os.path.join(
                     "safetensors",
-                    f"step_{self.train_step}",
+                    safetensors_identifier,
                 ),
                 trainable_only=False,
                 is_final=True,
                 dtype=util.str2torch_dtype(self.config.train.param_dtype),
             )
-        if self.config.train.ckpt.enable_checkpoint:
+        if self.config.train.ckpt.enable_checkpoint and not already_saved_at_final_step:
             logger.info(
                 f"Training finished at step {self.train_step}/{self.total_steps}, saving final cosmos checkpoint..."
             )
+            # For final checkpoint, calculate current epoch from steps
+            final_completed_epoch = None
+            if self.config.train.ckpt.save_freq_in_epoch > 0:
+                # Calculate current epoch based on steps and dataloader length
+                final_completed_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
+
             self.ckpt_manager.save_checkpoint(
                 model=self.model,
                 optimizer=self.optimizers,
                 scheduler=self.lr_schedulers,
                 step=self.train_step,
                 total_steps=self.total_steps,
+                epoch=final_completed_epoch,
                 is_final=True,
             )
             self.ckpt_manager.save_check(
                 step=self.train_step,
+                epoch=final_completed_epoch,
                 val_score=val_score if self.config.validation.enable else -1,
                 pp_enabled=self.parallel_dims.pp_enabled,
                 pp_last_stage=pp_last_stage,
