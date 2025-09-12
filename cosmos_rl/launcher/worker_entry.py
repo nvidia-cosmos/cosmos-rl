@@ -41,7 +41,12 @@ def main(
     elif role == "Policy":
         from cosmos_rl.policy.train import main as policy_main
 
-        policy_main(dataset=dataset, data_packer=data_packer)
+        policy_main(
+            dataset=dataset,
+            data_packer=data_packer,
+            val_dataset=val_dataset,
+            val_data_packer=val_data_packer,
+        )
         return
     else:
         from cosmos_rl.rollout.rollout_entrance import run_rollout

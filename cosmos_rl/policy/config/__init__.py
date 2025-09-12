@@ -968,10 +968,9 @@ class Config(BaseModel):
                     "Invalid config: GRPO with LoRA requires policy.parallelism.tp_size == 1."
                 )
 
-        if self.train.train_policy.type == "grpo":
-            # Handle for evaludation configuration.
-            if isinstance(self.validation.dataset.split, str):
-                self.validation.dataset.split = [self.validation.dataset.split]
+        # Handle for evaludation configuration.
+        if isinstance(self.validation.dataset.split, str):
+            self.validation.dataset.split = [self.validation.dataset.split]
 
         if self.train.transfer_dtype is None:
             # Default use param_dtype as transfer_dtype
