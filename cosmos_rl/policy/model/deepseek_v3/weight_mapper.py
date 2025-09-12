@@ -276,21 +276,7 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
                 )
         return rollout_weight_name
 
-    def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
-        # weight has shape [q_num_heads * head_dim + k_num_heads * head_dim + v_num_heads * head_dim, hidden_dim]
-        # TODO(aazzolini): 2.3 Implement split_qkv_weight
-        shares = self.kv_head_ratio + 2
-        dim_0 = weight.shape[0]  # for both weight and bias
-        unit_dim = dim_0 // shares
-
-        q_weight = weight[: unit_dim * self.kv_head_ratio]
-        k_weight = weight[
-            unit_dim * self.kv_head_ratio : unit_dim * (self.kv_head_ratio + 1)
-        ]
-        v_weight = weight[unit_dim * (self.kv_head_ratio + 1) :]
-        return q_weight, k_weight, v_weight
-
-    def _split_gate_proj_weight(self, name, weight: torch.Tensor):
+    def _split_gate_up_proj_weight(self, weight: torch.Tensor):
         # weight has shape [..., 2 * x, hidden_dim]
         # split it into [..., :x, hidden_dim] and [..., x:, hidden_dim]
 
@@ -333,26 +319,13 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            # logger.info(f"[Rollout] compatible_key: {compatible_key}")
-            if "qkv_proj" in compatible_key:
-                # must be inplace slicing.
-                # split qkv weight
-                q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
-                    compatible_key, param
-                )
-                q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
-                k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
-                v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
-                compatible_weight_map[q_proj_weight_key] = q_weight
-                group_keys.append((q_proj_weight_key, q_weight.ndim))
-                compatible_weight_map[k_proj_weight_key] = k_weight
-                group_keys.append((k_proj_weight_key, k_weight.ndim))
-                compatible_weight_map[v_proj_weight_key] = v_weight
-                group_keys.append((v_proj_weight_key, v_weight.ndim))
-            elif "gate_up_proj" in compatible_key:
+            logger.info(
+                f"[Rollout] param vllm_name {param_name} hf_name: {compatible_key}"
+            )
+            if "gate_up_proj" in compatible_key:
                 # split gate and up proj
-                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
-                    compatible_key, param
+                gate_proj_weight, up_proj_weight = self._split_gate_up_proj_weight(
+                    param
                 )
                 gate_proj_weight_key = compatible_key.replace(
                     "gate_up_proj", "gate_proj"

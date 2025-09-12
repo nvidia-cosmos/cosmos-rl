@@ -419,6 +419,18 @@ class SFTTrainer(Trainer):
             cp_group=cp_group,
         )
 
+        # Calculate the step interval to save the checkpoint
+        if self.config.train.ckpt.save_freq_in_epoch > 0:
+            # Use save_freq_in_epoch to calculate the save frequency in priority
+            self._save_freq = (
+                self.config.train.ckpt.save_freq_in_epoch * len(self.train_data_loader)
+            ) // self.dp_world_size
+            logger.info(
+                f"Checkpoint will be saved every {self._save_freq} steps, which is approximately every `train.ckpt.save_freq_in_epoch` {self.config.train.ckpt.save_freq_in_epoch} epochs. `train.ckpt.save_freq` will be ignored."
+            )
+        else:
+            self._save_freq = self.config.train.ckpt.save_freq
+
     def validate(self):
         if not self.config.validation.enable:
             return
@@ -849,7 +861,7 @@ class SFTTrainer(Trainer):
                 # save checkpoint
                 if (
                     self.config.train.ckpt.enable_checkpoint
-                    and self.train_step % self.config.train.ckpt.save_freq == 0
+                    and self.train_step % self._save_freq == 0
                     and self.train_step > 0
                     and self.parallel_dims.dp_replicate_coord[0] == 0
                 ):

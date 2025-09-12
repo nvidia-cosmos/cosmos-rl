@@ -36,6 +36,7 @@ class Rollout:
     advantage: float
     prompt_idx: int
     n_ignore_prefix_tokens: int = 0
+    filter_reward: float = 0.0
 
     def __init__(
         self,
@@ -46,6 +47,7 @@ class Rollout:
         advantage: float,
         prompt_idx: int,
         n_ignore_prefix_tokens: int = 0,
+        filter_reward: float = 0.0,
     ):
         self.payload = payload
         self.completion = completion
@@ -54,6 +56,7 @@ class Rollout:
         self.advantage = advantage
         self.prompt_idx = prompt_idx
         self.n_ignore_prefix_tokens = n_ignore_prefix_tokens
+        self.filter_reward = filter_reward
 
     @classmethod
     def from_dict(cls, dict_v: Dict[str, Any]) -> "Rollout":
@@ -90,7 +93,7 @@ class RolloutGroup:
             for completion in self.completions
         ]
         logger.debug(f"[RolloutGroup] Rewards: {rewards}")
-        advantages = algo.compute_advantage(rewards)
+        advantages = algo.compute_advantage([r[0] for r in rewards])
         logger.debug(f"[RolloutGroup] Advantages: {advantages}")
 
         return [
@@ -98,9 +101,10 @@ class RolloutGroup:
                 payload=self.payload,
                 completion=completion,
                 is_end=self.is_end,
-                reward=reward,
+                reward=reward[0],
                 advantage=advantage,
                 prompt_idx=self.prompt_idx,
+                filter_reward=reward[1],
             )
             for completion, reward, advantage in zip(
                 self.completions, rewards, advantages
