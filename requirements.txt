@@ -26,3 +26,5 @@ pyyaml
 blobfile
 nvidia-nccl-cu12>=2.26.2
 liger_kernel
+accelerate
+kernels

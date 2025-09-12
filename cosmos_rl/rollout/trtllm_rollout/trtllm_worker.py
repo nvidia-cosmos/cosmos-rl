@@ -181,7 +181,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         self.vllm_weight_inplace_view_map, grouped_recv_param_key_n_rank_list = (
-            self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+            self.weight_mapper.cosmos_rollout_prepare_recv(self.get_underlying_model())
         )
         self.recv_param_key_n_rank_list = []
         param_groups = []

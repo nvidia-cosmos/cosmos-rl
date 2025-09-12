@@ -18,7 +18,7 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 
 import vllm
 import torch
-from typing import List, Tuple, Any, Optional
+from typing import List, Tuple, Any, Optional, Dict
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
@@ -83,6 +83,8 @@ class vLLMRollout(RolloutBase):
         self._model_param_map = None  # key: compatible name, value: param
         self.is_vlm = getattr(self.model_config, "vision_config", None) is not None
 
+        self.preset_vllm_env()
+
     def init_engine(
         self,
         quantization: Optional[str] = None,
@@ -96,9 +98,6 @@ class vLLMRollout(RolloutBase):
             model_path = self.config.policy.model_name_or_path
 
             rollout_parallelism = self.rollout_config.parallelism
-
-            # disable VLLM_DISABLE_COMPILE_CACHE
-            os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
             tp_size = rollout_parallelism.tp_size
             pp_size = rollout_parallelism.pp_size
@@ -222,7 +221,6 @@ class vLLMRollout(RolloutBase):
 
             traceback.print_exc()
             return []
-
         return response
 
     def get_underlying_model(self):
@@ -257,13 +255,156 @@ class vLLMRollout(RolloutBase):
 
         return qweight.t(), weight_scale
 
-    def model_param_map(self, weight_mapper: WeightMapper):
+    def mxfp4_quantization(self, weight: torch.Tensor):
+        """
+        Quantize the original bf16 weight sent by policy to mxfp4 weight.
+        """
+        # https://github.com/vllm-project/vllm/pull/22259
+        # Note: vLLM use triton kernel for mxfp4 moe when ep not specified.
+        # We temporarily support this case first.
+        # Reference: https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L493
+
+        # Note: For mxfp4 quantizaiton, vLLM will load original mxfp4 weight from hf fp4 weight, and do some post processing like padding and swizzle.
+        # So we have two phases for quantization:
+        # 1. Quantize the original bf16 weight sent by policy:
+        # We use: https://github.com/openai/gpt-oss/blob/d0a300a40d6502a1bdd73d18464f3d69440656e0/gpt_oss/triton/model.py#L302
+
+        # 2. Post process the quantized weight as vLLM did for triton kernel:
+        # https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L173
+        # mxfp4_block_size = 32
+        weight = weight.transpose(-2, -1).contiguous()
+        # weight is bf16 moe weight with shape:
+        # gate_up_proj: [num_experts, hidden_size, 2 * intermediate_size]
+        # donw_proj:    [num_experts, intermediate_size, hidden_size]
+
+        # 1. Quantize the original bf16 weight sent by policy:
+        from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import quantize_mx4
+
+        # weight_mxfp4 and weight_scale_mxfp4 are torch.Tensor
+        weight_mxfp4, weight_scale_mxfp4 = quantize_mx4(weight.to(torch.bfloat16))
+        weight_mxfp4 = weight_mxfp4.transpose(-2, -1).contiguous()  # Now torch.Tensor
+        weight_scale_mxfp4 = weight_scale_mxfp4.transpose(-2, -1).contiguous()
+        # For weight_mxfp4:
+        # [num_experts, 2 * intermediate_size, hidden_size // mxfp4_block_size, 16] for gate_up_proj
+        # [num_experts, hidden_size, intermediate_size // mxfp4_block_size, 16] for down_proj
+        # For weight_scale_mxfp4:
+        # [num_experts, 2 * intermediate_size, hidden_size // mxfp4_block_size] for gate_up_proj
+        # [num_experts, hidden_size, intermediate_size // mxfp4_block_size] for down_proj
+
+        # 2. Post process
+        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+            _swizzle_mxfp4,
+        )
+
+        num_warps = 8
+        swizzled_weight_mxfp4, _, swizzled_weight_scale_mxfp4 = _swizzle_mxfp4(
+            weight_mxfp4, weight_scale_mxfp4, num_warps
+        )
+        return (
+            swizzled_weight_mxfp4.storage.data,
+            swizzled_weight_scale_mxfp4.storage.data,
+        )
+
+    def model_param_map(self, weight_mapper: WeightMapper) -> Dict[str, torch.Tensor]:
+        """
+        All the parameters of the rollout model:
+            - All the parameters of the model.
+            - All the scales of quantized weights.
+        """
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+
         if self._model_param_map:
             return self._model_param_map
         model = self.get_underlying_model()
         param_map = {}
-        for name, param in model.named_parameters():
+        for name, param in model.state_dict().items():
             compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
             param_map[compatible_name] = param
+
+        quantized_tensors = self.get_quantized_tensors(weight_mapper)
+        param_map.update(quantized_tensors)
+
         self._model_param_map = param_map
         return self._model_param_map
+
+    def preset_vllm_env(self):
+        def log_env(env_name: str, env_value: str):
+            logger.info(f"[Rollout] Setting vLLM {env_name} to {env_value}")
+            os.environ[env_name] = env_value
+
+        # disable VLLM_DISABLE_COMPILE_CACHE
+        log_env("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+        # if flashinfer config is not enabled, avoid importing flashinfer
+        if self.config.rollout.vllm_use_flashinfer:
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.vllm_use_flashinfer setting."
+                )
+            else:
+                log_env("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+
+        if self.config.rollout.sampling_config.use_flashinfer:
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.sampling_config.use_flashinfer setting."
+                )
+            else:
+                log_env("VLLM_USE_FLASHINFER_SAMPLER", "1")
+
+        # Model specific logic
+        model_type = self.model_config.model_type
+        if model_type == "gpt_oss" and self.config.rollout.quantization == "mxfp4":
+            # We disable flashinfer kernel for now temporarily in mxfp4 quantization
+            log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0")
+            log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0")
+            log_env("VLLM_MXFP4_USE_MARLIN", "0")
+
+    def get_quantized_tensors(
+        self, weight_mapper: WeightMapper
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Get the quantized tensors of the rollout model.
+        """
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+        model = self.get_underlying_model()
+        quantized_tensors = {}
+        # Handle special cases for some quantized models
+        if "gpt_oss" in self.model_config.model_type and self.quantization == "mxfp4":
+            # FIXME: (lms) generally handle all quantized cases when refactoring the rollout param cache.
+            # iterate all the modules in the model
+            for module_name, module in model.named_modules():
+                if hasattr(module, "w13_bias"):
+                    # this is a mxfp4 quant layer
+                    w13_weight_name = f"{module_name}.w13_weight"
+                    w2_weight_name = f"{module_name}.w2_weight"
+                    w13_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
+                        w13_weight_name
+                    )
+                    w2_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
+                        w2_weight_name
+                    )
+                    quantized_tensors[w13_compatible_name] = (
+                        module.quant_method.w13_weight_triton_tensor.storage.data
+                    )
+                    quantized_tensors[w2_compatible_name] = (
+                        module.quant_method.w2_weight_triton_tensor.storage.data
+                    )
+                    quantized_tensors[w13_compatible_name + "_scale"] = (
+                        module.quant_method.w13_precision_config.weight_scale.storage.data
+                    )
+                    quantized_tensors[w2_compatible_name + "_scale"] = (
+                        module.quant_method.w2_precision_config.weight_scale.storage.data
+                    )
+
+        return quantized_tensors

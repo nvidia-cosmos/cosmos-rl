@@ -56,6 +56,14 @@ class BaseModel(torch.nn.Module, ABC):
                 if not hasattr(module, "_gradient_checkpointing_enabled"):
                     setattr(module, "_gradient_checkpointing_enabled", enabled)
 
+    def post_transform_of_local_view(
+        self, local_view: torch.Tensor, name: str
+    ) -> torch.Tensor:
+        """
+        Post-transform the local view of the tensor. In some cases, we need to transform the local view of the tensor before sending it to the rollout model.
+        """
+        return local_view
+
     @cached_property
     def trainable_params(self) -> List[str]:
         """
@@ -103,10 +111,10 @@ class BaseModel(torch.nn.Module, ABC):
                     trainable_params.append(name)
         return trainable_params
 
-    @cached_property
-    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
-        from cosmos_rl.utils.parallelism_map import DimSliceInfo, ParallelTopoMapper
-
+    def gen_local_view_transforms(self) -> Dict[str, Union[torch.Tensor, Callable]]:
+        """
+        Generate the local view or transform function for a P2R weight sync inst.
+        """
         # 1. get all parameters, but not buffers
         named_parameters = {name: param for name, param in self.named_parameters()}
         keys = list(named_parameters.keys())
@@ -116,11 +124,21 @@ class BaseModel(torch.nn.Module, ABC):
             v = named_parameters[k]
             is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
             local_view = v.to_local() if is_dist_tensor else v
+            local_view = self.post_transform_of_local_view(local_view, k)
             transforms[
                 self.weight_mapper.policy_map_local_key_to_hf_key(
                     util.clear_weight_name(k)
                 )
             ] = local_view
+        return transforms
+
+    @cached_property
+    def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
+        from cosmos_rl.utils.parallelism_map import ParallelTopoMapper
+        from cosmos_rl.utils.dim_slice_info import DimSliceInfo
+
+        # 1. get all parameters, but not buffers
+        transforms = self.gen_local_view_transforms()
 
         # 2. do 1->n decomposition on weights like qkv_proj.weight -> q.weight, k.weight, v.weight
         for name, param in self.named_parameters():
@@ -694,7 +712,7 @@ class WeightMapper(ABC):
         return False
 
     @cached_property
-    def packed_modules_mapping(self):
+    def packed_modules_mapping(self) -> Dict[str, List[str]]:
         """
         Return the packed modules mapping for the model.
         This method defines a mapping of packed modules to their corresponding components.
@@ -736,3 +754,55 @@ class WeightMapper(ABC):
         self.backend = backend
         if backend not in WeightMapper._WEIGHT_MAPPER_BACKEND_SUPPORTED:
             raise ValueError(f"Backend {backend} is not supported by weight mapper.")
+
+    def rollout_prepare_recv_filter(self, key: str) -> bool:
+        """ "
+        Filter the weights that are not needed to be synced when generating recv key and shape list
+        """
+        if "_scale" in key:
+            # Filter weight scale
+            return True
+        return False
+
+    def cosmos_rollout_prepare_recv(
+        self,
+        vllm_model: Any,
+    ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
+        vllm_weight_inplace_view_map, recv_key_n_shape_list = self.rollout_prepare_recv(
+            vllm_model
+        )
+        final_vllm_weight_inplace_view_map = {}
+        final_recv_key_n_shape_list = []
+        for key, value in vllm_weight_inplace_view_map.items():
+            if self.rollout_prepare_recv_filter(key):
+                continue
+            final_vllm_weight_inplace_view_map[key] = value
+        total_count = 0
+        for group_keys in recv_key_n_shape_list:
+            group_key = group_keys[0][0]
+            if self.rollout_prepare_recv_filter(group_key):
+                continue
+            final_recv_key_n_shape_list.append(group_keys)
+            total_count += len(group_keys)
+        assert (
+            len(final_vllm_weight_inplace_view_map) == total_count
+        ), f"{len(final_vllm_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
+        return final_vllm_weight_inplace_view_map, final_recv_key_n_shape_list
+
+    def update_tensor_view(
+        self,
+        tensor_view: torch.Tensor,
+        recv_tensor: torch.Tensor,
+        inst_dest_name: str,
+        **kwargs,
+    ):
+        """
+        Update the tensor view with the recv tensor. This is called when weight sync is done, we want to update the
+        original tensor in rollout model.
+
+        @param tensor_view: the tensor view to be updated, this is from rollout model
+        @param recv_tensor: the recv tensor from policy model, data filled by NCCL recv of P2R.
+        @param inst_dest_name: the name of the tensor to be updated, compatible name.
+        """
+        tmp_recv_tensor = recv_tensor.to(tensor_view.dtype)
+        tensor_view.copy_(tmp_recv_tensor)

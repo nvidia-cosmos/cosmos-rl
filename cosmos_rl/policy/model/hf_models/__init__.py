@@ -16,7 +16,10 @@
 import torch
 from torch import nn
 import inspect
+from transformers.utils import quantization_config as transformers_quantization_config
+from functools import partial
 from typing import Tuple, List, Optional, Callable
+
 from transformers import AutoConfig
 from cosmos_rl.utils.util import (
     clear_weight_name,
@@ -52,12 +55,15 @@ class HFModel(BaseModel):
     def supported_model_types():
         return [COSMOS_HF_MODEL_TYPES]
 
-    def __init__(self, hf_config, model, model_class, is_vlm=False):
+    def __init__(
+        self, hf_config, model, model_class, is_vlm=False, need_dequantization=False
+    ):
         super().__init__(hf_config)
         self.hf_config = hf_config
         self.model = model
         self.model_class = model_class
         self.is_vlm = is_vlm
+        self.need_dequantization = need_dequantization
         if getattr(model, "_checkpoint_conversion_mapping", None):
             if hf_config.model_type in ["R"]:
                 logger.warning(
@@ -321,24 +327,38 @@ class HFModel(BaseModel):
         model_type = self.hf_config.model_type
         dtype = self.hf_config.torch_dtype
         self.model = self.model.to(dtype=dtype)
+
+        kwargs = {
+            "config": self.hf_config,
+            "revision": revision,
+            "trust_remote_code": True,
+        }
+        if self.need_dequantization:
+            quantization_config = self.hf_config.quantization_config
+            mxfp4_quantization_config = transformers_quantization_config.Mxfp4Config(
+                dequantize=True,
+                modules_to_not_convert=quantization_config["modules_to_not_convert"],
+            )
+            kwargs["quantization_config"] = mxfp4_quantization_config
+
         hf_model = self.model_class.from_pretrained(
             model_name_or_path,
-            revision=revision,
-            config=self.hf_config,
-            trust_remote_code=True,
+            **kwargs,
         ).to(device="cpu", dtype=dtype)
 
         self.reset_named_buffers(hf_model)
 
-        state_dict = hf_model.state_dict()
+        hf_state_dict = hf_model.state_dict()
+
         self_state_dict = self.model.state_dict()
+
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         all_tensor_names = self_state_dict.keys()
         lm_head_weight_key = "lm_head.weight"
         embed_tokens_weight_key = "model.embed_tokens.weight"
         reserved = {}
 
-        for name, tensor in state_dict.items():
+        for name, tensor in hf_state_dict.items():
             if name == embed_tokens_weight_key:
                 reserved[name] = tensor
             dest_name, shared_weight = convert_weight_from_hf(
@@ -499,6 +519,19 @@ class HFModel(BaseModel):
         """
         is_vlm = getattr(hf_config, "vision_config", None) is not None
         model_class = None
+        quantization_config = getattr(hf_config, "quantization_config", None)
+        need_dequantization = False
+        if quantization_config is not None:
+            if quantization_config["quant_method"] in ["mxfp4"]:
+                assert hasattr(
+                    transformers_quantization_config, "Mxfp4Config"
+                ), "Mxfp4Config is not supported in this version of transformers. Please upgrade transformers to version 4.45.0 or higher."
+                logger.warning(
+                    "We don't support mxfp4 training for HFModel currently, will default to dequantizing the model to bf16/fp16."
+                )
+                need_dequantization = True
+            hf_config.quantization_config["dequantize"] = need_dequantization
+
         try:
             model_class = load_model_class_by_config(hf_config)
             model = model_class(hf_config)
@@ -516,6 +549,7 @@ class HFModel(BaseModel):
             model,
             model_class,
             is_vlm=is_vlm,
+            need_dequantization=need_dequantization,
         )
 
     @classmethod
@@ -562,3 +596,15 @@ class HFModel(BaseModel):
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         assert cp_size == 1, "cp is not supported for HFModel"
         assert tp_size == 1, "tp is not supported for HFModel"
+
+    def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
+        if "gpt_oss" in self.hf_config.model_type:
+            if "bias" not in name:  # bias is not transposed
+                if "gate_up_proj" in name or "down_proj" in name:
+
+                    def transform(view):
+                        return view.transpose(-2, -1).contiguous()
+
+                    return partial(transform, local_view)
+
+        return local_view
