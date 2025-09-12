@@ -300,6 +300,8 @@ class GRPOTrainer(Trainer):
     def prepare_shard_infos_for_weight_sync_insts(self):
         for name, tensor in self.model.state_dict().items():
             logger.info(f"[Policy] State dict: {name} {tensor.shape}")
+        
+        
 
         logger.info(f"[Policy] Model type: {type(self.model)}")
         keys_n_ranks = []
@@ -541,12 +543,12 @@ class GRPOTrainer(Trainer):
         # 1. Sync all model states
         for state_to_sync in model_state_dict:
             for dest_name in sorted(state_to_sync.keys()):
-                logger.info(f"[Policy] Syncing model state: {dest_name}")
                 obj = state_to_sync[dest_name]
                 assert isinstance(obj, torch.Tensor)
                 local_view = self.wrap_to_cuda_tensor(
                     dest_name, obj, in_place=obj.is_cuda
                 )
+                logger.info(f"[Policy] Syncing model state: {dest_name}, local_view dtype: {local_view.dtype}, local_view shape: {local_view.shape}")
                 original_obj = torch.clone(get_local_tensor(obj))
                 if is_send:
                     send_hook(local_view)
