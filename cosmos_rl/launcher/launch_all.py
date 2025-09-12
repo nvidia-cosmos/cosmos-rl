@@ -23,6 +23,7 @@ import time
 import os
 import re
 import argparse
+from argparse import REMAINDER
 from typing import List, Dict, Optional, Any, Callable
 import toml
 import tempfile
@@ -280,13 +281,6 @@ def parse_args():
     )
 
     parser.add_argument(
-        "script",
-        nargs="?",  # “?” means 0 or 1 occurrences
-        default=None,
-        help="A user script which can be provided for custom dataset, reward functions, and model registration.",
-    )
-
-    parser.add_argument(
         "--lepton-mode",
         action="store_true",
         default=False,
@@ -429,6 +423,17 @@ def parse_args():
         help="Reservation ID for dedicated node groups",
     )
 
+    # Positional arguments
+
+    parser.add_argument(
+        "script",
+        nargs="?",  # “?” means 0 or 1 occurrences
+        default=None,
+        help="A user script which can be provided for custom dataset, reward functions, and model registration.",
+    )
+
+    parser.add_argument("script_args", nargs=REMAINDER)
+
     args = parser.parse_args()
 
     # Validate Lepton mode arguments
@@ -474,6 +479,7 @@ def replica_placement(
     script: Optional[str] = None,
     backend: str = "vllm",
     config_path: Optional[str] = None,
+    script_args: Optional[List[Any]] = None,
 ) -> List[List[str]]:
     commands = []
     gpu_devices = []
@@ -516,6 +522,9 @@ def replica_placement(
                         rdzv_ip = get_worker_ip(global_worker_idx)
                 else:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+
+                if script_args is not None:
+                    commands[-1] += f" {' '.join(script_args)}"
 
                 control_urls.append(control_url)
                 output_files.append(
@@ -562,6 +571,8 @@ def replica_placement(
             )
             if script is not None:
                 commands[-1] += f" --script {script}"
+            if script_args is not None:
+                commands[-1] += f" {' '.join(script_args)}"
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"policy_{i}.log")
@@ -609,6 +620,9 @@ def replica_placement(
                 else:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
 
+                if script_args is not None:
+                    commands[-1] += f" {' '.join(script_args)}"
+
                 control_urls.append(control_url)
                 output_files.append(
                     os.path.join(output_dir, f"rollout_{i}.log")
@@ -652,6 +666,10 @@ def replica_placement(
             )
             if script is not None:
                 commands[-1] += f" --script {script}"
+
+            if script_args is not None:
+                commands[-1] += f" {' '.join(script_args)}"
+
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"rollout_{i}.log")
@@ -1188,7 +1206,9 @@ cosmos-rl --config config.toml"""
         controller_cmd = f"{controller_script} --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"
         if script:
-            controller_cmd += f" {script}"
+            controller_cmd += f" --script {script}"
+        if args.script_args is not None:
+            controller_cmd += f" {' '.join(args.script_args)}"
         control_url = f"localhost:{port}"
 
     def get_lepton_ip(worker_idx: int) -> str:
@@ -1244,6 +1264,7 @@ cosmos-rl --config config.toml"""
         script=script,
         backend=backend,
         config_path=tmpfile_toml,
+        script_args=args.script_args,
     )
 
     num_workers = len(global_launch_settings)

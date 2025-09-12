@@ -503,7 +503,16 @@ class GRPOTrainer(Trainer):
         Sync all states of the model and optimizer.
         """
         len_params = 0
-        model_state_dict = [self.model.state_dict()]
+        # It's a HFModel, we need to sync the named buffers
+        if hasattr(self.model, "reset_named_buffers"):
+            # Convert the model to the hf_config.torch_dtype, which is param_dtype
+            self.model.model = self.model.model.to(
+                dtype=self.model.hf_config.torch_dtype
+            )
+            named_buffers_dict = dict(self.model.named_buffers())
+            model_state_dict = [self.model.state_dict(), named_buffers_dict]
+        else:
+            model_state_dict = [self.model.state_dict()]
 
         # If KL-divergence is enabled, we need to also sync the reference model state dict
         if self.config.train.train_policy.kl_beta != 0.0:

@@ -600,8 +600,7 @@ class InternVLChatModel(BaseModel):
         lm_args = None
         if (
             architecture := hf_config.llm_config.architectures[0]
-            == "Qwen3MoeForCausalLM"
-        ):
+        ) == "Qwen3MoeForCausalLM":
             lm_config = hf_config.llm_config
             # Qwen3MoE does not have any biases
             bias_list = []
