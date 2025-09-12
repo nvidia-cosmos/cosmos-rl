@@ -66,6 +66,8 @@ def main(*args, **kwargs):
                     parallel_dims=parallel_dims,
                     dataset=custom_sft_dataset,
                     data_packer=custom_sft_data_packer,
+                    val_dataset=kwargs.get("val_dataset", None),
+                    val_data_packer=kwargs.get("val_data_packer", None),
                 )
                 trainer.train()
             else:

@@ -22,7 +22,7 @@ from datasets import concatenate_datasets
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.cache as cache
 from transformers import AutoTokenizer
-from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
+from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
 from cosmos_rl.policy.config import (
     Config,
     config_hash,

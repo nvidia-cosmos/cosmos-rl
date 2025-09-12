@@ -119,11 +119,14 @@ def collate_fn(
 
 
 def construct_dataset(
-    config: SFTDataConfig,
+    cosmos_config: CosmosConfig,
     tokenizer: AutoTokenizer,
     data_packer: DataPacker,
     user_provided_dataset: Optional[Dataset] = None,
+    val_data_packer: Optional[DataPacker] = None,
+    user_provided_val_dataset: Optional[Dataset] = None,
 ):
+    config = cosmos_config.train.train_policy
     if user_provided_dataset is not None:
         dataset = None
         train_dataset = user_provided_dataset
@@ -143,35 +146,68 @@ def construct_dataset(
         train_dataset = concatenate_datasets(dataset_list)
     logger.info(f"Final dataset size = {len(train_dataset)}")
 
-    if isinstance(train_dataset, torch.utils.data.Dataset):
-        # Define the split ratio (e.g., 80% train, 20% test)
-        if config.dataset.test_size is None:
-            logger.warning(
-                "No test size specified, using 10% of the training dataset for testing."
+    if cosmos_config.validation.enable:
+        if user_provided_val_dataset is not None:
+            test_dataset = user_provided_val_dataset
+            logger.info(
+                "Using user-provided validation dataset, which will skip split processing."
             )
-            config.dataset.test_size = 0.1
-        if isinstance(config.dataset.test_size, float):
-            n_test_samples = int(len(train_dataset) * config.dataset.test_size)
+        elif cosmos_config.validation.dataset.name:
+            dataset = util.load_data_from_disk_or_hf(
+                cosmos_config.validation.dataset.name,
+                cosmos_config.validation.dataset.subset,
+                cosmos_config.validation.dataset.revision or None,
+            )
+            dataset_list = []
+            for split_name in cosmos_config.validation.dataset.split:
+                logger.info(
+                    f"Appending validation split {split_name}, validation dataset size = {len(dataset[split_name])}"
+                )
+                dataset_list.append(dataset[split_name])
+            test_dataset = concatenate_datasets(dataset_list)
         else:
-            n_test_samples = config.dataset.test_size
-        n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
+            logger.warning(
+                "No validation dataset provided, using split of training dataset for validation."
+            )
+            if isinstance(train_dataset, torch.utils.data.Dataset):
+                # Define the split ratio (e.g., 80% train, 20% test)
+                if config.dataset.test_size is None:
+                    logger.warning(
+                        "No test size specified, using 10% of the training dataset for testing."
+                    )
+                    config.dataset.test_size = 0.1
+                if isinstance(config.dataset.test_size, float):
+                    n_test_samples = int(len(train_dataset) * config.dataset.test_size)
+                else:
+                    n_test_samples = config.dataset.test_size
+                n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
 
-        # Generate deterministic indices
-        indices = list(range(len(train_dataset)))
-        test_indices = indices[:n_test_samples]
-        train_indices = indices[n_test_samples:]
+                # Generate deterministic indices
+                indices = list(range(len(train_dataset)))
+                test_indices = indices[:n_test_samples]
+                train_indices = indices[n_test_samples:]
 
-        test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
-        train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
+                test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
+                train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
+            else:
+                assert hasattr(
+                    train_dataset, "train_test_split"
+                ), "train_dataset must have train_test_split method"
+                split = train_dataset.train_test_split(
+                    test_size=config.dataset.test_size, shuffle=False
+                )
+                train_dataset = split["train"]
+                test_dataset = split["test"]
     else:
-        assert hasattr(
-            train_dataset, "train_test_split"
-        ), "train_dataset must have train_test_split method"
-        split = train_dataset.train_test_split(
-            test_size=config.dataset.test_size, shuffle=False
-        )
-        train_dataset = split["train"]
-        test_dataset = split["test"]
+
+        class EmptyDataset(Dataset):
+            def __len__(self):
+                return 0
+
+            def __getitem__(self, idx):
+                raise IndexError("EmptyDataset has no items")
+
+        test_dataset = EmptyDataset()
 
     train_sft_dataset = SFTDataset(
         config,
@@ -184,7 +220,7 @@ def construct_dataset(
         config,
         tokenizer=tokenizer,
         dataset=test_dataset,
-        data_packer=data_packer,
+        data_packer=val_data_packer,
         is_user_dataset=user_provided_dataset is not None,
     )
 
@@ -253,6 +289,8 @@ class SFTTrainer(Trainer):
         parallel_dims: ParallelDims,
         dataset: Optional[Dataset] = None,
         data_packer: Optional[DataPacker] = None,
+        val_dataset: Optional[Dataset] = None,
+        val_data_packer: Optional[DataPacker] = None,
     ):
         super(SFTTrainer, self).__init__(config, parallel_dims)
 
@@ -317,12 +355,23 @@ class SFTTrainer(Trainer):
             data_packer.setup(self.config, self.tokenizer)
             self.data_packer = data_packer
 
+        if isinstance(val_dataset, Callable):
+            val_dataset = val_dataset(self.config)
+            val_dataset.setup(self.config, self.tokenizer)
+        if val_data_packer:
+            val_data_packer.setup(self.config, self.tokenizer)
+            self.val_data_packer = val_data_packer
+        else:
+            self.val_data_packer = self.data_packer
+
         # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
-            config.train.train_policy,
+            config,
             tokenizer=self.tokenizer,
             data_packer=self.data_packer,
             user_provided_dataset=dataset,
+            val_data_packer=self.val_data_packer,
+            user_provided_val_dataset=val_dataset,
         )
         train_sampler = DistributedSampler(
             train_dataset,
@@ -451,7 +500,7 @@ class SFTTrainer(Trainer):
                 if fixed_length is None:
                     max_len = min(
                         self.config.policy.model_max_length,
-                        self.data_packer.sft_compute_max_len(val_global_batch),
+                        self.val_data_packer.sft_compute_max_len(val_global_batch),
                     )
                 else:
                     max_len = fixed_length
@@ -462,7 +511,7 @@ class SFTTrainer(Trainer):
                         * self.seq_len_multiple
                     )
 
-                val_batch = self.data_packer.sft_collate_fn(
+                val_batch = self.val_data_packer.sft_collate_fn(
                     val_global_batch,
                     computed_max_len=max_len,
                     pad_token_id=self.tokenizer.pad_token_id,
