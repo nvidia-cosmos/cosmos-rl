@@ -550,6 +550,10 @@ class GRPOTrainer(Trainer):
                 )
                 logger.info(f"[Policy] Syncing model state: {dest_name}, local_view dtype: {local_view.dtype}, local_view shape: {local_view.shape}")
                 original_obj = torch.clone(get_local_tensor(obj))
+
+                if "inv_freq" in dest_name:
+                    local_view = local_view.to(torch.bfloat16)
+                
                 if is_send:
                     send_hook(local_view)
                 else:
@@ -561,6 +565,9 @@ class GRPOTrainer(Trainer):
 
                     # Copy again for offloaded tensor since it is not inplace received
                     if not to_write.is_cuda:
+                        to_write.copy_(local_view)
+                    
+                    if "inv_freq" in dest_name:
                         to_write.copy_(local_view)
 
                 # assert torch.allclose(
