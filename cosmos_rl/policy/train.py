@@ -15,25 +15,23 @@
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.distributed import (
-    init_distributed,
-    destroy_distributed,
-    get_controller_metadata,
-)
+from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
 from cosmos_rl.utils import util
+from cosmos_rl.dispatcher.api.client import APIClient
 
 
 def main(*args, **kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    ctrl_ip, ctrl_port, metadata = get_controller_metadata()
+    api_client = APIClient(role="POLICY")
+    metadata = api_client.get_controller_metadata()
 
     if metadata["config"] is None:
         raise RuntimeError(
-            f"[Policy] Please first go to http://{ctrl_ip}:{ctrl_port} to configure training parameters."
+            f"[Policy] Please first go to http://{api_client.remote_ips}:{api_client.remote_port} to configure training parameters."
         )
 
     cosmos_config = CosmosConfig.from_dict(metadata["config"])
