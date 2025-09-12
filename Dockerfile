@@ -85,11 +85,12 @@ RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url h
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
 # Install flash_attn separately
-RUN pip install flash_attn==2.8.2 --no-build-isolation
+# RUN pip install flash_attn==2.8.2 --no-build-isolation
 
 
 RUN pip install \
     torchao==0.13.0 \
+    flash_attn==2.8.2 \
     -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly \
     flashinfer-python \
     transformer_engine[pytorch] \
@@ -105,7 +106,6 @@ RUN pip install \
 RUN pip uninstall -y triton triton_kernels && \
     pip install -U triton --pre --extra-index-url https://download.pytorch.org/whl/nightly --no-deps && \
     pip install -U triton_kernels --extra-index-url https://wheels.vllm.ai/gpt-oss/ --no-deps && \
-    pip install accelerate kernels
     
 ###################################################
 FROM no-efa-base AS efa-base
