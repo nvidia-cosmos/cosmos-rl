@@ -742,6 +742,10 @@ class ValidationConfig(BaseModel):
         default=20,
         description="Validation frequency during training, in terms of training steps",
     )
+    freq_in_epoch: int = Field(
+        default=0,
+        description="Validation frequency during training, in terms of training epochs. Default to 0 (disabled). Takes priority over freq when enabled.",
+    )
     batch_size: Optional[int] = Field(
         default=None,
         description="Batch size for validation, will use the same batch size as training if not set.",
@@ -785,6 +789,13 @@ class ValidationConfig(BaseModel):
         assert (
             len(self.reward_function) > 0
         ), "reward_function must be a dict of reward functions"
+
+        if self.enable:
+            if self.freq_in_epoch <= 0 and self.freq <= 0:
+                raise ValueError(
+                    f"validation freq must be greater than 0 when freq_in_epoch disabled, got {self.freq}"
+                )
+
         return self
 
 

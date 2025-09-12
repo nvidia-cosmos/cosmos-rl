@@ -674,9 +674,10 @@ class PolicyStatusManager:
             need_sync_weight = need_sync_weight or step == total_steps
             # If validation is enabled, we need to sync weight every validation step
             if self.config.validation.enable:
-                need_sync_weight = need_sync_weight or (
-                    step % self.config.validation.freq == 0
-                )
+                # For step-based validation, check now
+                if self.config.validation.freq > 0:
+                    need_sync_weight = need_sync_weight or (step % self.config.validation.freq == 0)
+                # For epoch-based validation, we'll check after required_rollouts is defined
 
             if profile_finished:
                 # Only reset the do_profile flag if the profile is finished
@@ -853,10 +854,32 @@ class PolicyStatusManager:
             # From controller's perspective, the training step is already increased
             self.current_step += 1
 
-            if self.config.validation.enable and (
-                self.current_step % self.config.validation.freq == 0
-                or self.current_step == self.total_steps
-            ):
+            # Validation dataloader activation - support both step-based and epoch-based
+            should_activate_validation = False
+            if self.config.validation.enable:
+                if self.config.validation.freq_in_epoch > 0:
+                    # Epoch-based validation (takes priority)
+                    current_epoch = (
+                        self.config.train.epoch
+                        - (self.remain_samples_num + required_rollouts - 1)
+                        // self.samples_per_epoch
+                    )
+                    if current_epoch % self.config.validation.freq_in_epoch == 0:
+                        # Check if this is the end of an epoch
+                        epoch_boundary = (
+                            self.remain_samples_num + required_rollouts - 1
+                        ) // self.samples_per_epoch != (
+                            self.remain_samples_num - 1
+                        ) // self.samples_per_epoch
+                        should_activate_validation = epoch_boundary or self.current_step == self.total_steps
+                elif self.config.validation.freq > 0:
+                    # Step-based validation (fallback)
+                    should_activate_validation = (
+                        self.current_step % self.config.validation.freq == 0
+                        or self.current_step == self.total_steps
+                    )
+
+            if should_activate_validation:
                 self.validation_activate_dataloader(self.current_step)
 
             # Interleave-style data dispatch
@@ -897,6 +920,22 @@ class PolicyStatusManager:
                     and self.current_step > 0
                 )
 
+            # Calculate current epoch if save_freq_in_epoch is configured
+            current_epoch = None
+            if self.config.train.ckpt.save_freq_in_epoch > 0:
+                # Calculate the epoch that is ending or has just ended
+                # For final step, we want the final epoch number
+                if self.current_step == self.total_steps:
+                    # Final step: we're completing the final epoch
+                    current_epoch = self.config.train.epoch
+                else:
+                    # Regular step: calculate based on remaining samples
+                    current_epoch = (
+                        self.config.train.epoch
+                        - (self.remain_samples_num + required_rollouts - 1)
+                        // self.samples_per_epoch
+                    )
+
             for replica in arrived_replicas:
                 command.DataFetchCommand.trigger(
                     replica=replica,
@@ -908,6 +947,7 @@ class PolicyStatusManager:
                     # Only `do_save` when checkpointing is enabled
                     do_save=do_save and self.config.train.ckpt.enable_checkpoint,
                     redis_handler=self.redis_handler,
+                    current_epoch=current_epoch,
                 )
                 self.set_status(replica.name, PolicyStatus.RUNNING)
 
