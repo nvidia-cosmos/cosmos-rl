@@ -732,7 +732,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 total_params += 1
                 total_recvs += len(insts_for_per_param.instructions)
 
-        copy_stream = torch.cuda.Stream()
+        copy_stream = self.inference_stream  # torch.cuda.Stream()
 
         assert total_params == len(
             self.recv_param_key_n_rank_list
@@ -950,7 +950,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         # Remove the weight version from the prompts
                         # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
                         prompts = [(prompt[0], prompt[1]) for prompt in prompts]
-                        completions: List[List[str]] = self.rollout.rollout_generation(
+                        completions, results = self.rollout.rollout_generation(
                             prompt_id_and_payload_list=prompts,
                             stream=self.inference_stream,
                             data_packer=self.val_data_packer,
@@ -1167,12 +1167,40 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
                 prompts = [(prompt[0], prompt[1]) for prompt in prompts]
 
-                completions: List[List[str]] = self.rollout.rollout_generation(
+                if self.global_rank == 0:
+                    logger.info(
+                        f"=== [{self.replica_name}] Start generation {len(prompts)} {[len(p[1]) for p in prompts]} {[p[0] for p in prompts]}==="
+                    )
+                completions, results = self.rollout.rollout_generation(
                     prompt_id_and_payload_list=prompts,
                     stream=self.inference_stream,
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
+                if self.global_rank == 0:
+                    token_ids = []
+                    for output in results:
+                        token_ids.append(
+                            [output.outputs[i].token_ids for i in range(len(output.outputs))]
+                        )
+                    logger.info(
+                        f"=== [{self.replica_name}] End generation {[[len(r) for r in rs] for rs in completions]}\nids: {[[len(r) for r in rs] for rs in token_ids]}\n==="
+                    )
+                    is_exit = False
+                    for idx, rs in enumerate(completions):
+                        for inner, r in enumerate(rs):
+                            if len(r) > 50000:
+                                logger.info(
+                                    f"=== [{self.replica_name}] Completion: {len(r)} Sampling: {self.sampling_params} Max_tokens: {self.sampling_params.max_tokens} Prompt_len: {len(prompts[idx][1])} Tokens: {len(token_ids[idx][inner])} ==="
+                                )
+                                logger.info(
+                                    f"=== [{self.replica_name}] Prompt:\n{prompts[idx]}\nCompletion:\n{r[0:32]}\nTokens:\n{token_ids[idx][inner][0:128]}\n ==="
+                                )
+                                is_exit = True
+                                break
+                        if is_exit:
+                            break
+
                 # Remove empty completions
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []
