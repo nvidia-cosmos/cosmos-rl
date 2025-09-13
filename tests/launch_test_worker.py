@@ -1237,7 +1237,7 @@ async def parallel_map_check():
 def run_sft_for_sequence_packing(fsdp, tp, cp):
     def train_test(self, packing_seq):
         train_dataset, _ = construct_dataset(
-            config.train.train_policy,
+            config,
             tokenizer=self.tokenizer,
             data_packer=self.data_packer,
             user_provided_dataset=None,
