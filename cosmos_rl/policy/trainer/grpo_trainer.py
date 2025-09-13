@@ -65,7 +65,7 @@ from cosmos_rl.utils.ulysses import (
 from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
-from cosmos_rl.dispatcher.replica import Rollout
+from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
     COSMOS_API_POLICY_TRAIN_ACK_SUFFIX,
@@ -417,7 +417,7 @@ class GRPOTrainer(Trainer):
             rollouts = []
             try:
                 rollouts = [
-                    Rollout.from_dict(msgpack.unpackb(x))
+                    Rollout.model_validate(msgpack.unpackb(x))
                     for x in self.redis_controller.subscribe_rollout(self.replica_name)
                 ]
             except Exception as e:
@@ -1284,7 +1284,12 @@ class GRPOTrainer(Trainer):
         logger.debug("[Policy] Prepare training data.")
         rollouts: List[Rollout] = self.dispatch_rollouts()
 
-        payloads_list = [rollout.payload for rollout in rollouts]
+        # For single-turn rollout, we use the prompt, for multi-turn rollout, we use the completed conversation
+        if self.config.rollout.multi_turn_config.enable:
+            samples = [rollout.completed_conversation for rollout in rollouts]
+        else:
+            samples = [rollout.prompt for rollout in rollouts]
+
         completions_list = [rollout.completion for rollout in rollouts]
         advantages_list = [rollout.advantage for rollout in rollouts]
         # Optional Positive-NLL support: only compute flags when coefficient > 0
@@ -1303,11 +1308,11 @@ class GRPOTrainer(Trainer):
         ]
         processed_samples: List[Any] = [
             self.data_packer.get_policy_input(
-                payloads_list[i],
+                samples[i],
                 completions_list[i],
                 n_ignore_prefix_tokens_list[i],
             )
-            for i in range(len(payloads_list))
+            for i in range(len(samples))
         ]
 
         # user_info_keys = list(kwargs.keys())
@@ -1408,6 +1413,11 @@ class GRPOTrainer(Trainer):
                                 user_mini_batch["interested_tokens"] = user_mini_batch[
                                     "logprob_masks"
                                 ]
+
+                            if not torch.any(user_mini_batch["interested_tokens"]):
+                                logger.warning(
+                                    "No interested tokens, may cause 'compute_logprobs()' failed"
+                                )
 
                             # Move all tensor to device
                             for k in user_mini_batch.keys():

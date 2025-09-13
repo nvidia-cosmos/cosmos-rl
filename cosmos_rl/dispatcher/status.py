@@ -639,6 +639,13 @@ class PolicyStatusManager:
             if self.tokenizer.eos_token is not None and rollout.completion is not None:
                 if not rollout.completion.endswith(self.tokenizer.eos_token):
                     rollout.completion = rollout.completion + self.tokenizer.eos_token
+                    if (
+                        self.config.rollout.multi_turn_config.enable
+                        and rollout.completed_conversation[-1].role == "assistant"
+                    ):
+                        rollout.completed_conversation[
+                            -1
+                        ].content += self.tokenizer.eos_token
         self.rollout_buffer.put(rollout)
         self.try_trigger_data_fetch_and_training()
 

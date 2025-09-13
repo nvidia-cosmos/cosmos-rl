@@ -21,7 +21,7 @@ from queue import Queue
 import atexit
 import types
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
-from typing import List, Tuple, Optional, Callable, Any
+from typing import List, Optional, Callable
 from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase, State
@@ -77,6 +77,12 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
     replace_weight_of_quantized_module,
     post_process_view_map_for_fp8,
 )
+from cosmos_rl.dispatcher.data.schema import (
+    RLPayload,
+    IdxAndRLPayload,
+    ConversationType,
+)
+from cosmos_rl.rollout.schema import RolloutResult
 
 from vllm import SamplingParams
 import time
@@ -134,7 +140,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
         # CommandQueue queried from controller.
         self._command_queue: Queue[Command] = Queue()
-        self._prompt_queue: Queue[List[List[int, str]]] = Queue()
+        self._prompt_queue: Queue[List[IdxAndRLPayload]] = Queue()
         self.current_weight_version = 0
 
         # if flashinfer config is not enabled, avoid importing flashinfer
@@ -933,9 +939,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 or current_step == broadcast_command.total_steps
             )
             validation_queue = Queue()
-            validation_results = []
             prompt_idxs: List[int] = []
-            payloads: List[Any] = []
+            validation_payloads: List[RLPayload] = []
             if should_do_validation:
                 # Do inline validation here
                 while True:
@@ -945,21 +950,29 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         validation_step=current_step,
                     )
                     if not validation_queue.empty():
-                        prompts = validation_queue.get()
-                        # For validation, we don't need to check the weight version
-                        # Remove the weight version from the prompts
-                        # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
-                        prompts = [(prompt[0], prompt[1]) for prompt in prompts]
-                        completions: List[List[str]] = self.rollout.rollout_generation(
-                            prompt_id_and_payload_list=prompts,
-                            stream=self.inference_stream,
-                            data_packer=self.val_data_packer,
-                            sampling_params=self.val_sampling_params,
+                        prompt_id_and_payload_list: List[IdxAndRLPayload] = (
+                            validation_queue.get()
                         )
-                        if completions:
-                            prompt_idxs.extend([prompt[0] for prompt in prompts])
-                            payloads.extend([prompt[1] for prompt in prompts])
-                            validation_results.extend(completions)
+                        payloads = [p for _, p in prompt_id_and_payload_list]
+                        rollout_results: List[RolloutResult] = (
+                            self.rollout.rollout_generation(
+                                payloads=payloads,
+                                stream=self.inference_stream,
+                                data_packer=self.val_data_packer,
+                                sampling_params=self.val_sampling_params,
+                            )
+                        )
+                        if rollout_results:
+                            prompt_idxs.extend(
+                                [idx for idx, _ in prompt_id_and_payload_list]
+                            )
+                            for p, rr in zip(payloads, rollout_results):
+                                p.completions = rr.completions
+                                if self.rollout.rollout_config.multi_turn_config.enable:
+                                    p.completed_conversations = (
+                                        rr.completed_conversations
+                                    )
+                            validation_payloads.extend(payloads)
 
                     if is_end:
                         break
@@ -973,8 +986,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         src_replica_name=self.replica_name,
                         validation_step=current_step,
                         prompt_idxs=prompt_idxs,
-                        payloads=payloads,
-                        completions=validation_results,
+                        payloads=validation_payloads,
                         is_end=True,
                     )
                     try:
@@ -1020,7 +1032,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         """
         prompts_and_is_end = (None, False)
         if self.global_rank == 0:
-            prompt_id_and_payload_list = None
+            prompt_id_and_payload_list: List[IdxAndRLPayload] | None = None
             is_end = False
             url_suffix = COSMOS_API_NEXT_PROMPT_SUFFIX
             try:
@@ -1056,6 +1068,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
         prompts, is_end = prompts_and_is_end
         if prompts is not None:
+            prompts = [
+                (prompt[0], RLPayload.model_validate(prompt[1])) for prompt in prompts
+            ]
             prompt_queue.put(prompts)
         return is_end
 
@@ -1155,40 +1170,68 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
 
                 # Check if the prompt is valid for the current weight version
+                first_payload: RLPayload = self._prompt_queue.queue[0][0][1]
                 is_valid_prompt_for_current_weight_version = (
-                    self._prompt_queue.queue[0][0][2] <= self.current_weight_version
+                    first_payload.weight_version <= self.current_weight_version
                 )
                 if not is_valid_prompt_for_current_weight_version:
                     # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
                     continue
-                prompts: List[Tuple[int, str, int]] = self._prompt_queue.get()
 
-                # Remove the weight version from the prompts
-                # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
-                prompts = [(prompt[0], prompt[1]) for prompt in prompts]
+                prompt_id_and_payload_list: List[IdxAndRLPayload] = (
+                    self._prompt_queue.get()
+                )
+                payloads: List[RLPayload] = [
+                    payload for _, payload in prompt_id_and_payload_list
+                ]
 
-                completions: List[List[str]] = self.rollout.rollout_generation(
-                    prompt_id_and_payload_list=prompts,
+                rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
+                    payloads=payloads,
                     stream=self.inference_stream,
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
-                # Remove empty completions
-                valid_completions: List[List[str]] = []
-                prompt_indices_to_remove: List[int] = []
-                if len(completions):
-                    batch_size = len(prompts)
-                    assert (
-                        len(completions) == batch_size
-                    ), f"Error: VLLM returned {len(completions)} for {batch_size}"
-                    for i in range(batch_size):
-                        completion = completions[i]
+
+                if len(rollout_results) == 0:
+                    continue
+
+                assert len(rollout_results) == len(
+                    payloads
+                ), f"Error: VLLM returned {len(rollout_results)} for {len(payloads)}"
+
+                # we need filter the result with valid completions or valid completed_conversations
+                valid_result: List[RolloutResult] = []
+                valid_prompt_id_and_payload_list: List[IdxAndRLPayload] = []
+                if self.rollout.rollout_config.multi_turn_config.enable:
+                    for id_and_payload, rr in zip(
+                        prompt_id_and_payload_list, rollout_results
+                    ):
+                        valid_conversations: List[ConversationType] = []
+                        # remove those result without valid assistant message
+                        flag = False
+                        for conversation in rr.completed_conversations:
+                            for msg in conversation:
+                                if msg.role == "assistant" and msg.content != "":
+                                    flag = True
+                                    break
+                            if flag:
+                                valid_conversations.append(conversation)
+                        rr.completed_conversations = valid_conversations
+                        if len(rr.completed_conversations) > 0:
+                            valid_result.append(rr)
+                            valid_prompt_id_and_payload_list.append(id_and_payload)
+                else:
+                    # Remove empty completions
+                    for id_and_payload, rr in zip(
+                        prompt_id_and_payload_list, rollout_results
+                    ):
+                        completions = rr.completions
                         skip_output = False
-                        total_generation_count = len(completion)
+                        total_generation_count = len(completions)
                         empty_generation_count = 0
-                        output_texts = []
+                        output_texts: List[str] = []
                         for j in range(total_generation_count):
-                            output_text = completion[j]
+                            output_text = completions[j]
                             # if output_text == "":
                             #     logger.warning(
                             #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
@@ -1211,18 +1254,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                             total_generation_count - empty_generation_count
                         ) <= 1
                         if not skip_output:
-                            valid_completions.append(output_texts)
-                        else:
-                            prompt_indices_to_remove.append(i)
-                if len(prompt_indices_to_remove):
-                    prompts = [
-                        prompt
-                        for i, prompt in enumerate(prompts)
-                        if i not in prompt_indices_to_remove
-                    ]
-                    assert (
-                        len(prompts) == len(valid_completions)
-                    ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
+                            rr.completions = output_texts
+                            valid_result.append(rr)
+                            valid_prompt_id_and_payload_list.append(id_and_payload)
 
                 logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
@@ -1232,20 +1266,31 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         self.parallel_dims.pp_coord[0]
                         == self.parallel_dims.pp_coord[1] - 1
                     )
-                    and len(valid_completions) > 0
+                    and len(valid_result) > 0
                 )
 
                 if should_report:
                     url_suffix = COSMOS_API_ROLLOUT_SUFFIX
                     # only the first tp rank in the rollout replica will post the completion to the controller.
-                    prompt_idxs = [prompt[0] for prompt in prompts]
-                    payloads = [prompt[1] for prompt in prompts]
+                    valid_payloads: List[RLPayload] = []
+                    valid_prompt_idxs: List[int] = []
+
+                    for (prompt_idx, old_payload), result in zip(
+                        valid_prompt_id_and_payload_list, valid_result
+                    ):
+                        valid_prompt_idxs.append(prompt_idx)
+                        # update payload
+                        old_payload.completions = result.completions
+                        if self.rollout.rollout_config.multi_turn_config.enable:
+                            old_payload.completed_conversations = (
+                                result.completed_conversations
+                            )
+                        valid_payloads.append(old_payload)
 
                     response = RolloutRequest(
                         src_replica_name=self.replica_name,
-                        prompt_idxs=prompt_idxs,
-                        payloads=payloads,
-                        completions=valid_completions,
+                        prompt_idxs=valid_prompt_idxs,
+                        payloads=valid_payloads,
                         is_end=False,
                     )
                     try:

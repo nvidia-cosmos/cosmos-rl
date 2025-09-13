@@ -2,7 +2,10 @@ from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from typing import List, Any, Dict, Union
 import torch
 import copy
-
+from cosmos_rl.dispatcher.data.packer.multi_turn import (
+    ConversationType,
+    get_token_ids_and_loss_mask_from_conversation,
+)
 
 IGNORE_LABEL_ID = -100
 
@@ -11,8 +14,6 @@ class DecoderOnlyLLMDataPacker(DataPacker):
     """
     Data protocol & processing logic for the decoder only LLM for SFT and RL training.
     """
-
-    ConversationType = List[Dict[str, str]]
 
     class RLPolicyInput:
         input_ids: List[int]
@@ -30,30 +31,28 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         # 1. if item is a string, then assume it is a raw text
         if isinstance(sample, str):
             return sample
-        # 2. if item is a list, then assume it is in conversation format of:
-        # [
-        #     {
-        #         "role": "user",
-        #         "content": "..."
-        #     },
-        #     {
-        #         "role": "assistant",
-        #         "content": "..."
-        #     }
-        # ]
-        else:
-            assert isinstance(sample, list), "All items should be list"
-            # Check `role` and `content` in each item
-            for x in sample:
-                assert isinstance(x, dict), "Each item should be a dict"
-                assert "role" in x, "Each item should have 'role'"
-                assert "content" in x, "Each item should have 'content'"
 
+        # 2. if item is a list, check the conversation format
+        if not self.config.rollout.multi_turn_config.enable:
             # Apply template to each item
             prompt = self.tokenizer.apply_chat_template(
                 sample,
                 tokenize=False,
                 add_generation_prompt=True,
+            )
+            return prompt
+        else:
+            tool_schemas = (
+                self.tool_agent.tool_schemas() if self.tool_agent is not None else None
+            )
+            prompt = self.tokenizer.apply_chat_template(
+                sample,
+                tools=tool_schemas,
+                chat_template=self.custom_chat_template,
+                tokenize=False,
+                add_generation_prompt=self.config.rollout.multi_turn_config.add_generation_prompt,
+                continue_final_message=self.config.rollout.multi_turn_config.continue_final_message,
+                enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
             )
             return prompt
 
@@ -69,22 +68,45 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         """
         assert isinstance(completion, str), "Completion should be a string"
 
-        # Reuse the same logic as get_rollout_input to get raw text prompts
-        prompt = self.get_rollout_input(sample)
-        assert isinstance(prompt, str), "Prompt should be a string"
+        if not self.config.rollout.multi_turn_config.enable:
+            # Reuse the same logic as get_rollout_input to get raw text prompts
+            prompt = self.get_rollout_input(sample)
+            assert isinstance(prompt, str), "Prompt should be a string"
 
-        input_ids = self.tokenizer(
-            prompt, add_special_tokens=False
-        ).input_ids  # not padded yet
+            input_ids = self.tokenizer(
+                prompt, add_special_tokens=False
+            ).input_ids  # not padded yet
 
-        completion_ids = self.tokenizer(completion, add_special_tokens=False).input_ids
+            completion_ids = self.tokenizer(
+                completion, add_special_tokens=False
+            ).input_ids
 
-        return DecoderOnlyLLMDataPacker.RLPolicyInput(
-            input_ids=input_ids + completion_ids,
-            logprob_masks=[0] * (len(input_ids) - 1 + n_ignore_prefix_tokens)
-            + [1] * (len(completion_ids) - n_ignore_prefix_tokens)
-            + [0],
-        )
+            return DecoderOnlyLLMDataPacker.RLPolicyInput(
+                input_ids=input_ids + completion_ids,
+                logprob_masks=[0] * (len(input_ids) - 1 + n_ignore_prefix_tokens)
+                + [1] * (len(completion_ids) - n_ignore_prefix_tokens)
+                + [0],
+            )
+        else:
+            # ignore completion for multi-turn rollout, it already in the conversation
+            tool_schemas = (
+                self.tool_agent.tool_schemas() if self.tool_agent is not None else None
+            )
+            input_ids, loss_mask = get_token_ids_and_loss_mask_from_conversation(
+                self.tokenizer,
+                sample,
+                chat_template=self.custom_chat_template,
+                enable_thinking=self.config.rollout.multi_turn_config.enable_thinking,
+                tools=tool_schemas,
+            )
+
+            assert any(
+                loss_mask
+            ), "Should not mask all tokens, this sample is not valid"
+
+            return DecoderOnlyLLMDataPacker.RLPolicyInput(
+                input_ids=input_ids, logprob_masks=loss_mask
+            )
 
     def policy_compute_max_len(self, processed_samples: List[RLPolicyInput]) -> int:
         return max([len(x.input_ids) for x in processed_samples])
@@ -172,27 +194,8 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         if isinstance(sample, str):
             token_ids = self.tokenizer(sample, add_special_tokens=False).input_ids
             label_ids = token_ids.copy()
-        # 2. if item is a list, then assume it is in conversation format of:
-        # [
-        #     {
-        #         "role": "user",
-        #         "content": "..."
-        #     },
-        #     {
-        #         "role": "assistant",
-        #         "content": "..."
-        #     }
-        # ]
+        # 2. if item is a list, then assume it is in conversation format:
         else:
-            assert isinstance(sample, list), "All items should be list, got: {}".format(
-                sample
-            )
-            # Check `role` and `content` in each item
-            for x in sample:
-                assert isinstance(x, dict), "Each item should be a dict"
-                assert "role" in x, "Each item should have 'role'"
-                assert "content" in x, "Each item should have 'content'"
-
             original_sample = copy.deepcopy(sample)
 
             try:
