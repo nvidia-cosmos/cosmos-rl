@@ -186,5 +186,41 @@ class TestProcessFlow(unittest.TestCase):
             ), f"Process failed with code: {process.returncode}"
 
 
+class TestValidationFlow(unittest.TestCase):
+    def test_train_validation(self):
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+        world_size = 4
+        # Create the Python command for torchrun
+        cmd = [
+            "torchrun",
+            f"--nproc_per_node={world_size}",  # Use 4 GPUs
+            "--role=rank",
+            "--tee=3",
+            "--rdzv_backend=c10d",
+            "--rdzv_endpoint=localhost:0",
+            os.path.join(cur_dir, "launch_test_worker.py"),
+            "--mode",
+            "sft_for_validation",
+        ]
+        env = dict(os.environ)
+        env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+        # Start the process
+        process = subprocess.Popen(
+            cmd,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            env=env,
+        )
+        processes = [process]
+
+        # Wait for process to complete
+        for process in processes:
+            stdout, stderr = process.communicate()
+            # Check if process completed successfully
+            assert (
+                process.returncode == 0
+            ), f"Process failed with code: {process.returncode}"
+
+
 if __name__ == "__main__":
     unittest.main()

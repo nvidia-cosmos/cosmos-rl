@@ -80,7 +80,8 @@ from cosmos_rl.utils.sequence_packing import (
 )
 from torch.utils.data import DataLoader, DistributedSampler, Sampler
 from cosmos_rl.policy.trainer.sft_trainer import collate_fn, construct_dataset
-
+from torch.utils.data import Dataset
+from datasets import concatenate_datasets
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -1427,6 +1428,75 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
         assert np.allclose(non_packing_losses, packing_losses, atol=1e-3, rtol=1e-3)
 
 
+def run_sft_validation():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_sft.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        hf_config = util.retry(AutoConfig.from_pretrained)(
+            self.config.policy.model_name_or_path, trust_remote_code=True
+        )
+        model_type = hf_config.model_type
+        logger.info(f"model type {model_type}")
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        self.remote_hosts = ["0.0.0.0:8000"]
+        pass
+
+    CommMixin.init_comm = dummy
+    trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
+    assert len(trainer.val_data_loader) == 29195
+
+    class TestDataset(Dataset):
+        def __init__(self, config: CosmosConfig):
+            pass
+
+        def setup(
+            self,
+            config: CosmosConfig,
+            tokenizer: AutoTokenizer,
+        ):
+            dataset = util.load_data_from_disk_or_hf(
+                config.validation.dataset.name,
+                config.validation.dataset.subset,
+                config.validation.dataset.revision or None,
+            )
+            dataset_list = []
+            for split_name in config.validation.dataset.split:
+                dataset_list.append(dataset[split_name])
+            self.dataset = concatenate_datasets(dataset_list)
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, idx):
+            return self.dataset[idx]
+
+    trainer = SFTTrainer(
+        config=config,
+        parallel_dims=parallel_dims,
+        val_dataset=TestDataset,
+        val_data_packer=DecoderOnlyLLMDataPacker(),
+    )
+    assert len(trainer.val_data_loader) == 1
+    trainer.validate()
+
+
 async def main():
     # Get shared memory name and size from command line arguments
     import argparse
@@ -1478,6 +1548,9 @@ async def main():
         tp = int(tp.split(":")[1])
         cp = int(cp.split(":")[1])
         run_sft_for_sequence_packing(fsdp, tp, cp)
+        exit(0)
+    elif mode == "sft_for_validation":
+        run_sft_validation()
         exit(0)
 
     # Initialize distributed environment
