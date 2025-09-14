@@ -26,6 +26,7 @@ from cosmos_rl.utils.redis_stream import RedisStreamHandler
 import msgpack
 import time
 from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
+from concurrent.futures import ProcessPoolExecutor
 
 
 class RolloutGroup:
