@@ -24,13 +24,13 @@ from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.utils.modelscope import modelscope_load_dataset
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.tools.tools_use import (
+from cosmos_rl.utils.tools_use import (
     ToolAgent,
     BaseTool,
     OpenAIFunctionToolSchema,
     ToolResponse,
 )
-from cosmos_rl.tools.tools_use.hermes_tool_parser import HermesToolParser
+from cosmos_rl.utils.tools_use.hermes_tool_parser import HermesToolParser
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
     add_tool_response_messages,

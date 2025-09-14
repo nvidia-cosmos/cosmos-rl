@@ -1415,11 +1415,6 @@ class GRPOTrainer(Trainer):
                                     "logprob_masks"
                                 ]
 
-                            if not torch.any(user_mini_batch["interested_tokens"]):
-                                logger.warning(
-                                    "No interested tokens, may cause 'compute_logprobs()' failed"
-                                )
-
                             # Move all tensor to device
                             for k in user_mini_batch.keys():
                                 v = user_mini_batch[k]

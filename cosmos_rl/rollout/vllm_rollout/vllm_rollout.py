@@ -31,13 +31,13 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.model import WeightMapper
-from cosmos_rl.tools.tools_use import ToolParser
+from cosmos_rl.utils.tools_use import ToolParser
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
     add_tool_response_messages,
     add_assistant_message,
 )
-from cosmos_rl.tools.tools_use import OpenAIFunctionToolSchema
+from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
 

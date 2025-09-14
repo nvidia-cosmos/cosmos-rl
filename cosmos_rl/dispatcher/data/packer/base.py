@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Type, Union, Optional
 from transformers import AutoTokenizer
 from cosmos_rl.policy.config import Config
-from cosmos_rl.tools.tools_use.tool_agent import ToolAgent
+from cosmos_rl.utils.tools_use.tool_agent import ToolAgent
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
     add_assistant_message,

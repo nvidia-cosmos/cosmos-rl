@@ -15,7 +15,7 @@
 
 from typing import List, Optional, Dict
 
-from cosmos_rl.tools.tools_use.schema import OpenAIFunctionToolSchema
+from cosmos_rl.utils.tools_use.schema import OpenAIFunctionToolSchema
 from cosmos_rl.utils.logging import logger
 from .base_tool import BaseTool
 from .base_tool_parser import ToolParser
