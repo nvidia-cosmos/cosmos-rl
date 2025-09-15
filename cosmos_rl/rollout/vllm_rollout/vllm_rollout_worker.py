@@ -54,15 +54,6 @@ from cosmos_rl.utils.parallelism_map import (
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
-from cosmos_rl.utils.fp8.fp8_util import (
-    IS_TORCH_COMPATIBLE_WITH_FP8,
-    MIN_TORCH_VERSION_FOR_FP8,
-)
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
-    cache_weight_of_quantized_module,
-    replace_weight_of_quantized_module,
-    post_process_view_map_for_fp8,
-)
 from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
     IdxAndRLPayload,
