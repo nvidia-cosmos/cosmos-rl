@@ -117,6 +117,85 @@ def compute_loss(
             ref_per_token_logps.shape, current_token_logps.shape
         )
 
+    # If GSPO variant is enabled, compute sequence-level importance ratio and apply sequence-wise clipping
+    if getattr(config.train.train_policy, "variant", "grpo") == "gspo":
+        bsz, _ = logprob_masks.shape
+        epsilon_low = config.train.train_policy.epsilon_low
+        epsilon_high = config.train.train_policy.epsilon_high
+
+        delta = torch.clamp(
+            current_token_logps - old_per_token_logps, min=-20.0, max=20.0
+        )  # [n_tokens]
+        shifted_length = (cu_seqlens[1:] - cu_seqlens[:-1]).to(delta.dtype)  # [bsz]
+        batch_idx = torch.arange(bsz, device=delta.device).repeat_interleave(
+            shifted_length.to(torch.long)
+        )
+
+        sum_delta = torch.zeros(bsz, dtype=delta.dtype, device=delta.device)
+        sum_delta.index_add_(0, batch_idx, delta)
+        mean_delta = sum_delta / (shifted_length + 1e-8)
+        s = torch.exp(mean_delta)  # [bsz]
+        s_clipped = torch.clamp(s, 1 - epsilon_low, 1 + epsilon_high)
+
+        sum_adv = torch.zeros(
+            bsz, dtype=current_advantages.dtype, device=current_advantages.device
+        )
+        sum_adv.index_add_(0, batch_idx, current_advantages)
+        A_seq = sum_adv / (shifted_length + 1e-8)
+
+        seq_loss = -torch.minimum(s * A_seq, s_clipped * A_seq)  # [bsz]
+
+        if config.train.train_policy.kl_beta != 0.0 and ref_per_token_logps is not None:
+            kl_ratio = torch.clamp(
+                ref_per_token_logps - current_token_logps, min=-20, max=20
+            )
+            per_token_kl = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
+            sum_kl = torch.zeros(
+                bsz, dtype=per_token_kl.dtype, device=per_token_kl.device
+            )
+            sum_kl.index_add_(0, batch_idx, per_token_kl)
+            kl_seq = sum_kl / (shifted_length + 1e-8)
+        else:
+            kl_seq = torch.zeros_like(seq_loss)
+
+        if config.train.train_policy.loss_type == "seq-mean-token-mean":
+            # Sequence-level equal weighting (recommended for GSPO)
+            per_token_loss = seq_loss.mean()
+            kl_loss = kl_seq.mean()
+        elif config.train.train_policy.loss_type == "seq-mean-token-sum":
+            per_token_loss = (seq_loss * shifted_length).mean()
+            kl_loss = (kl_seq * shifted_length).mean()
+        elif config.train.train_policy.loss_type == "token-mean":
+            length_sum = shifted_length.sum()
+            num_dp_workers = 1
+            if dp_group is not None:
+                num_dp_workers *= torch.distributed.get_world_size(group=dp_group)
+                torch.distributed.all_reduce(length_sum, group=dp_group)
+            if ddp_comm is not None:
+                num_dp_workers *= ddp_comm.world_size()
+                ddp_comm.allreduce(
+                    length_sum, length_sum, op=torch.distributed.ReduceOp.SUM
+                )
+            per_token_loss = (
+                (seq_loss * shifted_length).sum()
+                / (length_sum + 1e-8)
+                * (num_dp_workers)
+            )
+            kl_loss = (
+                (kl_seq * shifted_length).sum() / (length_sum + 1e-8) * (num_dp_workers)
+            )
+        else:
+            raise ValueError(
+                f"Invalid loss type: {config.train.train_policy.loss_type}"
+            )
+
+        return (
+            per_token_loss + kl_loss * config.train.train_policy.kl_beta,
+            per_token_loss,
+            kl_loss,
+        )
+
+    # Default path: GRPO-style token-level ratio and clipping
     coef_1 = torch.clamp(current_token_logps - old_per_token_logps, min=-20.0, max=20.0)
     coef_1 = torch.exp(coef_1)
 

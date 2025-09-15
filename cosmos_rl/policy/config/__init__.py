@@ -233,8 +233,8 @@ class GrpoConfig(BaseModel):
     type: Literal["grpo"]
     variant: str = Field(
         default="grpo",
-        description="Variant of the GRPO, currently support `grpo`, and `dapo`",
-        choices=["grpo", "dapo"],
+        description="Variant of the GRPO, currently support `grpo`, `dapo`, and `gspo`",
+        choices=["grpo", "dapo", "gspo"],
     )
 
     dataset: DatasetConfig = Field(
@@ -371,7 +371,42 @@ class GrpoConfig(BaseModel):
         assert self.variant in [
             "grpo",
             "dapo",
-        ], "variant must be one of ['grpo', 'dapo']"
+            "gspo",
+        ], "variant must be one of ['grpo', 'dapo', 'gspo']"
+        # If GSPO is selected and user didn't explicitly set loss_type, default to seq-mean-token-mean
+        try:
+            from cosmos_rl.utils.logging import logger as _cfg_logger
+        except Exception:
+            _cfg_logger = None
+
+        if self.variant == "gspo":
+            # If user did not explicitly set loss_type in the input config, default to seq-mean-token-mean
+            try:
+                _fields_set = getattr(self, "model_fields_set", set())
+            except Exception:
+                _fields_set = set()
+            if "loss_type" not in _fields_set and self.loss_type == "token-mean":
+                self.loss_type = "seq-mean-token-mean"
+                if _cfg_logger is not None:
+                    _cfg_logger.info(
+                        "[Config] GSPO selected and loss_type not provided: defaulting to 'seq-mean-token-mean'."
+                    )
+            # Validate and warn when non-recommended loss type is set
+            if self.loss_type not in (
+                "seq-mean-token-mean",
+                "token-mean",
+                "seq-mean-token-sum",
+            ):
+                if _cfg_logger is not None:
+                    _cfg_logger.warning(
+                        f"[Config] GSPO with unsupported loss_type '{self.loss_type}', falling back to 'seq-mean-token-mean'."
+                    )
+                self.loss_type = "seq-mean-token-mean"
+            elif self.loss_type != "seq-mean-token-mean":
+                if _cfg_logger is not None:
+                    _cfg_logger.warning(
+                        f"[Config] GSPO recommended loss_type is 'seq-mean-token-mean', but got '{self.loss_type}'. Proceed with caution."
+                    )
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
@@ -384,6 +419,8 @@ class GrpoConfig(BaseModel):
         ), "reward_function must be a dict of reward functions"
         if isinstance(self.filter_reward_metric, str):
             self.filter_reward_metric = [self.filter_reward_metric]
+        if self.positive_nll_coef is not None and self.positive_nll_coef <= 0.0:
+            raise ValueError("positive_nll_coef must be > 0")
         return self
 
 
