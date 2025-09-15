@@ -243,7 +243,7 @@ class CommMixin:
 
     def heartbeat_trigger(self, shutdown_signal: threading.Event):
         while True:
-            self.api_client.send_heartbeat(self.replica_name)
+            self.api_client.post_heartbeat(self.replica_name)
 
             # If the heartbeat interval is greater than 1, we need to check the shutdown signal every second
             # for faster shutdown check

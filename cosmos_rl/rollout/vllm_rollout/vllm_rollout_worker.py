@@ -298,7 +298,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
         ]
         if self.global_rank == 0:
-            self.api_client.set_rollout_shard_info(
+            self.api_client.post_rollout_shard_info(
                 shard_infos=self.all_rank_local_shard_infos,
                 param_groups=list(merged_groups.values()),
                 sorted_params=sorted_params_all_rank,
@@ -354,7 +354,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         if self.rank_in_rollout_repicas == 0:
             # only replica_rank == 0 have the right to generate nccl id.
             nccl_group_id = create_nccl_uid()
-            self.api_client.set_nccl_comm_initiator(
+            self.api_client.post_nccl_comm_initiator(
                 unique_rollout_group_key, nccl_group_id
             )
 
@@ -384,7 +384,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def query_nccl_unique_id_from_controller(self, unique_id_key: str):
         # We don't have something like dist.barrier(), so just use while True loop to query it like synchronize.
         # all ranks not zero in replica 0 or all ranks of other replicas need to query the group_id from controller
-        return self.api_client.get_nccl_comm_acceptor(unique_id_key)
+        return self.api_client.post_nccl_comm_acceptor(unique_id_key)
 
     def prepare_trainable_params(self):
         # TODO: (lms/feng) Refactor the param management logic for P2R and R2R, incluing trainable params for P2R and non-trainable params for R2R.
@@ -780,7 +780,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
             )
             self.policy_to_rollout_recv_insts = (
-                self.api_client.get_rollout_shard_recv_insts(self.global_rank)
+                self.api_client.post_rollout_shard_recv_insts(self.global_rank)
             )
             logger.info(
                 "[Rollout] Finished policy_to_rollout_recv_insts from controller."
@@ -1059,7 +1059,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         payloads=validation_payloads,
                         is_end=True,
                     )
-                    self.api_client.send_validation_report(response)
+                    self.api_client.post_validation_report(response)
 
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
@@ -1150,7 +1150,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             is_end=True,
         )
         logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
-        self.api_client.send_rollout_completion(response)
+        self.api_client.post_rollout_completion(response)
 
     @torch.no_grad()
     def main_loop(self):
@@ -1309,7 +1309,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         payloads=valid_payloads,
                         is_end=False,
                     )
-                    self.api_client.send_rollout_completion(response)
+                    self.api_client.post_rollout_completion(response)
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()

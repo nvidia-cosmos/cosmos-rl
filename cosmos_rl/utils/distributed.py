@@ -472,7 +472,7 @@ class HighAvailabilitylNccl:
             # initialize nccl handle for building mesh among policies
             # only replica_rank == 0 have the right to generate nccl id.
             nccl_group_id = create_nccl_uid()
-            self.api_client.set_nccl_comm_initiator(unique_pair_name, nccl_group_id)
+            self.api_client.post_nccl_comm_initiator(unique_pair_name, nccl_group_id)
             logger.debug(
                 f"{self.__log_prefix()} post nccl group_id to controller: {unique_pair_name}"
             )
@@ -482,7 +482,7 @@ class HighAvailabilitylNccl:
             # and then they can get the group_id from controller
             # But we don't have something like dist.barrier(), so just while True loop to query it like synchronize.
             # all ranks not zero in replica 0 or all ranks of other replicas need to query the group_id from controller
-            nccl_group_id = self.api_client.get_nccl_comm_acceptor(unique_pair_name)
+            nccl_group_id = self.api_client.post_nccl_comm_acceptor(unique_pair_name)
 
         # create nccl comm, any error will be reported to the controller
         try:
@@ -492,7 +492,7 @@ class HighAvailabilitylNccl:
             self.is_first_time_build_mesh = False
         except Exception as e:
             # report the error to the controller
-            self.api_client.send_nccl_comm_error(self.replica_name, e)
+            self.api_client.post_nccl_comm_error(self.replica_name, e)
             logger.error(
                 f"{self.__log_prefix()} failed in create nccl comm , report to controller: {e}"
             )
@@ -510,7 +510,7 @@ class HighAvailabilitylNccl:
         # To prevent following rebuild mesh with same unique_pair_name,
         # we need to clear the kv store of the old mesh.
         if self.replica_name_to_rank.get(self.replica_name) == 0:
-            self.api_client.clear_nccl_comm_store(unique_pair_name)
+            self.api_client.post_clear_nccl_comm_store(unique_pair_name)
 
     def __do_nccl_op_with_retry(self, func: Callable, timeout_ms: int, **kwargs):
         if self.is_single_peer.is_set():
@@ -541,7 +541,7 @@ class HighAvailabilitylNccl:
 
                 # report the error to the controller
                 # the communicator will destroy before buildmesh
-                self.api_client.send_nccl_comm_error(self.replica_name, e)
+                self.api_client.post_nccl_comm_error(self.replica_name, e)
                 logger.error(
                     f"{self.__log_prefix()} recovering nccl op '{func.__name__}' with kwargs {kwargs} after {i} retries: {e}"
                 )

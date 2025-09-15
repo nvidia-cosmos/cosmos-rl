@@ -214,7 +214,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
         ]
         if self.global_rank == 0:
-            self.api_client.set_rollout_shard_info(
+            self.api_client.post_rollout_shard_info(
                 self.all_rank_local_shard_infos,
                 list(merged_groups.values()),
                 sorted_params_all_rank,
@@ -260,7 +260,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if self.rank_in_rollout_repicas == 0:
             # only replica_rank == 0 have the right to generate nccl id.
             nccl_group_id = create_nccl_uid()
-            self.api_client.set_nccl_comm_initiator(
+            self.api_client.post_nccl_comm_initiator(
                 unique_rollout_group_key, nccl_group_id
             )
             logger.debug(f"[Rollout] post nccl group_id to controller: {nccl_group_id}")
@@ -269,7 +269,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             # all ranks need to wait for the rollout replica 0 finished the group_id post
             # and then they can get the group_id from controller
             # all ranks not zero in replica 0 or all ranks of other replicas need to query the group_id from controller
-            nccl_group_id = self.api_client.get_nccl_comm_acceptor(
+            nccl_group_id = self.api_client.post_nccl_comm_acceptor(
                 unique_rollout_group_key
             )
             if nccl_group_id is None:
@@ -396,7 +396,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         else:
             logger.debug(f"[Rollout] Querying nccl group id for {nccl_unique_id_key}")
             # query the nccl group id from controller
-            nccl_group_id = self.api_client.get_nccl_comm_acceptor(nccl_unique_id_key)
+            nccl_group_id = self.api_client.post_nccl_comm_acceptor(nccl_unique_id_key)
             if nccl_group_id is None:
                 raise RuntimeError(
                     "[Rollout] Failed to query nccl group_id from controller!"
@@ -414,7 +414,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             )
         if not hasattr(self, "policy_to_rollout_recv_insts"):
             self.policy_to_rollout_recv_insts = (
-                self.api_client.get_rollout_shard_recv_insts(self.global_rank)
+                self.api_client.post_rollout_shard_recv_insts(self.global_rank)
             )
             logger.info(
                 "[Rollout] Finished policy_to_rollout_recv_insts from controller."
