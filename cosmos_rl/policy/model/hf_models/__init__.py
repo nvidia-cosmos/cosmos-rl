@@ -84,30 +84,6 @@ class HFModel(BaseModel):
         sig = inspect.signature(self.model.forward)
         return sig.parameters.keys()
 
-    def _process_vision_embeddings(
-        self, inputs_embeds, input_ids, pixel_values, grid_thw, pad_token_id
-    ):
-        """Helper function to process vision embeddings (images or videos)"""
-        n_tokens = (input_ids == pad_token_id).sum().item()
-        if n_tokens > 0:
-            # TODO: check whether vision_model.forward has grid_thw as input
-            # e.g. vision models like SiglipVisionModel do not have grid_thw as input
-            kwargs = {}
-            if grid_thw is not None:
-                kwargs["grid_thw"] = grid_thw
-            vision_embeds = self.vision_model(pixel_values, **kwargs)
-            assert (
-                vision_embeds.shape[0] == n_tokens
-            ), "vision_embeds.shape[0] must be equal to n_tokens"
-            mask = input_ids == pad_token_id
-            mask_unsqueezed = mask.unsqueeze(-1)
-            mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
-            vision_mask = mask_expanded.to(inputs_embeds.device)
-
-            vision_embeds = vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(vision_mask, vision_embeds)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -181,7 +157,8 @@ class HFModel(BaseModel):
                 "vision_model.encoder.layers",  # SiglipVisionModel(Gemma)
                 "transformer.layers",  # PixtralVisionModel（Mistral）
                 "model.layers",  # Llama4VisionModel
-                "encoder.layer",  # InternVLVisionModel
+                "encoder.layer",  # InternVLVisionModel(qwen)
+                "encoder.layers",  # InternVLVisionModel(gpt-oss)
             ]:
                 vision_layers = safe_deep_getattr(self.vision_model, path, None)
                 if vision_layers is not None:
@@ -218,8 +195,12 @@ class HFModel(BaseModel):
     def text_config(self):
         text_config = None
         if self.is_vlm:
-            text_config = getattr(self.hf_config, "text_config", None)
-            if text_config is None:
+            if hasattr(self.hf_config, "text_config"):
+                text_config = self.hf_config.text_config
+            elif hasattr(self.hf_config, "llm_config"):
+                text_config = self.hf_config.llm_config
+            else:
+                logger.warning(f"Can not get text config from {self.hf_config}.")
                 text_config = self.hf_config
         else:
             text_config = self.hf_config

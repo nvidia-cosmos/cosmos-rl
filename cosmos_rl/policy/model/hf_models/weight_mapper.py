@@ -39,6 +39,13 @@ class HFModelWeightMapper(WeightMapper):
                 text_config.num_attention_heads // text_config.num_key_value_heads
             )
             self.head_dim = text_config.hidden_size // text_config.num_attention_heads
+        elif getattr(self.config, "llm_config", None) is not None:
+            # VLM models like InternVL could has num_attention_heads in llm_config
+            text_config = self.config.llm_config
+            self.kv_head_ratio = (
+                text_config.num_attention_heads // text_config.num_key_value_heads
+            )
+            self.head_dim = text_config.hidden_size // text_config.num_attention_heads
         else:
             raise ValueError(
                 f"Can not determine kv_head_ratio and head_dim from config: {self.config}"
