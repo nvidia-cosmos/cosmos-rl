@@ -1,0 +1,171 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-Turn Rollout Example (For GSM8K) &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Multi-Turn Rollout Example (For GSM8K)</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/multi_turn/multi-turn rollout example.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="multi-turn-rollout-example-for-gsm8k">
+<h1>Multi-Turn Rollout Example (For GSM8K)<a class="headerlink" href="#multi-turn-rollout-example-for-gsm8k" title="Link to this heading"></a></h1>
+<p>This example shows how to perform multi-turn RL training on cosmos-rl.</p>
+<section id="usage">
+<h2>Usage<a class="headerlink" href="#usage" title="Link to this heading"></a></h2>
+</section>
+<section id="step-1-configure-the-config-file">
+<h2>Step 1: Configure the config file<a class="headerlink" href="#step-1-configure-the-config-file" title="Link to this heading"></a></h2>
+<p>cosmos-rl provides a multi-turn rollout config file, which can be referred to <code class="docutils literal notranslate"><span class="pre">configs/qwen2-5/qwen2-5-multiturn-3b-p-fsdp1-tp1-r-tp1-pp1-grpo.toml</span></code></p>
+<p>The <code class="docutils literal notranslate"><span class="pre">[rollout.multi_turn_config]</span></code> section configures the parameters for multi-turn rollout, as follows:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">enable</span></code>: Whether to enable multi-turn rollout</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">enable_tools</span></code>: Whether to enable tools, if enabled, the related tool call prompt will be added to the generated prompt. The tool addition method can be referred to another document</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">enable_thinking</span></code>: Whether to enable thinking</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">custom_chat_template_path</span></code>: The path to the custom chat template, which is a jinja2 template, and the writing method can be referred to huggingface chat_template writing: <a class="reference external" href="https://huggingface.co/docs/transformers/en/chat_templating_writing">https://huggingface.co/docs/transformers/en/chat_templating_writing</a></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">max_assistant_turns</span></code>: Maximum assistant turns</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">add_generation_prompt</span></code>: Whether to add generation prompt, default to true</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">continue_final_message</span></code>: Whether to continue the final message</p></li>
+</ul>
+</section>
+<section id="step-2-run-the-grpo-training">
+<h2>Step 2: Run the GRPO training<a class="headerlink" href="#step-2-run-the-grpo-training" title="Link to this heading"></a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cosmos-rl<span class="w"> </span>--config<span class="w"> </span>configs/qwen2-5/qwen2-5-multiturn-3b-p-fsdp1-tp1-r-tp1-pp1-grpo.toml<span class="w"> </span>tools/dataset/gsm8k_grpo.py
+</pre></div>
+</div>
+</section>
+<section id="notes">
+<h2>Notes<a class="headerlink" href="#notes" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>To enable model to call tools and reference tool response to generate final answer, it is recommended to set <code class="docutils literal notranslate"><span class="pre">max_assistant_turns</span></code> to at least 2, i.e., the first assistant calls the tool, and the second assistant references the tool response to generate the final answer</p></li>
+<li><p>The effect of tool_call is closely related to chat_template, if the tool call is not ideal, please print the conversation, so as to determine whether the chat_template is appropriate</p></li>
+<li><p>To execute the GRPO algorithm, it is necessary to set <code class="docutils literal notranslate"><span class="pre">rollout.n_generation</span></code> to be greater than 1, so as to calculate the correct reward</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

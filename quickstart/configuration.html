@@ -1115,6 +1115,119 @@
 <tr class="row-odd"><td><p>enum</p></td>
 <td colspan="2"><p>gaussian, eva, olora, pissa, pissa_niter_[number of iters]</p></td>
 </tr>
+<tr class="row-even"><td rowspan="32"><ul class="simple">
+<li><p>MultiTurnRolloutConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>MultiTurnRolloutConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Enable</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to enable multi-turn rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable_tools</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Enable Tools</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to enable tools in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable_thinking</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Enable Thinking</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to enable thinking in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>custom_chat_template_path</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Custom Chat Template Path</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>The path to the custom chat template in chat.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>max_assistant_turns</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Max Assistant Turns</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Max assistant turn count for multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>5</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>add_generation_prompt</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Add Generation Prompt</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Whether to add generation prompt in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>continue_final_message</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Continue Final Message</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Whether to continue the final message in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
 <tr class="row-even"><td rowspan="15"><ul class="simple">
 <li><p>OverlongRewardConfig</p></li>
 </ul>
@@ -1480,7 +1593,7 @@
 </tr>
 <tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/SubProfilerConfig</span></p></td>
 </tr>
-<tr class="row-even"><td rowspan="50"><ul class="simple">
+<tr class="row-even"><td rowspan="52"><ul class="simple">
 <li><p>RolloutConfig</p></li>
 </ul>
 </td>
@@ -1660,6 +1773,14 @@
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>vllm</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><ul class="simple">
+<li><p>multi_turn_config</p></li>
+</ul>
+</td>
+<td colspan="4"><p>Configuration for multi-turn rollout.</p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/MultiTurnRolloutConfig</span></p></td>
 </tr>
 <tr class="row-even"><td rowspan="39"><ul class="simple">
 <li><p>RolloutParallelismConfig</p></li>
