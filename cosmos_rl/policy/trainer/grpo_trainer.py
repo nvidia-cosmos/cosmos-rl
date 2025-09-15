@@ -1011,6 +1011,9 @@ class GRPOTrainer(Trainer):
         """
         # Add nccl allreduce operations for all parameters and necessary states.
         """
+        if int(os.environ.get("COSMOS_NO_TRAIN", "0")) == 1:
+            return 0.0
+
         with torch.cuda.stream(self.train_stream):
             for model_part in self.model_parts:
                 # Model part may use same physical mesh for different logical mesh,
@@ -1717,7 +1720,8 @@ class GRPOTrainer(Trainer):
         end_event.record()
 
         # Only step lr scheduler when all the mini-batches are processed
-        self.lr_schedulers.step()
+        if int(os.environ.get("COSMOS_NO_TRAIN", "0")) != 1:
+            self.lr_schedulers.step()
 
         loss = (loss_sum / loss_count) if loss_count > 0 else loss_sum
         kl_loss = (kl_loss_sum / loss_count) if loss_count > 0 else kl_loss_sum
@@ -1739,6 +1743,45 @@ class GRPOTrainer(Trainer):
             global_avg_loss = global_max_loss = loss.item()  # noqa: F841
             if self.config.train.train_policy.kl_beta != 0.0:
                 global_avg_kl_loss = global_max_kl_loss = kl_loss.item()  # noqa: F841
+
+        def eval():
+            if len(processed_samples) > 0:
+                self.model.eval()
+                device = torch.cuda.current_device()
+                collated_dict = {}
+                collated_dict["input_ids"] = torch.tensor(
+                    [x.input_ids for x in processed_samples[0:1]],
+                    dtype=torch.long,
+                ).to(device)
+                for _ in range(128):
+                    position_ids, input_ids, pos_seq_dim = (
+                        self.model.get_position_ids(**collated_dict)
+                    )
+                    input_ids_before_cp = input_ids
+                    if self.parallel_dims.cp_enabled:
+                        [input_ids, position_ids, padding_mask] = (
+                            slice_inputs_for_ulysses(
+                                [input_ids, position_ids, None],
+                                self.parallel_dims.mesh["cp"],
+                                seq_dims=[1, pos_seq_dim, 1],
+                            )
+                        )
+                    collated_dict["position_ids"] = position_ids
+                    collated_dict["input_ids"] = input_ids
+                    logits = self.model(**collated_dict)
+                    next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                    input_ids = torch.cat([input_ids_before_cp, next_token], dim=1)
+                    collated_dict["input_ids"] = input_ids
+                    if next_token.item() == self.tokenizer.eos_token_id:
+                        break
+                self.model.train()
+                compl = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                if self.global_rank == 0:
+                    logger.info(f"====== [Policy] Eval {current_step} sample output:\n{compl}\n")
+                    logger.info(f"====== [Policy] From:\n{payloads_list[0]}\n")
+        inter = int(os.environ.get("COSMOS_POLICY_EVAL", "0"))
+        if inter > 0 and current_step > 0 and current_step % inter == 0:
+            eval()
 
         report_data = {}
         if self.config.logging.logger:

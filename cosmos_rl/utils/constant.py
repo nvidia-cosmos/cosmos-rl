@@ -27,7 +27,7 @@ COSMOS_ROLLOUT_TRAJECTORY_SIZE = 30
 # Heartbeat used to make sure the main thread is alive.
 # Mostly, Heartbeat report is non-blocking in a separate thread,
 # so we can use a shorter timeout threshold.
-COSMOS_HEARTBEAT_TIMEOUT = int(os.environ.get("COSMOS_HEARTBEAT_TIMEOUT", "200"))
+COSMOS_HEARTBEAT_TIMEOUT = int(os.environ.get("COSMOS_HEARTBEAT_TIMEOUT", "900"))
 COSMOS_HEARTBEAT_SEND_INTERVAL = int(
     os.environ.get("COSMOS_HEARTBEAT_SEND_INTERVAL", "60")
 )

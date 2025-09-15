@@ -221,7 +221,8 @@ class vLLMRollout(RolloutBase):
 
             traceback.print_exc()
             return []
-        return response
+
+        return response, results
 
     def get_underlying_model(self):
         """

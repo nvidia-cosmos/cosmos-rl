@@ -92,13 +92,19 @@ def _patch_vllm_rollout_locked_step(
         if not hasattr(self, "_cosmos_step_counter"):
             self._cosmos_step_counter = 0
         self._cosmos_step_counter += 1
-        if self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0:
-            # IMPORTANT:
-            # If validation is enabled, R2R is not expected to be called in this step function
-            # to avoid recursive inference execution.
-            consume_command(
-                cmd_pred=partial(cmd_pred, enable_validation=enable_validation)
-            )
+        if os.environ.get("COSMOS_STEP_CMD", "1") != "0":
+            if self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0:
+                # IMPORTANT:
+                # If validation is enabled, R2R is not expected to be called in this step function
+                # to avoid recursive inference execution.
+                last_cmd = None
+                while True:
+                    time.sleep(1.0)
+                    cmd = consume_command(cmd_pred=partial(cmd_pred, enable_validation=enable_validation))
+                    if cmd is None and (last_cmd is not None and isinstance(last_cmd, RolloutToRolloutBroadcastCommand) or last_cmd is None):
+                        break
+                    elif cmd is not None:
+                        last_cmd = cmd
         return orig_step(*args, **kwargs)
 
     llm_engine.step = types.MethodType(step, llm_engine)
@@ -886,7 +892,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 total_params += 1
                 total_recvs += len(insts_for_per_param.instructions)
 
-        copy_stream = torch.cuda.Stream()
+        copy_stream = self.inference_stream  # torch.cuda.Stream()
 
         assert (
             total_params == len(self.recv_param_key_n_rank_list)
@@ -1113,7 +1119,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         # Remove the weight version from the prompts
                         # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
                         prompts = [(prompt[0], prompt[1]) for prompt in prompts]
-                        completions: List[List[str]] = self.rollout.rollout_generation(
+                        completions, results = self.rollout.rollout_generation(
                             prompt_id_and_payload_list=prompts,
                             stream=self.inference_stream,
                             data_packer=self.val_data_packer,
@@ -1252,6 +1258,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 raise RuntimeError(
                     f"[Rollout] Command execution failed for {current_command._serialize()}"
                 ) from e
+        return current_command
 
     def send_end_signal(self, url_suffix: str):
         """
@@ -1285,7 +1292,15 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     @torch.no_grad()
     def main_loop(self):
         while not self.shutdown_signal.is_set():
-            self.consume_command(cmd_pred=None)
+            last_cmd = None
+            while True:
+                time.sleep(1.0)
+                cmd = self.consume_command(cmd_pred=None)
+                if cmd is None and (last_cmd is not None and isinstance(last_cmd, RolloutToRolloutBroadcastCommand) or last_cmd is None):
+                    break
+                elif cmd is not None:
+                    last_cmd = cmd
+
             # If weight is not ready, nothing else to do.
             if not self.state.weight_synced():
                 continue
@@ -1329,12 +1344,40 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # [prompt_idx, prompt_payload, weight_version] -> [prompt_idx, prompt_payload]
                 prompts = [(prompt[0], prompt[1]) for prompt in prompts]
 
-                completions: List[List[str]] = self.rollout.rollout_generation(
+                if self.global_rank == 0:
+                    logger.info(
+                        f"=== [{self.replica_name}] Start generation {len(prompts)} {[len(p[1]) for p in prompts]} {[p[0] for p in prompts]}==="
+                    )
+                completions, results = self.rollout.rollout_generation(
                     prompt_id_and_payload_list=prompts,
                     stream=self.inference_stream,
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
+                if self.global_rank == 0:
+                    token_ids = []
+                    for output in results:
+                        token_ids.append(
+                            [output.outputs[i].token_ids for i in range(len(output.outputs))]
+                        )
+                    logger.info(
+                        f"=== [{self.replica_name}] End generation {[[len(r) for r in rs] for rs in completions]}\nids: {[[len(r) for r in rs] for rs in token_ids]}\n==="
+                    )
+                    is_exit = False
+                    for idx, rs in enumerate(completions):
+                        for inner, r in enumerate(rs):
+                            if len(r) > 50000:
+                                logger.info(
+                                    f"=== [{self.replica_name}] Completion: {len(r)} Sampling: {self.sampling_params} Max_tokens: {self.sampling_params.max_tokens} Prompt_len: {len(prompts[idx][1])} Tokens: {len(token_ids[idx][inner])} ==="
+                                )
+                                logger.info(
+                                    f"=== [{self.replica_name}] Prompt:\n{prompts[idx]}\nCompletion:\n{r[0:32]}\nTokens:\n{token_ids[idx][inner][0:128]}\n ==="
+                                )
+                                is_exit = True
+                                break
+                        if is_exit:
+                            break
+
                 # Remove empty completions
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []
