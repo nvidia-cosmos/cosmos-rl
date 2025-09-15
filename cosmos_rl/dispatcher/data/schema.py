@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Any, Dict, Optional, Tuple
+from typing import List, Any, Dict, Optional, Tuple, Union
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -51,7 +51,7 @@ class RLPayload(BaseModel):
     The payload schema of RL sample.
     """
 
-    prompt: Optional[str] = Field(
+    prompt: Optional[Union[ConversationType, str]] = Field(
         default=None, description="The input prompt for the rollout."
     )
 
@@ -102,7 +102,7 @@ IdxAndRLPayload = Tuple[int, RLPayload]
 
 
 class Rollout(BaseModel):
-    prompt: Optional[str] = Field(
+    prompt: Optional[Union[ConversationType, str]] = Field(
         default=None, description="The input prompt for the rollout."
     )
 

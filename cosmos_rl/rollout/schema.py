@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from typing import List, Optional, Union
 from pydantic import BaseModel
 from cosmos_rl.dispatcher.data.schema import ConversationType
 
 
 class RolloutResult(BaseModel):
     # The input prompt for the completions
-    prompt: Optional[str] = None
+    prompt: Optional[Union[str, ConversationType]] = None
 
     # The original input prompt in conversation format
     conversation: Optional[ConversationType] = None

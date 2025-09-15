@@ -37,8 +37,10 @@ class RLDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
-        payload: RLPayload = self.dataset[idx]
-        return idx, payload
+        prompt = self.dataset[idx]
+        if isinstance(prompt, RLPayload):
+            return idx, prompt
+        return idx, RLPayload(prompt=prompt)
 
     def get_reference_answer(self, idx: int) -> Any:
         assert hasattr(
