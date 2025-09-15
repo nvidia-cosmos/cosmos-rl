@@ -1460,6 +1460,7 @@ def run_sft_validation():
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
         )
@@ -1467,7 +1468,6 @@ def run_sft_validation():
         logger.info(f"model type {model_type}")
         self.data_packer = DecoderOnlyLLMDataPacker()
         self.data_packer.setup(self.config, self.tokenizer)
-        self.remote_hosts = ["0.0.0.0:8000"]
         pass
 
     CommMixin.init_comm = dummy
