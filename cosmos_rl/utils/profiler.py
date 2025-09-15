@@ -19,14 +19,13 @@ from typing import List
 import os
 import torch
 from functools import partial
-import requests
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils.checkpoint import upload_folder_to_s3
-from cosmos_rl.utils import constant
+from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.dispatcher.protocol import SetTracePathRequest
 
 
 class CosmosProfiler:
@@ -35,7 +34,7 @@ class CosmosProfiler:
         config: CosmosConfig,
         parallel_dims: ParallelDims,
         replica_name: str,
-        alternative_urls: List[str],
+        api_client: APIClient,
     ):
         self.config = config
         self.replica_name = replica_name
@@ -47,7 +46,7 @@ class CosmosProfiler:
         self.profiled_times = 0
         self.profiler = None
         self.thread_pool = None
-        self.alternative_urls = alternative_urls
+        self.api_client = api_client
         # We do not want the timestamp part of output dir for profiling data.
         output_dir = os.path.dirname(config.train.output_dir)
         self.output_dir = os.path.join(
@@ -247,19 +246,10 @@ class CosmosProfiler:
         else:
             # just leave the trace file in local disk.
             pass
-        post_func = partial(
-            requests.post,
-            json={
-                "replica_name": self.replica_name,
-                "trace_path": abs_path,
-                "global_rank": self.global_rank,
-            },
+        request = SetTracePathRequest(
+            replica_name=self.replica_name,
+            trace_path=abs_path,
+            global_rank=self.global_rank,
         )
-
-        report_func = partial(
-            make_request_with_retry,
-            post_func,
-            self.alternative_urls,
-            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-        )
+        report_func = partial(self.api_client.post_trace_path, request)
         self.thread_pool.submit(report_func)

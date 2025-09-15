@@ -37,7 +37,6 @@ from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
 from typing import Dict, Optional
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils.profiler import CosmosProfiler
-from cosmos_rl.utils.api_suffix import COSMOS_API_SET_TRACE_PATH_SUFFIX
 from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
 from cosmos_rl.policy.kernel.modeling_utils import set_flash_attn_deterministic
 
@@ -151,9 +150,7 @@ class Trainer(CommMixin):
             config,
             parallel_dims,
             replica_name=self.replica_name,
-            alternative_urls=self.api_client.get_alternative_urls(
-                COSMOS_API_SET_TRACE_PATH_SUFFIX
-            ),
+            api_client=self.api_client,
         )
 
         self.report_data = {}
