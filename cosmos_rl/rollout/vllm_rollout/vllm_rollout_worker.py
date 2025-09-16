@@ -1275,7 +1275,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def consume_all_sync_commands(
         self,
         cmd_pred: Optional[Callable[[Command], bool]] = None,
-        timeout=constant.COSMOS_ROLLOUT_CMD_GROUP_TIMEOUT,
+        timeout=constant.COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT,
     ):
         # Consume all pending commands for weight sync.
         # To ensure the weight update is using the up-to-date commands.
@@ -1284,28 +1284,24 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         start_time = time.time()
         while time.time() - start_time < float(timeout):
             cmd = self.consume_command(cmd_pred=cmd_pred)
-            if (
-                cmd is None
-                and none_cnt >= 3
-                and (
-                    (
-                        last_cmd is not None
-                        and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
-                    )
-                    or last_cmd is None
-                )
-            ):
-                # If continuously get None for 3 times, and the last command is not P2R command, we break.
-                # Since P2R must be followed by another R2R broadcast command, we need wait.
-                # Continuously get None for 3 times to make sure the command queue is empty at that time.
-                break
-            elif cmd is not None:
+            if cmd is not None:
                 last_cmd = cmd
                 none_cnt = 0
                 start_time = time.time()
             else:
                 none_cnt += 1
-            time.sleep(0.01)
+            if none_cnt >= constant.COSMOS_ROLLOUT_CMD_WAIT_TIMES and (
+                (
+                    last_cmd is not None
+                    and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
+                )
+                or last_cmd is None
+            ):
+                # If continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times, and the last command is not P2R command, we break.
+                # Since P2R must be followed by another R2R broadcast command, we need wait.
+                # Continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times to make sure the command queue is empty at that time.
+                break
+            time.sleep(constant.COSMOS_ROLLOUT_CMD_WAIT_INTERVAL)
 
     def send_end_signal(self, url_suffix: str):
         """
