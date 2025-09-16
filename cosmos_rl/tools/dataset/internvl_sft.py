@@ -290,7 +290,7 @@ class InternVL_DataPacker(DataPacker):
         if "pixel_values" in inputs:
             result_dict["pixel_values"] = inputs["pixel_values"]
 
-        image_flags = torch.ones_like(pixel_values, dtype=torch.long)[:, :, 0]
+        image_flags = torch.ones(pixel_values.shape[0], dtype=torch.long)
         result_dict["image_flags"] = image_flags
         return result_dict
 
