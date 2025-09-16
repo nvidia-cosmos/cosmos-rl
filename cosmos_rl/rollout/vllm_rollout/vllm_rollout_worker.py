@@ -1236,6 +1236,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 payloads: List[RLPayload] = [
                     payload for _, payload in prompt_id_and_payload_list
                 ]
+                if self.global_rank == 0:
+                    logger.info(
+                        f"=== [{self.replica_name}] Start generation {len(payloads)} {[len(p.prompt) for p in payloads]} {[p[0] for p in prompt_id_and_payload_list]} ==="
+                    )
 
                 rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
                     payloads=payloads,
@@ -1250,6 +1254,35 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 assert len(rollout_results) == len(
                     payloads
                 ), f"Error: VLLM returned {len(rollout_results)} for {len(payloads)}"
+
+                if self.global_rank == 0:
+                    try:
+                        logger.info(
+                            f"=== [{self.replica_name}] End generation {[[len(r) for r in rs.completions] for rs in rollout_results]}\n==="
+                        )
+                        is_exit = False
+                        for idx, rs in enumerate(rollout_results):
+                            for inner, r in enumerate(rs.completions):
+                                if len(r) > 50000:
+                                    logger.info(
+                                        f"=== [{self.replica_name}] Completion: {len(r)} Max_tokens: {self.sampling_params.max_tokens} Prompt_len: {len(payloads[idx].prompt)} ==="
+                                    )
+                                    logger.info(
+                                        f"=== [{self.replica_name}] Prompt:\n{payloads[idx].prompt}\nCompletion:\n{r[0:128]}\n==="
+                                    )
+                                    is_exit = True
+                                    break
+                            if is_exit:
+                                break
+                        if not is_exit:
+                            logger.info(
+                                f"=== [{self.replica_name}] Completion: {len(rollout_results[0].completions[0])} Max_tokens: {self.sampling_params.max_tokens} Prompt_len: {len(payloads[0].prompt)} ==="
+                            )
+                            logger.info(
+                                f"=== [{self.replica_name}] Prompt:\n{payloads[0].prompt}\nCompletion:\n{rollout_results[0].completions[0][0:32]}\n==="
+                            )
+                    except Exception:
+                        pass
 
                 # we need filter the result with valid completions or valid completed_conversations
                 valid_result: List[RolloutResult] = []
