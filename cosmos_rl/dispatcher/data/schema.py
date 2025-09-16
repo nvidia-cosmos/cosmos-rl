@@ -78,6 +78,23 @@ class RLPayload(BaseModel):
         description="The original input conversation for the rollout, In multi-turn conversation, it is a list of conversation history for each turn.",
     )
 
+    n_ignore_prefix_tokens: Optional[List[int]] = Field(
+        default=None,
+        description="The number of prefix tokens to ignore when computing reward.",
+    )
+
+    rewards: Optional[List[float]] = Field(
+        default=None, description="The reward for each completion."
+    )
+
+    advantages: Optional[List[float]] = Field(
+        default=None, description="The advantage for each completion."
+    )
+
+    valid: Optional[bool] = Field(
+        default=True, description="Whether the rollout is valid."
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.prompt or self.conversation, "Must set prompt or conversation"

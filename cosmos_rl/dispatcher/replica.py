@@ -19,117 +19,12 @@ import math
 from cosmos_rl.dispatcher.protocol import Role, MESH_NAMES, RegisterRequest
 from cosmos_rl.policy.config import SubProfilerConfig
 import asyncio
-from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo
 import weakref
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 import msgpack
 import time
-from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
-from concurrent.futures import ProcessPoolExecutor
-
-
-class RolloutGroup:
-    """
-    RolloutGroup is a data structure that contains the prompt and completions of a rollout.
-    For MutliModal-LM, image/video/audio could be included in the extra_info.
-    """
-
-    def __init__(
-        self,
-        prompt_idx: int,
-        payload: RLPayload,
-        is_end: bool,
-        reference_answer: str,
-    ):
-        self.prompt_idx: int = prompt_idx
-        self.payload: RLPayload = payload
-        self.is_end: bool = is_end
-        self.reference_answer: str = reference_answer
-
-    async def compute_rollouts(
-        self, algo: RuleBasedAlgo, executor: ProcessPoolExecutor = None
-    ) -> List[Rollout]:
-        assert (
-            self.reference_answer is not None
-        ), "[RolloutGroup] Reference answer is not provided"
-
-        if executor is not None:
-            loop = asyncio.get_running_loop()
-            rewards = await asyncio.gather(
-                *[
-                    loop.run_in_executor(
-                        executor, algo.compute_reward, completion, self.reference_answer
-                    )
-                    for completion in self.completions
-                ]
-            )
-        else:
-            rewards = [
-                algo.compute_reward(completion, self.reference_answer)
-                for completion in self.payload.completions
-            ]
-        logger.debug(f"[RolloutGroup] Rewards: {rewards}")
-        if executor is not None:
-            loop = asyncio.get_running_loop()
-            advantages = await loop.run_in_executor(
-                executor, algo.compute_advantage, [r[0] for r in rewards]
-            )
-        else:
-            advantages = algo.compute_advantage([r[0] for r in rewards])
-        logger.debug(f"[RolloutGroup] Advantages: {advantages}")
-
-        # If the completed_conversations is not provided, we use None for all the rollouts
-        if self.payload.completed_conversations is not None:
-            completed_conversations = self.payload.completed_conversations
-        else:
-            completed_conversations = [None] * len(self.payload.completions)
-
-        return [
-            Rollout(
-                prompt=self.payload.prompt,
-                conversation=self.payload.conversation,
-                completion=completion,
-                completed_conversation=completed_conversation,
-                is_end=self.is_end,
-                reward=reward[0],
-                advantage=advantage,
-                prompt_idx=self.prompt_idx,
-                filter_reward=reward[1],
-            )
-            for completion, completed_conversation, reward, advantage in zip(
-                self.payload.completions, completed_conversations, rewards, advantages
-            )
-        ]
-
-
-class BatchedRolloutGroup:
-    """
-    Batched Wrapper of the RolloutGroup
-    """
-
-    def __init__(self):
-        self.rollout_groups: List[RolloutGroup] = []
-
-    def __len__(self):
-        return len(self.rollout_groups)
-
-    def __getitem__(self, idx: int) -> RolloutGroup:
-        return self.rollout_groups[idx]
-
-    def __setitem__(self, idx: int, rollout_group: RolloutGroup):
-        self.rollout_groups[idx] = rollout_group
-
-    def __delitem__(self, idx: int):
-        del self.rollout_groups[idx]
-
-    @classmethod
-    def from_rollout_groups(
-        cls, rollout_groups: List[RolloutGroup]
-    ) -> "BatchedRolloutGroup":
-        batched_rollout_group = cls()
-        batched_rollout_group.rollout_groups = rollout_groups
-        return batched_rollout_group
+from cosmos_rl.dispatcher.data.schema import Rollout
 
 
 @dataclass

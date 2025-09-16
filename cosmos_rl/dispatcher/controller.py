@@ -37,8 +37,8 @@ from cosmos_rl.utils.wandb_logger import (
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.network_util as network_util
 import cosmos_rl.utils.constant as constant
-from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
-from cosmos_rl.dispatcher.algo.reward import Reward
+from cosmos_rl.reward.algo.base import REGISTERED_ALGOs
+from cosmos_rl.reward.algo.reward import Reward
 from cosmos_rl.dispatcher.data import (
     CosmosDataset,
     RLPayload,
