@@ -810,7 +810,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
             _patch_vllm_rollout_locked_step(
                 self.rollout,
-                self.consume_all_sync_commands,
+                self.consume_command,
                 self.config.validation.enable,
             )
             self.prepare_shard_infos_for_weight_sync_insts()
@@ -1029,7 +1029,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 )
                 _patch_vllm_rollout_locked_step(
                     self.rollout,
-                    self.consume_all_sync_commands,
+                    self.consume_command,
                     self.config.validation.enable,
                 )
                 self.prepare_shard_infos_for_weight_sync_insts()
@@ -1240,7 +1240,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             prompt_queue.put(prompts)
         return is_end
 
-    def consume_command(self, cmd_pred: Optional[Callable[[Command], bool]] = None):
+    def consume_one_command(self, cmd_pred: Optional[Callable[[Command], bool]] = None):
         current_command = None
         if self.global_rank == 0:
             if not self._command_queue.empty():
@@ -1272,7 +1272,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 ) from e
         return current_command
 
-    def consume_all_sync_commands(
+    def consume_command(
         self,
         cmd_pred: Optional[Callable[[Command], bool]] = None,
         timeout=constant.COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT,
@@ -1283,7 +1283,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         none_cnt = 0
         start_time = time.time()
         while time.time() - start_time < float(timeout):
-            cmd = self.consume_command(cmd_pred=cmd_pred)
+            cmd = self.consume_one_command(cmd_pred=cmd_pred)
             if cmd is not None:
                 last_cmd = cmd
                 none_cnt = 0
@@ -1335,8 +1335,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     @torch.no_grad()
     def main_loop(self):
         while not self.shutdown_signal.is_set():
-            self.consume_all_sync_commands(cmd_pred=None)
-
+            self.consume_command(cmd_pred=None)
             # If weight is not ready, nothing else to do.
             if not self.state.weight_synced():
                 continue
