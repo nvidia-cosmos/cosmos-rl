@@ -98,7 +98,10 @@ def _patch_vllm_rollout_locked_step(
         if not hasattr(self, "_cosmos_step_counter"):
             self._cosmos_step_counter = 0
         self._cosmos_step_counter += 1
-        if self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0:
+        if (
+            COSMOS_ROLLOUT_STEP_INTERVAL > 0
+            and self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0
+        ):
             # IMPORTANT:
             # If validation is enabled, R2R is not expected to be called in this step function
             # to avoid recursive inference execution.
@@ -807,7 +810,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
             _patch_vllm_rollout_locked_step(
                 self.rollout,
-                self.consume_command,
+                self.consume_all_sync_commands,
                 self.config.validation.enable,
             )
             self.prepare_shard_infos_for_weight_sync_insts()
@@ -1026,7 +1029,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 )
                 _patch_vllm_rollout_locked_step(
                     self.rollout,
-                    self.consume_command,
+                    self.consume_all_sync_commands,
                     self.config.validation.enable,
                 )
                 self.prepare_shard_infos_for_weight_sync_insts()
@@ -1267,6 +1270,42 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 raise RuntimeError(
                     f"[Rollout] Command execution failed for {current_command._serialize()}"
                 ) from e
+        return current_command
+
+    def consume_all_sync_commands(
+        self,
+        cmd_pred: Optional[Callable[[Command], bool]] = None,
+        timeout=constant.COSMOS_ROLLOUT_CMD_GROUP_TIMEOUT,
+    ):
+        # Consume all pending commands for weight sync.
+        # To ensure the weight update is using the up-to-date commands.
+        last_cmd = None
+        none_cnt = 0
+        start_time = time.time()
+        while time.time() - start_time < float(timeout):
+            cmd = self.consume_command(cmd_pred=cmd_pred)
+            if (
+                cmd is None
+                and none_cnt >= 3
+                and (
+                    (
+                        last_cmd is not None
+                        and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
+                    )
+                    or last_cmd is None
+                )
+            ):
+                # If continuously get None for 3 times, and the last command is not P2R command, we break.
+                # Since P2R must be followed by another R2R broadcast command, we need wait.
+                # Continuously get None for 3 times to make sure the command queue is empty at that time.
+                break
+            elif cmd is not None:
+                last_cmd = cmd
+                none_cnt = 0
+                start_time = time.time()
+            else:
+                none_cnt += 1
+            time.sleep(0.01)
 
     def send_end_signal(self, url_suffix: str):
         """
@@ -1300,7 +1339,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     @torch.no_grad()
     def main_loop(self):
         while not self.shutdown_signal.is_set():
-            self.consume_command(cmd_pred=None)
+            self.consume_all_sync_commands(cmd_pred=None)
+
             # If weight is not ready, nothing else to do.
             if not self.state.weight_synced():
                 continue

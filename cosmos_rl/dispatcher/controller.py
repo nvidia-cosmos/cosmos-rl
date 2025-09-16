@@ -616,7 +616,7 @@ class Controller:
         elif replica_name in self.rollout_status_manager:
             self.rollout_status_manager.heartbeat(replica_name)
         else:
-            raise Exception(f"[Controller] Replica {replica_name} not found")
+            logger.error(f"[Controller] Replica {replica_name} not found")
 
     """
     Life-cycle of controller
