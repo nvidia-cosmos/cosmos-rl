@@ -123,9 +123,7 @@ def compute_loss(
         epsilon_low = config.train.train_policy.epsilon_low
         epsilon_high = config.train.train_policy.epsilon_high
 
-        delta = torch.clamp(
-            current_token_logps - old_per_token_logps, min=-20.0, max=20.0
-        )  # [n_tokens]
+        delta = current_token_logps - old_per_token_logps  # [n_tokens]
         shifted_length = (cu_seqlens[1:] - cu_seqlens[:-1]).to(delta.dtype)  # [bsz]
         batch_idx = torch.arange(bsz, device=delta.device).repeat_interleave(
             shifted_length.to(torch.long)
@@ -133,38 +131,53 @@ def compute_loss(
 
         sum_delta = torch.zeros(bsz, dtype=delta.dtype, device=delta.device)
         sum_delta.index_add_(0, batch_idx, delta)
-        mean_delta = sum_delta / (shifted_length + 1e-8)
-        s = torch.exp(mean_delta)  # [bsz]
-        s_clipped = torch.clamp(s, 1 - epsilon_low, 1 + epsilon_high)
+        mean_delta = sum_delta / (shifted_length + 1e-8)  # [bsz]
 
-        sum_adv = torch.zeros(
-            bsz, dtype=current_advantages.dtype, device=current_advantages.device
+        log_seq_ratio = (
+            current_token_logps - current_token_logps.detach()
+        ) + mean_delta.detach().index_select(0, batch_idx)
+        log_seq_ratio = torch.clamp(log_seq_ratio, max=10.0)
+        seq_ratio = torch.exp(log_seq_ratio)  # [n_tokens]
+
+        per_token_loss1 = -current_advantages * seq_ratio
+        per_token_loss2 = -current_advantages * torch.clamp(
+            seq_ratio, 1 - epsilon_low, 1 + epsilon_high
         )
-        sum_adv.index_add_(0, batch_idx, current_advantages)
-        A_seq = sum_adv / (shifted_length + 1e-8)
-
-        seq_loss = -torch.minimum(s * A_seq, s_clipped * A_seq)  # [bsz]
+        per_token_loss = torch.maximum(per_token_loss1, per_token_loss2)
 
         if config.train.train_policy.kl_beta != 0.0 and ref_per_token_logps is not None:
             kl_ratio = torch.clamp(
                 ref_per_token_logps - current_token_logps, min=-20, max=20
             )
-            per_token_kl = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
-            sum_kl = torch.zeros(
-                bsz, dtype=per_token_kl.dtype, device=per_token_kl.device
-            )
-            sum_kl.index_add_(0, batch_idx, per_token_kl)
-            kl_seq = sum_kl / (shifted_length + 1e-8)
+            kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
         else:
-            kl_seq = torch.zeros_like(seq_loss)
+            kl_loss = torch.zeros_like(per_token_loss)
+
+        bsz, max_len = logprob_masks.shape
+        per_token_loss_seq_sum = torch.zeros(
+            bsz, device=per_token_loss.device, dtype=per_token_loss.dtype
+        )  # [bsz]
+        kl_loss_seq_sum = torch.zeros(
+            bsz, device=kl_loss.device, dtype=kl_loss.dtype
+        )  # [bsz]
+        per_token_loss_seq_sum.index_add_(0, batch_idx, per_token_loss)
+        kl_loss_seq_sum.index_add_(0, batch_idx, kl_loss)
+        shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
 
         if config.train.train_policy.loss_type == "seq-mean-token-mean":
-            # Sequence-level equal weighting (recommended for GSPO)
-            per_token_loss = seq_loss.mean()
-            kl_loss = kl_seq.mean()
+            if (
+                config.train.train_policy.unbiased_loss_max_tokens is not None
+                and config.train.train_policy.unbiased_loss_max_tokens > 0
+            ):
+                norm_factor = config.train.train_policy.unbiased_loss_max_tokens
+            else:
+                norm_factor = shifted_length
+
+            per_token_loss = (per_token_loss_seq_sum / norm_factor).mean()
+            kl_loss = (kl_loss_seq_sum / norm_factor).mean()
         elif config.train.train_policy.loss_type == "seq-mean-token-sum":
-            per_token_loss = (seq_loss * shifted_length).mean()
-            kl_loss = (kl_seq * shifted_length).mean()
+            per_token_loss = per_token_loss_seq_sum.mean()
+            kl_loss = kl_loss_seq_sum.mean()
         elif config.train.train_policy.loss_type == "token-mean":
             length_sum = shifted_length.sum()
             num_dp_workers = 1
@@ -177,13 +190,9 @@ def compute_loss(
                     length_sum, length_sum, op=torch.distributed.ReduceOp.SUM
                 )
             per_token_loss = (
-                (seq_loss * shifted_length).sum()
-                / (length_sum + 1e-8)
-                * (num_dp_workers)
+                per_token_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
             )
-            kl_loss = (
-                (kl_seq * shifted_length).sum() / (length_sum + 1e-8) * (num_dp_workers)
-            )
+            kl_loss = kl_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
         else:
             raise ValueError(
                 f"Invalid loss type: {config.train.train_policy.loss_type}"
