@@ -480,9 +480,6 @@ class SFTTrainer(Trainer):
         else:
             self._save_freq = self.config.train.ckpt.save_freq
 
-        # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
-        self.delay_cp_slice_inputs = getattr(self.model, "delay_cp_slice_inputs", False)
-
     def validate(self):
         if not self.config.validation.enable:
             return
