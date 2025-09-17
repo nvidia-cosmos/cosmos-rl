@@ -76,8 +76,11 @@ def _patch_vllm_rollout_locked_step(
     orig_step = llm_engine.step
 
     def cmd_pred(cmd: Command, enable_validation: threading.Event):
-        if enable_validation.is_set() and isinstance(
-            cmd, RolloutToRolloutBroadcastCommand
+        # Make sure no weight update happens during validation.
+        # So filter out R2R and P2R commands when validation is enabled.
+        if enable_validation.is_set() and (
+            isinstance(cmd, RolloutToRolloutBroadcastCommand)
+            or isinstance(cmd, PolicyToRolloutUnicastCommand)
         ):
             return False
         return True
@@ -721,6 +724,55 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             skipped_params_cnt,
         )
 
+    def do_validation(self):
+        validation_queue = Queue()
+        prompt_idxs: List[int] = []
+        validation_payloads: List[RLPayload] = []
+        # Do validation here
+        while True:
+            is_end = self.request_new_prompts(
+                self.val_batch_size,
+                validation_queue,
+                validation_step=self.current_step,
+            )
+            if not validation_queue.empty():
+                prompt_id_and_payload_list: List[IdxAndRLPayload] = (
+                    validation_queue.get()
+                )
+                payloads = [p for _, p in prompt_id_and_payload_list]
+                rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
+                    payloads=payloads,
+                    stream=self.inference_stream,
+                    data_packer=self.val_data_packer,
+                    sampling_params=self.val_sampling_params,
+                )
+                if rollout_results:
+                    prompt_idxs.extend([idx for idx, _ in prompt_id_and_payload_list])
+                    for p, rr in zip(payloads, rollout_results):
+                        p.completions = rr.completions
+                        if self.rollout.rollout_config.multi_turn_config.enable:
+                            p.completed_conversations = rr.completed_conversations
+                    validation_payloads.extend(payloads)
+
+            if is_end:
+                break
+
+        # Clear the flag to indicate validation is done.
+        self.validation_flag.clear()
+        should_report = self.parallel_dims.tp_coord[0] == 0 and (
+            self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+        )
+
+        if should_report:
+            response = ValidationReportRequest(
+                src_replica_name=self.replica_name,
+                validation_step=self.current_step,
+                prompt_idxs=prompt_idxs,
+                payloads=validation_payloads,
+                is_end=True,
+            )
+            self.api_client.post_validation_report(response)
+
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
@@ -1014,60 +1066,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 current_step % self.config.validation.freq == 0
                 or current_step == broadcast_command.total_steps
             )
-            validation_queue = Queue()
-            prompt_idxs: List[int] = []
-            validation_payloads: List[RLPayload] = []
+
             if should_do_validation:
+                self.current_step = current_step
+                # Setting the flag, do validation in the main loop.
                 self.validation_flag.set()
-                # Do inline validation here
-                while True:
-                    is_end = self.request_new_prompts(
-                        self.val_batch_size,
-                        validation_queue,
-                        validation_step=current_step,
-                    )
-                    if not validation_queue.empty():
-                        prompt_id_and_payload_list: List[IdxAndRLPayload] = (
-                            validation_queue.get()
-                        )
-                        payloads = [p for _, p in prompt_id_and_payload_list]
-                        rollout_results: List[RolloutResult] = (
-                            self.rollout.rollout_generation(
-                                payloads=payloads,
-                                stream=self.inference_stream,
-                                data_packer=self.val_data_packer,
-                                sampling_params=self.val_sampling_params,
-                            )
-                        )
-                        if rollout_results:
-                            prompt_idxs.extend(
-                                [idx for idx, _ in prompt_id_and_payload_list]
-                            )
-                            for p, rr in zip(payloads, rollout_results):
-                                p.completions = rr.completions
-                                if self.rollout.rollout_config.multi_turn_config.enable:
-                                    p.completed_conversations = (
-                                        rr.completed_conversations
-                                    )
-                            validation_payloads.extend(payloads)
-
-                    if is_end:
-                        break
-
-                self.validation_flag.clear()
-                should_report = self.parallel_dims.tp_coord[0] == 0 and (
-                    self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
-                )
-
-                if should_report:
-                    response = ValidationReportRequest(
-                        src_replica_name=self.replica_name,
-                        validation_step=current_step,
-                        prompt_idxs=prompt_idxs,
-                        payloads=validation_payloads,
-                        is_end=True,
-                    )
-                    self.api_client.post_validation_report(response)
 
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
@@ -1164,16 +1167,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 start_time = time.time()
             else:
                 none_cnt += 1
-            if (
-                none_cnt >= constant.COSMOS_ROLLOUT_CMD_WAIT_TIMES
-                and (
-                    (
-                        last_cmd is not None
-                        and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
-                    )
-                    or last_cmd is None
+            if none_cnt >= constant.COSMOS_ROLLOUT_CMD_WAIT_TIMES and (
+                (
+                    last_cmd is not None
+                    and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
                 )
-            ) or self.validation_flag.is_set():
+                or last_cmd is None
+            ):
                 # If continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times, and the last command is not P2R command, we break.
                 # Since P2R must be followed by another R2R broadcast command, we need wait.
                 # Continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times to make sure the command queue is empty at that time.
@@ -1199,6 +1199,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def main_loop(self):
         while not self.shutdown_signal.is_set():
             self.consume_command(cmd_pred=None)
+            if self.validation_flag.is_set():
+                # If encounter validation flag during last rollout generation or this command fetch, do validation first.
+                self.do_validation()
+
             # If weight is not ready, nothing else to do.
             if not self.state.weight_synced():
                 continue
