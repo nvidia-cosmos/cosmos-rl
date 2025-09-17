@@ -344,6 +344,9 @@ class RolloutToRolloutBroadcastCommand(Command):
         for replica in dst_replicas:
             if not replica.in_mesh:
                 continue
+            from cosmos_rl.utils.logging import logger
+
+            logger.info(f"===== Publishing R2R command to {cmd._serialize()}")
             redis_handler.publish_command(cmd.pack(), replica.name)
             replica.weights_loaded_in_view_of_command = True
 

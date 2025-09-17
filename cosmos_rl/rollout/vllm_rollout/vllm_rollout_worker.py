@@ -76,8 +76,10 @@ def _patch_vllm_rollout_locked_step(
     llm_engine = rollout.get_engine().llm_engine
     orig_step = llm_engine.step
 
-    def cmd_pred(cmd: Command, enable_validation: bool):
-        if enable_validation and isinstance(cmd, RolloutToRolloutBroadcastCommand):
+    def cmd_pred(cmd: Command, enable_validation: threading.Event):
+        if enable_validation.is_set() and isinstance(
+            cmd, RolloutToRolloutBroadcastCommand
+        ):
             return False
         return True
 
@@ -89,9 +91,9 @@ def _patch_vllm_rollout_locked_step(
             COSMOS_ROLLOUT_STEP_INTERVAL > 0
             and self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0
         ):
-            logger.info(
-                f"=== [Rollout] {os.getpid()} Triggering R2R at step {self._cosmos_step_counter}"
-            )
+            # logger.info(
+            #     f"=== [Rollout] {os.getpid()} Triggering R2R at step {self._cosmos_step_counter}"
+            # )
             # IMPORTANT:
             # If validation is enabled, R2R is not expected to be called in this step function
             # to avoid recursive inference execution.
@@ -212,6 +214,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         # Holding temp tensors created in `recv_tensor_creator`. Do not remove this, or
         self.total_temp_tensor_pool = []
         self.misc_params = set()
+        self.validation_flag = threading.Event()
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         if self.quantization_type == "fp8":
@@ -742,7 +745,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             _patch_vllm_rollout_locked_step(
                 self.rollout,
                 self.consume_command,
-                self.config.validation.enable,
+                self.validation_flag,
             )
             self.prepare_shard_infos_for_weight_sync_insts()
         if command.dst_replica_name != self.replica_name:
@@ -941,7 +944,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 _patch_vllm_rollout_locked_step(
                     self.rollout,
                     self.consume_command,
-                    self.config.validation.enable,
+                    self.validation_flag,
                 )
                 self.prepare_shard_infos_for_weight_sync_insts()
 
@@ -1019,6 +1022,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             prompt_idxs: List[int] = []
             validation_payloads: List[RLPayload] = []
             if should_do_validation:
+                self.validation_flag.set()
                 # Do inline validation here
                 while True:
                     is_end = self.request_new_prompts(
@@ -1054,6 +1058,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     if is_end:
                         break
 
+                self.validation_flag.clear()
                 should_report = self.parallel_dims.tp_coord[0] == 0 and (
                     self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
                 )
@@ -1086,7 +1091,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             for instruction in commands:
                 command = Command.depack(instruction)
-                logger.debug(f"[Rollout] Received command: {command.command_type}")
+                logger.info(
+                    f"=== [Rollout] {os.getpid()} {self.replica_name} Received command: {command.command_type}"
+                )
                 self._command_queue.put(command)
 
     def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
@@ -1157,27 +1164,28 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         start_time = time.time()
         deb = 0
         while time.time() - start_time < float(timeout):
-            logger.info(
-                f"=== [Rollout] {os.getpid()} {self.replica_name} is checking command queue... {deb}"
-            )
             cmd = self.consume_one_command(cmd_pred=cmd_pred)
             deb += 1
-            logger.info(
-                f"=== [Rollout] {os.getpid()} {self.replica_name} chcked command queue... {deb} {cmd.command_type if cmd is not None else None}"
-            )
+            if cmd is not None:
+                logger.info(
+                    f"=== [Rollout] {os.getpid()} {self.replica_name} chcked command queue... {deb} {cmd._serialize() if cmd is not None else None}"
+                )
             if cmd is not None:
                 last_cmd = cmd
                 none_cnt = 0
                 start_time = time.time()
             else:
                 none_cnt += 1
-            if none_cnt >= constant.COSMOS_ROLLOUT_CMD_WAIT_TIMES and (
-                (
-                    last_cmd is not None
-                    and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
+            if (
+                none_cnt >= constant.COSMOS_ROLLOUT_CMD_WAIT_TIMES
+                and (
+                    (
+                        last_cmd is not None
+                        and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
+                    )
+                    or last_cmd is None
                 )
-                or last_cmd is None
-            ):
+            ) or self.validation_flag.is_set():
                 # If continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times, and the last command is not P2R command, we break.
                 # Since P2R must be followed by another R2R broadcast command, we need wait.
                 # Continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times to make sure the command queue is empty at that time.
