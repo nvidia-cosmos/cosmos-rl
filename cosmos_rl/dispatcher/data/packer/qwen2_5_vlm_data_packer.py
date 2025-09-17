@@ -3,6 +3,7 @@ from typing import List, Any, Dict, Optional, Tuple
 import torch
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
+from cosmos_rl.dispatcher.data.schema import ChatMessage
 from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info
 import logging
@@ -72,6 +73,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         It is user's responsibility to ensure the conversation format is correct
           and multi-media files involved in conversation are accessible.
         """
+        sample = [x.model_dump() if isinstance(x, ChatMessage) else x for x in sample]
         assert all(
             isinstance(x, dict) and "role" in x and "content" in x for x in sample
         ), "All samples should be in conversation format, but got: {}".format(sample)
@@ -565,6 +567,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
+        sample = [x.model_dump() if isinstance(x, ChatMessage) else x for x in sample]
         assert all(
             isinstance(x, dict) and "role" in x and "content" in x for x in sample
         ), "All samples should be in conversation format, but got: {}".format(sample)
