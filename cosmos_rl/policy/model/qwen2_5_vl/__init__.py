@@ -571,6 +571,10 @@ class Qwen2_5_VLConditionalModel(BaseModel):
     def video_token_id(self):
         return self.config.hf_config.video_token_id
 
+    @property
+    def delay_cp_slice_inputs(self):
+        return True
+
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         seq_dim_idx = 2
         assert "position_ids" in kwargs, "position_ids must be provided"

@@ -118,8 +118,8 @@ class Qwen3MoE(nn.Module):
                 interested_tokens,
                 inputs_seq_dim=1,
                 inputs_batch_dim=0,
-                position_ids_seq_dim=2,
-                position_ids_batch_dim=1,
+                position_ids_seq_dim=1,
+                position_ids_batch_dim=0,
                 interested_tokens_seq_dim=1,
                 interested_tokens_batch_dim=0,
                 padding_mask=kwargs.get("padding_mask", None),
@@ -130,6 +130,24 @@ class Qwen3MoE(nn.Module):
             h = updated_kwargs.pop("inputs")
             h = self.identity_layer(h)
             kwargs.update(updated_kwargs)
+        # elif cp_enabled:
+        # input_ids_before_cp = input_ids
+        # position_ids_before_cp = position_ids
+        # padding_mask_before_cp = padding_mask
+
+        # [input_ids, position_ids, padding_mask] = (
+        #     slice_inputs_for_ulysses(
+        #         [input_ids, position_ids, padding_mask],
+        #         self.parallel_dims.mesh["cp"],
+        #         seq_dims=[1, pos_seq_dim, 1],
+        #     )
+        # )
+
+        # batch["input_ids"] = input_ids
+        # batch["position_ids"] = position_ids
+        # if padding_mask is not None:
+        #     batch["padding_mask"] = padding_mask
+
         for layer in self.layers.values():
             if (
                 hasattr(layer, "_gradient_checkpointing_enabled")
@@ -383,6 +401,10 @@ class InternVLChatModel(BaseModel):
         # TODO: fix this
         # <IMG_CONTEXT> is a special token for video context
         return 151671
+
+    @property
+    def delay_cp_slice_inputs(self):
+        return True
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         if self.lm_arch == "Qwen3MoeForCausalLM":

@@ -702,11 +702,15 @@ class SFTTrainer(Trainer):
                         )
                         batch.update(packed_args)
 
-                    if self.parallel_dims.cp_enabled and not packing_seq:
-                        input_ids_before_cp = input_ids
-                        position_ids_before_cp = position_ids
-                        padding_mask_before_cp = padding_mask
+                    delay_cp_slice_inputs = getattr(
+                        self.model, "delay_cp_slice_inputs", False
+                    )
 
+                    if (
+                        self.parallel_dims.cp_enabled
+                        and not packing_seq
+                        and not delay_cp_slice_inputs
+                    ):
                         [input_ids, position_ids, padding_mask] = (
                             slice_inputs_for_ulysses(
                                 [input_ids, position_ids, padding_mask],
@@ -723,9 +727,6 @@ class SFTTrainer(Trainer):
                     if self.parallel_dims.cp_enabled and packing_seq:
                         # Slice for cp after embedding generation and sequence packing in the model forward later.
                         batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
-                        input_ids_before_cp = input_ids
-                        position_ids_before_cp = position_ids
-                        padding_mask_before_cp = padding_mask
 
                     if self.parallel_dims.pp_enabled:
                         pp_last_stage = (
@@ -789,13 +790,6 @@ class SFTTrainer(Trainer):
                         #########################################################################################
 
                         logits = self.model(**batch)
-
-                        # recover from ulysses if cp is enabled
-                        if self.parallel_dims.cp_enabled:
-                            batch["input_ids"] = input_ids_before_cp
-                            batch["position_ids"] = position_ids_before_cp
-                            if padding_mask_before_cp is not None:
-                                batch["padding_mask"] = padding_mask_before_cp
 
                         loss = self.loss_fn(
                             logits,

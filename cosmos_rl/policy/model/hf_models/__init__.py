@@ -281,6 +281,10 @@ class HFModel(BaseModel):
 
         return multi_modal_projector
 
+    @property
+    def delay_cp_slice_inputs(self):
+        return self.is_vlm
+
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         # Will reset all named buffers in load_hf_weights
         return
