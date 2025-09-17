@@ -542,6 +542,10 @@ class TrainingConfig(BaseModel):
         default=False,
         description="Whether to use deterministic training. If set to True, will use deterministic training, which is expected to be slower.",
     )
+    activation_offload: bool = Field(
+        default=False,
+        description="Whether to use activation offload",
+    )
 
     seed: Optional[int] = Field(
         default=None,
@@ -660,22 +664,27 @@ class LoraConfig(BaseModel):
 
 class PolicyConfig(BaseModel):
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
+
     model_name_or_path: str = Field(
         # default="Qwen/Qwen2.5-3B-Instruct",  #'Qwen/Qwen2.5-VL-7B-Instruct'
         default="Qwen/Qwen2.5-VL-7B-Instruct",
         description="The model name or path, compatible with huggingface model name or local path",
     )
+
     model_revision: Optional[str] = Field(
         default=None,
         description="The revision of the model to use",
     )
+
     model_max_length: int = Field(
         default=4096,
         description="The maximum length for training, longer than this will be ignored for training stability",
     )
+
     model_gradient_checkpointing: bool = Field(
         default=True, description="Whether to use gradient checkpointing"
     )
+
     lora: LoraConfig | None = Field(default=None, description="LoRA configuration")
     trainable_map: Optional[Dict[str, bool]] = Field(
         default=None,

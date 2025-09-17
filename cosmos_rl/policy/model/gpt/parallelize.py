@@ -110,6 +110,9 @@ def parallelize(
             enable_compiled_autograd=config.train.compile,
         )
 
+    if config.train.activation_offload:
+        apply_activation_offload(model, parallel_dims)
+
     pp_rank, pp_size = parallel_dims.pp_coord
     if pp_size > 1:
         proc_group = parallel_dims.mesh["pp"].get_group()
@@ -442,6 +445,12 @@ def apply_ddp(
     replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
 
     logger.info("Applied DDP to the model")
+
+
+def apply_activation_offload(model: nn.Module):
+    from cosmos_rl.utils.activation_offload import enable_activation_offloading
+
+    enable_activation_offloading(model)
 
 
 def pipeline_parallelize(
