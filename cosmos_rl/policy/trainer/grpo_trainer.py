@@ -153,113 +153,66 @@ def compute_loss(
         else:
             kl_loss = torch.zeros_like(per_token_loss)
 
-        bsz, max_len = logprob_masks.shape
-        per_token_loss_seq_sum = torch.zeros(
-            bsz, device=per_token_loss.device, dtype=per_token_loss.dtype
-        )  # [bsz]
-        kl_loss_seq_sum = torch.zeros(
-            bsz, device=kl_loss.device, dtype=kl_loss.dtype
-        )  # [bsz]
-        per_token_loss_seq_sum.index_add_(0, batch_idx, per_token_loss)
-        kl_loss_seq_sum.index_add_(0, batch_idx, kl_loss)
-        shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
+    else:
+        coef_1 = torch.clamp(
+            current_token_logps - old_per_token_logps, min=-20.0, max=20.0
+        )
+        coef_1 = torch.exp(coef_1)
 
-        if config.train.train_policy.loss_type == "seq-mean-token-mean":
-            if (
-                config.train.train_policy.unbiased_loss_max_tokens is not None
-                and config.train.train_policy.unbiased_loss_max_tokens > 0
-            ):
-                norm_factor = config.train.train_policy.unbiased_loss_max_tokens
-            else:
-                norm_factor = shifted_length
-
-            per_token_loss = (per_token_loss_seq_sum / norm_factor).mean()
-            kl_loss = (kl_loss_seq_sum / norm_factor).mean()
-        elif config.train.train_policy.loss_type == "seq-mean-token-sum":
-            per_token_loss = per_token_loss_seq_sum.mean()
-            kl_loss = kl_loss_seq_sum.mean()
-        elif config.train.train_policy.loss_type == "token-mean":
-            length_sum = shifted_length.sum()
-            num_dp_workers = 1
-            if dp_group is not None:
-                num_dp_workers *= torch.distributed.get_world_size(group=dp_group)
-                torch.distributed.all_reduce(length_sum, group=dp_group)
-            if ddp_comm is not None:
-                num_dp_workers *= ddp_comm.world_size()
-                ddp_comm.allreduce(
-                    length_sum, length_sum, op=torch.distributed.ReduceOp.SUM
-                )
-            per_token_loss = (
-                per_token_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
-            )
-            kl_loss = kl_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
+        if config.train.train_policy.aipo_rho is not None:
+            # Due to the asynchronous update of the reference model, the rollout is not necessarily
+            # the exact previous iterate of latest policy. So a more natural motivation is correct
+            # for the off-policyness of samples generated under previous policy, to construct
+            # approximate on-policy update to latest policy.
+            # A difference from double-sided clipping of PPO, we use one-sided clipping.
+            rho = config.train.train_policy.aipo_rho
+            per_token_loss = -torch.clamp(coef_1, max=rho) * current_advantages
         else:
-            raise ValueError(
-                f"Invalid loss type: {config.train.train_policy.loss_type}"
+            # the standard grpo loss with dual-clip PPO: https://arxiv.org/pdf/1912.09729
+            coef_2 = torch.clamp(
+                coef_1,
+                1 - config.train.train_policy.epsilon_low,
+                1 + config.train.train_policy.epsilon_high,
+            )
+            per_token_loss1 = coef_1 * current_advantages
+            per_token_loss2 = coef_2 * current_advantages
+            per_token_loss3 = (
+                -config.train.train_policy.lower_bound_ratio * current_advantages
+            )
+            clip_losses1 = -torch.min(per_token_loss1, per_token_loss2)
+            clip_losses2 = torch.min(per_token_loss3, clip_losses1)
+            per_token_loss = torch.where(
+                current_advantages < 0, clip_losses2, clip_losses1
             )
 
-        return (
-            per_token_loss + kl_loss * config.train.train_policy.kl_beta,
-            per_token_loss,
-            kl_loss,
-        )
-
-    # Default path: GRPO-style token-level ratio and clipping
-    coef_1 = torch.clamp(current_token_logps - old_per_token_logps, min=-20.0, max=20.0)
-    coef_1 = torch.exp(coef_1)
-
-    if config.train.train_policy.aipo_rho is not None:
-        # Due to the asynchronous update of the reference model, the rollout is not necessarily
-        # the exact previous iterate of latest policy. So a more natural motivation is correct
-        # for the off-policyness of samples generated under previous policy, to construct
-        # approximate on-policy update to latest policy.
-        # A difference from double-sided clipping of PPO, we use one-sided clipping.
-        rho = config.train.train_policy.aipo_rho
-        per_token_loss = -torch.clamp(coef_1, max=rho) * current_advantages
-    else:
-        # the standard grpo loss with dual-clip PPO: https://arxiv.org/pdf/1912.09729
-        coef_2 = torch.clamp(
-            coef_1,
-            1 - config.train.train_policy.epsilon_low,
-            1 + config.train.train_policy.epsilon_high,
-        )
-        per_token_loss1 = coef_1 * current_advantages
-        per_token_loss2 = coef_2 * current_advantages
-        per_token_loss3 = (
-            -config.train.train_policy.lower_bound_ratio * current_advantages
-        )
-        clip_losses1 = -torch.min(per_token_loss1, per_token_loss2)
-        clip_losses2 = torch.min(per_token_loss3, clip_losses1)
-        per_token_loss = torch.where(current_advantages < 0, clip_losses2, clip_losses1)
-
-    # Compute the KL divergence between the model and the reference model
-    if config.train.train_policy.kl_beta != 0.0:
-        assert (
-            not ref_per_token_logps.requires_grad
-        ), "ref_per_token_logps should not require gradient"
-        """
-            With reference model used for KL. The logic should be further reviewed to verify.
-        """
-        kl_ratio = ref_per_token_logps - current_token_logps
-        # For numerical stability
-        kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
-        kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
-    else:
-        kl_loss = torch.zeros_like(per_token_loss)
+        # Compute the KL divergence between the model and the reference model
+        if config.train.train_policy.kl_beta != 0.0:
+            assert (
+                not ref_per_token_logps.requires_grad
+            ), "ref_per_token_logps should not require gradient"
+            """
+                With reference model used for KL. The logic should be further reviewed to verify.
+            """
+            kl_ratio = ref_per_token_logps - current_token_logps
+            # For numerical stability
+            kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
+            kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
+        else:
+            kl_loss = torch.zeros_like(per_token_loss)
 
     bsz, max_len = logprob_masks.shape
+    shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
+    batch_idx = torch.arange(bsz, device=per_token_loss.device).repeat_interleave(
+        shifted_length.to(torch.long)
+    )
     per_token_loss_seq_sum = torch.zeros(
         bsz, device=per_token_loss.device, dtype=per_token_loss.dtype
-    )  # [bsz,]
+    )  # [bsz]
     kl_loss_seq_sum = torch.zeros(
         bsz, device=kl_loss.device, dtype=kl_loss.dtype
-    )  # [bsz,]
-    for i in range(bsz):
-        per_token_loss_seq_sum[i] = per_token_loss[
-            cu_seqlens[i] : cu_seqlens[i + 1]
-        ].sum()
-        kl_loss_seq_sum[i] = kl_loss[cu_seqlens[i] : cu_seqlens[i + 1]].sum()
-    shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
+    )  # [bsz]
+    per_token_loss_seq_sum.index_add_(0, batch_idx, per_token_loss)
+    kl_loss_seq_sum.index_add_(0, batch_idx, kl_loss)
 
     if config.train.train_policy.loss_type == "seq-mean-token-mean":
         # seq-mean-token-sum
