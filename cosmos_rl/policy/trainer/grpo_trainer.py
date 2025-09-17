@@ -117,21 +117,23 @@ def compute_loss(
             ref_per_token_logps.shape, current_token_logps.shape
         )
 
-    # If GSPO variant is enabled, compute sequence-level importance ratio and apply sequence-wise clipping
+    bsz, _ = logprob_masks.shape
+    shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
+    batch_idx = torch.arange(bsz, device=current_token_logps.device).repeat_interleave(
+        shifted_length.to(torch.long)
+    )
+
+    # If GSPO variant is enabled, compute sequence-level importance ratio
     if getattr(config.train.train_policy, "variant", "grpo") == "gspo":
-        bsz, _ = logprob_masks.shape
         epsilon_low = config.train.train_policy.epsilon_low
         epsilon_high = config.train.train_policy.epsilon_high
 
         delta = current_token_logps - old_per_token_logps  # [n_tokens]
-        shifted_length = (cu_seqlens[1:] - cu_seqlens[:-1]).to(delta.dtype)  # [bsz]
-        batch_idx = torch.arange(bsz, device=delta.device).repeat_interleave(
-            shifted_length.to(torch.long)
-        )
+        shifted_length_f = shifted_length.to(delta.dtype)  # [bsz]
 
         sum_delta = torch.zeros(bsz, dtype=delta.dtype, device=delta.device)
         sum_delta.index_add_(0, batch_idx, delta)
-        mean_delta = sum_delta / (shifted_length + 1e-8)  # [bsz]
+        mean_delta = sum_delta / (shifted_length_f + 1e-8)  # [bsz]
 
         log_seq_ratio = (
             current_token_logps - current_token_logps.detach()
@@ -200,11 +202,6 @@ def compute_loss(
         else:
             kl_loss = torch.zeros_like(per_token_loss)
 
-    bsz, max_len = logprob_masks.shape
-    shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
-    batch_idx = torch.arange(bsz, device=per_token_loss.device).repeat_interleave(
-        shifted_length.to(torch.long)
-    )
     per_token_loss_seq_sum = torch.zeros(
         bsz, device=per_token_loss.device, dtype=per_token_loss.dtype
     )  # [bsz]
