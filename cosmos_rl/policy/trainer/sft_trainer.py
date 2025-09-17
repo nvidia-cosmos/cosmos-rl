@@ -480,6 +480,9 @@ class SFTTrainer(Trainer):
         else:
             self._save_freq = self.config.train.ckpt.save_freq
 
+        # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
+        self.delay_cp_slice_inputs = getattr(self.model, "delay_cp_slice_inputs", False)
+
     def validate(self):
         if not self.config.validation.enable:
             return
@@ -530,11 +533,7 @@ class SFTTrainer(Trainer):
                 val_batch["position_ids"] = val_position_ids
                 val_padding_mask = val_batch.get("padding_mask", None)
 
-                if self.parallel_dims.cp_enabled:
-                    input_ids_before_cp = val_inputs
-                    position_ids_before_cp = val_position_ids
-                    padding_mask_before_cp = val_padding_mask
-
+                if self.parallel_dims.cp_enabled and not self.delay_cp_slice_inputs:
                     [val_inputs, val_position_ids, val_padding_mask] = (
                         slice_inputs_for_ulysses(
                             [val_inputs, val_position_ids, val_padding_mask],
@@ -574,12 +573,6 @@ class SFTTrainer(Trainer):
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
                     val_logits = self.model(**val_batch)
-                    # recover from ulysses if cp is enabled
-                    if self.parallel_dims.cp_enabled:
-                        val_batch["input_ids"] = input_ids_before_cp
-                        val_batch["position_ids"] = position_ids_before_cp
-                        if padding_mask_before_cp is not None:
-                            val_batch["padding_mask"] = padding_mask_before_cp
 
                     val_loss = self.loss_fn(val_logits, val_labels)
                 val_total_loss += val_loss.item() * val_inputs.size(0)
@@ -702,14 +695,10 @@ class SFTTrainer(Trainer):
                         )
                         batch.update(packed_args)
 
-                    delay_cp_slice_inputs = getattr(
-                        self.model, "delay_cp_slice_inputs", False
-                    )
-
                     if (
                         self.parallel_dims.cp_enabled
                         and not packing_seq
-                        and not delay_cp_slice_inputs
+                        and not self.delay_cp_slice_inputs
                     ):
                         [input_ids, position_ids, padding_mask] = (
                             slice_inputs_for_ulysses(
@@ -724,7 +713,7 @@ class SFTTrainer(Trainer):
                         if padding_mask is not None:
                             batch["padding_mask"] = padding_mask
 
-                    if self.parallel_dims.cp_enabled and packing_seq:
+                    if self.parallel_dims.cp_enabled:
                         # Slice for cp after embedding generation and sequence packing in the model forward later.
                         batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
 

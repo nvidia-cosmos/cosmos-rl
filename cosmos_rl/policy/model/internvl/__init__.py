@@ -27,6 +27,9 @@ from cosmos_rl.utils.util import (
     clear_weight_name,
     sync_model_vocab,
 )
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
 from cosmos_rl.utils.logging import logger
 from safetensors import safe_open
 from cosmos_rl.policy.model.internvl.weight_converter import (
@@ -109,6 +112,8 @@ class Qwen3MoE(nn.Module):
 
         position_embeddings = self.rotary_emb(h, position_ids)
 
+        cp_mesh = kwargs.get("cp_mesh", None)
+
         if "valid_input_len" in kwargs:
             valid_input_len = kwargs["valid_input_len"]
             updated_kwargs = pack_sequences_for_inputs(
@@ -123,30 +128,27 @@ class Qwen3MoE(nn.Module):
                 interested_tokens_seq_dim=1,
                 interested_tokens_batch_dim=0,
                 padding_mask=kwargs.get("padding_mask", None),
-                cp_mesh=kwargs.get("cp_mesh", None),
+                cp_mesh=cp_mesh,
             )
             position_embeddings = tuple(updated_kwargs.pop("position_ids"))
             interested_tokens = updated_kwargs.pop("interested_tokens")
             h = updated_kwargs.pop("inputs")
             h = self.identity_layer(h)
             kwargs.update(updated_kwargs)
-        # elif cp_enabled:
-        # input_ids_before_cp = input_ids
-        # position_ids_before_cp = position_ids
-        # padding_mask_before_cp = padding_mask
-
-        # [input_ids, position_ids, padding_mask] = (
-        #     slice_inputs_for_ulysses(
-        #         [input_ids, position_ids, padding_mask],
-        #         self.parallel_dims.mesh["cp"],
-        #         seq_dims=[1, pos_seq_dim, 1],
-        #     )
-        # )
-
-        # batch["input_ids"] = input_ids
-        # batch["position_ids"] = position_ids
-        # if padding_mask is not None:
-        #     batch["padding_mask"] = padding_mask
+        elif cp_mesh is not None:
+            [inputs_embeds, interested_tokens] = slice_inputs_for_ulysses(
+                [inputs_embeds, interested_tokens],
+                cp_mesh,
+                seq_dims=[1, 1],
+            )
+            position_embeddings = tuple(
+                slice_inputs_for_ulysses(
+                    list(position_embeddings),
+                    cp_mesh,
+                    seq_dims=[1] * len(position_embeddings),
+                )
+            )
+            h = self.identity_layer(inputs_embeds)
 
         for layer in self.layers.values():
             if (
@@ -383,7 +385,6 @@ class InternVLChatModel(BaseModel):
         # to avoid computing the logits which are not needed for the model
         outputs = self.model(
             inputs_embeds=inputs_embeds,
-            # Permute back to [3, batch_size, seq_len] for Pipeline Parallelism micro batch
             position_ids=position_ids,
             interested_tokens=kwargs.pop("interested_tokens", None),
             **kwargs,  # Additional arguments for compatibility
