@@ -293,6 +293,7 @@ class TestRollout:
 
         self.total_temp_tensor_pool = []
         self.prepare_trainable_params()
+        self.validation_flag = threading.Event()
 
     def get_underlying_model(self):
         return None

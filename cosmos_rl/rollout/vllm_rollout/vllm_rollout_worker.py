@@ -63,7 +63,6 @@ from cosmos_rl.rollout.schema import RolloutResult
 
 from vllm import SamplingParams
 import time
-import os
 
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
@@ -91,9 +90,6 @@ def _patch_vllm_rollout_locked_step(
             COSMOS_ROLLOUT_STEP_INTERVAL > 0
             and self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0
         ):
-            # logger.info(
-            #     f"=== [Rollout] {os.getpid()} Triggering R2R at step {self._cosmos_step_counter}"
-            # )
             # IMPORTANT:
             # If validation is enabled, R2R is not expected to be called in this step function
             # to avoid recursive inference execution.
@@ -1091,9 +1087,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
             for instruction in commands:
                 command = Command.depack(instruction)
-                logger.info(
-                    f"=== [Rollout] {os.getpid()} {self.replica_name} Received command: {command.command_type}"
-                )
+                logger.debug(f"[Rollout] Received command: {command.command_type}")
                 self._command_queue.put(command)
 
     def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
@@ -1162,14 +1156,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         last_cmd = None
         none_cnt = 0
         start_time = time.time()
-        deb = 0
         while time.time() - start_time < float(timeout):
             cmd = self.consume_one_command(cmd_pred=cmd_pred)
-            deb += 1
-            if cmd is not None:
-                logger.info(
-                    f"=== [Rollout] {os.getpid()} {self.replica_name} chcked command queue... {deb} {cmd._serialize() if cmd is not None else None}"
-                )
             if cmd is not None:
                 last_cmd = cmd
                 none_cnt = 0
