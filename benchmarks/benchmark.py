@@ -10,7 +10,7 @@ import argparse
 
 def benchmark_nvfp4_gemm(m, n, k, iterations, warmup):
     """
-    Runs the NVFP4 GEMM benchmark (quantization + GEMM).
+    Runs the NVFP4 GEMM benchmark, creating buffers only once.
     """
     # Setup
     te_dtype = tex.DType.kFloat4E2M1
@@ -38,11 +38,13 @@ def benchmark_nvfp4_gemm(m, n, k, iterations, warmup):
     bias_dtype = TE_DType[torch.bfloat16]
     use_gelu, use_grad, accumulate, use_split_accumulator = False, False, False, False
 
-    # Warm-up
+    # UPDATED: Call make_empty() once outside the loops
+    x_nvfp4 = x_quantizer.make_empty(x_shape, dtype=x_dtype, device=device)
+    w_nvfp4 = w_quantizer.make_empty(w_shape, dtype=w_dtype, device=device)
+
+    # Warm-up (reusing the empty tensors)
     for _ in range(warmup):
-        x_nvfp4 = x_quantizer.make_empty(x_shape, dtype=x_dtype, device=device)
         x_nvfp4 = x_quantizer.update_quantized(x, x_nvfp4)
-        w_nvfp4 = w_quantizer.make_empty(w_shape, dtype=w_dtype, device=device)
         w_nvfp4 = w_quantizer.update_quantized(w, w_nvfp4)
         
         _ = tex.generic_gemm(
@@ -55,16 +57,11 @@ def benchmark_nvfp4_gemm(m, n, k, iterations, warmup):
     # Timed Benchmarking
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
-    timings = { "make_empty_ms": 0.0, "update_quantized_ms": 0.0, "nvfp4_gemm_ms": 0.0 }
+    # UPDATED: Removed timing for make_empty_ms
+    timings = { "update_quantized_ms": 0.0, "nvfp4_gemm_ms": 0.0 }
 
     for _ in range(iterations):
-        start_event.record()
-        x_nvfp4 = x_quantizer.make_empty(x_shape, dtype=x_dtype, device=device)
-        w_nvfp4 = w_quantizer.make_empty(w_shape, dtype=w_dtype, device=device)
-        end_event.record()
-        torch.cuda.synchronize()
-        timings["make_empty_ms"] += start_event.elapsed_time(end_event)
-
+        # UPDATED: The make_empty calls are no longer in the timed loop
         start_event.record()
         x_nvfp4 = x_quantizer.update_quantized(x, x_nvfp4)
         w_nvfp4 = w_quantizer.update_quantized(w, w_nvfp4)
@@ -83,9 +80,9 @@ def benchmark_nvfp4_gemm(m, n, k, iterations, warmup):
         timings["nvfp4_gemm_ms"] += start_event.elapsed_time(end_event)
 
     # Return Averages
+    # UPDATED: Removed "Make Empty (ms)" from the results
     return {
         "M": m, "N": n, "K": k,
-        "Make Empty (ms)": timings["make_empty_ms"] / iterations,
         "Update Quantized (ms)": timings["update_quantized_ms"] / iterations,
         "NVFP4 GEMM (ms)": timings["nvfp4_gemm_ms"] / iterations,
     }
@@ -93,9 +90,7 @@ def benchmark_nvfp4_gemm(m, n, k, iterations, warmup):
 # --- BF16 Benchmarking Function (Native) ---
 
 def benchmark_bf16_gemm(m, n, k, iterations, warmup):
-    """
-    Runs a standard BF16 GEMM using torch.matmul for comparison.
-    """
+    # (Existing function code remains unchanged)
     device = "cuda"
     seed = 42
     torch.manual_seed(seed)
@@ -121,12 +116,10 @@ def benchmark_bf16_gemm(m, n, k, iterations, warmup):
         
     return {"BF16 GEMM (ms)": total_time_ms / iterations}
 
-# --- UPDATED: Quantization Configuration Benchmark ---
+# --- Quantization Configuration Benchmark ---
 
 def benchmark_quantization_configs(iterations, warmup, mem_bandwidth):
-    """
-    Benchmarks quantization step for various configurations and tensor dimensions.
-    """
+    # (Existing function code remains unchanged)
     print("\n" + "="*60)
     print("🚀 Starting Quantization Configuration Benchmark...")
     print("="*60)
@@ -136,7 +129,6 @@ def benchmark_quantization_configs(iterations, warmup, mem_bandwidth):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    # UPDATED: Define multiple tensor dimensions to test
     tensor_dimensions = [
         (4096, 4096),
         (8192, 8192),
@@ -150,13 +142,11 @@ def benchmark_quantization_configs(iterations, warmup, mem_bandwidth):
     ]
 
     all_results = []
-    # UPDATED: Loop over tensor dimensions
     for dims in tensor_dimensions:
         print(f"Benchmarking Tensor Dimension: {dims}...")
         tensor = torch.randn(dims, dtype=torch.bfloat16, device=device)
         
-        # UPDATED: Calculate theoretical time for this dimension
-        bytes_read = dims[0] * dims[1] * 2  # bfloat16 is 2 bytes
+        bytes_read = dims[0] * dims[1] * 2
         theo_time_ms = (bytes_read / mem_bandwidth) * 1000
         
         result_row = {'Dim 1': dims[0], 'Dim 2': dims[1], 'Theoretical Time (ms)': theo_time_ms}
@@ -190,11 +180,9 @@ def benchmark_quantization_configs(iterations, warmup, mem_bandwidth):
 
         all_results.append(result_row)
 
-    # UPDATED: Create a more detailed DataFrame
     df_quant = pd.DataFrame(all_results)
     df_quant.set_index(['Dim 1', 'Dim 2'], inplace=True)
 
-    # Add efficiency columns
     for config in configs:
         col_name = f"{config['name']} (ms)"
         eff_col_name = f"{config['name']} Efficiency (%)"
@@ -204,10 +192,72 @@ def benchmark_quantization_configs(iterations, warmup, mem_bandwidth):
     print(df_quant)
     print("\n" + "="*60)
 
+
+# --- `make_empty()` Cost Benchmark ---
+
+def benchmark_make_empty_cost(iterations, warmup):
+    # (Existing function code remains unchanged)
+    print("\n" + "="*60)
+    print("🚀 Starting make_empty() Cost Benchmark...")
+    print("="*60)
+
+    device = "cuda"
+    tensor_shape = (8192, 8192)
+    tensor = torch.randn(tensor_shape, dtype=torch.bfloat16, device=device)
+    quantizer = NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1, rowwise=True)
+    results = []
+    start_event, end_event = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+
+    # --- Scenario A: Reuse Tensor (make_empty once) ---
+    print("Benchmarking Scenario A: Reuse pre-allocated tensor...")
+    quantized_tensor = quantizer.make_empty(tensor_shape, dtype=torch.bfloat16, device=device)
+    for _ in range(warmup):
+        quantizer.update_quantized(tensor, quantized_tensor)
+    torch.cuda.synchronize()
+
+    total_time_a = 0.0
+    for _ in range(iterations):
+        start_event.record()
+        quantizer.update_quantized(tensor, quantized_tensor)
+        end_event.record()
+        torch.cuda.synchronize()
+        total_time_a += start_event.elapsed_time(end_event)
+    avg_time_a = total_time_a / iterations
+    results.append({'Scenario': 'A: Reuse Tensor (update_quantized only)', 'Avg Time (ms)': avg_time_a})
+
+    # --- Scenario B: Recreate Tensor (make_empty every time) ---
+    print("Benchmarking Scenario B: Recreate tensor in each step...")
+    for _ in range(warmup):
+        q_tensor = quantizer.make_empty(tensor_shape, dtype=torch.bfloat16, device=device)
+        q_tensor = quantizer.update_quantized(tensor, q_tensor)
+    torch.cuda.synchronize()
+
+    total_time_b = 0.0
+    for _ in range(iterations):
+        start_event.record()
+        q_tensor = quantizer.make_empty(tensor_shape, dtype=torch.bfloat16, device=device)
+        q_tensor = quantizer.update_quantized(tensor, q_tensor)
+        end_event.record()
+        torch.cuda.synchronize()
+        total_time_b += start_event.elapsed_time(end_event)
+    avg_time_b = total_time_b / iterations
+    results.append({'Scenario': 'B: Recreate Tensor (make_empty + update)', 'Avg Time (ms)': avg_time_b})
+
+    # --- Analysis and Print ---
+    df = pd.DataFrame(results).set_index('Scenario')
+    print("\n📊 `make_empty()` Cost Analysis:\n")
+    print(df)
+
+    cost_per_call = avg_time_b - avg_time_a
+    overhead_percent = (cost_per_call / avg_time_b) * 100
+    print(f"\nDerived cost of make_empty() per call: {cost_per_call:.4f} ms")
+    print(f"Overhead of recreating vs. reusing: {overhead_percent:.2f}%")
+    print("\n" + "="*60)
+
 # --- Main Execution Logic ---
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark NVFP4 vs BF16 GEMM performance.")
+    parser = argparse.ArgumentParser(description="Full suite of Transformer Engine benchmarks.")
     parser.add_argument("--iterations", type=int, default=100, help="Number of timed iterations.")
     parser.add_argument("--warmup", type=int, default=10, help="Number of warm-up iterations.")
     args = parser.parse_args()
@@ -217,7 +267,7 @@ def main():
     B200_FP4_PFLOPS = 10 * 1e15
     B200_BF16_PFLOPS = 5 * 1e15
 
-    TEST_CONFIGURATIONS = [
+    TEST_CONFIGURATIONS_GEMM = [
         (1024, 1024, 1024), (2048, 2048, 2048),
         (4096, 4096, 4096), (4096, 4096, 8192),
         (8192, 8192, 8192),
@@ -227,11 +277,11 @@ def main():
         print("❌ CUDA is not available.")
         return
 
+    # --- Run GEMM Benchmarks ---
     print(f"🚀 Starting GEMM Benchmark on {torch.cuda.get_device_name(0)}...")
     print("-" * 60)
-
     all_results = []
-    for m, n, k in TEST_CONFIGURATIONS:
+    for m, n, k in TEST_CONFIGURATIONS_GEMM:
         print(f"Benchmarking GEMM: M={m}, N={n}, K={k}...")
         try:
             results_nvfp4 = benchmark_nvfp4_gemm(m, n, k, args.iterations, args.warmup)
@@ -261,8 +311,11 @@ def main():
         print("\n📊 GEMM Benchmark Results vs. Theoretical Maximums (B200):\n")
         print(df)
 
-    # --- Call the new, separate benchmark for quantization configs ---
+    # --- Run Quantization Config Benchmark ---
     benchmark_quantization_configs(args.iterations, args.warmup, B200_MEM_BANDWIDTH)
+
+    # --- Run make_empty() Cost Benchmark ---
+    benchmark_make_empty_cost(args.iterations, args.warmup)
     
     print("\nAll benchmarks complete. ✨")
 
