@@ -179,9 +179,6 @@ class Trainer(CommMixin):
         )
         self.upload_thread = None
 
-        # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
-        self.delay_cp_slice_inputs = getattr(self.model, "delay_cp_slice_inputs", False)
-
     def check_config(self):
         mini_batch = 1
         policy_type = self.config.train.train_policy.type

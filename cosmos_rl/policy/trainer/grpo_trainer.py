@@ -1383,11 +1383,14 @@ class GRPOTrainer(Trainer):
                             input_ids_before_cp = user_mini_batch["input_ids"]
                             position_ids_before_cp = user_mini_batch["position_ids"]
                             padding_mask_before_cp = padding_mask
-
+                            # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
+                            delay_cp_slice_inputs = getattr(
+                                self.model, "delay_cp_slice_inputs", False
+                            )
                             if (
                                 self.parallel_dims.cp_enabled
                                 and not packing_seq
-                                and not self.delay_cp_slice_inputs
+                                and not delay_cp_slice_inputs
                             ):
                                 [input_ids, position_ids, padding_mask] = (
                                     slice_inputs_for_ulysses(
