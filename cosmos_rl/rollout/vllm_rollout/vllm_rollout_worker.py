@@ -797,22 +797,26 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.reward_dispatcher.enqueue_rewards_cal(
                 validation_payloads, True, self.current_step, prompt_idxs
             )
-            payloads, is_validation, current_step, empty = (
-                self.report_rollouts()
+            payloads, is_validation, current_step, empty = self.report_rollouts(
+                block=True
             )
             assert (
-                is_validation and payloads is not None and not empty
+                (is_validation and payloads is not None or payloads is None)
+                and not empty
             ), "Validation report should be handled in the broadcast command."
             while not empty:
-                assert is_validation, "Validation report should be handled in the broadcast command."
-                response = ValidationReportRequest(
-                    src_replica_name=self.replica_name,
-                    validation_step=current_step,
-                    prompt_idxs=[],
-                    payloads=validation_payloads,
-                    is_end=True,
-                )
-                self.api_client.post_validation_report(response)
+                assert (
+                    is_validation or payloads is None
+                ), "Validation report should be handled in the broadcast command."
+                if payloads is not None:
+                    response = ValidationReportRequest(
+                        src_replica_name=self.replica_name,
+                        validation_step=current_step,
+                        prompt_idxs=[],
+                        payloads=payloads,
+                        is_end=True,
+                    )
+                    self.api_client.post_validation_report(response)
                 payloads, is_validation, current_step, empty = (
                     self.reward_dispatcher.dequeue_rewards_cal()
                 )
@@ -1234,7 +1238,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
         self.api_client.post_rollout_completion(response)
 
-    def report_rollouts(self):
+    def report_rollouts(self, block=False):
         while True:
             payloads, is_validation, step, empty = (
                 self.reward_dispatcher.dequeue_rewards_cal()
@@ -1249,7 +1253,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     is_end=False,
                 )
                 self.api_client.post_rollout_completion(response)
-            else:
+            elif not block or empty:
                 break
         return payloads, is_validation, step, empty
 
