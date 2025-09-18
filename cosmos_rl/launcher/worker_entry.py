@@ -51,7 +51,13 @@ def main(
     else:
         from cosmos_rl.rollout.rollout_entrance import run_rollout
 
-        run_rollout()
+        run_rollout(
+            dataset=dataset,
+            reward_fns=reward_fns,
+            filter_reward_fns=filter_reward_fns,
+            val_dataset=val_dataset,
+            val_reward_fns=val_reward_fns,
+        )
         return
 
 

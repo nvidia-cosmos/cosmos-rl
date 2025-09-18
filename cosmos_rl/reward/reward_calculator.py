@@ -135,6 +135,10 @@ class RewardCalculator:
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
             self.config.policy.model_name_or_path
         )
+        if dataset is not None and isinstance(dataset, Callable):
+            dataset = dataset(config)
+        if val_dataset is not None and isinstance(val_dataset, Callable):
+            val_dataset = val_dataset(config)
 
         if dataset is not None:
             assert isinstance(dataset, Dataset)
@@ -146,16 +150,16 @@ class RewardCalculator:
             )
         else:
             self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
-            self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
-                reward_fn=Reward(
-                    config=config,
-                    tokenier=self.tokenizer,
-                    reward_function=config.train.train_policy.reward_function,
-                    explicit_reward_fn=reward_fns,
-                    explicit_filter_reward_fn=filter_reward_fns,
-                ),
-                unbiased=config.train.train_policy.unbiased_advantage,
-            )
+        self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
+            reward_fn=Reward(
+                config=config,
+                tokenier=self.tokenizer,
+                reward_function=config.train.train_policy.reward_function,
+                explicit_reward_fn=reward_fns,
+                explicit_filter_reward_fn=filter_reward_fns,
+            ),
+            unbiased=config.train.train_policy.unbiased_advantage,
+        )
         if config.validation.enable:
             if val_dataset is not None:
                 assert isinstance(val_dataset, Dataset)
@@ -163,7 +167,7 @@ class RewardCalculator:
                     config=config, val_set=val_dataset, tokenizer=self.tokenizer
                 )
                 logger.info(
-                    "[Controller] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
+                    "[Reward] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
                 )
             else:
                 self.val_dataset = CosmosValidationDataset(
@@ -174,13 +178,13 @@ class RewardCalculator:
                     val_reward_fns = reward_fns
                     if val_reward_fns is not None:
                         logger.info(
-                            "[Controller] No validation reward functions provided, using the same reward functions as training."
+                            "[Reward] No validation reward functions provided, using the same reward functions as training."
                         )
                 config.validation.reward_function = (
                     config.train.train_policy.reward_function
                 )
                 logger.info(
-                    "[Controller] No validation reward function config specified, using the same reward function as training."
+                    "[Reward] No validation reward function config specified, using the same reward function as training."
                 )
             self.val_rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
                 reward_fn=Reward(
