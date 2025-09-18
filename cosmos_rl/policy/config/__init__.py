@@ -22,6 +22,7 @@ import os
 import json
 import hashlib
 from cosmos_rl.utils.modelscope import update_config_if_modelscope
+from cosmos_rl.utils.logging import logger as _cfg_logger
 
 
 def config_hash(config: BaseModel) -> str:
@@ -374,39 +375,29 @@ class GrpoConfig(BaseModel):
             "gspo",
         ], "variant must be one of ['grpo', 'dapo', 'gspo']"
         # If GSPO is selected and user didn't explicitly set loss_type, default to seq-mean-token-mean
-        try:
-            from cosmos_rl.utils.logging import logger as _cfg_logger
-        except Exception:
-            _cfg_logger = None
 
         if self.variant == "gspo":
             # If user did not explicitly set loss_type in the input config, default to seq-mean-token-mean
-            try:
-                _fields_set = getattr(self, "model_fields_set", set())
-            except Exception:
-                _fields_set = set()
+            _fields_set = getattr(self, "model_fields_set", set())
             if "loss_type" not in _fields_set and self.loss_type == "token-mean":
                 self.loss_type = "seq-mean-token-mean"
-                if _cfg_logger is not None:
-                    _cfg_logger.info(
-                        "[Config] GSPO selected and loss_type not provided: defaulting to 'seq-mean-token-mean'."
-                    )
+                _cfg_logger.info(
+                    "[Config] GSPO selected and loss_type not provided: defaulting to 'seq-mean-token-mean'."
+                )
             # Validate and warn when non-recommended loss type is set
             if self.loss_type not in (
                 "seq-mean-token-mean",
                 "token-mean",
                 "seq-mean-token-sum",
             ):
-                if _cfg_logger is not None:
-                    _cfg_logger.warning(
-                        f"[Config] GSPO with unsupported loss_type '{self.loss_type}', falling back to 'seq-mean-token-mean'."
-                    )
+                _cfg_logger.warning(
+                    f"[Config] GSPO with unsupported loss_type '{self.loss_type}', falling back to 'seq-mean-token-mean'."
+                )
                 self.loss_type = "seq-mean-token-mean"
             elif self.loss_type != "seq-mean-token-mean":
-                if _cfg_logger is not None:
-                    _cfg_logger.warning(
-                        f"[Config] GSPO recommended loss_type is 'seq-mean-token-mean', but got '{self.loss_type}'. Proceed with caution."
-                    )
+                _cfg_logger.warning(
+                    f"[Config] GSPO recommended loss_type is 'seq-mean-token-mean', but got '{self.loss_type}'. Proceed with caution."
+                )
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
