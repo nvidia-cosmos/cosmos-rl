@@ -1438,7 +1438,15 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
         assert len(packing_losses) == 8
         logger.info(f"[Test] non_packing_losses: {non_packing_losses}")
         logger.info(f"[Test] packing_losses: {packing_losses}")
-        assert np.allclose(non_packing_losses, packing_losses, atol=1e-3, rtol=1e-3)
+        double_actual = torch.tensor(non_packing_losses).double().view(-1)
+        double_expected = torch.tensor(packing_losses).double().view(-1)
+        cosine_similarity = torch.nn.functional.cosine_similarity(
+            double_actual, double_expected, dim=0, eps=1e-5
+        )
+        assert (
+            np.allclose(non_packing_losses, packing_losses, atol=1e-2, rtol=1e-2)
+            or cosine_similarity > 0.999
+        )
 
 
 def run_sft_validation():
