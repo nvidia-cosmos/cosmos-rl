@@ -79,6 +79,10 @@ class LoraInjectedLinear(nn.Linear):
         else:
             self.scaling = self.lora_alpha / self.r
 
+        # Deterministic merge/unmerge controls
+        self._deterministic: bool = False
+        self._weight_backup = None
+
     @torch.no_grad()
     def reinitialize_lora_params(self):
         nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
@@ -124,6 +128,12 @@ class LoraInjectedLinear(nn.Linear):
     def merge_adapters_(self) -> None:
         if self.r == 0 or self.merged:
             return
+
+        if getattr(self, "_deterministic", False) and self._weight_backup is None:
+            if not isinstance(self.weight, torch.distributed.tensor.DTensor):
+                self._weight_backup = self.weight.detach().clone()
+            else:
+                self._weight_backup = self.weight.to_local().detach().clone()
         lora_A = (
             self.lora_A.weight.full_tensor()
             if isinstance(self.lora_A.weight, torch.distributed.tensor.DTensor)
@@ -155,6 +165,23 @@ class LoraInjectedLinear(nn.Linear):
     def unmerge_adapters_(self) -> None:
         if self.r == 0 or not self.merged:
             return
+        if getattr(self, "_deterministic", False) and self._weight_backup is not None:
+            if not isinstance(self.weight, torch.distributed.tensor.DTensor):
+                self.weight.copy_(self._weight_backup)
+                self._weight_backup = None
+                self.merged = False
+                return
+            else:
+                dt_backup = torch.distributed.tensor.DTensor.from_local(
+                    self._weight_backup,
+                    device_mesh=self.weight.device_mesh,
+                    placements=self.weight.placements,
+                    run_check=False,
+                )
+                self.weight.copy_(dt_backup)
+                self._weight_backup = None
+                self.merged = False
+                return
 
         lora_A = (
             self.lora_A.weight.full_tensor()
@@ -342,16 +369,18 @@ def reinitialize_lora_params(model: nn.Module) -> None:
 
 
 @torch.no_grad()
-def merge_lora_weights_(model: nn.Module) -> None:
+def merge_lora_weights_(model: nn.Module, deterministic: bool = False) -> None:
     for m in model.modules():
         if isinstance(m, LoraInjectedLinear):
+            m._deterministic = bool(deterministic)
             m.merge_adapters_()
 
 
 @torch.no_grad()
-def unmerge_lora_weights_(model: nn.Module) -> None:
+def unmerge_lora_weights_(model: nn.Module, deterministic: bool = False) -> None:
     for m in model.modules():
         if isinstance(m, LoraInjectedLinear):
+            m._deterministic = bool(deterministic)
             m.unmerge_adapters_()
 
 
