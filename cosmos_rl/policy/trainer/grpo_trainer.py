@@ -49,6 +49,7 @@ from cosmos_rl.utils.util import (
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
+from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
 from functools import cached_property
 from typing import List, Callable, Dict, Any, Tuple, Optional
 import types
@@ -1516,7 +1517,10 @@ class GRPOTrainer(Trainer):
                                         else torch.tensor([-1.0], device=self.device)
                                     )
                             else:
-                                raw_logits = self.model(**user_mini_batch)
+                                with get_act_offloading_ctx_manager(
+                                    self.model, self.config.train.activation_offload
+                                ):
+                                    raw_logits = self.model(**user_mini_batch)
 
                                 if self.parallel_dims.cp_enabled:
                                     # reset the position ids and input ids
