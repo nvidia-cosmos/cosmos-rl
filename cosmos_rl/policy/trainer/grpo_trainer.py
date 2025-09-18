@@ -125,8 +125,10 @@ def compute_loss(
     epsilon_low = config.train.train_policy.epsilon_low
     epsilon_high = config.train.train_policy.epsilon_high
 
-    # If GSPO variant is enabled, compute sequence-level importance ratio
-    if getattr(config.train.train_policy, "variant", "grpo") == "gspo":
+    # If GSPO is enabled by variant or feature flag, compute sequence-level importance ratio
+    if getattr(config.train.train_policy, "variant", "grpo") == "gspo" or getattr(
+        config.train.train_policy, "enable_gspo", False
+    ):
         delta = current_token_logps - old_per_token_logps  # [n_tokens]
         shifted_length_f = shifted_length.to(delta.dtype)  # [bsz]
 

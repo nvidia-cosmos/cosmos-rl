@@ -238,6 +238,15 @@ class GrpoConfig(BaseModel):
         choices=["grpo", "dapo", "gspo"],
     )
 
+    enable_dapo: bool = Field(
+        default=False,
+        description="Enable DAPO-style dynamic sampling alongside base variant.",
+    )
+    enable_gspo: bool = Field(
+        default=False,
+        description="Enable GSPO-style sequence-level importance ratio alongside base variant.",
+    )
+
     dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
         description="Dataset configuration for GRPO training. It includes dataset name, subset, revision, train split, test split and test size.",
@@ -374,9 +383,11 @@ class GrpoConfig(BaseModel):
             "dapo",
             "gspo",
         ], "variant must be one of ['grpo', 'dapo', 'gspo']"
-        # If GSPO is selected and user didn't explicitly set loss_type, default to seq-mean-token-mean
+        # If GSPO is enabled (either by variant or the new flag) and user didn't explicitly
+        # set loss_type, default to seq-mean-token-mean
 
-        if self.variant == "gspo":
+        gspo_is_enabled = self.variant == "gspo" or self.enable_gspo
+        if gspo_is_enabled:
             # If user did not explicitly set loss_type in the input config, default to seq-mean-token-mean
             _fields_set = getattr(self, "model_fields_set", set())
             if "loss_type" not in _fields_set and self.loss_type == "token-mean":

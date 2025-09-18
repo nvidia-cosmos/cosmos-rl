@@ -553,7 +553,11 @@ class Controller:
         invalid_rollouts: List[Rollout]: The rollouts that have invalid rewards (all rewards are the same)
         """
         rollouts_to_put = None
-        if self.config.train.train_policy.variant == "dapo":
+        # Enable DAPO behavior when either variant=="dapo" or the new feature flag is set.
+        use_dapo = getattr(
+            self.config.train.train_policy, "variant", "grpo"
+        ) == "dapo" or getattr(self.config.train.train_policy, "enable_dapo", False)
+        if use_dapo:
             rollouts_to_put = valid_rollouts
         else:
             rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
