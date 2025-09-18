@@ -794,14 +794,28 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
 
         if should_report:
-            response = ValidationReportRequest(
-                src_replica_name=self.replica_name,
-                validation_step=self.current_step,
-                prompt_idxs=prompt_idxs,
-                payloads=validation_payloads,
-                is_end=True,
+            self.reward_dispatcher.enqueue_rewards_cal(
+                validation_payloads, True, self.current_step, prompt_idxs
             )
-            self.api_client.post_validation_report(response)
+            payloads, is_validation, current_step, empty = (
+                self.report_rollouts()
+            )
+            assert (
+                is_validation and payloads is not None and not empty
+            ), "Validation report should be handled in the broadcast command."
+            while not empty:
+                assert is_validation, "Validation report should be handled in the broadcast command."
+                response = ValidationReportRequest(
+                    src_replica_name=self.replica_name,
+                    validation_step=current_step,
+                    prompt_idxs=[],
+                    payloads=validation_payloads,
+                    is_end=True,
+                )
+                self.api_client.post_validation_report(response)
+                payloads, is_validation, current_step, empty = (
+                    self.reward_dispatcher.dequeue_rewards_cal()
+                )
 
     def lazy_initialize_rollout_engine(self, load_format):
         # lazy initialization of the vllm engine.
