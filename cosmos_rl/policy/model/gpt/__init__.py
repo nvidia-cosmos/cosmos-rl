@@ -760,7 +760,7 @@ class GPT(BaseModel):
         return model
 
     @classmethod
-    def fqn_filter_for_fp8(cls) -> List[str]:
+    def fqn_filter_for_quantization(cls) -> List[str]:
         return ["lm_head"]
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):

@@ -807,7 +807,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         return n_params, n_flops
 
     @classmethod
-    def fqn_filter_for_fp8(cls) -> List[str]:
+    def fqn_filter_for_quantization(cls) -> List[str]:
         llm = [
             "lm_head",
         ]

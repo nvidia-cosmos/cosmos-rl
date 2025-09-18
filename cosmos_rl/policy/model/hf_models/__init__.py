@@ -583,7 +583,7 @@ class HFModel(BaseModel):
         return self.model.named_parameters(*args, **kwargs)
 
     @classmethod
-    def fqn_filter_for_fp8(cls) -> List[str]:
+    def fqn_filter_for_quantization(cls) -> List[str]:
         llm = [
             "lm_head",
         ]

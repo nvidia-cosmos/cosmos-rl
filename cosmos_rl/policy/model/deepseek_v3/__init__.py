@@ -451,6 +451,9 @@ class DeepseekV3MoEModel(BaseModel):
 
         return sorted(transforms.items())
 
+    @classmethod
+    def fqn_filter_for_quantization(cls) -> List[str]:
+        return ["lm_head"]
 
 def _init_weights(module):
     std = 0.02
