@@ -111,7 +111,7 @@ def parallelize(
         )
 
     if config.train.activation_offload:
-        apply_activation_offload(model, parallel_dims)
+        apply_activation_offload(model)
 
     pp_rank, pp_size = parallel_dims.pp_coord
     if pp_size > 1:
@@ -448,9 +448,9 @@ def apply_ddp(
 
 
 def apply_activation_offload(model: nn.Module):
-    from cosmos_rl.utils.activation_offload import enable_activation_offloading
+    from cosmos_rl.utils.activation_offload import enable_activation_offload
 
-    enable_activation_offloading(model)
+    enable_activation_offload(model)
 
 
 def pipeline_parallelize(

@@ -46,14 +46,14 @@ class TrainableParameterFilter:
 class LayerSyncFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor, cpu_offload_handler):
-        cpu_offload_handler.on_group_commit_forward()
+        cpu_offload_handler.on_layer_commit_forward()
         ctx.cpu_offload_handler = cpu_offload_handler
         return tensor
 
     @staticmethod
     def backward(ctx, grad_output):
         cpu_offload_handler = ctx.cpu_offload_handler
-        cpu_offload_handler.on_group_commit_backward()
+        cpu_offload_handler.on_layer_commit_backward()
         return grad_output, None
 
 
@@ -88,7 +88,7 @@ class SynchronizedActivationOffloadHandler(ActivationOffloadHandler):
         self.tensor_count_current_layer = 0
 
     @staticmethod
-    def offload(cls, tensor: torch.Tensor):
+    def offload(tensor: torch.Tensor):
         cpu_tensor = torch.empty(
             tensor.size(),
             dtype=tensor.dtype,
@@ -100,7 +100,7 @@ class SynchronizedActivationOffloadHandler(ActivationOffloadHandler):
         return (tensor.device, cpu_tensor)
 
     @staticmethod
-    def reload(cls, state: Tuple[torch.device, torch.Tensor]):
+    def reload(state: Tuple[torch.device, torch.Tensor]):
         dev, cpu_tensor = state
         non_blocking = cpu_tensor.is_pinned()
         return cpu_tensor.to(dev, non_blocking=non_blocking)
@@ -128,6 +128,14 @@ class SynchronizedActivationOffloadHandler(ActivationOffloadHandler):
         else:
             tensor = state
         return tensor
+
+    def on_layer_commit_forward(self):
+        self.current_layer_index += 1
+        self.tensor_count_current_layer = 0
+
+    def on_layer_commit_backward(self):
+        self.current_layer_index -= 1
+        assert self.current_layer_index >= 0
 
 
 class AsynchronousActivationOffloadHandler(SynchronizedActivationOffloadHandler):
@@ -295,7 +303,9 @@ def get_activation_offload_handler(
     def layer_prefetch_offload_async(tensor):
         return layer_prefetch_offload_sync(tensor, cpu_offload_handler)
 
-    return cpu_offload_handler, layer_prefetch_offload_async
+    return CPUOffloadHookWithActivationOffloadHandler(
+        cpu_offload_handler
+    ), layer_prefetch_offload_async
 
 
 class ActivationOffloader:
@@ -356,8 +366,7 @@ def enable_activation_offload(model):
             if not isinstance(child, FSDP):
                 get_layers(child)
             else:
-                wrapped_module = child._fsdp_wrapped_module
-                if not isinstance(wrapped_module, torch.nn.Embedding):
+                if not isinstance(child, torch.nn.Embedding):
                     model_layers.append(child)
 
     get_layers(model)
@@ -377,6 +386,4 @@ def enable_activation_offload(model):
         cpu_offload_handler, sync_func, tensor_offload_filter
     )
     for layer in model_layers:
-        if isinstance(layer, FSDP):
-            layer = layer._fsdp_wrapped_module
         activation_offloader.wrap_module_forward_method(layer)
