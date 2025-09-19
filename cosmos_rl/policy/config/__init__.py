@@ -805,7 +805,7 @@ class ValidationConfig(BaseModel):
         description="Max output length of rollout generation during validation.",
     )
     reward_function: Union[str, List[str], Dict[str, float]] = Field(
-        default_factory=lambda: ["single_choice"],
+        default=[],
         description="Reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. You can add weight to each reward function by passing a dict, e.g., {'single_choice': 0.9, 'format': 0.1}",
     )
 
@@ -815,8 +815,8 @@ class ValidationConfig(BaseModel):
             self.reward_function = {self.reward_function: 1.0}
         elif isinstance(self.reward_function, list):
             self.reward_function = {k: 1.0 for k in self.reward_function}
-        assert (
-            len(self.reward_function) > 0
+        assert isinstance(
+            self.reward_function, dict
         ), "reward_function must be a dict of reward functions"
         return self
 
@@ -870,6 +870,11 @@ class RolloutConfig(BaseModel):
     multi_turn_config: MultiTurnRolloutConfig = Field(
         default_factory=MultiTurnRolloutConfig,
         description="Configuration for multi-turn rollout.",
+    )
+
+    reference_answer_in_local: bool = Field(
+        default=False,
+        description="Whether to store the dataset in local rollout worker for fetching reference answer.",
     )
 
     @model_validator(mode="after")

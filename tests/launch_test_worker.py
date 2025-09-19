@@ -304,6 +304,9 @@ class TestRollout:
     def prepare_trainable_params(self):
         self.trainable_params = self.model.get_trainable_params()
 
+    def lazy_initialize_rollout_engine(self, load_format):
+        pass
+
 
 async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
     policy_parallelism_config = ParallelismConfig(

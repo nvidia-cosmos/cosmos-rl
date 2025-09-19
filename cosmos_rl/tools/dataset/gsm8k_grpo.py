@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.dispatcher.algo.reward import gsm8k_reward_fn
+from cosmos_rl.reward.algo.reward import gsm8k_reward_fn
 from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.utils.modelscope import modelscope_load_dataset
@@ -121,7 +121,7 @@ class GSM8kValDataset(GSM8kDataset):
                 "Validation is not enabled in the config. Skipping setup for GSM8kValDataset."
             )
             return
-
+        self.apply_chat_template = not config.rollout.multi_turn_config.enable
         self.config = config
         self.tokenizer = tokenizer
 
