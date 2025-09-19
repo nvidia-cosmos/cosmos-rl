@@ -40,6 +40,7 @@ from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
+from quantum_attn import quantum_attn_func
 
 
 def build_norm(
@@ -257,7 +258,28 @@ class Attention(nn.Module):
                 causal=True,
             )
         else:
-            output = self.attn_func(xq, xk, xv, causal=True)
+            # ss = torch.cuda.Event(enable_timing=True)
+            # ee = torch.cuda.Event(enable_timing=True)
+            # ss.record()
+            # output = self.attn_func(xq, xk, xv, causal=True)
+            # ee.record()
+            # ee.synchronize()
+
+            # if rank == 0:
+            #     print(f"Attention forward self.attn_func {xq.shape} {ss.elapsed_time(ee)} ms")
+
+
+            # ss.record()
+            xq_quantum = xq.permute(0, 2, 1, 3).contiguous()
+            xk_quantum = xk.permute(0, 2, 1, 3).contiguous()
+            xv_quantum = xv.permute(0, 2, 1, 3).contiguous()
+            output_quantum = quantum_attn_func(xq_quantum, xk_quantum, xv_quantum, is_fp8=False)
+            output = output_quantum.permute(0, 2, 1, 3).contiguous()
+            # ee.record()
+
+            # ee.synchronize()
+            # torch.cuda.synchronize()
+
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)
 
