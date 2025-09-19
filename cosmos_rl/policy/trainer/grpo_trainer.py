@@ -956,15 +956,6 @@ class GRPOTrainer(Trainer):
                 for m in [model for model in self.model_parts if model is not None]
                 for p in m.parameters()
             ]
-            if self.global_rank == 0:
-                with torch.no_grad():
-                    for p in all_params:
-                        p_grad = p.grad
-                        if isinstance(p.grad, torch.distributed.tensor.DTensor):
-                            p_grad = p.grad.to_local()
-                        logger.info(
-                            f"LMS: p.grad.shape={p_grad.shape}, p.grad: {p_grad.flatten()[:10]}, p.grad.max={p_grad.max()}, p.grad.min={p_grad.min()}"
-                        )
             grad_norm = dist_util.gradient_norm_clipping(
                 all_params,
                 self.config.train.optm_grad_norm_clip,
