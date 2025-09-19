@@ -101,9 +101,14 @@ def compute_loss(
     dp_group: Optional[torch.distributed.ProcessGroup] = None,
     ddp_comm: HighAvailabilitylNccl = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Compute the GSPO (Group Sequential Policy Optimization) loss.
+
+    See https://arxiv.org/pdf/2507.18071 for more details.
+    """
+    logger.info("[Policy] Use GSPO loss")
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
     current_advantages = torch.masked_select(current_advantages, logprob_masks)
-
     assert (
         current_token_logps.shape == current_advantages.shape
     ), "current_token_logps and current_advantages should have the same shape"
@@ -117,127 +122,64 @@ def compute_loss(
             ref_per_token_logps.shape, current_token_logps.shape
         )
 
-    bsz, _ = logprob_masks.shape
+    negative_approx_kl = current_token_logps - old_per_token_logps
+
+    # compute sequence-level importance ratio:
+    bsz, max_len = logprob_masks.shape
+    negative_approx_kl_seq = torch.zeros(
+        bsz, device=negative_approx_kl.device, dtype=negative_approx_kl.dtype
+    )
+    for i in range(bsz):
+        seq_tokens = negative_approx_kl[cu_seqlens[i] : cu_seqlens[i + 1]]
+        seq_length = len(seq_tokens)
+        if seq_length > 0:
+            negative_approx_kl_seq[i] = seq_tokens.sum() / seq_length
+
+    # Combined ratio at token level:
+    # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
+    # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
+    # We need to expand negative_approx_kl_seq to match the token-level shape
+    expanded_seq_kl = torch.zeros_like(current_token_logps)
+    for i in range(bsz):
+        start_idx = cu_seqlens[i]
+        end_idx = cu_seqlens[i + 1]
+        expanded_seq_kl[start_idx:end_idx] = negative_approx_kl_seq[i]
+
+    log_seq_importance_ratio = (
+        current_token_logps - current_token_logps.detach() + expanded_seq_kl.detach()
+    )
+    log_seq_importance_ratio = torch.clamp(
+        log_seq_importance_ratio, max=10.0
+    )  # clamp for numerical stability
+    # Finally exp() to remove log
+    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+
+    # GSPO clipping parameters
+    clip_ratio_low = config.train.train_policy.epsilon_low
+    clip_ratio_high = config.train.train_policy.epsilon_high
+
+    # GSPO loss calculation
+    coef_1 = -current_advantages * seq_importance_ratio
+    coef_2 = -current_advantages * torch.clamp(
+        seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high
+    )
+    seq_coef = torch.maximum(coef_1, coef_2)
     shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
-    batch_idx = torch.arange(bsz, device=current_token_logps.device).repeat_interleave(
-        shifted_length.to(torch.long)
-    )
-    epsilon_low = config.train.train_policy.epsilon_low
-    epsilon_high = config.train.train_policy.epsilon_high
+    # GSPO loss aggregation must be "seq-mean-token-mean"
 
-    # If GSPO is enabled by variant or feature flag, compute sequence-level importance ratio
-    if getattr(config.train.train_policy, "variant", "grpo") == "gspo" or getattr(
-        config.train.train_policy, "enable_gspo", False
-    ):
-        delta = current_token_logps - old_per_token_logps  # [n_tokens]
-        shifted_length_f = shifted_length.to(delta.dtype)  # [bsz]
-
-        sum_delta = torch.zeros(bsz, dtype=delta.dtype, device=delta.device)
-        sum_delta.index_add_(0, batch_idx, delta)
-        mean_delta = sum_delta / (shifted_length_f + 1e-8)  # [bsz]
-
-        log_seq_ratio = (
-            current_token_logps - current_token_logps.detach()
-        ) + mean_delta.detach().index_select(0, batch_idx)
-        log_seq_ratio = torch.clamp(log_seq_ratio, max=10.0)
-        coef_1 = torch.exp(log_seq_ratio)  # [n_tokens]
-    else:
-        coef_1 = torch.clamp(
-            current_token_logps - old_per_token_logps, min=-20.0, max=20.0
+    per_seq_loss_sum = torch.zeros(bsz, device=seq_coef.device, dtype=seq_coef.dtype)
+    # token mean
+    for i in range(bsz):
+        per_seq_loss_sum[i] = (
+            seq_coef[cu_seqlens[i] : cu_seqlens[i + 1]].sum() / shifted_length[i]
         )
-        coef_1 = torch.exp(coef_1)
+    # seq mean
+    loss = per_seq_loss_sum.mean()
 
-    if config.train.train_policy.aipo_rho is not None:
-        # Due to the asynchronous update of the reference model, the rollout is not necessarily
-        # the exact previous iterate of latest policy. So a more natural motivation is correct
-        # for the off-policyness of samples generated under previous policy, to construct
-        # approximate on-policy update to latest policy.
-        # A difference from double-sided clipping of PPO, we use one-sided clipping.
-        rho = config.train.train_policy.aipo_rho
-        per_token_loss = -torch.clamp(coef_1, max=rho) * current_advantages
-    else:
-        # the standard grpo loss with dual-clip PPO: https://arxiv.org/pdf/1912.09729
-        coef_2 = torch.clamp(
-            coef_1,
-            1 - epsilon_low,
-            1 + epsilon_high,
-        )
-        per_token_loss1 = coef_1 * current_advantages
-        per_token_loss2 = coef_2 * current_advantages
-        per_token_loss3 = (
-            -config.train.train_policy.lower_bound_ratio * current_advantages
-        )
-        clip_losses1 = -torch.min(per_token_loss1, per_token_loss2)
-        clip_losses2 = torch.min(per_token_loss3, clip_losses1)
-        per_token_loss = torch.where(current_advantages < 0, clip_losses2, clip_losses1)
+    # KL loss is not needed
+    kl_loss = torch.zeros(1, device=loss.device, dtype=loss.dtype)
 
-    if config.train.train_policy.kl_beta != 0.0 and ref_per_token_logps is not None:
-        assert (
-            not ref_per_token_logps.requires_grad
-        ), "ref_per_token_logps should not require gradient"
-        kl_ratio = ref_per_token_logps - current_token_logps
-        kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
-        kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
-    else:
-        kl_loss = torch.zeros_like(per_token_loss)
-
-    per_token_loss_seq_sum = torch.zeros(
-        bsz, device=per_token_loss.device, dtype=per_token_loss.dtype
-    )  # [bsz]
-    kl_loss_seq_sum = torch.zeros(
-        bsz, device=kl_loss.device, dtype=kl_loss.dtype
-    )  # [bsz]
-    per_token_loss_seq_sum.index_add_(0, batch_idx, per_token_loss)
-    kl_loss_seq_sum.index_add_(0, batch_idx, kl_loss)
-
-    if config.train.train_policy.loss_type == "seq-mean-token-mean":
-        # seq-mean-token-sum
-        # If Dr.GRPO is used, we need to normalize the loss by the max tokens for unbiased loss
-        if (
-            config.train.train_policy.unbiased_loss_max_tokens is not None
-            and config.train.train_policy.unbiased_loss_max_tokens > 0
-        ):
-            norm_factor = config.train.train_policy.unbiased_loss_max_tokens
-        else:
-            norm_factor = shifted_length
-
-        per_token_loss = (per_token_loss_seq_sum / norm_factor).mean()
-        kl_loss = (kl_loss_seq_sum / norm_factor).mean()
-    elif config.train.train_policy.loss_type == "seq-mean-token-sum":
-        # seq-mean-token-sum
-        per_token_loss = per_token_loss_seq_sum.mean()
-        kl_loss = kl_loss_seq_sum.mean()
-    elif config.train.train_policy.loss_type == "token-mean":
-        length_sum = shifted_length.sum()
-        num_dp_workers = 1
-        # dps = [(num_dp_workers, length_sum.item())]
-        if dp_group is not None:
-            # # token-mean
-            # per_token_loss = per_token_loss_seq_sum.sum() / length_sum
-            # kl_loss = kl_loss_seq_sum.sum() / length_sum
-            # Take DP tokens into account
-            num_dp_workers *= torch.distributed.get_world_size(group=dp_group)
-            torch.distributed.all_reduce(length_sum, group=dp_group)
-            # dps.append((num_dp_workers, length_sum.item()))
-
-        if ddp_comm is not None:
-            num_dp_workers *= ddp_comm.world_size()
-            ddp_comm.allreduce(
-                length_sum, length_sum, op=torch.distributed.ReduceOp.SUM
-            )
-            # dps.append((num_dp_workers, length_sum.item()))
-        # print(f"dps: {dps}")
-        per_token_loss = (
-            per_token_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
-        )
-        kl_loss = kl_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
-    else:
-        raise ValueError(f"Invalid loss type: {config.train.train_policy.loss_type}")
-    return (
-        per_token_loss + kl_loss * config.train.train_policy.kl_beta,
-        per_token_loss,
-        kl_loss,
-    )
+    return (loss, loss, kl_loss)
 
 
 class GRPOTrainer(Trainer):
