@@ -50,6 +50,13 @@ class RolloutGroup:
         self.reference_answer: str = reference_answer
 
     def compute_rollouts(self, algo: RuleBasedAlgo) -> List[Rollout]:
+        """
+        Compute rewards and advantages for the rollouts in the group.
+        Args:
+            algo (RuleBasedAlgo): The reward algorithm to compute rewards and advantages.
+        Returns:
+            List[Rollout]: List of Rollout with rewards and advantages.
+        """
         assert (
             self.reference_answer is not None
         ), "[RolloutGroup] Reference answer is not provided"
@@ -131,25 +138,37 @@ class RewardCalculator:
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
     ) -> None:
+        """
+        Setup the RewardCalculator with the given configuration and datasets.
+        Args:
+            config (Config): The configuration for the reward calculator.
+            dataset (Optional[Dataset]): The training dataset.
+            reward_fns (Optional[List[Callable]]): The list of reward functions for training.
+            filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
+            val_dataset (Optional[Dataset]): The validation dataset.
+            val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
+        """
         self.config = config
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
             self.config.policy.model_name_or_path
         )
-        if dataset is not None and isinstance(dataset, Callable):
-            dataset = dataset(config)
-        if val_dataset is not None and isinstance(val_dataset, Callable):
-            val_dataset = val_dataset(config)
 
-        if dataset is not None:
-            assert isinstance(dataset, Dataset)
-            self.dataset = CosmosDataset(
-                config=config, train_set=dataset, tokenizer=self.tokenizer
-            )
-            logger.info(
-                "[Reward] Using provided dataset for training, dataset specification in the toml config will be ignored"
-            )
-        else:
-            self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
+        if config.rollout.reference_answer_in_local:
+            if dataset is not None and isinstance(dataset, Callable):
+                dataset = dataset(config)
+            if val_dataset is not None and isinstance(val_dataset, Callable):
+                val_dataset = val_dataset(config)
+
+            if dataset is not None:
+                assert isinstance(dataset, Dataset)
+                self.dataset = CosmosDataset(
+                    config=config, train_set=dataset, tokenizer=self.tokenizer
+                )
+                logger.info(
+                    "[Reward] Using provided dataset for training, dataset specification in the toml config will be ignored"
+                )
+            else:
+                self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
         self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
             reward_fn=Reward(
                 config=config,
@@ -161,18 +180,19 @@ class RewardCalculator:
             unbiased=config.train.train_policy.unbiased_advantage,
         )
         if config.validation.enable:
-            if val_dataset is not None:
-                assert isinstance(val_dataset, Dataset)
-                self.val_dataset = CosmosValidationDataset(
-                    config=config, val_set=val_dataset, tokenizer=self.tokenizer
-                )
-                logger.info(
-                    "[Reward] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
-                )
-            else:
-                self.val_dataset = CosmosValidationDataset(
-                    config=config, tokenizer=self.tokenizer
-                )
+            if config.rollout.reference_answer_in_local:
+                if val_dataset is not None:
+                    assert isinstance(val_dataset, Dataset)
+                    self.val_dataset = CosmosValidationDataset(
+                        config=config, val_set=val_dataset, tokenizer=self.tokenizer
+                    )
+                    logger.info(
+                        "[Reward] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
+                    )
+                else:
+                    self.val_dataset = CosmosValidationDataset(
+                        config=config, tokenizer=self.tokenizer
+                    )
             if not config.validation.reward_function:
                 if val_reward_fns is None:
                     val_reward_fns = reward_fns
@@ -198,6 +218,14 @@ class RewardCalculator:
     def query_reference_answer(
         self, prompt_idx: int, dataset_type: str = "train"
     ) -> Any:
+        """
+        Query the reference answer from the dataset based on the prompt index.
+        Args:
+            prompt_idx (int): The index of the prompt in the dataset.
+            dataset_type (str): The type of the dataset, either "train" or "val".
+        Returns:
+            Any: The reference answer corresponding to the prompt index.
+        """
         if dataset_type == "train":
             return self.dataset.train_set.get_reference_answer(prompt_idx)
         elif dataset_type == "val":
@@ -208,6 +236,23 @@ class RewardCalculator:
     def compute_validation_rewards(
         self, payloads: List[RLPayload], step: int, prompt_idxs: List[int]
     ) -> Tuple[List[RLPayload], bool, int]:
+        """
+        Compute rewards and advantages for the given payloads using validation reward function.
+        Args:
+            payloads (List[RLPayload]): List of RLPayload to compute rewards for.
+            step (int): The weight step where the payloads are generated.
+            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
+        Returns:
+            Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
+                payloads: List of RLPayload with rewards and advantages
+                is_validation: whether the payloads are from validation set (always True)
+                step: the weight step where the payloads are generated
+        """
+
+        assert (
+            not self.config.rollout.reference_answer_in_local
+            or len(prompt_idxs) == len(payloads)
+        ), "[Reward] prompt_idxs length should match payloads length when reference_answer_in_local is True"
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
                 prompt_idx=prompt_idxs[i] if len(prompt_idxs) == len(payloads) else -1,
@@ -215,8 +260,7 @@ class RewardCalculator:
                 # Only report once per replica, so is_end is always True
                 is_end=True,
                 reference_answer=payload.reference_answer
-                if payload.reference_answer is not None
-                or len(prompt_idxs) != len(payloads)
+                if not self.config.rollout.reference_answer_in_local
                 else self.query_reference_answer(prompt_idxs[i], "val"),
             )
             for i, payload in enumerate(payloads)
@@ -255,9 +299,29 @@ class RewardCalculator:
         step: int,
         prompt_idxs: List[int],
     ) -> Tuple[List[RLPayload], bool, int]:
+        """
+        Compute rewards and advantages for the given payloads.
+        If is_validation is True, use the validation reward function and return all rollouts.
+        If is_validation is False, use the training reward function and apply dynamic sampling.
+        Args:
+            payloads (List[RLPayload]): List of RLPayload to compute rewards for.
+            is_validation (bool): Whether the payloads are from validation set.
+            step (int): The weight step where the payloads are generated.
+            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
+        Returns:
+            Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
+                payloads: List of RLPayload with rewards and advantages
+                is_validation: whether the payloads are from validation set
+                step: the weight step where the payloads are generated
+        """
+
         if is_validation:
             return self.compute_validation_rewards(payloads, step, prompt_idxs)
 
+        assert (
+            not self.config.rollout.reference_answer_in_local
+            or len(prompt_idxs) == len(payloads)
+        ), "[Reward] prompt_idxs length should match payloads length when reference_answer_in_local is True"
         # Placeholder for advantage computation logic
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
@@ -265,8 +329,7 @@ class RewardCalculator:
                 payload=payload,
                 is_end=False,
                 reference_answer=payload.reference_answer
-                if payload.reference_answer is not None
-                or len(prompt_idxs) != len(payloads)
+                if not self.config.rollout.reference_answer_in_local
                 else self.query_reference_answer(prompt_idxs[i]),
             )
             for i, payload in enumerate(payloads)
@@ -377,6 +440,16 @@ class RewardDispatcher:
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
     ) -> None:
+        """
+        Setup the RewardCalculator with the given configuration and datasets.
+        Args:
+            config (Config): The configuration for the reward calculator.
+            dataset (Optional[Dataset]): The training dataset.
+            reward_fns (Optional[List[Callable]]): The list of reward functions for training.
+            filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
+            val_dataset (Optional[Dataset]): The validation dataset.
+            val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
+        """
         self.reward_calculator.setup(
             config=config,
             dataset=dataset,
@@ -393,6 +466,16 @@ class RewardDispatcher:
         step: int,
         prompt_idxs: List[int],
     ) -> None:
+        """
+        Enqueue the reward calculation task.
+        The task will be executed in
+        a separate process and the result will be stored in the task queue.
+        Args:
+            payloads (List[RLPayload]): List of RLPayload to compute rewards for.
+            is_validation (bool): Whether the payloads are from validation set.
+            step (int): The weight step where the payloads are generated.
+            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
+        """
         for i in range(0, len(payloads), self.payload_per_task):
             self.task_queue.put(
                 self.executor.submit(
@@ -407,6 +490,20 @@ class RewardDispatcher:
     def dequeue_rewards_cal(
         self,
     ) -> Optional[Tuple[List[RLPayload], bool, int, bool]]:
+        """
+        Dequeue the reward calculation result.
+        If the task queue is empty, return None.
+        If the task is not done, return None.
+        If the task is done, return the result.
+        If the task queue is empty and all tasks are done, return None and True.
+
+        Returns:
+            Tuple[List[RLPayload], bool, int, bool]: (payloads, is_validation, step, all_done)
+                payloads: List of RLPayload with rewards and advantages
+                is_validation: whether the payloads are from validation set
+                step: the weight step where the payloads are generated
+                all_done: whether all pending tasks are done
+        """
         if not self.task_queue.empty():
             if self.task_queue.queue[0].done():
                 payloads, is_validation, step = self.task_queue.get().result()
