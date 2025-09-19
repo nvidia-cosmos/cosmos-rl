@@ -17,7 +17,7 @@ import torch
 from torch import nn
 import inspect
 from transformers.utils import quantization_config as transformers_quantization_config
-from functools import partial
+from functools import partial, cached_property
 from typing import Tuple, List, Optional, Callable
 
 from transformers import AutoConfig
@@ -34,7 +34,10 @@ from cosmos_rl.policy.model.hf_models.weight_converter import convert_weight_fro
 from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from functools import cached_property
+from cosmos_rl.policy.model.hf_models.patch import (
+    pre_hf_models_patch,
+    post_hf_models_patch,
+)
 
 
 @ModelRegistry.register(HFModelWeightMapper)
@@ -96,9 +99,8 @@ class HFModel(BaseModel):
         }
 
         out = self.model(
-            input_ids,
+            input_ids=input_ids,
             position_ids=position_ids,
-            # attention_mask=None,
             past_key_values=None,
             use_cache=False,
             *args,
@@ -513,6 +515,8 @@ class HFModel(BaseModel):
                 need_dequantization = True
             hf_config.quantization_config["dequantize"] = need_dequantization
 
+        pre_hf_models_patch(hf_config)
+
         try:
             model_class = load_model_class_by_config(hf_config)
             model = model_class(hf_config)
@@ -524,6 +528,8 @@ class HFModel(BaseModel):
 
             model_class = AutoModel
             model = AutoModel.from_config(hf_config, trust_remote_code=True)
+
+        post_hf_models_patch(hf_config, model)
 
         return cls(
             hf_config,
