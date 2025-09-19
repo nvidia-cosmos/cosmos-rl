@@ -310,6 +310,12 @@ class GrpoConfig(BaseModel):
         choices=["token-mean", "seq-mean-token-sum", "seq-mean-token-mean"],
     )
 
+    loss_mode: str = Field(
+        default="grpo",
+        description="The type of loss to use for RL training.",
+        choices=["grpo", "gspo"],
+    )
+
     unbiased_loss_max_tokens: Optional[int] = Field(
         default=None,
         description="Maximum number of tokens to use for unbiased loss introduced in Dr.GRPO. If set to None, will not use unbiased loss."
