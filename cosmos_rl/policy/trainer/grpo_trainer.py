@@ -1523,7 +1523,8 @@ class GRPOTrainer(Trainer):
                                         else torch.tensor([-1.0], device=self.device)
                                     )
                             else:
-                                raw_logits = self.model(**user_mini_batch)
+                                with self.act_offloading_ctx_manager:
+                                    raw_logits = self.model(**user_mini_batch)
 
                                 if self.parallel_dims.cp_enabled:
                                     # reset the position ids and input ids
