@@ -17,7 +17,7 @@ import torch
 from torch import nn
 import inspect
 from transformers.utils import quantization_config as transformers_quantization_config
-from functools import partial
+from functools import partial, cached_property
 from typing import Tuple, List, Optional, Callable
 
 from transformers import AutoConfig
@@ -34,7 +34,10 @@ from cosmos_rl.policy.model.hf_models.weight_converter import convert_weight_fro
 from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from functools import cached_property
+from cosmos_rl.policy.model.hf_models.patch import (
+    pre_hf_models_patch,
+    post_hf_models_patch,
+)
 
 
 @ModelRegistry.register(HFModelWeightMapper)
@@ -84,30 +87,6 @@ class HFModel(BaseModel):
         sig = inspect.signature(self.model.forward)
         return sig.parameters.keys()
 
-    def _process_vision_embeddings(
-        self, inputs_embeds, input_ids, pixel_values, grid_thw, pad_token_id
-    ):
-        """Helper function to process vision embeddings (images or videos)"""
-        n_tokens = (input_ids == pad_token_id).sum().item()
-        if n_tokens > 0:
-            # TODO: check whether vision_model.forward has grid_thw as input
-            # e.g. vision models like SiglipVisionModel do not have grid_thw as input
-            kwargs = {}
-            if grid_thw is not None:
-                kwargs["grid_thw"] = grid_thw
-            vision_embeds = self.vision_model(pixel_values, **kwargs)
-            assert (
-                vision_embeds.shape[0] == n_tokens
-            ), "vision_embeds.shape[0] must be equal to n_tokens"
-            mask = input_ids == pad_token_id
-            mask_unsqueezed = mask.unsqueeze(-1)
-            mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
-            vision_mask = mask_expanded.to(inputs_embeds.device)
-
-            vision_embeds = vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(vision_mask, vision_embeds)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -120,9 +99,8 @@ class HFModel(BaseModel):
         }
 
         out = self.model(
-            input_ids,
+            input_ids=input_ids,
             position_ids=position_ids,
-            # attention_mask=None,
             past_key_values=None,
             use_cache=False,
             *args,
@@ -181,7 +159,8 @@ class HFModel(BaseModel):
                 "vision_model.encoder.layers",  # SiglipVisionModel(Gemma)
                 "transformer.layers",  # PixtralVisionModel（Mistral）
                 "model.layers",  # Llama4VisionModel
-                "encoder.layer",  # InternVLVisionModel
+                "encoder.layer",  # InternVLVisionModel(qwen)
+                "encoder.layers",  # InternVLVisionModel(gpt-oss)
             ]:
                 vision_layers = safe_deep_getattr(self.vision_model, path, None)
                 if vision_layers is not None:
@@ -218,8 +197,12 @@ class HFModel(BaseModel):
     def text_config(self):
         text_config = None
         if self.is_vlm:
-            text_config = getattr(self.hf_config, "text_config", None)
-            if text_config is None:
+            if hasattr(self.hf_config, "text_config"):
+                text_config = self.hf_config.text_config
+            elif hasattr(self.hf_config, "llm_config"):
+                text_config = self.hf_config.llm_config
+            else:
+                logger.warning(f"Can not get text config from {self.hf_config}.")
                 text_config = self.hf_config
         else:
             text_config = self.hf_config
@@ -536,6 +519,8 @@ class HFModel(BaseModel):
                 need_dequantization = True
             hf_config.quantization_config["dequantize"] = need_dequantization
 
+        pre_hf_models_patch(hf_config)
+
         try:
             model_class = load_model_class_by_config(hf_config)
             model = model_class(hf_config)
@@ -547,6 +532,8 @@ class HFModel(BaseModel):
 
             model_class = AutoModel
             model = AutoModel.from_config(hf_config, trust_remote_code=True)
+
+        post_hf_models_patch(hf_config, model)
 
         return cls(
             hf_config,
