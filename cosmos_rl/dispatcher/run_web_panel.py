@@ -628,11 +628,22 @@ def main(
         if role == "Policy":
             from cosmos_rl.policy.train import main as policy_main
 
-            policy_main()
+            policy_main(
+                dataset=dataset,
+                data_packer=data_packer,
+                val_dataset=val_dataset,
+                val_data_packer=val_data_packer,
+            )
         else:
             from cosmos_rl.rollout.rollout_entrance import run_rollout
 
-            run_rollout()
+            run_rollout(
+                dataset=dataset,
+                reward_fns=reward_fns,
+                filter_reward_fns=filter_reward_fns,
+                val_dataset=val_dataset,
+                val_reward_fns=val_reward_fns,
+            )
         return
 
     if args is None:

@@ -402,7 +402,10 @@ class Controller:
         n: int,
         validation_step: Optional[int] = None,
     ) -> Tuple[List[IdxAndRLPayload], bool]:
-        add_answer = self.config.rollout.multi_turn_config.enable
+        add_answer = (
+            self.config.rollout.multi_turn_config.enable
+            or not self.config.rollout.reference_answer_in_local
+        )
 
         # query n prompts from the dataset [idx, payload]
         prompt_id_and_payload_list: List[IdxAndRLPayload] = []

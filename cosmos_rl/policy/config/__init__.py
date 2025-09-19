@@ -881,6 +881,11 @@ class RolloutConfig(BaseModel):
         description="Configuration for multi-turn rollout.",
     )
 
+    reference_answer_in_local: bool = Field(
+        default=False,
+        description="Whether to store the dataset in local rollout worker for fetching reference answer.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if isinstance(self.parallelism, dict):
