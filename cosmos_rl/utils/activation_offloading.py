@@ -95,7 +95,7 @@ class OffloadActivations(saved_tensors_hooks):
 
         # for streaming
         if self.use_streams:
-            self.s1 = torch.Stream()  # comms stream
+            self.s1 = torch.cuda.Stream()  # comms stream
             self.fwd_stash = {}  # tensor_id => (activation, ev1)
             if max_fwd_stash_size < 1:
                 raise ValueError(

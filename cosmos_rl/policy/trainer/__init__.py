@@ -39,6 +39,7 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
 from cosmos_rl.policy.kernel.modeling_utils import set_flash_attn_deterministic
+from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
 
 
 class Trainer(CommMixin):
@@ -145,6 +146,10 @@ class Trainer(CommMixin):
         self.ckpt_manager = CheckpointMananger(
             config, self.parallel_dims, self.global_rank
         )
+        self.act_offloading_ctx_manager = get_act_offloading_ctx_manager(
+            self.model, config.train.activation_offload
+        )
+
         # profiler is initialized after the init_comm()
         self.profiler = CosmosProfiler(
             config,

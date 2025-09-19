@@ -49,7 +49,6 @@ from cosmos_rl.utils.util import (
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
-from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
 from functools import cached_property
 from typing import List, Callable, Dict, Any, Tuple, Optional
 import types
@@ -957,6 +956,15 @@ class GRPOTrainer(Trainer):
                 for m in [model for model in self.model_parts if model is not None]
                 for p in m.parameters()
             ]
+            if self.global_rank == 0:
+                with torch.no_grad():
+                    for p in all_params:
+                        p_grad = p.grad
+                        if isinstance(p.grad, torch.distributed.tensor.DTensor):
+                            p_grad = p.grad.to_local()
+                        logger.info(
+                            f"LMS: p.grad.shape={p_grad.shape}, p.grad: {p_grad.flatten()[:10]}, p.grad.max={p_grad.max()}, p.grad.min={p_grad.min()}"
+                        )
             grad_norm = dist_util.gradient_norm_clipping(
                 all_params,
                 self.config.train.optm_grad_norm_clip,
@@ -1517,9 +1525,7 @@ class GRPOTrainer(Trainer):
                                         else torch.tensor([-1.0], device=self.device)
                                     )
                             else:
-                                with get_act_offloading_ctx_manager(
-                                    self.model, self.config.train.activation_offload
-                                ):
+                                with self.act_offloading_ctx_manager:
                                     raw_logits = self.model(**user_mini_batch)
 
                                 if self.parallel_dims.cp_enabled:
