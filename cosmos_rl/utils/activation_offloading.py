@@ -28,6 +28,7 @@ from cosmos_rl.utils.logging import logger
 # We reuse this activation offload manager from torchtune, thanks for this plugin:
 # https://github.com/pytorch/torchtune/blob/67ab86b94de9e7ac7dd9850113ebe69e2bbd307c/torchtune/training/_activation_offloading.py#L24
 
+
 class OffloadActivations(saved_tensors_hooks):
     """Context manager under which activation tensors created in the forward pass will be offloaded.
 
