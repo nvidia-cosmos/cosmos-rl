@@ -788,7 +788,8 @@ class SFTTrainer(Trainer):
                         # return
                         #########################################################################################
 
-                        logits = self.model(**batch)
+                        with self.act_offloading_ctx_manager:
+                            logits = self.model(**batch)
 
                         # recover from ulysses if cp is enabled
                         if self.parallel_dims.cp_enabled:
