@@ -24,6 +24,7 @@ from cosmos_rl.dispatcher.data import (
     CosmosDataset,
     CosmosValidationDataset,
 )
+from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.constant as constant
 from transformers import AutoTokenizer
@@ -61,7 +62,9 @@ class RolloutGroup:
             self.reference_answer is not None
         ), "[RolloutGroup] Reference answer is not provided"
         rewards = [
-            algo.compute_reward(completion, self.reference_answer)
+            algo.compute_reward(
+                completion, self.reference_answer, prompt=self.payload.prompt
+            )
             for completion in self.payload.completions
         ]
         logger.debug(f"[RolloutGroup] Rewards: {rewards}")
@@ -137,6 +140,8 @@ class RewardCalculator:
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
+        data_packer: Optional[DataPacker] = None,
+        val_data_packer: Optional[DataPacker] = None,
     ) -> None:
         """
         Setup the RewardCalculator with the given configuration and datasets.
@@ -147,6 +152,8 @@ class RewardCalculator:
             filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
             val_dataset (Optional[Dataset]): The validation dataset.
             val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
+            data_packer (Optional[DataPacker]): The data packer for processing the payloads.
+            val_data_packer (Optional[DataPacker]): The data packer for processing the validation payloads.
         """
         self.config = config
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
@@ -176,6 +183,7 @@ class RewardCalculator:
                 reward_function=config.train.train_policy.reward_function,
                 explicit_reward_fn=reward_fns,
                 explicit_filter_reward_fn=filter_reward_fns,
+                data_packer=data_packer,
             ),
             unbiased=config.train.train_policy.unbiased_advantage,
         )
@@ -212,8 +220,20 @@ class RewardCalculator:
                     tokenier=self.tokenizer,
                     reward_function=config.validation.reward_function,
                     explicit_reward_fn=val_reward_fns,
+                    data_packer=val_data_packer,
                 )
             )
+
+    @classmethod
+    def get_instance(cls) -> "RewardCalculator":
+        """
+        Get the singleton instance of the RewardCalculator.
+        Returns:
+            RewardCalculator: The singleton instance of the RewardCalculator.
+        """
+        if not hasattr(cls, "_instance"):
+            cls._instance = cls()
+        return cls._instance
 
     def query_reference_answer(
         self, prompt_idx: int, dataset_type: str = "train"
@@ -234,7 +254,10 @@ class RewardCalculator:
             raise ValueError(f"Unknown dataset type: {dataset_type}")
 
     def compute_validation_rewards(
-        self, payloads: List[RLPayload], step: int, prompt_idxs: List[int]
+        self,
+        payloads: List[RLPayload],
+        step: int,
+        prompt_idxs: List[int] = [],
     ) -> Tuple[List[RLPayload], bool, int]:
         """
         Compute rewards and advantages for the given payloads using validation reward function.
@@ -297,7 +320,7 @@ class RewardCalculator:
         payloads: List[RLPayload],
         is_validation: bool,
         step: int,
-        prompt_idxs: List[int],
+        prompt_idxs: List[int] = [],
     ) -> Tuple[List[RLPayload], bool, int]:
         """
         Compute rewards and advantages for the given payloads.
@@ -424,9 +447,6 @@ class RewardDispatcher:
     """
 
     def __init__(self, payload_per_task: int = 1):
-        self.executor = ProcessPoolExecutor(
-            max_workers=8,
-        )
         self.reward_calculator = RewardCalculator()
         self.task_queue = Queue()
         self.payload_per_task = payload_per_task
@@ -439,6 +459,8 @@ class RewardDispatcher:
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
+        data_packer: Optional[DataPacker] = None,
+        val_data_packer: Optional[DataPacker] = None,
     ) -> None:
         """
         Setup the RewardCalculator with the given configuration and datasets.
@@ -449,14 +471,65 @@ class RewardDispatcher:
             filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
             val_dataset (Optional[Dataset]): The validation dataset.
             val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
+            data_packer (Optional[DataPacker]): The data packer for processing the payloads.
+            val_data_packer (Optional[DataPacker]): The data packer for processing the validation payloads.
         """
-        self.reward_calculator.setup(
-            config=config,
-            dataset=dataset,
-            reward_fns=reward_fns,
-            filter_reward_fns=filter_reward_fns,
-            val_dataset=val_dataset,
-            val_reward_fns=val_reward_fns,
+
+        def worker_init(
+            config,
+            dataset,
+            reward_fns,
+            filter_reward_fns,
+            val_dataset,
+            val_reward_fns,
+            data_packer,
+            val_data_packer,
+        ):
+            reward_calculator = RewardCalculator.get_instance()
+            reward_calculator.setup(
+                config=config,
+                dataset=dataset,
+                reward_fns=reward_fns,
+                filter_reward_fns=filter_reward_fns,
+                val_dataset=val_dataset,
+                val_reward_fns=val_reward_fns,
+                data_packer=data_packer,
+                val_data_packer=val_data_packer,
+            )
+
+        self.executor = ProcessPoolExecutor(
+            max_workers=8,
+            initializer=worker_init,
+            initargs=(
+                config,
+                dataset,
+                reward_fns,
+                filter_reward_fns,
+                val_dataset,
+                val_reward_fns,
+                data_packer,
+                val_data_packer,
+            ),
+        )
+
+    @staticmethod
+    def compute_rewards(payloads, is_validation, step, prompt_idxs):
+        """
+        Static method to compute rewards using the singleton RewardCalculator instance.
+        Args:
+            payloads (List[RLPayload]): List of RLPayload to compute rewards for.
+            is_validation (bool): Whether the payloads are from validation set.
+            step (int): The weight step where the payloads are generated.
+            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
+        Returns:
+            Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
+                payloads: List of RLPayload with rewards and advantages
+                is_validation: whether the payloads are from validation set
+                step: the weight step where the payloads are generated
+        """
+        reward_calculator = RewardCalculator.get_instance()
+        return reward_calculator.compute_rewards(
+            payloads, is_validation, step, prompt_idxs
         )
 
     def enqueue_rewards_cal(
@@ -464,7 +537,7 @@ class RewardDispatcher:
         payloads: List[RLPayload],
         is_validation: bool,
         step: int,
-        prompt_idxs: List[int],
+        prompt_idxs: List[int] = [],
     ) -> None:
         """
         Enqueue the reward calculation task.
@@ -479,7 +552,7 @@ class RewardDispatcher:
         for i in range(0, len(payloads), self.payload_per_task):
             self.task_queue.put(
                 self.executor.submit(
-                    self.reward_calculator.compute_rewards,
+                    RewardDispatcher.compute_rewards,
                     payloads[i : i + self.payload_per_task],
                     is_validation,
                     step,

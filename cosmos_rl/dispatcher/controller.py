@@ -37,8 +37,6 @@ from cosmos_rl.utils.wandb_logger import (
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.network_util as network_util
 import cosmos_rl.utils.constant as constant
-from cosmos_rl.reward.algo.base import REGISTERED_ALGOs
-from cosmos_rl.reward.algo.reward import Reward
 from cosmos_rl.dispatcher.data import (
     CosmosDataset,
     RLPayload,
@@ -155,16 +153,6 @@ class Controller:
                 )
             else:
                 self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
-            self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
-                reward_fn=Reward(
-                    config=config,
-                    tokenier=self.tokenizer,
-                    reward_function=config.train.train_policy.reward_function,
-                    explicit_reward_fn=reward_fns,
-                    explicit_filter_reward_fn=filter_reward_fns,
-                ),
-                unbiased=config.train.train_policy.unbiased_advantage,
-            )
 
             remain_samples_num = (
                 (
@@ -287,22 +275,11 @@ class Controller:
                     logger.info(
                         "[Controller] No validation reward function config specified, using the same reward function as training."
                     )
-                self.val_rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
-                    reward_fn=Reward(
-                        config=config,
-                        tokenier=self.tokenizer,
-                        reward_function=config.validation.reward_function,
-                        explicit_reward_fn=val_reward_fns,
-                    )
-                )
             else:
                 self.val_dataset = None
-                self.val_rl_algo = None
                 val_dataloader = None
         else:
-            self.rl_algo = None
             self.val_dataset = None
-            self.val_rl_algo = None
             val_dataloader = None
 
         redis_free_port = util.find_available_port(redis_port)

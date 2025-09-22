@@ -243,6 +243,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             filter_reward_fns=filter_reward_fns,
             val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
+            data_packer=self.data_packer,
+            val_data_packer=self.val_data_packer,
         )
 
     def prepare_shard_infos_for_weight_sync_insts(self):
