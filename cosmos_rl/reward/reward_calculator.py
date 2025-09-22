@@ -461,6 +461,7 @@ class RewardDispatcher:
         val_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[DataPacker] = None,
         val_data_packer: Optional[DataPacker] = None,
+        num_workers: int = 8,
     ) -> None:
         """
         Setup the RewardCalculator with the given configuration and datasets.
@@ -473,6 +474,7 @@ class RewardDispatcher:
             val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
             data_packer (Optional[DataPacker]): The data packer for processing the payloads.
             val_data_packer (Optional[DataPacker]): The data packer for processing the validation payloads.
+            num_workers (int): The number of worker processes for parallel reward calculation.
         """
 
         def worker_init(
@@ -497,20 +499,23 @@ class RewardDispatcher:
                 val_data_packer=val_data_packer,
             )
 
-        self.executor = ProcessPoolExecutor(
-            max_workers=8,
-            initializer=worker_init,
-            initargs=(
-                config,
-                dataset,
-                reward_fns,
-                filter_reward_fns,
-                val_dataset,
-                val_reward_fns,
-                data_packer,
-                val_data_packer,
-            ),
-        )
+        if num_workers > 0:
+            self.executor = ProcessPoolExecutor(
+                max_workers=num_workers,
+                initializer=worker_init,
+                initargs=(
+                    config,
+                    dataset,
+                    reward_fns,
+                    filter_reward_fns,
+                    val_dataset,
+                    val_reward_fns,
+                    data_packer,
+                    val_data_packer,
+                ),
+            )
+        else:
+            self.executor = None
 
     @staticmethod
     def compute_rewards(payloads, is_validation, step, prompt_idxs):

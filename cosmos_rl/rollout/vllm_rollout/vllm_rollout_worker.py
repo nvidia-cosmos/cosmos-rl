@@ -235,6 +235,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
+        num_workers: int = 8,
     ):
         self.reward_dispatcher.setup(
             config=self.config,
@@ -245,6 +246,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             val_reward_fns=val_reward_fns,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
+            num_workers=num_workers
+            if self.parallel_dims.tp_coord[0] == 0
+            and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
+            else 0,
         )
 
     def prepare_shard_infos_for_weight_sync_insts(self):

@@ -86,9 +86,34 @@ from datasets import concatenate_datasets
 from typing import List
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
+from cosmos_rl.reward.algo.reward import boxed_math_reward_fn
+import multiprocessing as mp
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
+
+
+class TestDataset(Dataset):
+    def __init__(self, config: CosmosConfig):
+        pass
+
+    def setup(
+        self,
+        config: CosmosConfig,
+        tokenizer: AutoTokenizer,
+    ):
+        dataset = util.load_data_from_disk_or_hf(
+            config.train.train_policy.dataset.name,
+            config.train.train_policy.dataset.subset,
+            config.train.train_policy.dataset.revision or None,
+        )
+        dataset_list = []
+        for split_name in config.train.train_policy.dataset.split:
+            dataset_list.append(dataset[split_name])
+        self.dataset = concatenate_datasets(dataset_list)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]
 
 
 class TestModel:
@@ -1486,10 +1511,7 @@ def run_sft_validation():
     trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
     assert len(trainer.val_data_loader) == 29195
 
-    class TestDataset(Dataset):
-        def __init__(self, config: CosmosConfig):
-            pass
-
+    class TestDatasetSFTVal(TestDataset):
         def setup(
             self,
             config: CosmosConfig,
@@ -1508,17 +1530,132 @@ def run_sft_validation():
         def __len__(self):
             return 1
 
-        def __getitem__(self, idx):
-            return self.dataset[idx]
-
     trainer = SFTTrainer(
         config=config,
         parallel_dims=parallel_dims,
-        val_dataset=TestDataset,
+        val_dataset=TestDatasetSFTVal,
         val_data_packer=DecoderOnlyLLMDataPacker(),
     )
     assert len(trainer.val_data_loader) == 1
     trainer.validate()
+
+
+def run_reward_check():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_grpo.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+
+    config.train.train_policy.dataset.name = os.path.join(
+        cur_dir, config.train.train_policy.dataset.name
+    )
+    logger.info(f"Using model from {config.policy.model_name_or_path}")
+    # config.rollout.n_generation = 2
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.rollout.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        self.val_data_packer = None
+        self.shutdown_signal = threading.Event()
+        self.shutdown_mp_signal = mp.Event()  # Must be a multiprocessing event
+        self.heartbeat_thread = None
+
+    def report_rollouts(self, block=False):
+        while True:
+            payloads, is_validation, step, empty = (
+                self.reward_dispatcher.dequeue_rewards_cal()
+            )
+            if not hasattr(self, "_cnt"):
+                self._cnt = 0
+            if payloads is not None:
+                self._cnt += 1
+                assert len(payloads) == 1
+                assert len(payloads[0].completions) == config.rollout.n_generation
+                assert len(payloads[0].rewards) == config.rollout.n_generation
+                assert len(payloads[0].advantages) == config.rollout.n_generation
+                logger.info(
+                    f"Got {payloads[0].rewards} {payloads[0].advantages} from reward calculation at {self._cnt}"
+                )
+                if is_validation:
+                    break
+            elif not block or empty:
+                break
+        if self._cnt >= 1:
+            self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
+
+        shutdown_signal = dist_util.broadcast_object_cpu(self.shutdown_signal.is_set())
+        if shutdown_signal:
+            self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
+
+        return payloads, is_validation, step, empty
+
+    vLLMRolloutWorker.report_rollouts = report_rollouts
+    vLLMRolloutWorker.send_end_signal = lambda self: None
+
+    def consume_command(
+        self,
+        cmd_pred=None,
+    ):
+        pass
+
+    CommMixin.init_comm = dummy
+    CommMixin.init_redis = lambda self: None
+    vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts = lambda self: None
+    vLLMRolloutWorker.consume_command = consume_command
+    rollout = vLLMRolloutWorker(config, parallel_dims=parallel_dims)
+
+    class TestDatasetReward(TestDataset):
+        def __len__(self):
+            return 1
+
+    def custom_reward_fn(to_be_evaluated, reference, *args, **kwargs) -> float:
+        assert isinstance(reference, str), "Reference answer should be a string"
+        reward = boxed_math_reward_fn(to_be_evaluated, reference, *args, **kwargs)
+        # Add more reward functions here
+        # ...
+        return reward
+
+    rollout.setup(
+        dataset=TestDatasetReward,
+        reward_fns=[custom_reward_fn],
+        num_workers=1,
+    )
+    rollout.lazy_initialize_rollout_engine("auto")
+
+    dataset = TestDatasetReward(config)
+    dataset.setup(tokenizer=rollout.tokenizer, config=config)
+    for idx in range(len(dataset)):
+        prompts = [
+            (
+                idx,
+                RLPayload(
+                    prompt=dataset[idx]["prompt"],
+                    reference_answer=dataset[idx]["result"],
+                ),
+            )
+        ]
+        rollout._prompt_queue.put(prompts)
+
+    rollout.state.set_weight_synced()
+    rollout.state.set_prompt_fetch_end()
+    rollout.main_loop()
+    rollout.handle_shutdown()
 
 
 async def main():
@@ -1575,6 +1712,9 @@ async def main():
         exit(0)
     elif mode == "sft_for_validation":
         run_sft_validation()
+        exit(0)
+    elif mode == "reward_execution_check":
+        run_reward_check()
         exit(0)
 
     # Initialize distributed environment
