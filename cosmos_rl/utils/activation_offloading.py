@@ -25,6 +25,9 @@ from torch.autograd.graph import saved_tensors_hooks
 from cosmos_rl.utils.logging import logger
 
 
+# We reuse this activation offload manager from torchtune, thanks for this plugin:
+# https://github.com/pytorch/torchtune/blob/67ab86b94de9e7ac7dd9850113ebe69e2bbd307c/torchtune/training/_activation_offloading.py#L24
+
 class OffloadActivations(saved_tensors_hooks):
     """Context manager under which activation tensors created in the forward pass will be offloaded.
 
@@ -187,7 +190,7 @@ class OffloadActivations(saved_tensors_hooks):
                 if self.use_streams:
                     event = self.s1.record_event()
 
-                    # Stash to keep activation alive til s1 is done
+                    # Stash to keep activation alive untill s1 is done
                     self.fwd_stash[tensor_id] = (activation, event)
             else:
                 self.tracker[tensor_id] = (
@@ -267,6 +270,7 @@ class OffloadActivations(saved_tensors_hooks):
 
                 brought_back_from_cpu = True
                 if unpack_tensor_id in self.fwd_stash:
+                    # this means that the tensor could be just in the process of being offloaded
                     maybe_gpu_tensor = self.fwd_stash[unpack_tensor_id][0]
                     brought_back_from_cpu = False
                 else:
@@ -400,7 +404,7 @@ def get_act_offloading_ctx_manager(
         # step, as the cost for offloading the activation and then soon after bringing
         # it back is expensive. Moreover, due to heuristics in our streaming API,
         # we actually use more memory if we offload it as it interferes with chunkedCE.
-        output_head_detected = False
+        lm_head_detected = False
         noop_ctx = NoOpManager()
         if hasattr(model, "lm_head"):
             if isinstance(model.lm_head, nn.Module):
@@ -410,14 +414,14 @@ def get_act_offloading_ctx_manager(
                 model.lm_head.register_forward_hook(
                     lambda *args: noop_ctx.__exit__(), always_call=True
                 )
-                output_head_detected = True
+                lm_head_detected = True
         # FIXME: (lms) Add the check for the VLM.
-        if not output_head_detected:
+        if not lm_head_detected:
             logger.warning(
-                "During activation offloading, no output head was detected. "
-                "If your model has an output head, it will be offloaded. "
+                "During activation offloading, no lm_head was detected. "
+                "If your model has an lm head, it will be offloaded. "
                 "This usually greatly slows training, given the large vocabulary size. "
-                "To change this behavior, set your output head as model.output and make it "
+                "To change this behavior, set your lm head as model.lm_head and make it "
                 "an nn.Module."
             )
 
