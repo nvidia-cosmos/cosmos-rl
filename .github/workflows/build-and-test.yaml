@@ -68,6 +68,7 @@ jobs:
           ${DOCKER_RUN} python tests/test_sequence_packing.py
           ${LONG_DOCKER_RUN} python tests/test_integration.py --stream
           ${DOCKER_RUN} python tests/test_hf_models.py
+          ${DOCKER_RUN} python tests/test_activation_offload.py
 
       - name: Cleanup
         if: always()
