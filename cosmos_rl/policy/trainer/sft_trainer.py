@@ -873,8 +873,28 @@ class SFTTrainer(Trainer):
                 self.profiler.step()
 
                 val_score = None
-                # validation
-                if self.train_step % self.config.validation.freq == 0:
+                # validation - support both step-based and epoch-based frequency
+                should_validate = False
+
+                if self.config.validation.enable:
+                    if self.config.validation.freq_in_epoch > 0:
+                        # Epoch-based validation (takes priority)
+                        steps_per_epoch = len(self.train_data_loader)
+                        # Calculate validation steps: end of each freq_in_epoch epochs
+                        validation_steps = []
+                        for epoch_num in range(1, self.config.train.epoch + 1):
+                            if epoch_num % self.config.validation.freq_in_epoch == 0:
+                                validation_steps.append(epoch_num * steps_per_epoch)
+
+                        if self.train_step in validation_steps:
+                            should_validate = True
+                            current_epoch = self.train_step // steps_per_epoch
+                            logger.info(f"[SFT Trainer] Triggering epoch-based validation at step {self.train_step} (end of epoch {current_epoch})")
+                    elif self.config.validation.freq > 0 and self.train_step % self.config.validation.freq == 0:
+                        # Step-based validation (fallback when epoch-based disabled)
+                        should_validate = True
+
+                if should_validate:
                     val_score = self.validate()
 
                 # save checkpoint
