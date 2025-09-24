@@ -433,7 +433,7 @@ class SFTTrainer(Trainer):
         else:
             self._save_freq = self.config.train.ckpt.save_freq
 
-    def validate(self):
+    def validate(self, current_epoch: int = None):
         if not self.config.validation.enable:
             return
         if self.parallel_dims.dp_replicate_coord[0] != 0:
@@ -543,14 +543,24 @@ class SFTTrainer(Trainer):
             if self.config.logging.logger and "tao" in self.config.logging.logger:
                 validation_data = {
                     "val/loss": float(val_avg_loss),
-                    "val/step": int(self.train_step)
+                    "val/step": int(self.train_step),
+                    "steps_per_epoch": len(self.train_data_loader),
                 }
-                log_tao_status(
-                    data=validation_data,
-                    step=int(self.train_step),
-                    component_name=f"{self.config.logging.experiment_name} SFT Validation",
-                    max_steps=int(self.total_steps)
-                )
+                if current_epoch is not None:
+                    log_tao_status(
+                        data=validation_data,
+                        current_epoch=current_epoch,
+                        max_epochs=self.epoch,
+                        component_name=f"{self.config.logging.experiment_name} SFT Validation"
+                    )
+                else:
+                    # Fall back to step-based logging if epoch is not available
+                    log_tao_status(
+                        data=validation_data,
+                        step=int(self.train_step),
+                        component_name=f"{self.config.logging.experiment_name} SFT Validation",
+                        max_steps=int(self.total_steps)
+                    )
         return val_avg_loss
 
     def train(self):
@@ -836,6 +846,7 @@ class SFTTrainer(Trainer):
                             "train/loss_max": global_max_loss.item() if isinstance(global_max_loss, torch.Tensor) else global_max_loss,
                             "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
                             "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else (grad_norm if grad_norm is not None else -1),
+                            "steps_per_epoch": len(self.train_data_loader),
                         }
 
                         # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
@@ -859,11 +870,13 @@ class SFTTrainer(Trainer):
                                 step=self.train_step,
                             )
                         if "tao" in self.config.logging.logger:
+                            # Calculate current epoch (1-based) from current training step
+                            current_training_epoch = cur_epoch + 1
                             log_tao_status(
                                 data=report_data,
-                                step=int(self.train_step),
-                                component_name=f"{self.config.logging.experiment_name} SFT",
-                                max_steps=int(self.total_steps)
+                                current_epoch=current_training_epoch,
+                                max_epochs=self.epoch,
+                                component_name=f"{self.config.logging.experiment_name} SFT"
                             )
                         if "console" in self.config.logging.logger:
                             logger.info(
@@ -896,7 +909,7 @@ class SFTTrainer(Trainer):
                         should_validate = True
 
                 if should_validate:
-                    val_score = self.validate()
+                    val_score = self.validate(current_epoch=cur_epoch + 1)
 
                 # save checkpoint
                 if (
@@ -955,7 +968,9 @@ class SFTTrainer(Trainer):
                 break  # break outer epoch loop
 
         # process the final step
-        val_score = self.validate()
+        # Calculate final epoch for validation logging
+        final_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
+        val_score = self.validate(current_epoch=final_epoch)
 
         # Check if we already saved at this step during regular checkpointing
         already_saved_at_final_step = (
