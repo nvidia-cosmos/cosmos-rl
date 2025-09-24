@@ -66,6 +66,8 @@ def main(*args, **kwargs):
                     data_packer=custom_sft_data_packer,
                     val_dataset=kwargs.get("val_dataset", None),
                     val_data_packer=kwargs.get("val_data_packer", None),
+                    sampler=kwargs.get("sampler", None),
+                    val_sampler=kwargs.get("val_sampler", None),
                 )
                 trainer.train()
             else:

@@ -291,6 +291,8 @@ class SFTTrainer(Trainer):
         data_packer: Optional[DataPacker] = None,
         val_dataset: Optional[Dataset] = None,
         val_data_packer: Optional[DataPacker] = None,
+        sampler: Optional[Callable] = None,
+        val_sampler: Optional[Callable] = None,
     ):
         super(SFTTrainer, self).__init__(config, parallel_dims)
 
@@ -373,13 +375,23 @@ class SFTTrainer(Trainer):
             val_data_packer=self.val_data_packer,
             user_provided_val_dataset=val_dataset,
         )
-        train_sampler = DistributedSampler(
-            train_dataset,
-            num_replicas=self.dp_world_size,
-            rank=self.dp_rank,
-            shuffle=config.train.train_policy.dataloader_shuffle,
-            drop_last=False,
-        )
+        if sampler is not None:
+            logger.info("Using user-provided sampler for training dataset.")
+            train_sampler = sampler(
+                train_dataset,
+                num_replicas=self.dp_world_size,
+                rank=self.dp_rank,
+                shuffle=config.train.train_policy.dataloader_shuffle,
+                drop_last=False,
+            )
+        else:
+            train_sampler = DistributedSampler(
+                train_dataset,
+                num_replicas=self.dp_world_size,
+                rank=self.dp_rank,
+                shuffle=config.train.train_policy.dataloader_shuffle,
+                drop_last=False,
+            )
 
         def get_train_data_loader(sampler: Sampler[int]):
             return DataLoader(
@@ -410,13 +422,23 @@ class SFTTrainer(Trainer):
             )
             self.start_epoch = self.train_step // total_steps_per_epoch
 
-        val_sampler = DistributedSampler(
-            val_dataset,
-            num_replicas=self.dp_world_size,
-            rank=self.dp_rank,
-            shuffle=False,
-            drop_last=False,
-        )
+        if val_sampler is not None:
+            logger.info("Using user-provided sampler for validation dataset.")
+            val_sampler = val_sampler(
+                val_dataset,
+                num_replicas=self.dp_world_size,
+                rank=self.dp_rank,
+                shuffle=False,
+                drop_last=False,
+            )
+        else:
+            val_sampler = DistributedSampler(
+                val_dataset,
+                num_replicas=self.dp_world_size,
+                rank=self.dp_rank,
+                shuffle=False,
+                drop_last=False,
+            )
         self.epoch = config.train.epoch
 
         assert (

@@ -98,13 +98,12 @@ class Controller:
         redis_port: int,
         redis_logfile_path: str,
         dataset: Optional[Dataset] = None,
-        reward_fns: Optional[List[Callable]] = None,
-        filter_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[DataPacker] = None,
         val_dataset: Optional[Dataset] = None,
-        val_reward_fns: Optional[List[Callable]] = None,
         val_data_packer: Optional[DataPacker] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
+        sampler: Optional[Callable] = None,
+        val_sampler: Optional[Callable] = None,
     ):
         if self.config is not None:
             raise Exception(
@@ -164,13 +163,23 @@ class Controller:
                 else 0
             )
 
-            train_sampler = DistributedSampler(
-                self.dataset.train_set,
-                num_replicas=1,
-                rank=0,
-                shuffle=config.train.train_policy.dataloader_shuffle,
-                drop_last=False,
-            )
+            if sampler is not None:
+                logger.info("[Controller] Using provided sampler for training")
+                train_sampler = sampler(
+                    self.dataset.train_set,
+                    num_replicas=1,
+                    rank=0,
+                    shuffle=config.train.train_policy.dataloader_shuffle,
+                    drop_last=False,
+                )
+            else:
+                train_sampler = DistributedSampler(
+                    self.dataset.train_set,
+                    num_replicas=1,
+                    rank=0,
+                    shuffle=config.train.train_policy.dataloader_shuffle,
+                    drop_last=False,
+                )
             if config.train.resume:
                 try:
                     # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
@@ -253,6 +262,16 @@ class Controller:
                     self.val_dataset = CosmosValidationDataset(
                         config=config, tokenizer=self.tokenizer
                     )
+                if val_sampler is not None:
+                    logger.info("[Controller] Using provided sampler for validation")
+                    val_sampler = val_sampler(
+                        self.val_dataset.val_set,
+                        num_replicas=1,
+                        rank=0,
+                        shuffle=False,
+                        drop_last=False,
+                    )
+
                 val_dataloader = DataLoader(
                     self.val_dataset.val_set,
                     batch_size=1,  # batch size is 1 is mandatory
@@ -260,21 +279,8 @@ class Controller:
                     num_workers=config.train.train_policy.dataloader_num_workers,
                     prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=RLPayload.collate_fn,
+                    sampler=val_sampler,
                 )
-
-                if not config.validation.reward_function:
-                    if val_reward_fns is None:
-                        val_reward_fns = reward_fns
-                        if val_reward_fns is not None:
-                            logger.info(
-                                "[Controller] No validation reward functions provided, using the same reward functions as training."
-                            )
-                    config.validation.reward_function = (
-                        config.train.train_policy.reward_function
-                    )
-                    logger.info(
-                        "[Controller] No validation reward function config specified, using the same reward function as training."
-                    )
             else:
                 self.val_dataset = None
                 val_dataloader = None
