@@ -97,9 +97,7 @@ def _patch_vllm_rollout_locked_step(
             and self._cosmos_step_counter % COSMOS_ROLLOUT_REPORT_INTERVAL == 0
         ):
             _, is_validation, _, _ = reward_fetch()
-            assert (
-                not is_validation
-            ), "Validation report should be handled in the broadcast command."
+            assert not is_validation, "Validation report should be handled in the broadcast command rather than step function."
 
         if (
             COSMOS_ROLLOUT_STEP_INTERVAL > 0
@@ -801,20 +799,26 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
 
         if should_report:
+            logger.info(
+                f"[Rollout] Reporting validation results ... {self.reward_dispatcher.task_queue.qsize()}"
+            )
             self.reward_dispatcher.enqueue_rewards_cal(
                 validation_payloads, True, self.current_step, prompt_idxs
+            )
+            logger.info(
+                f"[Rollout] Reported validation results {self.reward_dispatcher.task_queue.qsize()}"
             )
             payloads, is_validation, current_step, empty = self.report_rollouts(
                 block=True
             )
             assert (
                 (is_validation and payloads is not None or payloads is None)
-                and not empty
-            ), "Validation report should be handled in the broadcast command."
+                and (not empty or len(validation_payloads) == 0)
+            ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
             while not empty:
                 assert (
                     is_validation or payloads is None
-                ), "Validation report should be handled in the broadcast command."
+                ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
                 if payloads is not None:
                     response = ValidationReportRequest(
                         src_replica_name=self.replica_name,
@@ -1292,9 +1296,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         if self.global_rank == 0:
                             self.send_end_signal()
             _, is_validation, _, _ = self.report_rollouts()
-            assert (
-                not is_validation
-            ), "Validation report should be handled in the broadcast command."
+            assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
             if self.state.prompt_consume_end():
                 assert (
                     self._prompt_queue.empty() and self.state.prompt_fetch_end()
