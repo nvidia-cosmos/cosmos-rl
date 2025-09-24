@@ -54,7 +54,7 @@ def pipeline_model(
 
     pp_mesh = meshes["default"]["pp"]
     assert pp_mesh.size() == parallel_dims.pp
-    # parallelize_fn, _ = model.parallelize_fn
+    parallelizing_fn = model.parallelizing_fn()
 
     model_parts = _pipeline_manual_split(
         whole_model=model,
@@ -62,18 +62,18 @@ def pipeline_model(
         parallel_dims=parallel_dims,
     )
 
-    # # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
-    # # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
-    # # optimizer, and checkpointing
+    # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
+    # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
+    # optimizer, and checkpointing
 
-    # config = None
-    # pp_loss_fn = None
+    config = None
+    pp_loss_fn = None
 
-    # for i, m in enumerate(model_parts):
+    for i, m in enumerate(model_parts):
 
-    #     # apply SPMD-style PT-D techniques
-    #     m = parallelize_fn(m, parallel_dims, config, pp_loss_fn)
-    #     model_parts[i] = m
+        # apply SPMD-style PT-D techniques
+        m = parallelizing_fn(m, parallel_dims, config, pp_loss_fn)
+        model_parts[i] = m
 
     _setup_communication_channels(pp_mesh, device)
 
@@ -245,6 +245,6 @@ def _build_stage(
 
     if stage_idx != (num_stages - 1):
         model.model.model.norm = None
-        model.model.lm_head = None
+        model.model.model.lm_head = None
 
     return model
