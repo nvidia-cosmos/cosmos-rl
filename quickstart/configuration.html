@@ -1593,7 +1593,7 @@
 </tr>
 <tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/SubProfilerConfig</span></p></td>
 </tr>
-<tr class="row-even"><td rowspan="52"><ul class="simple">
+<tr class="row-even"><td rowspan="56"><ul class="simple">
 <li><p>RolloutConfig</p></li>
 </ul>
 </td>
@@ -1781,6 +1781,20 @@
 <td colspan="4"><p>Configuration for multi-turn rollout.</p></td>
 </tr>
 <tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/MultiTurnRolloutConfig</span></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>reference_answer_in_local</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Reference Answer In Local</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Whether to store the dataset in local rollout worker for fetching reference answer.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
 </tr>
 <tr class="row-even"><td rowspan="39"><ul class="simple">
 <li><p>RolloutParallelismConfig</p></li>
@@ -2883,7 +2897,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="52"><ul class="simple">
+<tr class="row-even"><td rowspan="53"><ul class="simple">
 <li><p>ValidationConfig</p></li>
 </ul>
 </td>
@@ -3044,7 +3058,7 @@
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="7"><ul class="simple">
+<tr class="row-odd"><td rowspan="8"><ul class="simple">
 <li><p>reward_function</p></li>
 </ul>
 </td>
@@ -3052,21 +3066,24 @@
 </tr>
 <tr class="row-even"><td colspan="4"><p>Reward functions for the model. Currently support <cite>single_choice</cite>, <cite>boxed_math</cite>, and <cite>format</cite>. You can add weight to each reward function by passing a dict, e.g., {‘single_choice’: 0.9, ‘format’: 0.1}</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><p>anyOf</p></td>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="2"><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="2"><p><em>array</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>items</p></td>
+<tr class="row-even"><td><p>items</p></td>
 <td><p>type</p></td>
 <td><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="2"><p><em>object</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>additionalProperties</p></td>
+<tr class="row-even"><td><p>additionalProperties</p></td>
 <td><p>type</p></td>
 <td><p><em>number</em></p></td>
 </tr>
