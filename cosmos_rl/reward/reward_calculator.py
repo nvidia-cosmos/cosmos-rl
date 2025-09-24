@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from typing import List, Dict, Any, Optional, Callable, Tuple
 from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo
 from cosmos_rl.utils.logging import logger
