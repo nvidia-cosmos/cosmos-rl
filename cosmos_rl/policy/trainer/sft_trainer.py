@@ -31,7 +31,8 @@ from cosmos_rl.policy.trainer.sampler import SkippingSampler
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
-from cosmos_rl.utils.wandb_logger import init_wandb, is_wandb_available, log_wandb
+from cosmos_rl.utils.wandb_logger import (init_wandb, is_wandb_available,
+                                          log_wandb)
 from datasets import concatenate_datasets
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, Sampler
 from tqdm import tqdm
