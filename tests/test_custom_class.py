@@ -15,7 +15,9 @@
 
 
 import unittest
-import os, subprocess, sys
+import os
+import subprocess
+import sys
 
 
 class TestCustomSampler(unittest.TestCase):

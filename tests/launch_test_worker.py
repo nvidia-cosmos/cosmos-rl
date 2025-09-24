@@ -1670,6 +1670,7 @@ def run_sft_custom_sampler():
     config = CosmosConfig.from_dict(
         config_dict,
     )
+    config.train.train_policy.dataloader_shuffle = False
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
@@ -1706,6 +1707,9 @@ def run_sft_custom_sampler():
                 dataset_list.append(dataset[split_name])
             self.dataset = concatenate_datasets(dataset_list)
 
+        def __getitem__(self, idx):
+            return super().__getitem__(idx)["conversation"]
+
         def __len__(self):
             return 16
 
@@ -1729,29 +1733,38 @@ def run_sft_custom_sampler():
 
         def __iter__(self):
             it = iter(self.base)
-            logger.info("Sampler iteration: next")
+            dp_rank = dist.get_rank() // 2
+            cnt = 0
+            for i in it:
+                assert (i - dp_rank) % 2 == 0
+                cnt += 1
+            assert cnt == 8
+            it = iter(self.base)
             return it
 
         def __len__(self) -> int:
             base_len = len(self.base)
-            logger.info(f"Base sampler length: {base_len}")
             return base_len
 
         def set_epoch(self, epoch: int):
             self.base.set_epoch(epoch)
 
-    val_dataset = TestDatasetSampler(config)
-    val_dataset.setup(config=config, tokenizer=None)
+    dataset = TestDatasetSampler(config)
+    dataset.setup(config=config, tokenizer=None)
 
     trainer = SFTTrainer(
         config=config,
         parallel_dims=parallel_dims,
-        val_dataset=val_dataset,
+        dataset=dataset,
+        val_dataset=dataset,
         val_data_packer=DecoderOnlyLLMDataPacker(),
+        sampler=TestSampler,
         val_sampler=TestSampler,
     )
-    # assert len(trainer.val_data_loader) == 1
-    trainer.validate()
+    for _ in trainer.train_data_loader:
+        pass
+    for _ in trainer.val_data_loader:
+        pass
 
 
 async def main():
