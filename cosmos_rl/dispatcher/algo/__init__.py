@@ -13,5 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import cosmos_rl.reward.algo.grpo  # noqa: F401
-import cosmos_rl.reward.algo.reward  # noqa: F401
+import cosmos_rl.dispatcher.algo.grpo  # noqa: F401
+import cosmos_rl.dispatcher.algo.reward  # noqa: F401

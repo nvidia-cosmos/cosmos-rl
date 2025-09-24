@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.reward.algo.base import RuleBasedAlgo, _register_rule_based_algo
+from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo, _register_rule_based_algo
 from typing import Callable, List, Tuple
 import numpy as np
 from cosmos_rl.utils.constant import Algo

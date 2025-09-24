@@ -86,7 +86,7 @@ from datasets import concatenate_datasets
 from typing import List
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
-from cosmos_rl.reward.algo.reward import boxed_math_reward_fn
+from cosmos_rl.dispatcher.algo.reward import boxed_math_reward_fn
 import multiprocessing as mp
 
 POLICY_WORLD_SIZE = 4

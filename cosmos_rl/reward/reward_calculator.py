@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import List, Dict, Any, Optional, Callable, Tuple
-from cosmos_rl.reward.algo.base import RuleBasedAlgo
+from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
 from concurrent.futures import ProcessPoolExecutor
 from torch.utils.data import Dataset
-from cosmos_rl.reward.algo.base import REGISTERED_ALGOs
-from cosmos_rl.reward.algo.reward import Reward
+from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
+from cosmos_rl.dispatcher.algo.reward import Reward
 from cosmos_rl.dispatcher.data import (
     CosmosDataset,
     CosmosValidationDataset,

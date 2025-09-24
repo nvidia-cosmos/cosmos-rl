@@ -19,7 +19,7 @@ from torch.utils.data import Dataset
 from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.reward.algo.reward import direct_math_reward_fn, overlong_reward_fn
+from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
 from transformers import AutoTokenizer
 from torch.utils.data import ConcatDataset
 
