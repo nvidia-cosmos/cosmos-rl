@@ -197,6 +197,10 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         Send end signal to the controller.
         This is used to notify the controller that the rollout worker has finished processing all prompts.
         """
+        payloads, is_validation, _, empty = self.report_rollouts(block=True)
+        assert (
+            not is_validation and payloads is None and empty
+        ), f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
         response = RolloutRequest(
             src_replica_name=self.replica_name,
             prompt_idxs=[],

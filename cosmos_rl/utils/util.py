@@ -731,7 +731,8 @@ def retry(func=None, *, max_retry=10, max_delay=30.0):
             for attempt in range(max_retry + 1):
                 try:
                     return f(*args, **kwargs)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Retrying {f.__name__} due to error: {e}")
                     if attempt == max_retry:
                         # out of retries: re-raise last exception
                         raise
