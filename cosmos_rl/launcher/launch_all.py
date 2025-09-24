@@ -23,10 +23,10 @@ import time
 import os
 import re
 import argparse
-from argparse import REMAINDER
 from typing import List, Dict, Optional, Any, Callable
 import toml
 import tempfile
+
 from cosmos_rl.utils.decorators import monitor_status
 
 logging.basicConfig(level=logging.INFO)
@@ -247,12 +247,7 @@ def parse_args():
         default=None,
         help="Ratio of policy replicas to rollout replicas. This is used to determine the number of rollout replicas and the number of policy replicas based on the number of workers.",
     )
-    parser.add_argument(
-        "--results_dir",
-        type=str,
-        default=None,
-        help="Directory to save results. If not provided, results will be saved to the output directory.",
-    )
+
     parser.add_argument(
         "--log-dir",
         type=str,
@@ -284,6 +279,13 @@ def parse_args():
         type=int,
         default=29345,
         help="Rendezvous endpoint port for the job, default is 29345. This is used when multi-node training are used for one replica.",
+    )
+
+    parser.add_argument(
+        "script",
+        nargs="?",  # “?” means 0 or 1 occurrences
+        default=None,
+        help="A user script which can be provided for custom dataset, reward functions, and model registration.",
     )
 
     parser.add_argument(
@@ -429,17 +431,6 @@ def parse_args():
         help="Reservation ID for dedicated node groups",
     )
 
-    # Positional arguments
-
-    parser.add_argument(
-        "script",
-        nargs="?",  # “?” means 0 or 1 occurrences
-        default=None,
-        help="A user script which can be provided for custom dataset, reward functions, and model registration.",
-    )
-
-    parser.add_argument("script_args", nargs=REMAINDER)
-
     args = parser.parse_args()
 
     # Validate Lepton mode arguments
@@ -485,7 +476,6 @@ def replica_placement(
     script: Optional[str] = None,
     backend: str = "vllm",
     config_path: Optional[str] = None,
-    script_args: Optional[List[Any]] = None,
 ) -> List[List[str]]:
     commands = []
     gpu_devices = []
@@ -528,9 +518,6 @@ def replica_placement(
                         rdzv_ip = get_worker_ip(global_worker_idx)
                 else:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-
-                if script_args is not None:
-                    commands[-1] += f" {' '.join(script_args)}"
 
                 control_urls.append(control_url)
                 output_files.append(
@@ -577,8 +564,6 @@ def replica_placement(
             )
             if script is not None:
                 commands[-1] += f" --script {script}"
-            if script_args is not None:
-                commands[-1] += f" {' '.join(script_args)}"
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"policy_{i}.log")
@@ -626,9 +611,6 @@ def replica_placement(
                 else:
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
 
-                if script_args is not None:
-                    commands[-1] += f" {' '.join(script_args)}"
-
                 control_urls.append(control_url)
                 output_files.append(
                     os.path.join(output_dir, f"rollout_{i}.log")
@@ -672,10 +654,6 @@ def replica_placement(
             )
             if script is not None:
                 commands[-1] += f" --script {script}"
-
-            if script_args is not None:
-                commands[-1] += f" {' '.join(script_args)}"
-
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"rollout_{i}.log")
@@ -699,10 +677,6 @@ def main():
 
     # Check if the config file is provided
     cosmos_config = read_config(args.config)
-
-    if args.results_dir:
-        cosmos_config.train.output_dir = args.results_dir
-
     if args.script is not None and args.script.endswith(".py"):
         # If the script is a Python file, we need to make sure it is absolute path
         # so that it can be found by the launched processes
@@ -1217,9 +1191,7 @@ cosmos-rl --config config.toml"""
         controller_cmd = f"{controller_script} --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"
         if script:
-            controller_cmd += f" --script {script}"
-        if args.script_args is not None:
-            controller_cmd += f" {' '.join(args.script_args)}"
+            controller_cmd += f" {script}"
         control_url = f"localhost:{port}"
 
     def get_lepton_ip(worker_idx: int) -> str:
@@ -1275,7 +1247,6 @@ cosmos-rl --config config.toml"""
         script=script,
         backend=backend,
         config_path=tmpfile_toml,
-        script_args=args.script_args,
     )
 
     num_workers = len(global_launch_settings)
@@ -1396,11 +1367,4 @@ cosmos-rl --config config.toml"""
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except (KeyboardInterrupt, SystemError) as e:
-        logger.error(f"Launcher was interrupted: {e}")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"Launcher failed: {e}")
-        sys.exit(1)
+    main()

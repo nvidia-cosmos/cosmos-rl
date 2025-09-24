@@ -2,13 +2,13 @@ import os
 from typing import Optional, List, Callable, Union
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.decorators import monitor_status
 from cosmos_rl.policy.config import Config as CosmosConfig
 from torch.utils.data import Dataset
-import argparse
+
+from cosmos_rl.utils.decorators import monitor_status
 
 
-@monitor_status(name="Cosmos-RL Worker", mode="worker")
+@monitor_status(name="Cosmos-RL Worker Entry", mode="worker")
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     data_packer: Optional[DataPacker] = None,
@@ -18,7 +18,7 @@ def main(
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
-    args: Optional[argparse.Namespace] = None,
+    *args,
     **kwargs,
 ):
     if kwargs:
@@ -26,35 +26,29 @@ def main(
 
     role = os.environ.get("COSMOS_ROLE")
     assert role in ["Policy", "Rollout", "Controller"], f"Invalid role: {role}"
+    if role == "Controller":
+        from cosmos_rl.dispatcher.run_web_panel import main as controller_main
 
-    try:
-        if role == "Controller":
-            from cosmos_rl.dispatcher.run_web_panel import main as controller_main
+        controller_main(
+            dataset=dataset,
+            data_packer=data_packer,
+            reward_fns=reward_fns,
+            filter_reward_fns=filter_reward_fns,
+            val_dataset=val_dataset,
+            val_reward_fns=val_reward_fns,
+            val_data_packer=val_data_packer,
+            custom_logger_fns=custom_logger_fns,
+        )
+    elif role == "Policy":
+        from cosmos_rl.policy.train import main as policy_main
 
-            controller_main(
-                dataset=dataset,
-                data_packer=data_packer,
-                reward_fns=reward_fns,
-                val_dataset=val_dataset,
-                val_reward_fns=val_reward_fns,
-                val_data_packer=val_data_packer,
-            )
-        elif role == "Policy":
-            from cosmos_rl.policy.train import main as policy_main
+        policy_main(dataset=dataset, data_packer=data_packer)
+        return
+    else:
+        from cosmos_rl.rollout.rollout_entrance import run_rollout
 
-            policy_main()
-            return
-        else:
-            from cosmos_rl.rollout.rollout_entrance import run_rollout
-
-            run_rollout()
-            return
-    except (KeyboardInterrupt, SystemError) as e:
-        logger.warning(f"[Worker {role}] Worker was interrupted: {str(e)}")
-        raise
-    except Exception as e:
-        logger.error(f"[Worker {role}] Worker failed: {str(e)}")
-        raise
+        run_rollout()
+        return
 
 
 if __name__ == "__main__":
