@@ -97,11 +97,6 @@ def monitor_status(name: str = 'Cosmos-RL',
                 config = kwargs['cfg']
 
             try:
-                # Log operation start 
-                s_logger.kpi = {
-                    'operation': mode,
-                    'component': name
-                }
                 s_logger.write(
                     status_level=Status.STARTED,
                     message=f"Starting {name} {mode}"
@@ -112,11 +107,6 @@ def monitor_status(name: str = 'Cosmos-RL',
                 result = runner(*args, **kwargs)
 
                 # Log successful completion
-                s_logger.kpi = {
-                    'operation': mode,
-                    'component': name,
-                    'status': 'completed'
-                }
                 s_logger.write(
                     status_level=Status.SUCCESS,
                     message=f"{name} {mode} completed successfully"
@@ -125,7 +115,6 @@ def monitor_status(name: str = 'Cosmos-RL',
 
                 # Check for cloud upload
                 if os.getenv("CLOUD_BASED") == "True":
-                    s_logger.kpi = {'cloud_upload': True}
                     s_logger.write(
                         status_level=Status.RUNNING,
                         message="Job artifacts are being uploaded to the cloud"
@@ -134,12 +123,6 @@ def monitor_status(name: str = 'Cosmos-RL',
                 return result
 
             except (KeyboardInterrupt, SystemError) as e:
-                s_logger.kpi = {
-                    'operation': mode,
-                    'component': name,
-                    'error_type': type(e).__name__,
-                    'interrupted': True
-                }
                 s_logger.write(
                     message=f"{name} {mode} was interrupted: {str(e)}",
                     verbosity_level=Verbosity.WARNING,
@@ -149,12 +132,6 @@ def monitor_status(name: str = 'Cosmos-RL',
                 raise
 
             except Exception as e:
-                s_logger.kpi = {
-                    'operation': mode,
-                    'component': name,
-                    'error_type': type(e).__name__,
-                    'error_message': str(e)
-                }
                 s_logger.write(
                     message=f"{name} {mode} failed: {str(e)}",
                     verbosity_level=Verbosity.ERROR,

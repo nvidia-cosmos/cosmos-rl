@@ -25,6 +25,7 @@ Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
 cosmos-rl = "cosmos_rl.launcher.launch_all:main"
 cosmos-rl-train = "cosmos_rl.launcher.launch_all:main"
 cosmos-rl-inference = "cosmos_rl.inference.inference:main"
+cosmos-rl-inference-microservice = "cosmos_rl.inference.infer_microservices:main"
 
 [tool.setuptools]
 include-package-data = true
