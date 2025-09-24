@@ -965,6 +965,7 @@ class GRPOTrainer(Trainer):
                 total_steps=command.total_steps,
                 remain_samples_num=command.remain_samples_num,
                 do_save_checkpoint=command.do_save,
+                current_epoch=getattr(command, 'current_epoch', None),
             )
         else:
             report_data = {}
@@ -1245,6 +1246,7 @@ class GRPOTrainer(Trainer):
         total_steps: int,
         remain_samples_num: int,
         do_save_checkpoint: bool = False,
+        current_epoch: int = None,
     ) -> Dict[str, Any]:
         pp_last_stage = (
             self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
@@ -1760,33 +1762,42 @@ class GRPOTrainer(Trainer):
                         report_data[f"train/{k}"] = v
         # checkpointing
         if self.is_master_replica and (do_save_checkpoint):
+            # Determine naming scheme for checkpoints
+            if self.config.train.ckpt.save_freq_in_epoch > 0 and current_epoch is not None:
+                checkpoint_identifier = f"epoch_{current_epoch}"
+                save_message = f"epoch {current_epoch}"
+            else:
+                checkpoint_identifier = f"step_{current_step}"
+                save_message = f"step {current_step}"
+
             if self.config.train.ckpt.export_safetensors:
                 logger.info(
-                    f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
+                    f"[Policy] Saving huggingface checkpoint at {save_message} to {self.config.train.output_dir}..."
                 )
                 self.export_safetensors(
                     output_dir=self.config.train.output_dir,
                     rel_path=os.path.join(
                         "safetensors",
-                        f"step_{current_step}",
+                        checkpoint_identifier,
                     ),
                     trainable_only=False,
                     is_final=current_step == total_steps,
                     dtype=str2torch_dtype(self.config.train.param_dtype),
                 )
-            logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
+            logger.info(f"[Policy] Saving cosmos checkpoint at {save_message}...")
             self.ckpt_manager.save_checkpoint(
                 model=self.model,
                 optimizer=self.optimizers,
                 scheduler=self.lr_schedulers,
                 step=current_step,
                 total_steps=total_steps,
+                epoch=current_epoch,
                 **{
                     "remain_samples_num": remain_samples_num,
                     "is_final": current_step == total_steps,
                 },
             )
-            self.ckpt_manager.save_check(step=current_step)
+            self.ckpt_manager.save_check(step=current_step, epoch=current_epoch)
 
         # For profiling
         self.profiler.step()

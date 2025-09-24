@@ -179,6 +179,7 @@ class CheckpointMananger:
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         step: int,
         total_steps: int,
+        epoch: int = None,
         **kwargs,
     ):
         """
@@ -207,14 +208,22 @@ class CheckpointMananger:
                     )
 
         is_final = kwargs.get("is_final", False)
-        cur_step_ckpt_dir = os.path.join(f"step_{step}", "policy")
+
+        # Use epoch-based naming when save_freq_in_epoch is configured and epoch is provided
+        if self.config.train.ckpt.save_freq_in_epoch > 0 and epoch is not None:
+            cur_ckpt_dir = os.path.join(f"epoch_{epoch}", "policy")
+            ckpt_identifier = f"epoch_{epoch}"
+        else:
+            cur_ckpt_dir = os.path.join(f"step_{step}", "policy")
+            ckpt_identifier = f"step_{step}"
+
         os.makedirs(
-            os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir), exist_ok=True
+            os.path.join(self.ckpt_output_dir, cur_ckpt_dir), exist_ok=True
         )
 
         # construct the extra info dict
         with open(
-            os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir, "cosmos_config"), "w"
+            os.path.join(self.ckpt_output_dir, cur_ckpt_dir, "cosmos_config"), "w"
         ) as f:
             f.write(json.dumps(self.config.model_dump(), indent=4))
         extra_info = {
@@ -222,6 +231,11 @@ class CheckpointMananger:
             "step": step,
             "total_steps": total_steps,
         }
+
+        # Add epoch info if epoch-based naming is used
+        if epoch is not None:
+            extra_info["epoch"] = epoch
+
         for key, value in kwargs.items():
             if key in extra_info:
                 extra_info[key] = value
@@ -230,16 +244,16 @@ class CheckpointMananger:
 
         # paths for saving the state dicts
         model_ckpt_path = os.path.join(
-            cur_step_ckpt_dir, f"model_rank_{self.global_rank}.pth"
+            cur_ckpt_dir, f"model_rank_{self.global_rank}.pth"
         )
         optimizer_ckpt_path = os.path.join(
-            cur_step_ckpt_dir, f"optimizer_rank_{self.global_rank}.pth"
+            cur_ckpt_dir, f"optimizer_rank_{self.global_rank}.pth"
         )
         scheduler_ckpt_path = os.path.join(
-            cur_step_ckpt_dir, f"scheduler_rank_{self.global_rank}.pth"
+            cur_ckpt_dir, f"scheduler_rank_{self.global_rank}.pth"
         )
         extra_info_ckpt_path = os.path.join(
-            cur_step_ckpt_dir, f"extra_info_rank_{self.global_rank}.pth"
+            cur_ckpt_dir, f"extra_info_rank_{self.global_rank}.pth"
         )
 
         if self.save_mode == "async":
@@ -300,7 +314,7 @@ class CheckpointMananger:
             _save_upload(extra_info, extra_info_ckpt_path, is_final)
 
         logger.info(
-            f"[Policy] Step: {step}, checkpoint saved successfully at {os.path.join(self.ckpt_output_dir, cur_step_ckpt_dir)}."
+            f"[Policy] {ckpt_identifier}, checkpoint saved successfully at {os.path.join(self.ckpt_output_dir, cur_ckpt_dir)}."
         )
 
     def load_checkpoint(
@@ -396,22 +410,37 @@ class CheckpointMananger:
 
         raise FileNotFoundError(f"No checkpoint found at {base_paths}")
 
-    def save_check(self, step: int, **kwargs):
+    def save_check(self, step: int, epoch: int = None, **kwargs):
         if is_master_rank(self.parallel_dims, self.global_rank):
             heapq.heappush(self.saved_steps, step)
+
+            # Determine checkpoint naming scheme
+            if self.config.train.ckpt.save_freq_in_epoch > 0 and epoch is not None:
+                ckpt_identifier = f"epoch_{epoch}"
+            else:
+                ckpt_identifier = f"step_{step}"
+
             # remove the old checkpoints
             if len(self.saved_steps) > self.max_keep:
                 oldest = heapq.heappop(self.saved_steps)
-                ckpt_dir = os.path.join(self.ckpt_output_dir, f"step_{oldest}")
-                safetensors_dir = os.path.join(
+                # We need to determine the naming scheme for the oldest checkpoint
+                # For now, we'll check both formats for backward compatibility
+                old_step_ckpt_dir = os.path.join(self.ckpt_output_dir, f"step_{oldest}")
+                old_step_safetensors_dir = os.path.join(
                     self.config.train.output_dir, "safetensors", f"step_{oldest}"
                 )
-                if os.path.exists(ckpt_dir):
-                    shutil.rmtree(ckpt_dir)
-                    logger.info(f"Removed old checkpoint: {ckpt_dir}")
-                if os.path.exists(safetensors_dir):
-                    shutil.rmtree(safetensors_dir)
-                    logger.info(f"Removed old safetensors: {safetensors_dir}")
+
+                # Remove step-based checkpoints if they exist
+                if os.path.exists(old_step_ckpt_dir):
+                    shutil.rmtree(old_step_ckpt_dir)
+                    logger.info(f"Removed old checkpoint: {old_step_ckpt_dir}")
+                if os.path.exists(old_step_safetensors_dir):
+                    shutil.rmtree(old_step_safetensors_dir)
+                    logger.info(f"Removed old safetensors: {old_step_safetensors_dir}")
+
+                # For epoch-based checkpoints, we need to find the corresponding epoch
+                # This is more complex as we need to track epoch->step mapping
+                # For now, this handles the cleanup of step-based checkpoints
 
             val_score = kwargs.get("val_score", None)
             if val_score is not None:
@@ -424,9 +453,9 @@ class CheckpointMananger:
                     )
                     if os.path.islink(best_ckpt_dir):
                         os.unlink(best_ckpt_dir)
-                    os.symlink(f"step_{step}", best_ckpt_dir)
+                    os.symlink(ckpt_identifier, best_ckpt_dir)
                     logger.info(
-                        f"Best checkpoint updated to step_{step} with score: {val_score}"
+                        f"Best checkpoint updated to {ckpt_identifier} with score: {val_score}"
                     )
                     if self.config.train.ckpt.export_safetensors:
                         best_safetensors_dir = os.path.join(
@@ -434,5 +463,5 @@ class CheckpointMananger:
                         )
                         if os.path.islink(best_safetensors_dir):
                             os.unlink(best_safetensors_dir)
-                        os.symlink(f"step_{step}", best_safetensors_dir)
-                        logger.info(f"Best safetensors updated to step_{step}")
+                        os.symlink(ckpt_identifier, best_safetensors_dir)
+                        logger.info(f"Best safetensors updated to {ckpt_identifier}")
