@@ -25,9 +25,10 @@ from cosmos_rl.utils.util import retry
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoConfig
 import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
+import cosmos_rl.utils.util as util
 
 
 IGNORE_LABEL_ID = -100
@@ -139,12 +140,11 @@ class InternVL_DataPacker(DataPacker):
             self.input_ids = input_ids
             self.logprob_masks = logprob_masks
 
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
-        super().setup(config, tokenizer, *args, **kwargs)
+    def setup(self, config: CosmosConfig, *args, **kwargs):
+        super().setup(config, *args, **kwargs)
         hf_config = retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
         )
-        self.tokenizer = tokenizer
         self.image_token_id = 151671
         self.vision_ids = [self.image_token_id]
         self.hf_config = hf_config
@@ -424,7 +424,6 @@ class InternVL_DataPacker(DataPacker):
         self,
         processed_samples: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         # Reuse the RL collate minibatch function
@@ -448,12 +447,12 @@ class InternVLSFTDataset(Dataset):
     def __init__(self, dataset: Dataset):
         self.dataset = dataset
 
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, *args, **kwargs):
         """
         Called by launcher after being mounted
         """
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
 
         if config.train.train_policy.dataset.split:
             if isinstance(config.train.train_policy.dataset.split, list):

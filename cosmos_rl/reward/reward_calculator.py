@@ -28,7 +28,6 @@ from cosmos_rl.dispatcher.data import (
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.constant as constant
-from transformers import AutoTokenizer
 import cosmos_rl.utils.util as util
 from queue import Queue
 
@@ -157,9 +156,7 @@ class RewardCalculator:
             val_data_packer (Optional[DataPacker]): The data packer for processing the validation payloads.
         """
         self.config = config
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            self.config.policy.model_name_or_path
-        )
+        self.tokenizer = util.setup_tokenizer(self.config.policy.model_name_or_path)
 
         if config.rollout.reference_answer_in_local:
             if dataset is not None and isinstance(dataset, Callable):
@@ -169,14 +166,12 @@ class RewardCalculator:
 
             if dataset is not None:
                 assert isinstance(dataset, Dataset)
-                self.dataset = CosmosDataset(
-                    config=config, train_set=dataset, tokenizer=self.tokenizer
-                )
+                self.dataset = CosmosDataset(config=config, train_set=dataset)
                 logger.info(
                     "[Reward] Using provided dataset for training, dataset specification in the toml config will be ignored"
                 )
             else:
-                self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
+                self.dataset = CosmosDataset(config=config)
         self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
             reward_fn=Reward(
                 config=config,
@@ -193,15 +188,13 @@ class RewardCalculator:
                 if val_dataset is not None:
                     assert isinstance(val_dataset, Dataset)
                     self.val_dataset = CosmosValidationDataset(
-                        config=config, val_set=val_dataset, tokenizer=self.tokenizer
+                        config=config, val_set=val_dataset
                     )
                     logger.info(
                         "[Reward] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
                     )
                 else:
-                    self.val_dataset = CosmosValidationDataset(
-                        config=config, tokenizer=self.tokenizer
-                    )
+                    self.val_dataset = CosmosValidationDataset(config=config)
             if not config.validation.reward_function:
                 if val_reward_fns is None:
                     val_reward_fns = reward_fns

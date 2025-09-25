@@ -21,7 +21,6 @@ from torch.utils.data import Dataset
 from datasets import concatenate_datasets
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.cache as cache
-from transformers import AutoTokenizer
 from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
 from cosmos_rl.policy.config import (
     Config,
@@ -40,10 +39,9 @@ class SFTRawTextDataset(Dataset):
     def setup(
         self,
         config: Config,
-        tokenizer: AutoTokenizer,
     ):
         self.config = config.train.train_policy
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
         self.column_name = self.config.conversation_column_name
         self.cache = None
         if self.config.enable_dataset_cache:

@@ -34,7 +34,6 @@ from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.packer import DataPacker
 
-from transformers import AutoTokenizer
 from transformers import AutoConfig
 from transformers import GenerationConfig
 from cosmos_rl.dispatcher.data.schema import (
@@ -43,8 +42,8 @@ from cosmos_rl.dispatcher.data.schema import (
 
 
 class TRTLLM_Rollout(RolloutBase):
-    def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
-        super().__init__(config, tokenizer)
+    def __init__(self, config: Config, **kwargs):
+        super().__init__(config)
         self.rollout_config = self.config.rollout
 
         hf_config_path = self.config.policy.model_name_or_path

@@ -144,14 +144,12 @@ class Controller:
         if self.is_rl:
             if dataset is not None:
                 assert isinstance(dataset, Dataset)
-                self.dataset = CosmosDataset(
-                    config=config, train_set=dataset, tokenizer=self.tokenizer
-                )
+                self.dataset = CosmosDataset(config=config, train_set=dataset)
                 logger.info(
                     "[Controller] Using provided dataset for training, dataset specification in the toml config will be ignored"
                 )
             else:
-                self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
+                self.dataset = CosmosDataset(config=config)
 
             remain_samples_num = (
                 (
@@ -253,15 +251,13 @@ class Controller:
                 if val_dataset is not None:
                     assert isinstance(val_dataset, Dataset)
                     self.val_dataset = CosmosValidationDataset(
-                        config=config, val_set=val_dataset, tokenizer=self.tokenizer
+                        config=config, val_set=val_dataset
                     )
                     logger.info(
                         "[Controller] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
                     )
                 else:
-                    self.val_dataset = CosmosValidationDataset(
-                        config=config, tokenizer=self.tokenizer
-                    )
+                    self.val_dataset = CosmosValidationDataset(config=config)
                 if val_sampler is not None:
                     logger.info("[Controller] Using provided sampler for validation")
                     val_sampler = val_sampler(

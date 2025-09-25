@@ -16,7 +16,6 @@
 from typing import Any, Dict, List
 
 import torch
-from transformers import AutoTokenizer
 
 from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
     DecoderOnlyLLMDataPacker,
@@ -29,8 +28,8 @@ class DeepSeek_DataPacker(DecoderOnlyLLMDataPacker):
     Data protocol & processing logic for the decoder only LLM for SFT and RL training.
     """
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        super().setup(config, tokenizer, *args, **kwargs)
+    def setup(self, config: Config, *args, **kwargs):
+        super().setup(config, *args, **kwargs)
         self.seq_len = config.policy.model_max_length
 
     def policy_compute_max_len(
@@ -74,7 +73,6 @@ class DeepSeek_DataPacker(DecoderOnlyLLMDataPacker):
         self,
         processed_samples: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         """
@@ -93,7 +91,7 @@ class DeepSeek_DataPacker(DecoderOnlyLLMDataPacker):
         input_ids = torch.tensor(
             [
                 x[:computed_max_len]
-                + [pad_token_id] * (max(0, computed_max_len - len(x)))
+                + [self.tokenizer.pad_token_id] * (max(0, computed_max_len - len(x)))
                 for x in list_of_input_ids
             ],
             dtype=torch.long,
