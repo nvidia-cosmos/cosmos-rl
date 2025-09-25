@@ -98,6 +98,21 @@ RUN pip install \
     -r /workspace/cosmos_rl/requirements.txt
 
 ###################################################
+
+FROM no-efa-base AS fa3-build
+
+# install git
+RUN apt-get update -y && apt-get install -y git
+
+WORKDIR /workspace
+
+RUN git clone --branch v2.8.3 --single-branch https://github.com/Dao-AILab/flash-attention.git
+
+WORKDIR /workspace/flash-attention
+
+RUN python setup.py bdist_wheel
+
+
 FROM no-efa-base AS efa-base
 
 # Remove HPCX and MPI to avoid conflicts with AWS-EFA
@@ -147,6 +162,13 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 ###################################################
 ## Image target: cosmos_rl
 FROM ${COSMOS_RL_BUILD_MODE}-base AS package
+
+WORKDIR /workspace
+
+# install fa3
+COPY --from=fa3-build /workspace/flash-attention/dist/*.whl /workspace/flash_attn_3.whl
+RUN pip install /workspace/flash_attn_3.whl
+RUN rm /workspace/flash_attn_3.whl
 
 COPY . /workspace/cosmos_rl
 RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
