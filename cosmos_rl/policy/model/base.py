@@ -593,7 +593,7 @@ class ModelRegistry:
                         raise e
                     else:
                         logger.warning(
-                            f"Failed to load model {model_name_or_path}, trying to load with {COSMOS_HF_MODEL_TYPES} instead."
+                            f"Failed to load model {model_name_or_path} with error={e}.\nTrying to load with {COSMOS_HF_MODEL_TYPES} instead."
                         )
                         model_type = COSMOS_HF_MODEL_TYPES
                         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
