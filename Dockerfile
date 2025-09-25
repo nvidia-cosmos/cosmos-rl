@@ -166,9 +166,9 @@ FROM ${COSMOS_RL_BUILD_MODE}-base AS package
 WORKDIR /workspace
 
 # install fa3
-COPY --from=fa3-build /workspace/flash-attention/dist/*.whl /workspace/flash_attn_3.whl
-RUN pip install /workspace/flash_attn_3.whl
-RUN rm /workspace/flash_attn_3.whl
+COPY --from=fa3-build /workspace/flash-attention/dist/*.whl /workspace
+RUN pip install /workspace/*.whl
+RUN rm /workspace/*.whl
 
 COPY . /workspace/cosmos_rl
 RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
