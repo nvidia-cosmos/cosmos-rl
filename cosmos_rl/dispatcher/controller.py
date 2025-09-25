@@ -57,6 +57,7 @@ from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data import IdxAndRLPayload
 from concurrent.futures import ProcessPoolExecutor
+from itertools import islice
 
 
 class Controller:
@@ -165,13 +166,23 @@ class Controller:
 
             if sampler is not None:
                 logger.info("[Controller] Using provided sampler for training")
-                train_sampler = sampler(
-                    self.dataset.train_set,
-                    num_replicas=1,
-                    rank=0,
-                    shuffle=config.train.train_policy.dataloader_shuffle,
-                    drop_last=False,
-                )
+                if isinstance(sampler, Callable):
+                    try:
+                        train_sampler = sampler(
+                            self.dataset.train_set,
+                            num_replicas=1,
+                            rank=0,
+                            shuffle=config.train.train_policy.dataloader_shuffle,
+                            drop_last=False,
+                            batch_size=1,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[Controller] Failed to create training sampler from provided callable: {e}. Please check the arguments of the sampler __init__ function. The arguments should include all of (dataset, num_replicas, rank, shuffle, drop_last, batch_size)."
+                        )
+                        raise e
+                else:
+                    train_sampler = sampler
             else:
                 train_sampler = DistributedSampler(
                     self.dataset.train_set,
@@ -220,7 +231,11 @@ class Controller:
                             % len(self.dataset.train_set)
                         ),
                     )
-
+                    train_dataloader_bias //= (
+                        len(list(islice(iter(train_sampler), 1))[0])
+                        if isinstance(list(islice(iter(train_sampler), 1))[0], list)
+                        else 1
+                    )  # in case of custom batch sampler
                     logger.info(
                         f"[Controller] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
                     )
@@ -237,16 +252,27 @@ class Controller:
                     logger.error(
                         f"[Controller] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
                     )
-
-            self.train_dataloader = DataLoader(
-                self.dataset.train_set,
-                batch_size=1,  # batch size is 1 is mandatory
-                shuffle=False,
-                num_workers=config.train.train_policy.dataloader_num_workers,
-                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                collate_fn=RLPayload.collate_fn,
-                sampler=train_sampler,
-            )
+            if isinstance(list(islice(iter(train_sampler), 1))[0], list):
+                logger.info(
+                    "[Controller] Using custom batch Sampler that yields list of indices for training dataset."
+                )
+                self.train_dataloader = DataLoader(
+                    self.dataset.train_set,
+                    num_workers=config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    collate_fn=RLPayload.collate_fn,
+                    sampler=train_sampler,
+                )
+            else:
+                self.train_dataloader = DataLoader(
+                    self.dataset.train_set,
+                    batch_size=1,  # batch size is 1 is mandatory
+                    shuffle=False,
+                    num_workers=config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    collate_fn=RLPayload.collate_fn,
+                    sampler=train_sampler,
+                )
             self.train_dataloader_iter = iter(self.train_dataloader)
 
             if config.validation.enable:
@@ -264,23 +290,42 @@ class Controller:
                     )
                 if val_sampler is not None:
                     logger.info("[Controller] Using provided sampler for validation")
-                    val_sampler = val_sampler(
-                        self.val_dataset.val_set,
-                        num_replicas=1,
-                        rank=0,
-                        shuffle=False,
-                        drop_last=False,
+                    if isinstance(val_sampler, Callable):
+                        try:
+                            val_sampler = val_sampler(
+                                self.val_dataset.val_set,
+                                num_replicas=1,
+                                rank=0,
+                                shuffle=False,
+                                drop_last=False,
+                                batch_size=1,
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"[Controller] Failed to create validation sampler from provided callable: {e}. Please check the arguments of the sampler __init__ function. The arguments should include all of (dataset, num_replicas, rank, shuffle, drop_last, batch_size)."
+                            )
+                            raise e
+                if isinstance(list(islice(iter(val_sampler), 1))[0], list):
+                    logger.info(
+                        "Using custom batch Sampler that yields list of indices for validation dataset."
                     )
-
-                val_dataloader = DataLoader(
-                    self.val_dataset.val_set,
-                    batch_size=1,  # batch size is 1 is mandatory
-                    shuffle=False,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                    collate_fn=RLPayload.collate_fn,
-                    sampler=val_sampler,
-                )
+                    val_dataloader = DataLoader(
+                        self.val_dataset.val_set,
+                        num_workers=config.train.train_policy.dataloader_num_workers,
+                        prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                        collate_fn=RLPayload.collate_fn,
+                        sampler=val_sampler,
+                    )
+                else:
+                    val_dataloader = DataLoader(
+                        self.val_dataset.val_set,
+                        batch_size=1,  # batch size is 1 is mandatory
+                        shuffle=False,
+                        num_workers=config.train.train_policy.dataloader_num_workers,
+                        prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                        collate_fn=RLPayload.collate_fn,
+                        sampler=val_sampler,
+                    )
             else:
                 self.val_dataset = None
                 val_dataloader = None

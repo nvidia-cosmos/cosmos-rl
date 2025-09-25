@@ -40,7 +40,7 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, Union
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
@@ -51,6 +51,7 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_masks,
     pack_sequences_for_labels,
 )
+from itertools import islice
 
 
 def async_safe_ce(
@@ -274,7 +275,10 @@ class SFTDataset(Dataset):
             else self.dataset[idx]
         )
 
-        item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
+        if isinstance(idx, list):  # a batch of items
+            item = [self.data_packer.sft_process_sample(x) for x in raw_item]
+        else:
+            item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
 
         if self.cache is not None:
             # try cache obj
@@ -377,13 +381,23 @@ class SFTTrainer(Trainer):
         )
         if sampler is not None:
             logger.info("Using user-provided sampler for training dataset.")
-            train_sampler = sampler(
-                train_dataset,
-                num_replicas=self.dp_world_size,
-                rank=self.dp_rank,
-                shuffle=config.train.train_policy.dataloader_shuffle,
-                drop_last=False,
-            )
+            if isinstance(sampler, Callable):
+                try:
+                    train_sampler = sampler(
+                        train_dataset,
+                        num_replicas=self.dp_world_size,
+                        rank=self.dp_rank,
+                        shuffle=config.train.train_policy.dataloader_shuffle,
+                        drop_last=False,
+                        batch_size=config.train.train_batch_per_replica,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error when constructing training sampler: {e}. Please check the arguments of the sampler __init__ function. The arguments should include all of (dataset, num_replicas, rank, shuffle, drop_last, batch_size)."
+                    )
+                    raise e
+            else:
+                train_sampler = sampler
         else:
             train_sampler = DistributedSampler(
                 train_dataset,
@@ -393,17 +407,30 @@ class SFTTrainer(Trainer):
                 drop_last=False,
             )
 
-        def get_train_data_loader(sampler: Sampler[int]):
-            return DataLoader(
-                train_dataset,
-                batch_size=config.train.train_batch_per_replica,
-                shuffle=False,
-                num_workers=config.train.train_policy.dataloader_num_workers,
-                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                sampler=sampler,
-                collate_fn=collate_fn,
-                drop_last=False,
-            )
+        def get_train_data_loader(sampler: Union[Sampler[int], Sampler[list[int]]]):
+            if isinstance(list(islice(iter(train_sampler), 1))[0], list):
+                logger.info(
+                    "Using custom batch Sampler that yields list of indices for training dataset."
+                )
+                data_loader = DataLoader(
+                    train_dataset,
+                    num_workers=config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    sampler=sampler,
+                    collate_fn=collate_fn,
+                )
+            else:
+                data_loader = DataLoader(
+                    train_dataset,
+                    batch_size=config.train.train_batch_per_replica,
+                    shuffle=False,
+                    num_workers=config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    sampler=sampler,
+                    collate_fn=collate_fn,
+                    drop_last=False,
+                )
+            return data_loader
 
         if config.train.resume and self.train_step > 0:
             """
@@ -414,6 +441,12 @@ class SFTTrainer(Trainer):
             total_steps_per_epoch = len(get_train_data_loader(train_sampler))
             data_loader_bias = self.train_step % total_steps_per_epoch
             data_loader_bias *= config.train.train_batch_per_replica
+            data_loader_bias //= (
+                len(list(islice(iter(train_sampler), 1))[0])
+                if isinstance(list(islice(iter(train_sampler), 1))[0], list)
+                else 1
+            )  # in case of custom batch sampler
+
             logger.info(
                 f"Resuming training from step {self.train_step}/{ckpt_total_steps}"
             )
@@ -424,13 +457,22 @@ class SFTTrainer(Trainer):
 
         if val_sampler is not None:
             logger.info("Using user-provided sampler for validation dataset.")
-            val_sampler = val_sampler(
-                val_dataset,
-                num_replicas=self.dp_world_size,
-                rank=self.dp_rank,
-                shuffle=False,
-                drop_last=False,
-            )
+            if isinstance(val_sampler, Callable):
+                try:
+                    val_sampler = val_sampler(
+                        val_dataset,
+                        num_replicas=self.dp_world_size,
+                        rank=self.dp_rank,
+                        shuffle=False,
+                        drop_last=False,
+                        batch_size=config.validation.batch_size
+                        or config.train.train_batch_per_replica,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error when constructing validation sampler: {e}. Please check the arguments of the sampler __init__ function. The arguments should include all of (dataset, num_replicas, rank, shuffle, drop_last, batch_size)."
+                    )
+                    raise e
         else:
             val_sampler = DistributedSampler(
                 val_dataset,
@@ -445,16 +487,28 @@ class SFTTrainer(Trainer):
             self.tokenizer.pad_token_id is not None
         ), "Tokenizer must have a pad token id"
         self.train_data_loader = get_train_data_loader(train_sampler)
-        self.val_data_loader = DataLoader(
-            val_dataset,
-            batch_size=config.validation.batch_size
-            or config.train.train_batch_per_replica,
-            num_workers=config.train.train_policy.dataloader_num_workers,
-            prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-            sampler=val_sampler,
-            collate_fn=collate_fn,
-            drop_last=False,
-        )
+        if isinstance(list(islice(iter(val_sampler), 1))[0], list):
+            logger.info(
+                "Using custom batch Sampler that yields list of indices for validation dataset."
+            )
+            self.val_data_loader = DataLoader(
+                val_dataset,
+                num_workers=config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                sampler=val_sampler,
+                collate_fn=collate_fn,
+            )
+        else:
+            self.val_data_loader = DataLoader(
+                val_dataset,
+                batch_size=config.validation.batch_size
+                or config.train.train_batch_per_replica,
+                num_workers=config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                sampler=val_sampler,
+                collate_fn=collate_fn,
+                drop_last=False,
+            )
 
         steps_by_dataset = (
             ckpt_total_steps
