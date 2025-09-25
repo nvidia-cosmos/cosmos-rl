@@ -48,6 +48,7 @@ def monitor_status(name: str = 'Cosmos-RL',
         @wraps(runner)
         def _func(*args, **kwargs):
             # Setup results directory - use job results dir if available
+            is_master = int(os.environ.get("NODE_RANK", 0)) == 0
             if results_dir is None:
                 # Try to get results_dir from config if available
                 config = None
@@ -80,7 +81,7 @@ def monitor_status(name: str = 'Cosmos-RL',
             log_verbosity = verbosity if verbosity is not None else Verbosity.INFO
             status_logger = StatusLogger(
                 filename=status_file,
-                is_master=True,
+                is_master=is_master,
                 verbosity=log_verbosity,
                 append=True  # Append to consolidated status.json file
             )
@@ -271,12 +272,12 @@ def monitor_training(name: str = 'Cosmos-RL Training',
                 default_results_dir = results_dir
 
             os.makedirs(default_results_dir, exist_ok=True)
-
+            is_master = int(os.environ.get("NODE_RANK", 0)) == 0
             # Setup status logger - single consolidated status.json file
             log_verbosity = verbosity if verbosity is not None else Verbosity.INFO
             status_logger = StatusLogger(
                 filename=os.path.join(default_results_dir, 'status.json'),
-                is_master=True,
+                is_master=is_master,
                 verbosity=log_verbosity,
                 append=True  # Append to consolidated status.json file
             )

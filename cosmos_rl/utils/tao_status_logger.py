@@ -58,10 +58,12 @@ def log_tao_status(data: Dict[str, Any], step: int = None, component_name: str =
         # Get TAO status file path
         status_file = get_tao_status_file_path()
 
+        is_master = int(os.environ.get("NODE_RANK", 0)) == 0
+
         # Create status logger on-demand
         status_logger = StatusLogger(
             filename=status_file,
-            is_master=True,
+            is_master=is_master,
             verbosity=Verbosity.INFO,
             append=True
         )
