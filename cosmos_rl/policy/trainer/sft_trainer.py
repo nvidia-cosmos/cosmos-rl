@@ -408,7 +408,9 @@ class SFTTrainer(Trainer):
             )
 
         def get_train_data_loader(sampler: Union[Sampler[int], Sampler[list[int]]]):
-            if isinstance(list(islice(iter(train_sampler), 1))[0], list):
+            if len(train_dataset) > 0 and isinstance(
+                list(islice(iter(train_sampler), 1))[0], list
+            ):
                 logger.info(
                     "Using custom batch Sampler that yields list of indices for training dataset."
                 )
@@ -487,7 +489,9 @@ class SFTTrainer(Trainer):
             self.tokenizer.pad_token_id is not None
         ), "Tokenizer must have a pad token id"
         self.train_data_loader = get_train_data_loader(train_sampler)
-        if isinstance(list(islice(iter(val_sampler), 1))[0], list):
+        if len(val_dataset) > 0 and isinstance(
+            list(islice(iter(val_sampler), 1))[0], list
+        ):
             logger.info(
                 "Using custom batch Sampler that yields list of indices for validation dataset."
             )

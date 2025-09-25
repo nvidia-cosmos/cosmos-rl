@@ -143,6 +143,10 @@ class Controller:
         remain_samples_num = 0
 
         if self.is_rl:
+            self.rollout_batch_size = (
+                config.train.train_policy.dataloader_batch_size
+                or config.rollout.batch_size
+            )
             if dataset is not None:
                 assert isinstance(dataset, Dataset)
                 self.dataset = CosmosDataset(
@@ -174,7 +178,7 @@ class Controller:
                             rank=0,
                             shuffle=config.train.train_policy.dataloader_shuffle,
                             drop_last=False,
-                            batch_size=1,
+                            batch_size=self.rollout_batch_size,
                         )
                     except Exception as e:
                         logger.error(
@@ -252,7 +256,9 @@ class Controller:
                     logger.error(
                         f"[Controller] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
                     )
-            if isinstance(list(islice(iter(train_sampler), 1))[0], list):
+            if len(self.dataset.train_set) > 0 and isinstance(
+                list(islice(iter(train_sampler), 1))[0], list
+            ):
                 logger.info(
                     "[Controller] Using custom batch Sampler that yields list of indices for training dataset."
                 )
@@ -266,7 +272,7 @@ class Controller:
             else:
                 self.train_dataloader = DataLoader(
                     self.dataset.train_set,
-                    batch_size=1,  # batch size is 1 is mandatory
+                    batch_size=self.rollout_batch_size,
                     shuffle=False,
                     num_workers=config.train.train_policy.dataloader_num_workers,
                     prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
@@ -276,6 +282,14 @@ class Controller:
             self.train_dataloader_iter = iter(self.train_dataloader)
 
             if config.validation.enable:
+                self.val_batch_size = (
+                    config.train.train_policy.dataloader_batch_size
+                    or config.validation.batch_size
+                    or self.rollout_batch_size
+                )
+                assert (
+                    self.val_batch_size > 0
+                ), "[Controller] val_batch_size should be greater than 0."
                 if val_dataset is not None:
                     assert isinstance(val_dataset, Dataset)
                     self.val_dataset = CosmosValidationDataset(
@@ -298,14 +312,18 @@ class Controller:
                                 rank=0,
                                 shuffle=False,
                                 drop_last=False,
-                                batch_size=1,
+                                batch_size=self.val_batch_size,
                             )
                         except Exception as e:
                             logger.error(
                                 f"[Controller] Failed to create validation sampler from provided callable: {e}. Please check the arguments of the sampler __init__ function. The arguments should include all of (dataset, num_replicas, rank, shuffle, drop_last, batch_size)."
                             )
                             raise e
-                if isinstance(list(islice(iter(val_sampler), 1))[0], list):
+                if (
+                    val_sampler is not None
+                    and len(self.val_dataset.val_set) > 0
+                    and isinstance(list(islice(iter(val_sampler), 1))[0], list)
+                ):
                     logger.info(
                         "Using custom batch Sampler that yields list of indices for validation dataset."
                     )
@@ -319,7 +337,7 @@ class Controller:
                 else:
                     val_dataloader = DataLoader(
                         self.val_dataset.val_set,
-                        batch_size=1,  # batch size is 1 is mandatory
+                        batch_size=self.val_batch_size,
                         shuffle=False,
                         num_workers=config.train.train_policy.dataloader_num_workers,
                         prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
@@ -382,6 +400,9 @@ class Controller:
             current_step=self.ckpt_extra_info.get("step", 0),
             max_num_steps=config.train.max_num_steps,
             custom_logger_fns=custom_logger_fns,
+            val_datasize=len(self.val_dataset.val_set)
+            if self.val_dataset is not None
+            else 0,
         )
         self.rollout_status_manager.setup(
             config, self.redis_controller, tokenizer=self.tokenizer
@@ -444,8 +465,10 @@ class Controller:
             iterator = self.policy_status_manager.validation_get_dataloader(
                 validation_step
             )
+            batch_size = self.val_batch_size
         else:
             iterator = self.train_dataloader_iter
+            batch_size = self.rollout_batch_size
 
         if not is_validation:
             # Throttle the generation speed:
@@ -468,27 +491,31 @@ class Controller:
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                     )
 
-        def _next_payload(iterator, add_answer: bool) -> tuple[int, RLPayload]:
+        def _next_payload(
+            iterator, add_answer: bool
+        ) -> tuple[List[int], List[RLPayload]]:
             idxs, payloads = next(iterator)
-            assert len(idxs) == 1
-            assert len(payloads) == 1
-            idx = idxs[0]
-            payload: RLPayload = payloads[0]
-            if add_answer:
-                if is_validation:
-                    payload.reference_answer = (
-                        self.val_dataset.val_set.get_reference_answer(idx)
-                    )
-                else:
-                    payload.reference_answer = (
-                        self.dataset.train_set.get_reference_answer(idx)
-                    )
-            return idx, payload
+            assert len(idxs) <= batch_size
+            assert len(payloads) <= batch_size
+            assert len(idxs) == len(payloads)
+            updated_payloads: List[RLPayload] = []
+            for idx, payload in zip(idxs, payloads):
+                if add_answer:
+                    if is_validation:
+                        payload.reference_answer = (
+                            self.val_dataset.val_set.get_reference_answer(idx)
+                        )
+                    else:
+                        payload.reference_answer = (
+                            self.dataset.train_set.get_reference_answer(idx)
+                        )
+                updated_payloads.append(payload)
+            return idxs, updated_payloads
 
-        for _ in range(n):
+        for _ in range(math.ceil(n / batch_size)):
             payload: RLPayload | None = None
             try:
-                idx, payload = _next_payload(iterator, add_answer)
+                idxs, payloads = _next_payload(iterator, add_answer)
             except StopIteration:
                 if not is_validation:
                     self.epoch += 1
@@ -497,7 +524,7 @@ class Controller:
                         iterator = iter(self.train_dataloader)
                         self.train_dataloader_iter = iterator
 
-                        idx, payload = _next_payload(iterator, add_answer)
+                        idxs, payloads = _next_payload(iterator, add_answer)
                     else:
                         if self.epoch == self.config.train.epoch + 1:
                             # We only log this all finished information once.
@@ -509,8 +536,10 @@ class Controller:
                 else:
                     is_end = True
                     break
-            idx = idx.item() if isinstance(idx, torch.Tensor) else idx
-            prompt_id_and_payload_list.append((idx, payload))
+            assert len(idxs) == len(payloads)
+            for idx, payload in zip(idxs, payloads):
+                idx = idx.item() if isinstance(idx, torch.Tensor) else idx
+                prompt_id_and_payload_list.append((idx, payload))
 
         current_fetch_count = len(prompt_id_and_payload_list)
         if (

@@ -257,6 +257,10 @@ class GrpoConfig(BaseModel):
         default=None,
         description="Number of batches loaded in advance by each worker.",
     )
+    dataloader_batch_size: Optional[int] = Field(
+        default=1,
+        description="Batch size for each iteration of the dataloader for when fetch prompts from controller. This is only the setting of the dataloader iterator on the controller side.",
+    )
     prompt_column_name: str = Field(
         default="",
         description="Column name for prompt",
@@ -384,6 +388,8 @@ class GrpoConfig(BaseModel):
         ), "reward_function must be a dict of reward functions"
         if isinstance(self.filter_reward_metric, str):
             self.filter_reward_metric = [self.filter_reward_metric]
+        if self.dataloader_batch_size is not None and self.dataloader_batch_size <= 0:
+            self.dataloader_batch_size = None
         return self
 
 
