@@ -591,9 +591,24 @@ class Qwen3VLMoeModel(BaseModel):
                     if dest_name is None:
                         # This is due to the expert parallelism grouping
                         continue
+
+                    # For debug
+                    # should_skip = True
+                    # for layer_id in range(
+                    #     self.hf_config.text_config.num_hidden_layers
+                    # ):
+                    #     contain_name = f"layers.{layer_id}."
+                    #     if contain_name not in dest_name:
+                    #         continue
+                    #     else:
+                    #         should_skip = False
+                    #         break
+                    # if should_skip:
+                    #     continue
+
                     # For MoE LM
                     if match := re.search(  # noqa: F841
-                        r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)\.(weight|bias)",
+                        r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)",
                         dest_name,
                     ):
                         tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
@@ -618,12 +633,12 @@ class Qwen3VLMoeModel(BaseModel):
                         for expert_id in range(n_experts):
                             belongs_to_current_ep = (
                                 tp_ep_rank * n_expert_per_ep
-                                <= int(match.group(2))  # Expert index
+                                <= expert_id  # Expert index
                                 < (tp_ep_rank + 1) * n_expert_per_ep
                             )
 
                             belongs_to_current_dp_shard = (
-                                int(match.group(2)) - tp_ep_rank * n_expert_per_ep
+                                expert_id - tp_ep_rank * n_expert_per_ep
                             ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
 
                             if belongs_to_current_ep and belongs_to_current_dp_shard:
@@ -635,26 +650,68 @@ class Qwen3VLMoeModel(BaseModel):
                                     // (parallel_dims.dp_shard * parallel_dims.cp)
                                 )
                                 expert_id = expert_id % n_local_experts
-                                target_tensor = lm_state_dict[dest_name]
+                                tensor_to_copy = []
+                                if "gate_up_proj" in dest_name:
+                                    moe_intermediate_size = (
+                                        self.hf_config.text_config.moe_intermediate_size
+                                    )
+                                    gate_proj_name = dest_name.replace(
+                                        "gate_up_proj", "gate_proj.weight"
+                                    )
+                                    target_gate_proj_tensor = lm_state_dict[
+                                        gate_proj_name
+                                    ]
+                                    expert_gate_proj_weight = expert_shard_weight[
+                                        :, :moe_intermediate_size
+                                    ]
+                                    tensor_to_copy.append(
+                                        (
+                                            target_gate_proj_tensor,
+                                            expert_gate_proj_weight,
+                                        )
+                                    )
+                                    up_proj_name = dest_name.replace(
+                                        "gate_up_proj", "up_proj.weight"
+                                    )
+                                    target_up_proj_tensor = lm_state_dict[up_proj_name]
+                                    expert_up_proj_weight = expert_shard_weight[
+                                        :, moe_intermediate_size:
+                                    ]
+                                    tensor_to_copy.append(
+                                        (target_up_proj_tensor, expert_up_proj_weight)
+                                    )
+                                elif "down_proj" in dest_name:
+                                    down_proj_name = dest_name.replace(
+                                        "down_proj", "down_proj.weight"
+                                    )
+                                    target_down_proj_tensor = lm_state_dict[
+                                        down_proj_name
+                                    ]
+                                    tensor_to_copy.append(
+                                        (target_down_proj_tensor, expert_shard_weight)
+                                    )
 
-                                is_dist_tensor = isinstance(
-                                    target_tensor, torch.distributed.tensor.DTensor
-                                )
-                                local_view = (
-                                    target_tensor.to_local()
-                                    if is_dist_tensor
-                                    else target_tensor
-                                )
+                                for target_tensor, expert_weight in tensor_to_copy:
+                                    is_dist_tensor = isinstance(
+                                        target_tensor, torch.distributed.tensor.DTensor
+                                    )
+                                    local_view = (
+                                        target_tensor.to_local()
+                                        if is_dist_tensor
+                                        else target_tensor
+                                    )
 
-                                local_view = local_view[expert_id]
+                                    local_view = local_view[expert_id]
+                                    expert_weight = expert_weight.transpose(0, 1)
 
-                                assert (
-                                    local_view.shape == expert_shard_weight.shape
-                                ), f"Shape mismatch: {local_view.shape} != {expert_shard_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
-                                with torch.no_grad():
-                                    local_view.data.copy_(expert_shard_weight)
+                                    assert (
+                                        local_view.shape == expert_weight.shape
+                                    ), f"Shape mismatch: {local_view.shape} != {expert_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                                    with torch.no_grad():
+                                        local_view.data.copy_(expert_weight)
                             else:
                                 continue
+                        continue
 
                     if dest_name in lm_state_dict:
                         target_tensor = lm_state_dict[dest_name]
@@ -664,20 +721,7 @@ class Qwen3VLMoeModel(BaseModel):
                         # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
                         continue
                     else:
-                        should_skip = True
-                        for layer_id in range(
-                            self.hf_config.text_config.num_hidden_layers
-                        ):
-                            contain_name = f"layers.{layer_id}."
-                            if contain_name not in dest_name:
-                                continue
-                            else:
-                                should_skip = False
-                                break
-                        if should_skip:
-                            continue
-                        else:
-                            raise ValueError(f"Unsupported weight: {dest_name}")
+                        raise ValueError(f"Unsupported weight: {dest_name}")
 
                     is_dist_tensor = isinstance(
                         target_tensor, torch.distributed.tensor.DTensor

@@ -97,7 +97,7 @@ def qwen3_moe_lm_weight_from_hf(
             shard = tensor.tensor_split(tp_ep_size, dim=-1)[tp_ep_rank]
     elif (
         match := re.search(  # noqa: F841
-            r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)\.(weight|bias)",
+            r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)",
             dest_name,
         )
     ) is not None:
