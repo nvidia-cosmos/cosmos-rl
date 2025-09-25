@@ -15,7 +15,6 @@
 
 
 import unittest
-from unittest.mock import Mock
 
 from cosmos_rl.dispatcher.data.packer.deepseek_data_packer import DeepSeek_DataPacker
 from cosmos_rl.policy.config import Config, PolicyConfig, TrainingConfig
@@ -27,9 +26,8 @@ class TestDataPacker(unittest.TestCase):
         config = Config(
             policy=PolicyConfig(model_max_length=MAX_LEN), train=TrainingConfig()
         )
-        tokenizer = Mock()
         data_packer = DeepSeek_DataPacker()
-        data_packer.setup(config, tokenizer)
+        data_packer.setup(config)
 
         TEST_SAMPLES = [
             {
@@ -41,7 +39,7 @@ class TestDataPacker(unittest.TestCase):
                 "label_ids": [3, 2, 1, 0, 11, 12],
             },
         ]
-        output = data_packer.sft_collate_fn(TEST_SAMPLES, 2, -100, -100)
+        output = data_packer.sft_collate_fn(TEST_SAMPLES, 2, -100)
         assert output["input_ids"].shape == (len(TEST_SAMPLES), MAX_LEN)
         assert output["label_ids"].shape == (len(TEST_SAMPLES), MAX_LEN)
 

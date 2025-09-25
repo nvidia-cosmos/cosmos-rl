@@ -9,7 +9,7 @@ A `torch.utils.data.Dataset` object with `query_reference_answer` method is all 
 .. code-block:: python
 
     class CustomDataset(torch.utils.data.Dataset):
-        def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+        def setup(self, config: Config, *args, **kwargs):
             pass
 
         def __len__(self):
@@ -34,18 +34,18 @@ Here we attach the `BytedTsinghua-SIA/DAPO-Math-17k <https://huggingface.co/data
     from datasets import load_dataset
     from cosmos_rl.policy.config import Config
     from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
-    from transformers import AutoTokenizer
     from torch.utils.data import ConcatDataset
+    import cosmos_rl.util.util as util
 
     class MathDapoDataset(Dataset):
-        def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+        def setup(self, config: Config, *args, **kwargs):
             '''
             This method is optional and get called by launcher after being mounted
             `config`: config;
             `tokenizer`: tokenizer;
             '''
             self.config = config
-            self.tokenizer = tokenizer
+            self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
 
             # This demo is only for DAPO-Math-17k dataset
             assert config.train.train_policy.dataset.name == "BytedTsinghua-SIA/DAPO-Math-17k"
@@ -108,7 +108,6 @@ Save this file to `./custom_entry.py`
     from cosmos_rl.launcher.worker_entry import main as launch_worker
     from cosmos_rl.policy.config import Config
     from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
-    from transformers import AutoTokenizer
     from torch.utils.data import ConcatDataset
 
     class MathDapoDataset(Dataset):
@@ -179,19 +178,17 @@ Here we just reuse the pre-defined LLM data packer to demonstrate how to pass yo
     from cosmos_rl.launcher.worker_entry import main as launch_worker
     from cosmos_rl.policy.config import Config
     from cosmos_rl.dispatcher.algo.reward import gsm8k_reward_fn
-    from transformers import AutoTokenizer
     from cosmos_rl.dispatcher.data.packer import DataPacker, DecoderOnlyLLMDataPacker
     from cosmos_rl.utils.modelscope import modelscope_load_dataset
 
     class GSM8kDataset(Dataset):
-        def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+        def setup(self, config: Config, *args, **kwargs):
             '''
             This method is optional and get called by launcher after being mounted
             `config`: config;
-            `tokenizer`: tokenizer;
             '''
             self.config = config
-            self.tokenizer = tokenizer
+            self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
             modelscope_dataset_if_enabled = modelscope_load_dataset('AI-ModelScope/gsm8k', subset_name='main', split='train')
             if modelscope_dataset_if_enabled is None:
                 self.dataset = load_dataset("openai/gsm8k", "main", split="train")
@@ -262,11 +259,10 @@ Here we just reuse the pre-defined LLM data packer to demonstrate how to pass yo
             # Check source code of DecoderOnlyLLMDataPacker to see how it's implemented
             self.underlying_data_packer = DecoderOnlyLLMDataPacker()
 
-        def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+        def setup(self, config: Config, *args, **kwargs):
             '''
             This method is optional and get called by launcher after being mounted
             `config`: config;
-            `tokenizer`: tokenizer;
             '''
             super().setup(config, tokenizer, *args, **kwargs)
             self.underlying_data_packer.setup(config, tokenizer, *args, **kwargs)

@@ -15,8 +15,8 @@
 
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Type, Union, Optional
-from transformers import AutoTokenizer
 from cosmos_rl.policy.config import Config
+import cosmos_rl.utils.util as util
 from cosmos_rl.utils.tools_use.tool_agent import ToolAgent
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
@@ -102,7 +102,6 @@ class DataPacker(ABC):
     def setup(
         self,
         config: Config,
-        tokenizer: AutoTokenizer,
         *args,
         **kwargs,
     ):
@@ -110,9 +109,9 @@ class DataPacker(ABC):
         Called by launcher after being mounted
         """
         assert config is not None, "config should be set"
-        assert tokenizer is not None, "tokenizer should be set"
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
+
         if not self.config.rollout.multi_turn_config.enable:
             self.tool_agent = None
 
@@ -193,7 +192,6 @@ class DataPacker(ABC):
         self,
         sub_batch: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         """
@@ -214,3 +212,10 @@ class DataPacker(ABC):
         """
         # By default, we always add response as assistant message
         return add_assistant_message(conversation, "" if responses else responses[0])
+
+    def maybe_save_pretrained_tokenizer(self, dst_path: str) -> None:
+        self.tokenizer.save_pretrained(dst_path)
+
+    @property
+    def pad_token_id(self) -> int:
+        return self.tokenizer.pad_token_id

@@ -48,6 +48,7 @@ from huggingface_hub import (
     snapshot_download,
     HfFileSystem,
 )
+from transformers import AutoTokenizer
 import time
 import functools
 from cosmos_rl.utils.logging import logger
@@ -1199,3 +1200,22 @@ def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
         rank0_print(f"Replaced {name} with liger equivalent")
         # Swap it in.
         setattr(root, name, new_child)
+
+
+def setup_tokenizer(model_name_or_path: str) -> AutoTokenizer:
+    tokenizer = retry(AutoTokenizer.from_pretrained)(
+        model_name_or_path,
+        trust_remote_code=True,
+    )
+    # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        try:
+            logger.warning(
+                f"Tokenizer for {model_name_or_path} has no pad_token_id, try to use eos_token_id({tokenizer.eos_token_id}) as pad_token_id"
+            )
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        except Exception as e:
+            logger.warning(
+                f"Failed to set pad_token_id with eos_token_id, error = {e}, ignore if not needed"
+            )
+    return tokenizer

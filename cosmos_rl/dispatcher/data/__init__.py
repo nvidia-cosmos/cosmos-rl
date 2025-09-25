@@ -19,7 +19,6 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.util import load_data_from_disk_or_hf
 from cosmos_rl.utils.logging import logger
 from typing import Optional, Any
-from transformers import AutoTokenizer
 
 from .schema import RLPayload, IdxAndRLPayload
 
@@ -28,10 +27,10 @@ from .schema import RLPayload, IdxAndRLPayload
 
 
 class RLDataset(Dataset):
-    def __init__(self, dataset: Any, tokenizer: AutoTokenizer, config: CosmosConfig):
+    def __init__(self, dataset: Any, config: CosmosConfig):
         self.dataset = dataset
         if hasattr(self.dataset, "setup"):
-            self.dataset.setup(tokenizer=tokenizer, config=config)
+            self.dataset.setup(config=config)
 
     def __len__(self):
         return len(self.dataset)
@@ -77,11 +76,10 @@ class CosmosDataset:
         self,
         config: CosmosConfig,
         train_set: Optional[Dataset] = None,
-        tokenizer: AutoTokenizer = None,
     ):
         self.config = config
         if train_set is not None:
-            self.train_set = RLDataset(train_set, tokenizer, config)
+            self.train_set = RLDataset(train_set, config)
         else:
             """
             Deprecated: for most cases, users should provide a train_set for better generalization
@@ -116,11 +114,10 @@ class CosmosValidationDataset:
         self,
         config: CosmosConfig,
         val_set: Optional[Dataset] = None,
-        tokenizer: AutoTokenizer = None,
     ):
         self.config = config
         if val_set is not None:
-            self.val_set = RLDataset(val_set, tokenizer, config)
+            self.val_set = RLDataset(val_set, config)
         else:
             """
             Deprecated: for most cases, users should provide a train_set for better generalization

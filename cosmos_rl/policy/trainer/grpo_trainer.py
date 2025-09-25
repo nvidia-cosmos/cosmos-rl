@@ -1357,7 +1357,7 @@ class GRPOTrainer(Trainer):
                                 # Prepare for the sequence packing information.
                                 packed_args = pack_sequences_info_collect(
                                     input_ids,
-                                    pad_token_id=self.tokenizer.pad_token_id,
+                                    pad_token_id=self.data_packer.pad_token_id,
                                     seq_len_multiple=self.seq_len_multiple,
                                 )
                                 user_mini_batch.update(packed_args)

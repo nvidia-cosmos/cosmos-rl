@@ -22,7 +22,6 @@ import torch.distributed as dist
 import toml
 from transformers import AutoConfig
 import cosmos_rl.utils.util as util
-from transformers import AutoTokenizer
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 import msgpack
 import threading
@@ -100,7 +99,6 @@ class TestDataset(Dataset):
     def setup(
         self,
         config: CosmosConfig,
-        tokenizer: AutoTokenizer,
     ):
         dataset = util.load_data_from_disk_or_hf(
             config.train.train_policy.dataset.name,
@@ -306,15 +304,13 @@ class TestRollout:
         self.recv_weight_shard = types.MethodType(
             vLLMRolloutWorker.recv_weight_shard, self
         )
-        # just for testing
-        tokenizer = AutoTokenizer.from_pretrained(self.config.policy.model_name_or_path)
         # change the default parallelism config
         self.config.rollout.parallelism.tp_size = 4
         self.config.rollout.parallelism.pp_size = 1
 
         self.consume_command = types.MethodType(vLLMRolloutWorker.consume_command, self)
 
-        self.rollout = vLLMRollout(self.config, tokenizer)
+        self.rollout = vLLMRollout(self.config)
 
         self.total_temp_tensor_pool = []
         self.prepare_trainable_params()
@@ -783,7 +779,6 @@ def run_overfitting_policy():
         batch = self.data_packer.sft_collate_fn(
             raw_batch,
             computed_max_len=max_len,
-            pad_token_id=self.tokenizer.pad_token_id,
             ignore_label_id=-100,
         )
 
@@ -935,7 +930,7 @@ def run_dummy_rollout():
     vLLMRolloutWorker.get_rollout_command_handler = get_rollout_command_handler
     vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts = dummy
 
-    def dummy_init(self, config: CosmosConfig, tokenizer, **kwargs):
+    def dummy_init(self, config: CosmosConfig, **kwargs):
         class Llm_engine:
             def step(self, *args, **kwargs):
                 pass
@@ -1047,13 +1042,7 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
         config.policy.model_name_or_path,
         trust_remote_code=True,
     )
-    tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-        config.policy.model_name_or_path
-    )
-    rollout = vLLMRollout(
-        config,
-        tokenizer=tokenizer,
-    )
+    rollout = vLLMRollout(config)
 
     rollout.init_engine(seed=config.rollout.seed, load_format="dummy")
     parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
@@ -1280,7 +1269,6 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
     def train_test(self, packing_seq):
         train_dataset, _ = construct_dataset(
             config,
-            tokenizer=self.tokenizer,
             data_packer=self.data_packer,
             user_provided_dataset=None,
         )
@@ -1335,7 +1323,6 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                 batch = self.data_packer.sft_collate_fn(
                     raw_batch,
                     computed_max_len=max_len,
-                    pad_token_id=self.tokenizer.pad_token_id,
                     ignore_label_id=-100,
                 )
                 self.model.train()
@@ -1351,7 +1338,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                     # Prepare for the sequence packing information.
                     packed_args = pack_sequences_info_collect(
                         batch["input_ids"],
-                        pad_token_id=self.tokenizer.pad_token_id,
+                        pad_token_id=self.data_packer.pad_token_id,
                         label_ids=labels,
                         ignore_label_id=-100,
                         seq_len_multiple=self.seq_len_multiple,
@@ -1453,7 +1440,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
         model_type = hf_config.model_type
         logger.info(f"model type {model_type}")
         self.data_packer = DecoderOnlyLLMDataPacker()
-        self.data_packer.setup(self.config, self.tokenizer)
+        self.data_packer.setup(self.config)
         pass
 
     CommMixin.init_comm = dummy
@@ -1504,7 +1491,7 @@ def run_sft_validation():
         model_type = hf_config.model_type
         logger.info(f"model type {model_type}")
         self.data_packer = DecoderOnlyLLMDataPacker()
-        self.data_packer.setup(self.config, self.tokenizer)
+        self.data_packer.setup(self.config)
         pass
 
     CommMixin.init_comm = dummy
@@ -1515,7 +1502,6 @@ def run_sft_validation():
         def setup(
             self,
             config: CosmosConfig,
-            tokenizer: AutoTokenizer,
         ):
             dataset = util.load_data_from_disk_or_hf(
                 config.validation.dataset.name,
@@ -1568,7 +1554,7 @@ def run_reward_check():
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
         self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
         self.data_packer = DecoderOnlyLLMDataPacker()
-        self.data_packer.setup(self.config, self.tokenizer)
+        self.data_packer.setup(self.config)
         self.val_data_packer = None
         self.shutdown_signal = threading.Event()
         self.shutdown_mp_signal = mp.Event()  # Must be a multiprocessing event
@@ -1639,7 +1625,7 @@ def run_reward_check():
     rollout.lazy_initialize_rollout_engine("auto")
 
     dataset = TestDatasetReward(config)
-    dataset.setup(tokenizer=rollout.tokenizer, config=config)
+    dataset.setup(config)
     for idx in range(len(dataset)):
         prompts = [
             (
@@ -1686,7 +1672,7 @@ def run_sft_custom_sampler():
         model_type = hf_config.model_type
         logger.info(f"model type {model_type}")
         self.data_packer = DecoderOnlyLLMDataPacker()
-        self.data_packer.setup(self.config, self.tokenizer)
+        self.data_packer.setup(self.config)
         pass
 
     CommMixin.init_comm = dummy
@@ -1695,7 +1681,6 @@ def run_sft_custom_sampler():
         def setup(
             self,
             config: CosmosConfig,
-            tokenizer: AutoTokenizer,
         ):
             dataset = util.load_data_from_disk_or_hf(
                 config.validation.dataset.name,
@@ -1750,7 +1735,7 @@ def run_sft_custom_sampler():
             self.base.set_epoch(epoch)
 
     dataset = TestDatasetSampler(config)
-    dataset.setup(config=config, tokenizer=None)
+    dataset.setup(config)
 
     trainer = SFTTrainer(
         config=config,

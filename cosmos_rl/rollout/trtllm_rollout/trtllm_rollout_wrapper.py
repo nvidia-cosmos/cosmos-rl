@@ -71,7 +71,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         # init the prompt queue
         self._prompt_queue: Queue[List[Tuple[int, str]]] = Queue()
 
-        self.rollout = TRTLLM_Rollout(config, self.tokenizer)
+        self.rollout = TRTLLM_Rollout(config)
         self.rollout.init_engine(seed=self.config.rollout.seed, load_format="auto")
 
         self.sampling_params = SamplingParams(

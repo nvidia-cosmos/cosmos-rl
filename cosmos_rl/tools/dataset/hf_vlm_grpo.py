@@ -18,7 +18,6 @@ from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config
-from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DataPacker, HFVLMDataPacker
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -27,12 +26,13 @@ import toml
 import base64
 import io
 from PIL import Image as PILImage
+import cosmos_rl.utils.util as util
 
 
 class HFVLMGRPODataset(Dataset):
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, *args, **kwargs):
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
         self.dataset = load_dataset(
             config.train.train_policy.dataset.name,
             config.train.train_policy.dataset.subset,
@@ -136,7 +136,7 @@ class HFVLMGRPOValDataset(HFVLMGRPODataset):
     It should be used in the launcher to evaluate the model during training.
     """
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: Config, *args, **kwargs):
         if not config.validation.enable:
             logger.warning(
                 "Validation is not enabled in the config. Skipping setup for CosmosGRPOValDataset."
@@ -144,7 +144,7 @@ class HFVLMGRPOValDataset(HFVLMGRPODataset):
             return
 
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
         self.dataset = load_dataset(
             config.validation.dataset.name, config.validation.dataset.subset
         )
@@ -182,14 +182,13 @@ class DemoDataPacker(DataPacker):
         # Check source code of Qwen2_5_VLM_DataPacker to see how it's implemented
         self.underlying_data_packer = HFVLMDataPacker()
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: Config, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
-        `tokenizer`: tokenizer;
         """
-        super().setup(config, tokenizer, *args, **kwargs)
-        self.underlying_data_packer.setup(config, tokenizer, *args, **kwargs)
+        super().setup(config, *args, **kwargs)
+        self.underlying_data_packer.setup(config, *args, **kwargs)
 
     def get_rollout_input(self, item: Any) -> Any:
         """
