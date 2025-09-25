@@ -1,4 +1,4 @@
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import ChatDataPacker
 from typing import List, Any, Dict, Union
 import torch
 import copy
@@ -10,7 +10,7 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 IGNORE_LABEL_ID = -100
 
 
-class DecoderOnlyLLMDataPacker(DataPacker):
+class DecoderOnlyLLMDataPacker(ChatDataPacker):
     """
     Data protocol & processing logic for the decoder only LLM for SFT and RL training.
     """
@@ -274,7 +274,6 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         self,
         processed_samples: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         """
@@ -292,7 +291,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         input_ids = torch.tensor(
             [
                 x[:computed_max_len]
-                + [pad_token_id] * (max(0, computed_max_len - len(x)))
+                + [self.tokenizer.pad_token_id] * (max(0, computed_max_len - len(x)))
                 for x in list_of_input_ids
             ],
             dtype=torch.long,

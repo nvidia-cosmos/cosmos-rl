@@ -20,7 +20,7 @@ import vllm
 import torch
 import copy
 from typing import List, Optional, Dict
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
 from vllm import SamplingParams
@@ -74,16 +74,15 @@ def update_conversation_wth_rollout_result(
 
 
 class vLLMRollout(RolloutBase):
-    def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
+    def __init__(self, config: Config, **kwargs):
         """Rollout with vLLM as the backend.
 
         Args:
             config: Cosmos Config.
-            tokenizer: Tokenizer of the model.
             hf_config_path: huggingface config file path.
             model_hf_config: the huggingface config to initiallize the generating model in vllm
         """
-        super().__init__(config, tokenizer)
+        super().__init__(config)
         policy_config = self.config.policy
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation

@@ -24,7 +24,6 @@ from cosmos_rl.dispatcher.algo.reward import Reward
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.constant as constant
-from transformers import AutoTokenizer
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from queue import Queue
@@ -168,9 +167,7 @@ class RewardCalculator:
             val_data_packer (Optional[DataPacker]): The data packer for processing the validation payloads.
         """
         self.config = config
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            self.config.policy.model_name_or_path
-        )
+        self.tokenizer = util.setup_tokenizer(self.config.policy.model_name_or_path)
         self.data_fetcher = data_fetcher
 
         self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](

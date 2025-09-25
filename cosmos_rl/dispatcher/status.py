@@ -137,7 +137,7 @@ class PolicyStatusManager:
         data_fetcher: ControllerDataFetcher,
         remain_samples_num: int,
         samples_per_epoch: int,
-        tokenizer: AutoTokenizer,
+        tokenizer: Optional[AutoTokenizer] = None,
         current_step: int = 0,
         max_num_steps: Optional[int] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
@@ -1051,11 +1051,9 @@ class RolloutStatusManager:
         self,
         config: Config,
         redis_handler: RedisStreamHandler,
-        tokenizer: AutoTokenizer,
     ):
         self.redis_handler = redis_handler
         self.config = config
-        self.tokenizer = tokenizer
         """
         Maintain the life status of the policy and rollout replicas.
         """

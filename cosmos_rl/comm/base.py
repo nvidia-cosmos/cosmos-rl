@@ -116,7 +116,7 @@ class CommMixin:
                     f"No default data packer found for {model_type}, using {type(self.data_packer).__name__} as default"
                 )
 
-        self.data_packer.setup(self.config, self.tokenizer)
+        self.data_packer.setup(self.config)
 
         if val_data_packer:
             assert isinstance(
@@ -140,7 +140,7 @@ class CommMixin:
                     f"No default validation data packer found for {model_type}, using {type(self.val_data_packer).__name__} as default"
                 )
 
-        self.val_data_packer.setup(self.config, self.tokenizer)
+        self.val_data_packer.setup(self.config)
 
     def register_to_controller(self):
         if hasattr(self, "_is_registered"):

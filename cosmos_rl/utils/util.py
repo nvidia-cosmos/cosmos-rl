@@ -31,6 +31,8 @@ import importlib
 import sys
 import glob
 import io
+import inspect
+import warnings
 from PIL import Image
 from filelock import FileLock, Timeout
 from collections import OrderedDict
@@ -48,11 +50,13 @@ from huggingface_hub import (
     snapshot_download,
     HfFileSystem,
 )
+from transformers import AutoTokenizer
 import time
 import functools
 from cosmos_rl.utils.logging import logger
 from safetensors import safe_open
 from cosmos_rl.utils.constant import CACHE_DIR
+from cosmos_rl.policy.config import Config as CosmosConfig
 import math
 
 
@@ -1227,3 +1231,63 @@ def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
         rank0_print(f"Replaced {name} with liger equivalent")
         # Swap it in.
         setattr(root, name, new_child)
+
+
+@functools.lru_cache(maxsize=None)
+def setup_tokenizer(model_name_or_path: str) -> AutoTokenizer:
+    tokenizer = retry(AutoTokenizer.from_pretrained)(
+        model_name_or_path,
+        trust_remote_code=True,
+    )
+    # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        try:
+            logger.warning(
+                f"Tokenizer for {model_name_or_path} has no pad_token_id, try to use eos_token_id({tokenizer.eos_token_id}) as pad_token_id"
+            )
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        except Exception as e:
+            logger.warning(
+                f"Failed to set pad_token_id with eos_token_id, error = {e}, ignore if not needed"
+            )
+    return tokenizer
+
+
+def call_dataset_setup(dataset: torch.utils.data.Dataset, config: CosmosConfig):
+    """
+    As part of decoupling tokenizer from the main training logic, we are changing the signature of `setup` used in custom datasets
+    This method, calls the dataset.setup compatibly across the old and new signatures
+
+    Old signatures: setup(self, config, tokenizer)
+    New signatures: setup(self, config)
+    """
+    if not hasattr(dataset, "setup"):
+        return
+
+    setup_fn = dataset.setup
+    sig = inspect.signature(setup_fn)
+
+    # "setup" is a function of the class, only consider params that aren't "self"
+    params = [
+        p
+        for p in sig.parameters.values()
+        if p.name != "self" and p.kind == p.POSITIONAL_OR_KEYWORD
+    ]
+
+    n_required = sum(1 for p in params if p.default is inspect.Parameter.empty)
+
+    if n_required == 1:
+        setup_fn(config)
+    elif n_required == 2:
+        warnings.warn(
+            f"{dataset.__class__.__name__}.setup(self, config, tokenizer) is deprecated. "
+            "Please update to setup(self, config) and instantiate tokenizer if needed in the funciton implementaion.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        setup_fn(config, setup_tokenizer(config.policy.model_name_or_path))
+    else:
+        raise TypeError(
+            f"{dataset.__class__.__name__}.setup() must accept either "
+            f"(self, config) or (self, config, tokenizer), but signature was: {sig}"
+        )

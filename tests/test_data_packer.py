@@ -15,10 +15,9 @@
 
 
 import unittest
-from unittest.mock import Mock
 from packaging import version
 import transformers
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig
 
 import cosmos_rl.utils.util as util
 from cosmos_rl.policy.model.hf_models import HFModel
@@ -40,9 +39,8 @@ class TestDataPacker(unittest.TestCase):
         config = Config(
             policy=PolicyConfig(model_max_length=MAX_LEN), train=TrainingConfig()
         )
-        tokenizer = Mock()
         data_packer = DeepSeek_DataPacker()
-        data_packer.setup(config, tokenizer)
+        data_packer.setup(config)
 
         TEST_SAMPLES = [
             {
@@ -54,7 +52,7 @@ class TestDataPacker(unittest.TestCase):
                 "label_ids": [3, 2, 1, 0, 11, 12],
             },
         ]
-        output = data_packer.sft_collate_fn(TEST_SAMPLES, 2, -100, -100)
+        output = data_packer.sft_collate_fn(TEST_SAMPLES, 2, -100)
         assert output["input_ids"].shape == (len(TEST_SAMPLES), MAX_LEN)
         assert output["label_ids"].shape == (len(TEST_SAMPLES), MAX_LEN)
 
@@ -73,7 +71,6 @@ class TestDataPacker(unittest.TestCase):
             hf_config = util.retry(AutoConfig.from_pretrained)(
                 model_id, trust_remote_code=True
             )
-            tokenizer = AutoTokenizer.from_pretrained(model_id)
             is_vlm = getattr(hf_config, "vision_config", None) is not None
 
             try:
@@ -87,7 +84,7 @@ class TestDataPacker(unittest.TestCase):
                 policy=PolicyConfig(model_max_length=4096, model_name_or_path=model_id),
                 train=TrainingConfig(),
             )
-            data_packer.setup(config, tokenizer)
+            data_packer.setup(config)
 
             if model_id == "Qwen/Qwen2.5-VL-7B-Instruct":
                 assert isinstance(data_packer, Qwen2_5_VLM_DataPacker)
@@ -148,7 +145,7 @@ class TestDataPacker(unittest.TestCase):
                     len(return_dict1["input_ids"]), len(return_dict2["input_ids"])
                 )
                 output = data_packer.sft_collate_fn(
-                    [return_dict1, return_dict2], computed_max_len, -100, -100
+                    [return_dict1, return_dict2], computed_max_len, -100
                 )
                 assert output["input_ids"].shape == (2, computed_max_len)
                 assert output["label_ids"].shape == (2, computed_max_len)

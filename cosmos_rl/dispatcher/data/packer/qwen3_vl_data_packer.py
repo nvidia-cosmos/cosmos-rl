@@ -18,13 +18,13 @@ import base64
 import torch
 from PIL import Image
 from typing import List, Any, Dict, Optional, Tuple, Union
-from transformers import AutoTokenizer, AutoProcessor, AutoConfig
+from transformers import AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import ChatDataPacker
 
 IGNORE_LABEL_ID = -100
 
@@ -50,7 +50,7 @@ def decode_base64_to_image(image_inputs: List[str]) -> List[str]:
     return new_image_inputs
 
 
-class Qwen3_VL_DataPacker(DataPacker):
+class Qwen3_VL_DataPacker(ChatDataPacker):
     """
     Data protocol & processing logic for the Qwen3.5 VLMs for SFT and RL training.
     """
@@ -65,8 +65,8 @@ class Qwen3_VL_DataPacker(DataPacker):
             self.input_ids = input_ids
             self.logprob_masks = logprob_masks
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        super().setup(config, tokenizer, *args, **kwargs)
+    def setup(self, config: Config, *args, **kwargs):
+        super().setup(config, *args, **kwargs)
         self.hf_processor = retry(AutoProcessor.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
         )
@@ -783,7 +783,6 @@ class Qwen3_VL_DataPacker(DataPacker):
         self,
         processed_samples: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         # Reuse the RL collate minibatch function

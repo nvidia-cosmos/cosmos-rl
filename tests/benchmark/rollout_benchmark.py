@@ -123,7 +123,6 @@ def main(args: argparse.Namespace):
 
     rollout_engine = vLLMRollout(
         config,
-        tokenizer=tokenizer,
         seed=seed,
         load_format="auto",
     )
