@@ -16,7 +16,6 @@
 # Standard library imports
 import math
 import os
-import re
 import time
 import threading
 from collections import defaultdict
@@ -24,10 +23,8 @@ from queue import Queue, Empty
 from datetime import timedelta
 from typing import Dict, Iterable, Optional, Union, Callable
 from functools import partial
-from urllib.parse import urljoin
 
 # Third party imports
-import requests
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
@@ -38,17 +35,9 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 # Local imports
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils import constant, network_util
-from cosmos_rl.utils.util import list_to_b64, b64_to_list
 from cosmos_rl.dispatcher.command import Command, BuildMeshCommand
-from cosmos_rl.utils.api_suffix import (
-    COSMOS_API_META_SUFFIX,
-    COSMOS_API_NCCL_COMM_ERROR_SUFFIX,
-    COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
-    COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
-    COSMOS_API_NCCL_COMM_STORE_CLEAR_SUFFIX,
-)
+from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.utils.pynccl import (
     get_nccl_timeout_ms,
     nccl_timeout_watchdog,
@@ -74,43 +63,6 @@ def init_distributed(cpu_enabled: bool = True):
             backend="cuda:nccl,cpu:gloo",
             timeout=timedelta(seconds=600),
         )
-
-
-def get_controller_metadata() -> Dict:
-    """
-    Get metadata from the controller with retry logic.
-
-    Returns:
-        Tuple containing (remote_ips, remote_port, metadata)
-    """
-    remote_hosts = os.environ["COSMOS_CONTROLLER_HOST"]
-    # Verify in the format of host:port
-    remote_ips, remote_port = remote_hosts.split(":")
-    remote_ips = remote_ips.split(";")
-    for remote_ip in remote_ips:
-        if not re.match(
-            r"^([a-zA-Z0-9_.-]+):([1-9][0-9]{0,4})$", f"{remote_ip}:{remote_port}"
-        ):
-            raise ValueError(f"Invalid remote host: {remote_ip}:{remote_port}")
-    remote_hosts = [
-        f"http://{remote_ip}:{remote_port}{COSMOS_API_META_SUFFIX}"
-        for remote_ip in remote_ips
-    ]
-    try:
-        r = make_request_with_retry(
-            requests.get,
-            remote_hosts,
-            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-        )
-    except Exception as e:
-        logger.error(f"Failed to communicate with controller after attempts: {e}")
-        raise e
-    metadata: Dict = r.json()
-    remote_eth_ips = metadata.get("config", {}).get("eth_ips", [])
-    if remote_eth_ips:
-        remote_ips = remote_ips + remote_eth_ips.split(";")
-
-    return remote_ips, remote_port, metadata
 
 
 def destroy_distributed():
@@ -413,12 +365,10 @@ def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
 class HighAvailabilitylNccl:
     DESTROY_CMD = "destroy"
 
-    def __init__(
-        self, replica_name: str, global_rank: int, controller_hosts: list[str]
-    ):
+    def __init__(self, replica_name: str, global_rank: int, api_client: APIClient):
         self.replica_name = replica_name
         self.global_rank = global_rank
-        self.remote_hosts = controller_hosts
+        self.api_client = api_client
         # max retry times for nccl op after nccl comm is rebuilt
         self.max_retry = 3
         self.default_timeout_ms = get_nccl_timeout_ms()
@@ -443,13 +393,6 @@ class HighAvailabilitylNccl:
             name=f"HA_NCCL-{self.replica_name}-#{self.global_rank}",
         )
         self.build_mesh_thread.start()
-
-    def __get_alternative_urls(self, suffix: str):
-        # Get the alternative URLs for the given suffix
-        urls = []
-        for remote_host in self.remote_hosts:
-            urls.append(urljoin(remote_host, suffix))
-        return urls
 
     def __get_mesh_unique_key(self, replica_name_to_rank: Dict[str, int]):
         return (
@@ -524,57 +467,22 @@ class HighAvailabilitylNccl:
         assert self.replica_name in cmd.replica_name_to_rank
         rank = cmd.replica_name_to_rank[self.replica_name]
         nccl_group_id = None
+        unique_pair_name = self.__get_mesh_unique_key(cmd.replica_name_to_rank)
         if rank == 0:
             # initialize nccl handle for building mesh among policies
             # only replica_rank == 0 have the right to generate nccl id.
             nccl_group_id = create_nccl_uid()
-            base64_nccl_group_id = list_to_b64(nccl_group_id)
+            self.api_client.post_nccl_comm_initiator(unique_pair_name, nccl_group_id)
             logger.debug(
-                f"{self.__log_prefix()} post nccl group_id to controller: {self.__get_mesh_unique_key(cmd.replica_name_to_rank)}"
+                f"{self.__log_prefix()} post nccl group_id to controller: {unique_pair_name}"
             )
-            try:
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={
-                            "unique_pair_name": self.__get_mesh_unique_key(
-                                cmd.replica_name_to_rank
-                            ),
-                            "handle_base64": base64_nccl_group_id,
-                        },
-                    ),
-                    self.__get_alternative_urls(COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"{self.__log_prefix()} failed in post nccl group_id to controller after retries {e}."
-                )
         else:
             # other replicas should query the nccl group id from controller
             # all ranks need to wait for the rollout replica 0 finished the group_id post
             # and then they can get the group_id from controller
             # But we don't have something like dist.barrier(), so just while True loop to query it like synchronize.
             # all ranks not zero in replica 0 or all ranks of other replicas need to query the group_id from controller
-            try:
-                r = make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={
-                            "unique_pair_name": self.__get_mesh_unique_key(
-                                cmd.replica_name_to_rank
-                            )
-                        },
-                    ),
-                    self.__get_alternative_urls(COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_LONG_WAIT_MAX_RETRY,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"{self.__log_prefix()} failed in query nccl group_id from controller after retries {e}."
-                )
-            base64_nccl_group_id = r.json()["handle_base64"]
-            nccl_group_id = b64_to_list(base64_nccl_group_id)
+            nccl_group_id = self.api_client.post_nccl_comm_acceptor(unique_pair_name)
 
         # create nccl comm, any error will be reported to the controller
         try:
@@ -584,15 +492,7 @@ class HighAvailabilitylNccl:
             self.is_first_time_build_mesh = False
         except Exception as e:
             # report the error to the controller
-            make_request_with_retry(
-                partial(
-                    requests.post,
-                    json={"replica_name": self.replica_name, "error": str(e)},
-                ),
-                self.__get_alternative_urls(COSMOS_API_NCCL_COMM_ERROR_SUFFIX),
-                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-            )
-
+            self.api_client.post_nccl_comm_error(self.replica_name, e)
             logger.error(
                 f"{self.__log_prefix()} failed in create nccl comm , report to controller: {e}"
             )
@@ -610,18 +510,7 @@ class HighAvailabilitylNccl:
         # To prevent following rebuild mesh with same unique_pair_name,
         # we need to clear the kv store of the old mesh.
         if self.replica_name_to_rank.get(self.replica_name) == 0:
-            make_request_with_retry(
-                partial(
-                    requests.post,
-                    json={
-                        "unique_pair_name": self.__get_mesh_unique_key(
-                            cmd.replica_name_to_rank
-                        )
-                    },
-                ),
-                self.__get_alternative_urls(COSMOS_API_NCCL_COMM_STORE_CLEAR_SUFFIX),
-                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-            )
+            self.api_client.post_clear_nccl_comm_store(unique_pair_name)
 
     def __do_nccl_op_with_retry(self, func: Callable, timeout_ms: int, **kwargs):
         if self.is_single_peer.is_set():
@@ -652,14 +541,7 @@ class HighAvailabilitylNccl:
 
                 # report the error to the controller
                 # the communicator will destroy before buildmesh
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={"replica_name": self.replica_name, "error": str(e)},
-                    ),
-                    self.__get_alternative_urls(COSMOS_API_NCCL_COMM_ERROR_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
+                self.api_client.post_nccl_comm_error(self.replica_name, e)
                 logger.error(
                     f"{self.__log_prefix()} recovering nccl op '{func.__name__}' with kwargs {kwargs} after {i} retries: {e}"
                 )

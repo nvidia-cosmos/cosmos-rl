@@ -16,8 +16,6 @@
 import torch
 import time
 import threading
-import requests
-import msgpack
 from functools import partial
 from typing import List, Optional, Callable, NamedTuple
 import torch.distributed as dist
@@ -32,7 +30,6 @@ from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
     WeightSyncInstructionsGroup,
 )
-from cosmos_rl.utils.util import list_to_b64, b64_to_list
 from cosmos_rl.dispatcher.command import (
     BuildMeshCommand,
     PolicyToRolloutUnicastCommand,
@@ -47,18 +44,11 @@ from cosmos_rl.utils.pynccl import (
     nccl_group_start,
     nccl_group_end,
 )
-from cosmos_rl.utils.api_suffix import (
-    COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
-    COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
-    COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
-    COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
-)
 
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.distributed as dist_util
-from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
 from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
     ValidationInstruction,
@@ -181,7 +171,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         self.vllm_weight_inplace_view_map, grouped_recv_param_key_n_rank_list = (
-            self.weight_mapper.rollout_prepare_recv(self.get_underlying_model())
+            self.weight_mapper.cosmos_rollout_prepare_recv(self.get_underlying_model())
         )
         self.recv_param_key_n_rank_list = []
         param_groups = []
@@ -224,26 +214,11 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
         ]
         if self.global_rank == 0:
-            body = {
-                "shard_infos": self.all_rank_local_shard_infos,
-                "param_groups": list(merged_groups.values()),
-                "sorted_params": sorted_params_all_rank,
-            }
-            data = msgpack.packb(body)
-            try:
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        data=data,
-                        headers={"Content-Type": "application/msgpack"},
-                    ),
-                    self.get_alternative_urls(COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"[Rollout] Failed in post shard infos to controller after retries {e}."
-                )
+            self.api_client.post_rollout_shard_info(
+                self.all_rank_local_shard_infos,
+                list(merged_groups.values()),
+                sorted_params_all_rank,
+            )
 
     def get_underlying_model(self):
         """
@@ -285,30 +260,16 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if self.rank_in_rollout_repicas == 0:
             # only replica_rank == 0 have the right to generate nccl id.
             nccl_group_id = create_nccl_uid()
-            base64_nccl_group_id = list_to_b64(nccl_group_id)
-            try:
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={
-                            "unique_pair_name": unique_rollout_group_key,
-                            "handle_base64": base64_nccl_group_id,
-                        },
-                    ),
-                    self.get_alternative_urls(COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"[Rollout] Failed in post nccl group_id to controller after retries {e}."
-                )
+            self.api_client.post_nccl_comm_initiator(
+                unique_rollout_group_key, nccl_group_id
+            )
             logger.debug(f"[Rollout] post nccl group_id to controller: {nccl_group_id}")
         if self.rank_in_rollout_repicas != 0:
             # other replicas should query the nccl group id from controller
             # all ranks need to wait for the rollout replica 0 finished the group_id post
             # and then they can get the group_id from controller
             # all ranks not zero in replica 0 or all ranks of other replicas need to query the group_id from controller
-            nccl_group_id = self.query_nccl_unique_id_from_controller(
+            nccl_group_id = self.api_client.post_nccl_comm_acceptor(
                 unique_rollout_group_key
             )
             if nccl_group_id is None:
@@ -328,27 +289,6 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         )
         # update the replcia_name to rank dict
         self.replica_name_to_rank = replica_name_to_rank
-
-    def query_nccl_unique_id_from_controller(self, unique_id_key: str):
-        # We don't have something like dist.barrier(), so just use while True loop to query it like synchronize.
-        nccl_group_id = None
-        # all ranks not zero in replica 0 or all ranks of other replicas need to query the group_id from controller
-        try:
-            r = make_request_with_retry(
-                partial(
-                    requests.post,
-                    json={"unique_pair_name": unique_id_key},
-                ),
-                self.get_alternative_urls(COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX),
-                max_retries=constant.COSMOS_HTTP_LONG_WAIT_MAX_RETRY,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"[Rollout] Failed in post nccl group_id to controller after retries {e}."
-            )
-        base64_nccl_group_id = r.json()["handle_base64"]
-        nccl_group_id = b64_to_list(base64_nccl_group_id)
-        return nccl_group_id
 
     def recv_weight_shard(
         self,
@@ -456,9 +396,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         else:
             logger.debug(f"[Rollout] Querying nccl group id for {nccl_unique_id_key}")
             # query the nccl group id from controller
-            nccl_group_id = self.query_nccl_unique_id_from_controller(
-                nccl_unique_id_key
-            )
+            nccl_group_id = self.api_client.post_nccl_comm_acceptor(nccl_unique_id_key)
             if nccl_group_id is None:
                 raise RuntimeError(
                     "[Rollout] Failed to query nccl group_id from controller!"
@@ -475,28 +413,9 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
                 communicator_index
             )
         if not hasattr(self, "policy_to_rollout_recv_insts"):
-            self.policy_to_rollout_recv_insts = []
-            try:
-                insts_meta = make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={
-                            "rank": self.global_rank,
-                        },
-                    ),
-                    self.get_alternative_urls(
-                        COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX
-                    ),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-                insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
-                self.policy_to_rollout_recv_insts = [
-                    WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
-                ]
-            except Exception as e:
-                raise RuntimeError(
-                    f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
-                )
+            self.policy_to_rollout_recv_insts = (
+                self.api_client.post_rollout_shard_recv_insts(self.global_rank)
+            )
             logger.info(
                 "[Rollout] Finished policy_to_rollout_recv_insts from controller."
             )

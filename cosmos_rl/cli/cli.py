@@ -47,5 +47,9 @@ def get_ip_from_hostname(hostname):
     return ip_address
 
 
-if __name__ == "__main__":
+def main():
     cosmos()
+
+
+if __name__ == "__main__":
+    main()

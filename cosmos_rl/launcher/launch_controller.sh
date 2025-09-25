@@ -73,4 +73,5 @@ fi
 echo "Controller CMD: ${CMD}"
 
 export COSMOS_ROLE="Controller"
+
 $CMD

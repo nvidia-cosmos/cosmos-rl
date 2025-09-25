@@ -23,25 +23,18 @@ import sys
 import subprocess
 import torch.distributed as dist
 import threading
-from functools import partial
-import requests
 import atexit
 from queue import Queue, Empty
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils import constant
-from cosmos_rl.utils.network_util import make_request_with_retry, get_local_ip
+from cosmos_rl.utils.network_util import get_local_ip
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.dispatcher.command import Command, BuildMeshCommand
 from cosmos_rl.policy.config import Config
-from cosmos_rl.utils.distributed import get_controller_metadata
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.api_suffix import (
-    COSMOS_API_REGISTER_SUFFIX,
-    COSMOS_API_UNREGISTER_SUFFIX,
-)
+from cosmos_rl.dispatcher.api.client import APIClient
 
 
 WORK_DIR = f"/tmp/{os.path.basename(__file__)}"
@@ -120,21 +113,19 @@ def launch_controller(config: str):
 
 
 class TestHANccl(CommMixin):
-    def __init__(self, ctrl_ip: str, ctrl_port: int, config: Config):
+    def __init__(self, api_client: APIClient, config: Config):
         self.config = config
         self.replica_name = f"HANCCL-{dist.get_rank()}"
         self.global_rank = (
             0  # here we assume every replica only has one gpu, so the global_rank is 0
         )
         self.replica_rank = dist.get_rank()
-        self.remote_hosts = [f"http://{os.environ['COSMOS_CONTROLLER_HOST']}"]
         self.role = "POLICY"
         self._shutdown_event = threading.Event()
         self._is_registered = False
 
         # override those fields
-        self.remote_ips = ctrl_ip
-        self.remote_port = ctrl_port
+        self.api_client = api_client
         self.parallel_dims = ParallelDims.from_config_for_analysis(
             config.policy.parallelism, world_size=1
         )
@@ -155,13 +146,6 @@ class TestHANccl(CommMixin):
         self.fetch_command_thread.start()
         self.command_queue = Queue()
 
-    def __get_alternative_urls(self, suffix: str):
-        # Get the alternative URLs for the given suffix
-        urls = []
-        for remote_host in self.remote_hosts:
-            urls.append(f"{remote_host}/{suffix}")
-        return urls
-
     def register_to_controller(self):
         if self._is_registered:
             return
@@ -170,22 +154,15 @@ class TestHANccl(CommMixin):
         if host_info_tuple is None:
             raise Exception("Failed to get local IP address")
         host_ip, host_name = host_info_tuple
-        make_request_with_retry(
-            partial(
-                requests.post,
-                json={
-                    "replica_name": self.replica_name,
-                    "role": self.role,
-                    "mesh_names": MESH_NAMES,
-                    "ranks": [0 for _ in MESH_NAMES],
-                    "group_size": [1 for _ in MESH_NAMES],
-                    "global_rank": self.global_rank,
-                    "host_ip": host_ip,
-                    "host_name": host_name,
-                },
-            ),
-            self.__get_alternative_urls(COSMOS_API_REGISTER_SUFFIX),
-            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+        self.api_client.register(
+            replica_name=self.replica_name,
+            role=self.role,
+            mesh_names=MESH_NAMES,
+            ranks=[0 for _ in MESH_NAMES],
+            group_size=[1 for _ in MESH_NAMES],
+            global_rank=self.global_rank,
+            host_ip=host_ip,
+            host_name=host_name,
         )
         self._is_registered = True
         logger.info(f"register to controller: {self.replica_name}")
@@ -193,15 +170,7 @@ class TestHANccl(CommMixin):
     def unregister_from_controller(self):
         if not self._is_registered:
             return
-
-        make_request_with_retry(
-            partial(
-                requests.post,
-                json={"replica_name": self.replica_name},
-            ),
-            self.__get_alternative_urls(COSMOS_API_UNREGISTER_SUFFIX),
-            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-        )
+        self.api_client.unregister(self.replica_name)
         self._is_registered = False
         logger.info(f"unregister from controller: {self.replica_name}")
 
@@ -239,7 +208,7 @@ class TestHANccl(CommMixin):
         comm = HighAvailabilitylNccl(
             replica_name=self.replica_name,
             global_rank=self.global_rank,
-            controller_hosts=self.remote_hosts,
+            api_client=self.api_client,
         )
 
         # wait all ranks fetch latest command from controller
@@ -275,7 +244,7 @@ class TestHANccl(CommMixin):
         comm = HighAvailabilitylNccl(
             replica_name=self.replica_name,
             global_rank=self.global_rank,
-            controller_hosts=self.remote_hosts,
+            api_client=self.api_client,
         )
 
         # wait all ranks fetch latest command from controller
@@ -319,7 +288,7 @@ class TestHANccl(CommMixin):
         comm = HighAvailabilitylNccl(
             replica_name=self.replica_name,
             global_rank=self.global_rank,
-            controller_hosts=self.remote_hosts,
+            api_client=self.api_client,
         )
 
         dist.barrier()
@@ -435,9 +404,10 @@ def main():
     time.sleep(10)
 
     # 3. init the tester
-    ctrl_ip, ctrl_port, metadata = get_controller_metadata()
+    api_client = APIClient(role="POLICY")
+    metadata = api_client.get_controller_metadata()
     cosmos_config = Config.from_dict(metadata["config"])
-    tester = TestHANccl(ctrl_ip, ctrl_port, cosmos_config)
+    tester = TestHANccl(api_client, cosmos_config)
     dist.barrier()
 
     # 4. Run the test

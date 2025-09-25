@@ -18,7 +18,8 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 
 import vllm
 import torch
-from typing import List, Tuple, Any, Optional
+import copy
+from typing import List, Optional, Dict
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
@@ -30,6 +31,15 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.model import WeightMapper
+from cosmos_rl.utils.tools_use import ToolParser
+from cosmos_rl.dispatcher.data.packer.multi_turn import (
+    ConversationType,
+    add_tool_response_messages,
+    add_assistant_message,
+)
+from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
+from cosmos_rl.dispatcher.data import RLPayload
+from cosmos_rl.rollout.schema import RolloutResult
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -39,6 +49,28 @@ def vllm_version_check(rollout_config: RolloutConfig):
             "Pipeline parallelism is not supported for vLLM < 0.9.0, current version is %s"
             % vllm_version
         )
+
+
+def update_conversation_wth_rollout_result(
+    conversation: ConversationType,
+    rollout_result: str,
+    tool_parser: ToolParser,
+    tools: list[OpenAIFunctionToolSchema],
+) -> ConversationType:
+    """
+    Update the conversation with the rollout result.
+
+    1. if the rollout result contains tool calls, add the tool response messages to the conversation
+    2. otherwise, add the assistant message to the conversation
+    """
+    content, function_calls = tool_parser.extract_tool_calls(rollout_result)
+
+    if function_calls:
+        conversation = add_tool_response_messages(conversation, function_calls)
+    else:
+        conversation = add_assistant_message(conversation, content)
+
+    return conversation
 
 
 class vLLMRollout(RolloutBase):
@@ -83,6 +115,8 @@ class vLLMRollout(RolloutBase):
         self._model_param_map = None  # key: compatible name, value: param
         self.is_vlm = getattr(self.model_config, "vision_config", None) is not None
 
+        self.preset_vllm_env()
+
     def init_engine(
         self,
         quantization: Optional[str] = None,
@@ -96,9 +130,6 @@ class vLLMRollout(RolloutBase):
             model_path = self.config.policy.model_name_or_path
 
             rollout_parallelism = self.rollout_config.parallelism
-
-            # disable VLLM_DISABLE_COMPILE_CACHE
-            os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
             tp_size = rollout_parallelism.tp_size
             pp_size = rollout_parallelism.pp_size
@@ -167,41 +198,32 @@ class vLLMRollout(RolloutBase):
                     apply_fp8_linear_patch(self.get_underlying_model())
 
     @torch.no_grad()
-    def rollout_generation(
+    def rollout_generation_single_turn(
         self,
-        prompt_id_and_payload_list: List[Tuple[int, Any]],
+        payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
-    ) -> List[List[str]]:
+    ) -> List[RolloutResult]:
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
 
-        # List of payloads.
-        # [
-        #   payload,
-        #   payload,
-        #   ...
-        # ]
-        payloads = [x[1] for x in prompt_id_and_payload_list]
-
         # Pack the payloads into prompts for vllm.
-        prompts = [data_packer.get_rollout_input(payload) for payload in payloads]
+        prompts = []
+        for pl in payloads:
+            assert (
+                pl.prompt is not None
+            ), "Prompt should not be None for single turn rollout generation."
+            prompts.append(data_packer.get_rollout_input(pl.prompt))
         prompts = data_packer.rollout_collate_fn(prompts)
         if self.is_vlm:
             new_prompts = util.decode_vision_info(prompts)
         else:
             new_prompts = prompts
 
-        # List of completions per prompt.
-        # [
-        #   [completion_str, completion_str, ...],
-        #   [completion_str, completion_str, ...],
-        #   ...
-        # ]
-        response: List[List[str]] = []
+        response: List[RolloutResult] = []
 
         stream = torch.cuda.current_stream() if stream is None else stream
         try:
@@ -212,9 +234,14 @@ class vLLMRollout(RolloutBase):
                     use_tqdm=False,
                 )
 
-            for output in results:
+            for i, output in enumerate(results):
                 response.append(
-                    [output.outputs[i].text for i in range(len(output.outputs))]
+                    RolloutResult(
+                        prompt=payloads[i].prompt,
+                        completions=[
+                            output.outputs[i].text for i in range(len(output.outputs))
+                        ],
+                    )
                 )
         except Exception as e:
             logger.error(f"[Rollout] Failed in rollout generation: {str(e)}")
@@ -222,8 +249,109 @@ class vLLMRollout(RolloutBase):
 
             traceback.print_exc()
             return []
+        return response
+
+    @torch.no_grad()
+    def rollout_generation_multi_turn(
+        self,
+        payloads: List[RLPayload],
+        stream: torch.cuda.Stream,
+        data_packer: DataPacker,
+        sampling_params: SamplingParams,
+    ) -> List[RolloutResult]:
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+        stream = torch.cuda.current_stream() if stream is None else stream
+
+        def generation_multi_turn_for_one_payload(
+            current_conversation: ConversationType,
+        ):
+            assistant_turn_count = 0
+            assert (
+                payload.conversation is not None
+            ), "Conversation should not be None for multi-turn rollout generation."
+            while (
+                assistant_turn_count
+                < self.rollout_config.multi_turn_config.max_assistant_turns
+            ):
+                # Pack the payloads into prompts for vllm.
+                prompts = [data_packer.get_rollout_input(current_conversation)]
+                prompts = data_packer.rollout_collate_fn(prompts)
+
+                with torch.cuda.stream(stream):
+                    results = self.rollout_engine.generate(
+                        prompts=prompts,
+                        sampling_params=sampling_params,
+                        use_tqdm=False,
+                    )
+
+                # TODO(zjx): support multi-path conversations search for multi-turn rollout generation
+                # extend the conversation with the rollout result
+                responses = [output.text for output in results[0].outputs]
+                current_conversation = data_packer.extend_conversation(
+                    current_conversation,
+                    responses,
+                    ground_truth=payload.reference_answer,
+                )
+
+                # check if the sequence length is reached the max_sequence_length
+                if (
+                    len(results[0].prompt_token_ids)
+                    + len(results[0].outputs[0].token_ids)
+                    > self.rollout_config.max_response_length
+                ):
+                    logger.warning(
+                        "[Rollout] The sequence length is reached the max_response_length, stop the multi-turn generation."
+                    )
+                    break
+
+                assistant_turn_count += 1
+
+            # return the last assistant message as the completion to compute the reward in controller
+            completion = current_conversation[-1].content
+            return current_conversation, completion
+
+        n_generation = sampling_params.n
+        sampling_params = copy.deepcopy(sampling_params)
+        sampling_params.n = 1
+        response: List[RolloutResult] = []
+        for payload in payloads:
+            conversations = []
+            completions = []
+            for _ in range(n_generation):
+                new_conversation, completion = generation_multi_turn_for_one_payload(
+                    copy.deepcopy(payload.conversation)
+                )
+                conversations.append(new_conversation)
+                completions.append(completion)
+
+            response.append(
+                RolloutResult(
+                    conversation=payload.conversation,
+                    completions=completions,
+                    completed_conversations=conversations,
+                )
+            )
 
         return response
+
+    def rollout_generation(
+        self,
+        payloads: List[RLPayload],
+        stream: torch.cuda.Stream,
+        data_packer: DataPacker,
+        sampling_params: SamplingParams,
+    ) -> List[RolloutResult]:
+        if self.rollout_config.multi_turn_config.enable:
+            return self.rollout_generation_multi_turn(
+                payloads, stream, data_packer, sampling_params
+            )
+        else:
+            return self.rollout_generation_single_turn(
+                payloads, stream, data_packer, sampling_params
+            )
 
     def get_underlying_model(self):
         """
@@ -257,13 +385,156 @@ class vLLMRollout(RolloutBase):
 
         return qweight.t(), weight_scale
 
-    def model_param_map(self, weight_mapper: WeightMapper):
+    def mxfp4_quantization(self, weight: torch.Tensor):
+        """
+        Quantize the original bf16 weight sent by policy to mxfp4 weight.
+        """
+        # https://github.com/vllm-project/vllm/pull/22259
+        # Note: vLLM use triton kernel for mxfp4 moe when ep not specified.
+        # We temporarily support this case first.
+        # Reference: https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L493
+
+        # Note: For mxfp4 quantizaiton, vLLM will load original mxfp4 weight from hf fp4 weight, and do some post processing like padding and swizzle.
+        # So we have two phases for quantization:
+        # 1. Quantize the original bf16 weight sent by policy:
+        # We use: https://github.com/openai/gpt-oss/blob/d0a300a40d6502a1bdd73d18464f3d69440656e0/gpt_oss/triton/model.py#L302
+
+        # 2. Post process the quantized weight as vLLM did for triton kernel:
+        # https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L173
+        # mxfp4_block_size = 32
+        weight = weight.transpose(-2, -1).contiguous()
+        # weight is bf16 moe weight with shape:
+        # gate_up_proj: [num_experts, hidden_size, 2 * intermediate_size]
+        # donw_proj:    [num_experts, intermediate_size, hidden_size]
+
+        # 1. Quantize the original bf16 weight sent by policy:
+        from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import quantize_mx4
+
+        # weight_mxfp4 and weight_scale_mxfp4 are torch.Tensor
+        weight_mxfp4, weight_scale_mxfp4 = quantize_mx4(weight.to(torch.bfloat16))
+        weight_mxfp4 = weight_mxfp4.transpose(-2, -1).contiguous()  # Now torch.Tensor
+        weight_scale_mxfp4 = weight_scale_mxfp4.transpose(-2, -1).contiguous()
+        # For weight_mxfp4:
+        # [num_experts, 2 * intermediate_size, hidden_size // mxfp4_block_size, 16] for gate_up_proj
+        # [num_experts, hidden_size, intermediate_size // mxfp4_block_size, 16] for down_proj
+        # For weight_scale_mxfp4:
+        # [num_experts, 2 * intermediate_size, hidden_size // mxfp4_block_size] for gate_up_proj
+        # [num_experts, hidden_size, intermediate_size // mxfp4_block_size] for down_proj
+
+        # 2. Post process
+        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+            _swizzle_mxfp4,
+        )
+
+        num_warps = 8
+        swizzled_weight_mxfp4, _, swizzled_weight_scale_mxfp4 = _swizzle_mxfp4(
+            weight_mxfp4, weight_scale_mxfp4, num_warps
+        )
+        return (
+            swizzled_weight_mxfp4.storage.data,
+            swizzled_weight_scale_mxfp4.storage.data,
+        )
+
+    def model_param_map(self, weight_mapper: WeightMapper) -> Dict[str, torch.Tensor]:
+        """
+        All the parameters of the rollout model:
+            - All the parameters of the model.
+            - All the scales of quantized weights.
+        """
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+
         if self._model_param_map:
             return self._model_param_map
         model = self.get_underlying_model()
         param_map = {}
-        for name, param in model.named_parameters():
+        for name, param in model.state_dict().items():
             compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
             param_map[compatible_name] = param
+
+        quantized_tensors = self.get_quantized_tensors(weight_mapper)
+        param_map.update(quantized_tensors)
+
         self._model_param_map = param_map
         return self._model_param_map
+
+    def preset_vllm_env(self):
+        def log_env(env_name: str, env_value: str):
+            logger.info(f"[Rollout] Setting vLLM {env_name} to {env_value}")
+            os.environ[env_name] = env_value
+
+        # disable VLLM_DISABLE_COMPILE_CACHE
+        log_env("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+        # if flashinfer config is not enabled, avoid importing flashinfer
+        if self.config.rollout.vllm_use_flashinfer:
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.vllm_use_flashinfer setting."
+                )
+            else:
+                log_env("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+
+        if self.config.rollout.sampling_config.use_flashinfer:
+            try:
+                import flashinfer  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[Rollout] flashinfer is not installed, ignore rollout.sampling_config.use_flashinfer setting."
+                )
+            else:
+                log_env("VLLM_USE_FLASHINFER_SAMPLER", "1")
+
+        # Model specific logic
+        model_type = self.model_config.model_type
+        if model_type == "gpt_oss" and self.config.rollout.quantization == "mxfp4":
+            # We disable flashinfer kernel for now temporarily in mxfp4 quantization
+            log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0")
+            log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0")
+            log_env("VLLM_MXFP4_USE_MARLIN", "0")
+
+    def get_quantized_tensors(
+        self, weight_mapper: WeightMapper
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Get the quantized tensors of the rollout model.
+        """
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+        model = self.get_underlying_model()
+        quantized_tensors = {}
+        # Handle special cases for some quantized models
+        if "gpt_oss" in self.model_config.model_type and self.quantization == "mxfp4":
+            # FIXME: (lms) generally handle all quantized cases when refactoring the rollout param cache.
+            # iterate all the modules in the model
+            for module_name, module in model.named_modules():
+                if hasattr(module, "w13_bias"):
+                    # this is a mxfp4 quant layer
+                    w13_weight_name = f"{module_name}.w13_weight"
+                    w2_weight_name = f"{module_name}.w2_weight"
+                    w13_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
+                        w13_weight_name
+                    )
+                    w2_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
+                        w2_weight_name
+                    )
+                    quantized_tensors[w13_compatible_name] = (
+                        module.quant_method.w13_weight_triton_tensor.storage.data
+                    )
+                    quantized_tensors[w2_compatible_name] = (
+                        module.quant_method.w2_weight_triton_tensor.storage.data
+                    )
+                    quantized_tensors[w13_compatible_name + "_scale"] = (
+                        module.quant_method.w13_precision_config.weight_scale.storage.data
+                    )
+                    quantized_tensors[w2_compatible_name + "_scale"] = (
+                        module.quant_method.w2_precision_config.weight_scale.storage.data
+                    )
+
+        return quantized_tensors

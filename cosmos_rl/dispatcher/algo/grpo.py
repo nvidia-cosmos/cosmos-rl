@@ -29,9 +29,9 @@ class GRPO(RuleBasedAlgo):
         self.eps = eps
 
     def compute_reward(
-        self, to_be_evaluated: str, reference: str
+        self, to_be_evaluated: str, reference: str, prompt: str = None
     ) -> Tuple[float, float]:
-        return self.reward_fn.compute_reward(to_be_evaluated, reference)
+        return self.reward_fn.compute_reward(to_be_evaluated, reference, prompt=prompt)
 
     def compute_advantage(self, rewards: List[float]) -> List[float]:
         rewards = np.array(rewards).astype(np.float32)

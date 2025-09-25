@@ -28,7 +28,10 @@ cosmos-rl = "cosmos_rl.launcher.launch_all:main"
 include-package-data = true
 
 [tool.setuptools.package-data]
-cosmos_rl = ["launcher/*.sh"]
+cosmos_rl = [
+    "launcher/*.sh",
+    "tools/chat_templates/*.jinja2"
+]
 
 [tool.setuptools.packages.find]
 include = ["cosmos_rl*"]

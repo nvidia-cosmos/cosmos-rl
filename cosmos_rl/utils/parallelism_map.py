@@ -26,64 +26,17 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     MergedColumnParallelLinear,
 )
+from vllm.model_executor import models as vllm_model_classes
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 
 from torch.nn.parameter import Parameter
-from math import gcd
-from functools import reduce
 import asyncio
 from cosmos_rl.utils import util
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from cosmos_rl.policy.config import Config as CosmosConfig
-
-
-class DimSliceInfo:
-    """
-    A class to represent the slice information of a tensor along a specific dimension.
-    This class contains the offset, total size, dimension name, and length of the slice.
-    """
-
-    offset: int
-    total_size: int
-    dim: str
-    length: int = 1
-
-    def __init__(self, offset: int, total_size: int, dim: str = "", length: int = 1):
-        """
-        Initialize the DimSliceInfo with the given offset, total size, dimension name, and length.
-        """
-        self.offset = offset
-        self.total_size = total_size
-        self.dim = dim
-        self.length = length
-
-    def __repr__(self):
-        # Returning a dictionary representation
-        return f"{self.__dict__}"
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
-        """
-        Create a DimSliceInfo object from a dictionary.
-        :param data: A dictionary containing the keys 'offset', 'total_size', 'dim', and 'length'.
-        :return: A DimSliceInfo object.
-        """
-        return DimSliceInfo(
-            offset=data["offset"],
-            total_size=data["total_size"],
-            dim=data.get("dim", ""),
-            length=data.get("length", 1),
-        )
-
-    def simplify(self):
-        common = reduce(gcd, [self.offset, self.total_size, self.length])  # noqa: E741
-        return DimSliceInfo(
-            offset=self.offset // common,
-            total_size=self.total_size // common,
-            dim=self.dim,
-            length=self.length // common,
-        )
+from cosmos_rl.utils.dim_slice_info import DimSliceInfo
 
 
 def slice_tensor_with_strategy(
@@ -806,51 +759,72 @@ class ParallelTopoMapper:
         param_name: str,
         is_bias: bool,
         leaf_name: str,
-    ) -> int:
+    ) -> Tuple[int, Dict[str, Any], Dict[str, List[str]]]:
+        packed_modules_mapping = self.weight_mapper.packed_modules_mapping
+        dims_rank_info = None
+        tp_dim = None
         if self.backend == "vllm":
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
                 assert any(
-                    [
-                        k in param_name
-                        for k in self.weight_mapper.packed_modules_mapping.keys()
-                    ]
-                ), f"QKVParallelLinear {param_name} is not in packed_modules_mapping {self.weight_mapper.packed_modules_mapping}."
-                return output_dim
+                    [k in param_name for k in packed_modules_mapping.keys()]
+                ), f"QKVParallelLinear {param_name} is not in packed_modules_mapping {packed_modules_mapping}."
+                tp_dim = output_dim
             elif isinstance(part, (MergedColumnParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
                 assert any(
-                    [
-                        k in param_name
-                        for k in self.weight_mapper.packed_modules_mapping.keys()
-                    ]
-                ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {self.weight_mapper.packed_modules_mapping}."
-                return output_dim
+                    [k in param_name for k in packed_modules_mapping.keys()]
+                ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {packed_modules_mapping}."
+                tp_dim = output_dim
             elif isinstance(part, (RowParallelLinear)):
+                input_dim = getattr(param, "input_dim", 1)
                 if not is_bias:
-                    input_dim = getattr(param, "input_dim", 1)
                     assert (
                         input_dim is not None
                     ), f"RowParallelLinear {param_name} has no input_dim attribute."
-                    return input_dim
+                    tp_dim = input_dim
             elif isinstance(part, (ColumnParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
-                return output_dim
+                tp_dim = output_dim
             elif isinstance(part, VocabParallelEmbedding):
-                # lm_head and embed_tokens
                 output_dim = getattr(param, "output_dim", 0)
                 assert (
                     not is_bias
                 ), f"VocabParallelEmbedding {param_name} should not have bias."
-                return output_dim
+                tp_dim = output_dim
             else:
-                assert (
-                    "Parallel" not in part.__class__.__name__
-                ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
-                logger.warning(
-                    f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
-                )
-                return None
+                if "gpt_oss" in self.hf_config.model_type:
+                    # special cases for gpt-oss model.
+                    assert hasattr(
+                        vllm_model_classes, "gpt_oss"
+                    ), "gpt-oss is not supported for this version of vllm."
+                    from cosmos_rl.utils.mxfp4.quantizer import genereate_dim_rank_info
+
+                    if isinstance(part, vllm_model_classes.gpt_oss.OAIAttention):
+                        if "sinks" in param_name:
+                            tp_dim = 0  # sinks has shape [num_heads]
+                    elif isinstance(part, FusedMoE):
+                        # This temporarily for mxfp4 gpt-oss model. un-even sharding.
+                        dims_rank_info, _tp_dim = genereate_dim_rank_info(
+                            part, param_name, param, self.hf_config, self.parallelism
+                        )
+                        if _tp_dim > 0:
+                            tp_dim = _tp_dim
+                        packed_modules_mapping = {}
+                    else:
+                        assert (
+                            "Parallel" not in part.__class__.__name__
+                        ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                        logger.warning(
+                            f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
+                        )
+                else:
+                    assert (
+                        "Parallel" not in part.__class__.__name__
+                    ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
+                    logger.warning(
+                        f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
+                    )
         elif self.backend == "trtllm":
             # for trtllm
             try:
@@ -863,18 +837,20 @@ class ParallelTopoMapper:
                 # For lm_head and embed_tokens: LMHead is children class of Linear
                 # For mlp and attention, they both use Linear, too.
                 if part.tp_mode == TensorParallelMode.COLUMN:
-                    return 0
+                    tp_dim = 0
                 elif part.tp_mode == TensorParallelMode.ROW:
-                    return 1
+                    tp_dim = 1
                 else:
-                    return None
+                    tp_dim = None
             else:
                 logger.warning(
                     f"Class {part.__class__.__name__} is not supported by auto parallelism, treat it as non-parallel Layer. If issues happened, please contact the maintainer."
                 )
-                return None
+                tp_dim = None
         else:
             raise ValueError(f"Backend {self.backend} is not supported.")
+
+        return tp_dim, dims_rank_info, packed_modules_mapping
 
     def parallelism_info_for_vllm_params(self):
         """
@@ -904,13 +880,26 @@ class ParallelTopoMapper:
                             is_bias = True
                         elif part_name == "weight":
                             is_bias = False
+                        elif part_name == "w13_weight":
+                            is_bias = False
+                        elif part_name == "w2_weight":
+                            is_bias = False
+                        elif part_name == "w13_bias":
+                            is_bias = False
+                        elif part_name == "w2_bias":
+                            is_bias = False
+                        elif part_name == "sinks":
+                            is_bias = False
+                        # FIXME: (lms) bias could also tp-ed?
                         elif part_name == "class_embedding":
                             # class_embedding is a parameter in vision encoder
                             is_bias = True
                         elif part_name == "mm_input_projection_weight":
                             # Gemma has mm_input_projection_weight
                             is_bias = True
-                        elif part_name == "weight_scale":
+                        elif (
+                            "_scale" in part_name
+                        ):  # Both `weight_scale` and `down_proj_scale` cases
                             # Currently weight scale should be skipped not for weight sync.
                             should_skip = True
                         break
@@ -922,7 +911,10 @@ class ParallelTopoMapper:
             if should_skip:
                 continue
             dims_map = {}
-            tp_dim = self.determine_tp_dim(part, param, param_name, is_bias, part_name)
+            tp_dim, dims_rank_info, packed_modules_mapping = self.determine_tp_dim(
+                part, param, param_name, is_bias, part_name
+            )
+
             if tp_dim is not None:
                 dims_map["tp"] = tp_dim
 
@@ -930,7 +922,8 @@ class ParallelTopoMapper:
                 param_name,
                 dims_map,
                 self.weight_mapper._rollout_vllm_name_to_hf,
-                self.weight_mapper.packed_modules_mapping,
+                packed_modules_mapping=packed_modules_mapping,
+                dims_rank_info=dims_rank_info,
             )
 
 
@@ -1332,7 +1325,7 @@ class ParallelizedShardMapper:
                 )
             else:
                 logger.warning(
-                    f"No send instructions generated for parameter {dest_name} in policy rank {p_rank}."
+                    f"[Policy] No send instructions generated for parameter {dest_name} in sorted_params, policy rank {p_rank}."
                 )
             if insts_for_group:
                 policy_to_rollout_insts.append(
@@ -1400,7 +1393,7 @@ class ParallelizedShardMapper:
                 )
         if len(name_in_group) > 0:
             logger.warning(
-                f"No send instructions generated for parameters {name_in_group} in policy rank {p_rank}."
+                f"[Policy] No send instructions generated for parameters {name_in_group} in policy rank {p_rank}."
             )
         # Pack the instructions into msgpack format for efficient serialization.
         return msgpack.packb(policy_to_rollout_insts)
@@ -1519,13 +1512,17 @@ class ParallelizedShardMapper:
                         dest_name, insts_for_param_name
                     ).__dict__
                 )
+            else:
+                logger.warning(
+                    f"[Rollout] No recv instructions generated for parameter {dest_name} in sorted_params, rollout rank {r_rank}."
+                )
             if insts_for_group:
                 rollout_from_policy_insts.append(
                     WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
             else:
                 raise ValueError(
-                    f"No recv instructions generated for parameter {dest_name} in rollout rank {r_rank}."
+                    f"[Rollout] No recv insts_for_group generated for parameter {dest_name} in sorted_params, rollout rank {r_rank}."
                 )
         for group in self.param_groups:
             insts_for_group = []
@@ -1586,9 +1583,13 @@ class ParallelizedShardMapper:
                 rollout_from_policy_insts.append(
                     WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
+            else:
+                raise ValueError(
+                    f"[Rollout] No recv insts_for_group generated for parameter {dest_name} in rollout rank {r_rank}."
+                )
         assert (
             len(name_in_group) == 0
-        ), f"No recv instructions generated for parameters {name_in_group} in rollout rank {r_rank}."
+        ), f"[Rollout] No recv instructions generated for parameters {name_in_group} in rollout rank {r_rank}."
         # Pack the instructions into msgpack format for efficient serialization.
         return msgpack.packb(rollout_from_policy_insts)
 

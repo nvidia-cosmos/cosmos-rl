@@ -48,6 +48,7 @@ epsilon_high = 0.2
 kl_beta = 0.0
 mu_iterations = 1
 min_filter_prefix_tokens = 1
+dataloader_shuffle = false
 
 [train.ckpt]
 enable_checkpoint = true

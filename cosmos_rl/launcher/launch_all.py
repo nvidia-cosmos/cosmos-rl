@@ -21,6 +21,7 @@ import sys
 import logging
 import time
 import os
+import shutil
 import re
 import argparse
 from argparse import REMAINDER
@@ -685,6 +686,25 @@ def replica_placement(
     return global_launch_settings
 
 
+def get_hostname_from_host(ip):
+    try:
+        # Run 'host' command
+        result = subprocess.run(
+            ["host", ip], capture_output=True, text=True, check=True
+        )
+        # Parse output
+        output = result.stdout.strip()
+        if "has address" in output:
+            # Extract part after "has address "
+            hostname = output.rsplit("has address ", 2)[-1].strip()
+            return hostname
+        else:
+            return None
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return None
+
+
 def main():
     args, parser = parse_args()
     if args.debug:
@@ -1132,21 +1152,6 @@ cosmos-rl --config config.toml"""
     else:
         cur_work_idx = args.worker_idx
 
-    if "LEPTON_JOB_WORKER_INDEX" in os.environ:
-        prefix = os.environ.get(
-            "LEPTON_JOB_SERVICE_PREFIX", os.environ.get("LEPTON_JOB_NAME")
-        )
-        subdomain = os.environ.get("LEPTON_SUBDOMAIN", "")
-        hostname = f"{prefix}-{cur_work_idx}.{subdomain}"
-        import cosmos_rl.utils.network_util as network_util
-
-        ips = network_util.get_eth_ips()
-        assert len(ips) > 0, "No IPs found for the current machine"
-        logger.info(
-            f"Setting hostname to {hostname} {ips[0]} for worker index {cur_work_idx}"
-        )
-        os.system(f"hostname {ips[0]}")
-
     control_url = None
     if args.url is not None:
         ip, port = args.url.split(":")
@@ -1278,6 +1283,39 @@ cosmos-rl --config config.toml"""
         >= min_n_gpus_policy * n_policy + min_n_gpus_rollout * n_rollouts
     ), f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * n_rollouts}, Available: {len(available_gpus)}"
 
+    if "LEPTON_JOB_WORKER_INDEX" in os.environ:
+        prefix = os.environ.get(
+            "LEPTON_JOB_SERVICE_PREFIX", os.environ.get("LEPTON_JOB_NAME")
+        )
+        subdomain = os.environ.get("LEPTON_SUBDOMAIN", "")
+        hostname = f"{prefix}-{cur_work_idx}.{subdomain}"
+        import cosmos_rl.utils.network_util as network_util
+
+        ips = network_util.get_eth_ips()
+        assert len(ips) > 0, "No IPs found for the current machine"
+        logger.info(
+            f"Setting hostname to {hostname} {ips[0]} for worker index {cur_work_idx}"
+        )
+        os.system(f"hostname {ips[0]}")
+        if shutil.which("host") is not None:
+            # Do a blocking wait until the hostname is properly resolved
+            # Only do this if 'host' command is available
+            idx = 0
+            while idx < num_workers:
+                remote_host = f"{prefix}-{idx}.{subdomain}"
+                remote_hostname = get_hostname_from_host(remote_host)
+                pattern = r"^\d+\.\d+\.\d+\.\d+$"
+                if (
+                    remote_hostname is not None
+                    and re.match(pattern, remote_hostname) is not None
+                ):
+                    idx = idx + 1
+                    continue
+                else:
+                    logger.info(
+                        f"Waiting for hostname {remote_host} to be changed as ready, current: {remote_hostname}"
+                    )
+                    time.sleep(1)
     if (
         len(global_launch_settings) <= cur_work_idx
         or len(global_launch_settings[cur_work_idx]) == 0

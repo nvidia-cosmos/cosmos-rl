@@ -119,11 +119,14 @@ def collate_fn(
 
 
 def construct_dataset(
-    config: SFTDataConfig,
+    cosmos_config: CosmosConfig,
     tokenizer: AutoTokenizer,
     data_packer: DataPacker,
     user_provided_dataset: Optional[Dataset] = None,
+    val_data_packer: Optional[DataPacker] = None,
+    user_provided_val_dataset: Optional[Dataset] = None,
 ):
+    config = cosmos_config.train.train_policy
     if user_provided_dataset is not None:
         dataset = None
         train_dataset = user_provided_dataset
@@ -143,35 +146,68 @@ def construct_dataset(
         train_dataset = concatenate_datasets(dataset_list)
     logger.info(f"Final dataset size = {len(train_dataset)}")
 
-    if isinstance(train_dataset, torch.utils.data.Dataset):
-        # Define the split ratio (e.g., 80% train, 20% test)
-        if config.dataset.test_size is None:
-            logger.warning(
-                "No test size specified, using 10% of the training dataset for testing."
+    if cosmos_config.validation.enable:
+        if user_provided_val_dataset is not None:
+            test_dataset = user_provided_val_dataset
+            logger.info(
+                "Using user-provided validation dataset, which will skip split processing."
             )
-            config.dataset.test_size = 0.1
-        if isinstance(config.dataset.test_size, float):
-            n_test_samples = int(len(train_dataset) * config.dataset.test_size)
+        elif cosmos_config.validation.dataset.name:
+            dataset = util.load_data_from_disk_or_hf(
+                cosmos_config.validation.dataset.name,
+                cosmos_config.validation.dataset.subset,
+                cosmos_config.validation.dataset.revision or None,
+            )
+            dataset_list = []
+            for split_name in cosmos_config.validation.dataset.split:
+                logger.info(
+                    f"Appending validation split {split_name}, validation dataset size = {len(dataset[split_name])}"
+                )
+                dataset_list.append(dataset[split_name])
+            test_dataset = concatenate_datasets(dataset_list)
         else:
-            n_test_samples = config.dataset.test_size
-        n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
+            logger.warning(
+                "No validation dataset provided, using split of training dataset for validation."
+            )
+            if isinstance(train_dataset, torch.utils.data.Dataset):
+                # Define the split ratio (e.g., 80% train, 20% test)
+                if config.dataset.test_size is None:
+                    logger.warning(
+                        "No test size specified, using 10% of the training dataset for testing."
+                    )
+                    config.dataset.test_size = 0.1
+                if isinstance(config.dataset.test_size, float):
+                    n_test_samples = int(len(train_dataset) * config.dataset.test_size)
+                else:
+                    n_test_samples = config.dataset.test_size
+                n_test_samples = max(min(n_test_samples, len(train_dataset) - 1), 1)
 
-        # Generate deterministic indices
-        indices = list(range(len(train_dataset)))
-        test_indices = indices[:n_test_samples]
-        train_indices = indices[n_test_samples:]
+                # Generate deterministic indices
+                indices = list(range(len(train_dataset)))
+                test_indices = indices[:n_test_samples]
+                train_indices = indices[n_test_samples:]
 
-        test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
-        train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
+                test_dataset = torch.utils.data.Subset(train_dataset, test_indices)
+                train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
+            else:
+                assert hasattr(
+                    train_dataset, "train_test_split"
+                ), "train_dataset must have train_test_split method"
+                split = train_dataset.train_test_split(
+                    test_size=config.dataset.test_size, shuffle=False
+                )
+                train_dataset = split["train"]
+                test_dataset = split["test"]
     else:
-        assert hasattr(
-            train_dataset, "train_test_split"
-        ), "train_dataset must have train_test_split method"
-        split = train_dataset.train_test_split(
-            test_size=config.dataset.test_size, shuffle=False
-        )
-        train_dataset = split["train"]
-        test_dataset = split["test"]
+
+        class EmptyDataset(Dataset):
+            def __len__(self):
+                return 0
+
+            def __getitem__(self, idx):
+                raise IndexError("EmptyDataset has no items")
+
+        test_dataset = EmptyDataset()
 
     train_sft_dataset = SFTDataset(
         config,
@@ -184,7 +220,7 @@ def construct_dataset(
         config,
         tokenizer=tokenizer,
         dataset=test_dataset,
-        data_packer=data_packer,
+        data_packer=val_data_packer,
         is_user_dataset=user_provided_dataset is not None,
     )
 
@@ -253,6 +289,10 @@ class SFTTrainer(Trainer):
         parallel_dims: ParallelDims,
         dataset: Optional[Dataset] = None,
         data_packer: Optional[DataPacker] = None,
+        val_dataset: Optional[Dataset] = None,
+        val_data_packer: Optional[DataPacker] = None,
+        sampler: Optional[Callable] = None,
+        val_sampler: Optional[Callable] = None,
     ):
         super(SFTTrainer, self).__init__(config, parallel_dims)
 
@@ -317,20 +357,41 @@ class SFTTrainer(Trainer):
             data_packer.setup(self.config, self.tokenizer)
             self.data_packer = data_packer
 
+        if isinstance(val_dataset, Callable):
+            val_dataset = val_dataset(self.config)
+            val_dataset.setup(self.config, self.tokenizer)
+        if val_data_packer:
+            val_data_packer.setup(self.config, self.tokenizer)
+            self.val_data_packer = val_data_packer
+        else:
+            self.val_data_packer = self.data_packer
+
         # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
-            config.train.train_policy,
+            config,
             tokenizer=self.tokenizer,
             data_packer=self.data_packer,
             user_provided_dataset=dataset,
+            val_data_packer=self.val_data_packer,
+            user_provided_val_dataset=val_dataset,
         )
-        train_sampler = DistributedSampler(
-            train_dataset,
-            num_replicas=self.dp_world_size,
-            rank=self.dp_rank,
-            shuffle=config.train.train_policy.dataloader_shuffle,
-            drop_last=False,
-        )
+        if sampler is not None:
+            logger.info("Using user-provided sampler for training dataset.")
+            train_sampler = sampler(
+                train_dataset,
+                num_replicas=self.dp_world_size,
+                rank=self.dp_rank,
+                shuffle=config.train.train_policy.dataloader_shuffle,
+                drop_last=False,
+            )
+        else:
+            train_sampler = DistributedSampler(
+                train_dataset,
+                num_replicas=self.dp_world_size,
+                rank=self.dp_rank,
+                shuffle=config.train.train_policy.dataloader_shuffle,
+                drop_last=False,
+            )
 
         def get_train_data_loader(sampler: Sampler[int]):
             return DataLoader(
@@ -361,13 +422,23 @@ class SFTTrainer(Trainer):
             )
             self.start_epoch = self.train_step // total_steps_per_epoch
 
-        val_sampler = DistributedSampler(
-            val_dataset,
-            num_replicas=self.dp_world_size,
-            rank=self.dp_rank,
-            shuffle=False,
-            drop_last=False,
-        )
+        if val_sampler is not None:
+            logger.info("Using user-provided sampler for validation dataset.")
+            val_sampler = val_sampler(
+                val_dataset,
+                num_replicas=self.dp_world_size,
+                rank=self.dp_rank,
+                shuffle=False,
+                drop_last=False,
+            )
+        else:
+            val_sampler = DistributedSampler(
+                val_dataset,
+                num_replicas=self.dp_world_size,
+                rank=self.dp_rank,
+                shuffle=False,
+                drop_last=False,
+            )
         self.epoch = config.train.epoch
 
         assert (
@@ -451,7 +522,7 @@ class SFTTrainer(Trainer):
                 if fixed_length is None:
                     max_len = min(
                         self.config.policy.model_max_length,
-                        self.data_packer.sft_compute_max_len(val_global_batch),
+                        self.val_data_packer.sft_compute_max_len(val_global_batch),
                     )
                 else:
                     max_len = fixed_length
@@ -462,7 +533,7 @@ class SFTTrainer(Trainer):
                         * self.seq_len_multiple
                     )
 
-                val_batch = self.data_packer.sft_collate_fn(
+                val_batch = self.val_data_packer.sft_collate_fn(
                     val_global_batch,
                     computed_max_len=max_len,
                     pad_token_id=self.tokenizer.pad_token_id,
@@ -481,11 +552,10 @@ class SFTTrainer(Trainer):
                 val_batch["position_ids"] = val_position_ids
                 val_padding_mask = val_batch.get("padding_mask", None)
 
-                if self.parallel_dims.cp_enabled:
-                    input_ids_before_cp = val_inputs
-                    position_ids_before_cp = val_position_ids
-                    padding_mask_before_cp = val_padding_mask
-
+                delay_cp_slice_inputs = getattr(
+                    self.model, "delay_cp_slice_inputs", False
+                )
+                if self.parallel_dims.cp_enabled and not delay_cp_slice_inputs:
                     [val_inputs, val_position_ids, val_padding_mask] = (
                         slice_inputs_for_ulysses(
                             [val_inputs, val_position_ids, val_padding_mask],
@@ -525,12 +595,6 @@ class SFTTrainer(Trainer):
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
                     val_logits = self.model(**val_batch)
-                    # recover from ulysses if cp is enabled
-                    if self.parallel_dims.cp_enabled:
-                        val_batch["input_ids"] = input_ids_before_cp
-                        val_batch["position_ids"] = position_ids_before_cp
-                        if padding_mask_before_cp is not None:
-                            val_batch["padding_mask"] = padding_mask_before_cp
 
                     val_loss = self.loss_fn(val_logits, val_labels)
                 val_total_loss += val_loss.item() * val_inputs.size(0)
@@ -652,12 +716,15 @@ class SFTTrainer(Trainer):
                             batch["valid_input_len"], batch["valid_input_len"]
                         )
                         batch.update(packed_args)
-
-                    if self.parallel_dims.cp_enabled and not packing_seq:
-                        input_ids_before_cp = input_ids
-                        position_ids_before_cp = position_ids
-                        padding_mask_before_cp = padding_mask
-
+                    # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
+                    delay_cp_slice_inputs = getattr(
+                        self.model, "delay_cp_slice_inputs", False
+                    )
+                    if (
+                        self.parallel_dims.cp_enabled
+                        and not packing_seq
+                        and not delay_cp_slice_inputs
+                    ):
                         [input_ids, position_ids, padding_mask] = (
                             slice_inputs_for_ulysses(
                                 [input_ids, position_ids, padding_mask],
@@ -671,12 +738,9 @@ class SFTTrainer(Trainer):
                         if padding_mask is not None:
                             batch["padding_mask"] = padding_mask
 
-                    if self.parallel_dims.cp_enabled and packing_seq:
+                    if self.parallel_dims.cp_enabled:
                         # Slice for cp after embedding generation and sequence packing in the model forward later.
                         batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
-                        input_ids_before_cp = input_ids
-                        position_ids_before_cp = position_ids
-                        padding_mask_before_cp = padding_mask
 
                     if self.parallel_dims.pp_enabled:
                         pp_last_stage = (
@@ -739,14 +803,8 @@ class SFTTrainer(Trainer):
                         # return
                         #########################################################################################
 
-                        logits = self.model(**batch)
-
-                        # recover from ulysses if cp is enabled
-                        if self.parallel_dims.cp_enabled:
-                            batch["input_ids"] = input_ids_before_cp
-                            batch["position_ids"] = position_ids_before_cp
-                            if padding_mask_before_cp is not None:
-                                batch["padding_mask"] = padding_mask_before_cp
+                        with self.act_offloading_ctx_manager:
+                            logits = self.model(**batch)
 
                         loss = self.loss_fn(
                             logits,

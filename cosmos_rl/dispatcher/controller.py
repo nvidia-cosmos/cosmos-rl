@@ -37,8 +37,6 @@ from cosmos_rl.utils.wandb_logger import (
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.network_util as network_util
 import cosmos_rl.utils.constant as constant
-from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
-from cosmos_rl.dispatcher.algo.reward import Reward
 from cosmos_rl.dispatcher.data import (
     CosmosDataset,
     RLPayload,
@@ -57,6 +55,8 @@ from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
+from cosmos_rl.dispatcher.data import IdxAndRLPayload
+from concurrent.futures import ProcessPoolExecutor
 
 
 class Controller:
@@ -98,13 +98,12 @@ class Controller:
         redis_port: int,
         redis_logfile_path: str,
         dataset: Optional[Dataset] = None,
-        reward_fns: Optional[List[Callable]] = None,
-        filter_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[DataPacker] = None,
         val_dataset: Optional[Dataset] = None,
-        val_reward_fns: Optional[List[Callable]] = None,
         val_data_packer: Optional[DataPacker] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
+        sampler: Optional[Callable] = None,
+        val_sampler: Optional[Callable] = None,
     ):
         if self.config is not None:
             raise Exception(
@@ -153,16 +152,6 @@ class Controller:
                 )
             else:
                 self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
-            self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
-                reward_fn=Reward(
-                    config=config,
-                    tokenier=self.tokenizer,
-                    reward_function=config.train.train_policy.reward_function,
-                    explicit_reward_fn=reward_fns,
-                    explicit_filter_reward_fn=filter_reward_fns,
-                ),
-                unbiased=config.train.train_policy.unbiased_advantage,
-            )
 
             remain_samples_num = (
                 (
@@ -174,13 +163,23 @@ class Controller:
                 else 0
             )
 
-            train_sampler = DistributedSampler(
-                self.dataset.train_set,
-                num_replicas=1,
-                rank=0,
-                shuffle=config.train.train_policy.dataloader_shuffle,
-                drop_last=False,
-            )
+            if sampler is not None:
+                logger.info("[Controller] Using provided sampler for training")
+                train_sampler = sampler(
+                    self.dataset.train_set,
+                    num_replicas=1,
+                    rank=0,
+                    shuffle=config.train.train_policy.dataloader_shuffle,
+                    drop_last=False,
+                )
+            else:
+                train_sampler = DistributedSampler(
+                    self.dataset.train_set,
+                    num_replicas=1,
+                    rank=0,
+                    shuffle=config.train.train_policy.dataloader_shuffle,
+                    drop_last=False,
+                )
             if config.train.resume:
                 try:
                     # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
@@ -263,6 +262,16 @@ class Controller:
                     self.val_dataset = CosmosValidationDataset(
                         config=config, tokenizer=self.tokenizer
                     )
+                if val_sampler is not None:
+                    logger.info("[Controller] Using provided sampler for validation")
+                    val_sampler = val_sampler(
+                        self.val_dataset.val_set,
+                        num_replicas=1,
+                        rank=0,
+                        shuffle=False,
+                        drop_last=False,
+                    )
+
                 val_dataloader = DataLoader(
                     self.val_dataset.val_set,
                     batch_size=1,  # batch size is 1 is mandatory
@@ -270,37 +279,13 @@ class Controller:
                     num_workers=config.train.train_policy.dataloader_num_workers,
                     prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=RLPayload.collate_fn,
-                )
-
-                if not config.validation.reward_function:
-                    if val_reward_fns is None:
-                        val_reward_fns = reward_fns
-                        if val_reward_fns is not None:
-                            logger.info(
-                                "[Controller] No validation reward functions provided, using the same reward functions as training."
-                            )
-                    config.validation.reward_function = (
-                        config.train.train_policy.reward_function
-                    )
-                    logger.info(
-                        "[Controller] No validation reward function config specified, using the same reward function as training."
-                    )
-                self.val_rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
-                    reward_fn=Reward(
-                        config=config,
-                        tokenier=self.tokenizer,
-                        reward_function=config.validation.reward_function,
-                        explicit_reward_fn=val_reward_fns,
-                    )
+                    sampler=val_sampler,
                 )
             else:
                 self.val_dataset = None
-                self.val_rl_algo = None
                 val_dataloader = None
         else:
-            self.rl_algo = None
             self.val_dataset = None
-            self.val_rl_algo = None
             val_dataloader = None
 
         redis_free_port = util.find_available_port(redis_port)
@@ -357,6 +342,8 @@ class Controller:
             config, self.redis_controller, tokenizer=self.tokenizer
         )
 
+        self.reward_executor = ProcessPoolExecutor(max_workers=4)
+
         # Register the exit function to be called when the program exits
         def exit_server(redis_server_proc, redis_free_port):
             logger.info("Stopping redis server")
@@ -397,9 +384,14 @@ class Controller:
         self,
         n: int,
         validation_step: Optional[int] = None,
-    ) -> Tuple[List[Tuple[int, str]], bool]:
-        # query n prompts from the dataset
-        prompt_id_and_payload_list: List[Tuple[int, str]] = []
+    ) -> Tuple[List[IdxAndRLPayload], bool]:
+        add_answer = (
+            self.config.rollout.multi_turn_config.enable
+            or not self.config.rollout.reference_answer_in_local
+        )
+
+        # query n prompts from the dataset [idx, payload]
+        prompt_id_and_payload_list: List[IdxAndRLPayload] = []
         is_end = False
 
         is_validation = validation_step is not None
@@ -431,14 +423,27 @@ class Controller:
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                     )
 
+        def _next_payload(iterator, add_answer: bool) -> tuple[int, RLPayload]:
+            idxs, payloads = next(iterator)
+            assert len(idxs) == 1
+            assert len(payloads) == 1
+            idx = idxs[0]
+            payload: RLPayload = payloads[0]
+            if add_answer:
+                if is_validation:
+                    payload.reference_answer = (
+                        self.val_dataset.val_set.get_reference_answer(idx)
+                    )
+                else:
+                    payload.reference_answer = (
+                        self.dataset.train_set.get_reference_answer(idx)
+                    )
+            return idx, payload
+
         for _ in range(n):
-            payload = None
+            payload: RLPayload | None = None
             try:
-                idx, payload = next(iterator)
-                assert len(idx) == 1
-                assert len(payload) == 1
-                idx = idx[0]
-                payload = payload[0].payload
+                idx, payload = _next_payload(iterator, add_answer)
             except StopIteration:
                 if not is_validation:
                     self.epoch += 1
@@ -446,11 +451,8 @@ class Controller:
                         logger.info(f"[Controller] Epoch {self.epoch} start.")
                         iterator = iter(self.train_dataloader)
                         self.train_dataloader_iter = iterator
-                        idx, payload = next(iterator)
-                        assert len(idx) == 1
-                        assert len(payload) == 1
-                        idx = idx[0]
-                        payload = payload[0].payload
+
+                        idx, payload = _next_payload(iterator, add_answer)
                     else:
                         if self.epoch == self.config.train.epoch + 1:
                             # We only log this all finished information once.
@@ -472,27 +474,21 @@ class Controller:
             and len(self.rollout_status_manager.replica_scaling_log) == 0
         ):
             # Fully Synchronized mode is enabled, we need to tag the prompt with specific weight-version
-            weight_versions = []
             global_batch_size = (
                 self.config.train.train_batch_per_replica
                 * len(self.policy_status_manager)
                 // self.config.rollout.n_generation
             )
             for i in range(current_fetch_count):
-                weight_versions.append(
-                    (self.prompt_fetch_count + i) // global_batch_size
-                )
+                prompt_id_and_payload_list[i][1].weight_version = (
+                    self.prompt_fetch_count + i
+                ) // global_batch_size
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}, prompt_fetch_count: {self.prompt_fetch_count}")
             self.prompt_fetch_count += current_fetch_count
         else:
-            weight_versions = [0] * current_fetch_count
+            for i in range(current_fetch_count):
+                prompt_id_and_payload_list[i][1].weight_version = 0
 
-        prompt_id_and_payload_list = [
-            (idx, payload, weight_version)
-            for (idx, payload), weight_version in zip(
-                prompt_id_and_payload_list, weight_versions
-            )
-        ]
         return prompt_id_and_payload_list, is_end
 
     def query_reference_answer(
@@ -606,7 +602,7 @@ class Controller:
         elif replica_name in self.rollout_status_manager:
             self.rollout_status_manager.heartbeat(replica_name)
         else:
-            raise Exception(f"[Controller] Replica {replica_name} not found")
+            logger.error(f"[Controller] Replica {replica_name} not found")
 
     """
     Life-cycle of controller

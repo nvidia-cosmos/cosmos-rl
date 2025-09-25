@@ -17,14 +17,11 @@ import torch.distributed as dist
 import uuid
 from typing import Dict, Callable, Type, Optional, Any
 import copy
-import requests
 import time
 import atexit
-from functools import partial
 import threading
-from urllib.parse import urljoin
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
-from cosmos_rl.utils.network_util import make_request_with_retry, get_local_ip
+from cosmos_rl.utils.network_util import get_local_ip
 from cosmos_rl.dispatcher.command import (
     PolicyCommandRegistry,
     RolloutCommandRegistry,
@@ -40,15 +37,11 @@ import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
 import cosmos_rl.utils.util as util
-from cosmos_rl.utils.api_suffix import (
-    COSMOS_API_REGISTER_SUFFIX,
-    COSMOS_API_UNREGISTER_SUFFIX,
-    COSMOS_API_HEARTBEAT_SUFFIX,
-)
 import base64
 import cloudpickle
 from transformers import AutoConfig
 import multiprocessing as mp
+from cosmos_rl.dispatcher.api.client import APIClient
 
 
 class CommMixin:
@@ -93,19 +86,14 @@ class CommMixin:
             f"{self.role} Replica started at global rank {self.global_rank}, with replica name: {self.replica_name}"
         )
 
+        self.api_client = APIClient(self.role)
         self.init_meta()
 
         self.register_to_controller()
 
     def init_meta(self):
         # Fetch metadata from the controller
-        # Get list of remote IPs and port
-        self.remote_ips, self.remote_port, metadata = (
-            dist_utils.get_controller_metadata()
-        )
-        self.remote_hosts = [
-            f"http://{remote_ip}:{self.remote_port}" for remote_ip in self.remote_ips
-        ]
+        metadata = self.api_client.get_controller_metadata()
         self.init_data_packer(metadata)
 
     def init_data_packer(self, metadata: Dict[str, Any]):
@@ -177,33 +165,20 @@ class CommMixin:
                 ranks.append(0)
                 group_size.append(1)
 
-        try:
-            host_info_tuple = get_local_ip()
-            if host_info_tuple is None:
-                raise Exception("Failed to get local IP address")
-            host_ip, host_name = host_info_tuple
-
-            payload = {
-                "replica_name": self.replica_name,
-                "role": self.role,
-                "mesh_names": target_mesh_names,
-                "ranks": ranks,
-                "group_size": group_size,
-                "global_rank": self.global_rank,
-                "host_ip": host_ip,
-                "host_name": host_name,
-            }
-            make_request_with_retry(
-                partial(
-                    requests.post,
-                    json=payload,
-                ),
-                self.get_alternative_urls(COSMOS_API_REGISTER_SUFFIX),
-                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-            )
-        except Exception as e:
-            logger.error(f"Failed to register to controller: {e}")
-            raise e
+        host_info_tuple = get_local_ip()
+        if host_info_tuple is None:
+            raise Exception("Failed to get local IP address")
+        host_ip, host_name = host_info_tuple
+        self.api_client.register(
+            replica_name=self.replica_name,
+            role=self.role,
+            mesh_names=target_mesh_names,
+            ranks=ranks,
+            group_size=group_size,
+            global_rank=self.global_rank,
+            host_ip=host_ip,
+            host_name=host_name,
+        )
 
         dist.barrier()  # wait all the atoms registered.
 
@@ -238,17 +213,7 @@ class CommMixin:
         self._is_registered = False
         # let only rank == 0 send the unregister request
         if self.global_rank == 0:
-            try:
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={"replica_name": self.replica_name},
-                    ),
-                    self.get_alternative_urls(COSMOS_API_UNREGISTER_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-            except Exception as e:
-                logger.error(f"Failed to unregister to controller: {e}")
+            self.api_client.unregister(self.replica_name)
 
     def get_group_unique_key(self, replica_name_to_rank: Dict[str, int]):
         return (
@@ -265,29 +230,20 @@ class CommMixin:
         )
 
     def init_redis(self):
+        assert (
+            self.api_client.remote_ips is not None
+        ), "Please init the api client first"
         # For command fetch via redis connection
         self.redis_controller = RedisStreamHandler(
-            ips=self.remote_ips, port=int(self.config.redis)
+            ips=self.api_client.remote_ips, port=int(self.config.redis)
         )
         logger.debug(
-            f"[{self.role}] Init redis at {self.remote_ips}:{self.redis_controller.port}"
+            f"[{self.role}] Init redis at {self.api_client.remote_ips}:{self.redis_controller.port}"
         )
 
     def heartbeat_trigger(self, shutdown_signal: threading.Event):
         while True:
-            try:
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={
-                            "replica_name": self.replica_name,
-                        },
-                    ),
-                    self.get_alternative_urls(COSMOS_API_HEARTBEAT_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-            except Exception as e:
-                logger.error(f"Failed to send heartbeat to controller: {e}")
+            self.api_client.post_heartbeat(self.replica_name)
 
             # If the heartbeat interval is greater than 1, we need to check the shutdown signal every second
             # for faster shutdown check
@@ -305,10 +261,3 @@ class CommMixin:
                 time.sleep(constant.COSMOS_HEARTBEAT_SEND_INTERVAL)
                 if shutdown_signal.is_set():
                     break
-
-    def get_alternative_urls(self, suffix: str):
-        # Get the alternative URLs for the given suffix
-        urls = []
-        for remote_host in self.remote_hosts:
-            urls.append(urljoin(remote_host, suffix))
-        return urls

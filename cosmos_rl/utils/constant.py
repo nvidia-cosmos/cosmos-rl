@@ -39,7 +39,20 @@ COSMOS_ROLLOUT_STEP_INTERVAL = int(
 COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY = int(
     os.environ.get("COSMOS_NCCL_ERROR_CLEAN_REPLICA_DELAY", "10")
 )
-COSMOS_P2R_NCCL_GROUP_SIZE = int(os.environ.get("COSMOS_P2R_NCCL_GROUP_SIZE", "4"))
+# FIXME: (lms) Setting this greater than 1 could cause P2R NCCL hang when PP and FSDP are both enabled.
+COSMOS_P2R_NCCL_GROUP_SIZE = int(os.environ.get("COSMOS_P2R_NCCL_GROUP_SIZE", "1"))
+COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT = int(
+    os.environ.get("COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT", "600")
+)
+COSMOS_ROLLOUT_CMD_WAIT_INTERVAL = float(
+    os.environ.get("COSMOS_ROLLOUT_CMD_WAIT_INTERVAL", "0.001")
+)
+COSMOS_ROLLOUT_CMD_WAIT_TIMES = int(
+    os.environ.get("COSMOS_ROLLOUT_CMD_WAIT_TIMES", "0")
+)
+COSMOS_ROLLOUT_REPORT_INTERVAL = int(
+    os.environ.get("COSMOS_ROLLOUT_REPORT_INTERVAL", "100")
+)
 
 # Internal model type for HFModel
 COSMOS_HF_MODEL_TYPES = "hfmodel"
