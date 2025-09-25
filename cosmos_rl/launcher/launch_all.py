@@ -431,7 +431,7 @@ def parse_args():
         help="Reservation ID for dedicated node groups",
     )
 
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     # Validate Lepton mode arguments
     if args.lepton_mode:
@@ -513,10 +513,12 @@ def replica_placement(
                 if script is not None:
                     commands[-1] += f" --script {script}"
                 if node_in_replica == 0:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
                         rdzv_ip = get_worker_ip(global_worker_idx)
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                 else:
+                    if "MASTER_ADDR" in os.environ:
+                        rdzv_ip = os.environ["MASTER_ADDR"]
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
 
                 control_urls.append(control_url)
@@ -605,10 +607,12 @@ def replica_placement(
                 if script is not None:
                     commands[-1] += f" --script {script}"
                 if node_in_replica == 0:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
                         rdzv_ip = get_worker_ip(global_worker_idx)
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                 else:
+                    if "MASTER_ADDR" in os.environ:
+                        rdzv_ip = os.environ["MASTER_ADDR"]
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
 
                 control_urls.append(control_url)
@@ -1116,7 +1120,7 @@ cosmos-rl --config config.toml"""
         cur_work_idx = int(os.environ.get("LEPTON_JOB_WORKER_INDEX"))
     else:
         cur_work_idx = args.worker_idx
-
+    
     if "LEPTON_JOB_WORKER_INDEX" in os.environ:
         prefix = os.environ.get(
             "LEPTON_JOB_SERVICE_PREFIX", os.environ.get("LEPTON_JOB_NAME")
@@ -1142,6 +1146,10 @@ cosmos-rl --config config.toml"""
         else:
             control_url = args.url
     else:
+        if "MASTER_ADDR" in os.environ and "NODE_RANK" in os.environ and int(os.environ.get("NODE_RANK")) != 0:
+            primary_hostname = os.environ.get("MASTER_ADDR")
+            primary_hostname = resolve_host_blocking(primary_hostname)
+            control_url = f"{primary_hostname}:{args.port}"
         if (
             "LEPTON_JOB_WORKER_INDEX" in os.environ
             and int(os.environ.get("LEPTON_JOB_WORKER_INDEX")) != 0
@@ -1222,8 +1230,21 @@ cosmos-rl --config config.toml"""
                 )
         else:
             raise RuntimeError("Node IP list not provided")
+    
+    def get_k8s_ip(worker_idx: int) -> str:
+        if "JOB_SERVICE_PREFIX" in os.environ and "JOB_SERVICE_NAME" in os.environ and "NAMESPACE" in os.environ:
+            prefix = os.environ.get("JOB_SERVICE_PREFIX")
+            service_name = os.environ.get("JOB_SERVICE_NAME")
+            namespace = os.environ.get("NAMESPACE")
+            hostname = f"{prefix}-{worker_idx}.{service_name}.{namespace}.svc.cluster.local"
+            hostname = resolve_host_blocking(hostname)
+            return hostname
+        else:
+            raise RuntimeError("Job service prefix, name, and namespace not found in environment variables")
 
     def get_worker_ip(worker_idx: int) -> str:
+        if "JOB_SERVICE_PREFIX" in os.environ and "JOB_SERVICE_NAME" in os.environ and "NAMESPACE" in os.environ:
+            return get_k8s_ip(worker_idx)
         if "LEPTON_JOB_WORKER_INDEX" in os.environ:
             return get_lepton_ip(worker_idx)
         elif args.node_ip_list is not None:

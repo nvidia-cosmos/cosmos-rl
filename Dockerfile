@@ -101,7 +101,7 @@ RUN pip install --no-cache-dir torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.
 # Install additional heavy dependencies
 RUN pip install --no-cache-dir \
     torchao==0.12.0 \
-    vllm==0.10.0 \
+    vllm==0.10.1.1 \
     flash-attn==2.8.2 \
     transformer_engine[pytorch] \
     https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl && \
