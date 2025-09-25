@@ -327,9 +327,9 @@ class HFModel(BaseModel):
                 modules_to_not_convert=quantization_config["modules_to_not_convert"],
             )
             kwargs["quantization_config"] = mxfp4_quantization_config
-
         hf_model = self.model_class.from_pretrained(
             model_name_or_path,
+            dtype=dtype,
             **kwargs,
         ).to(device="cpu", dtype=dtype)
 
