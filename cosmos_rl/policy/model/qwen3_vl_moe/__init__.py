@@ -345,30 +345,6 @@ class Qwen3VLMoeModel(BaseModel):
         self.visual = Qwen3VLMoeVisionModel(config.encoder_args)
         self.vocab_size = config.lm_args.vocab_size
 
-    def get_image_features(
-        self,
-        pixel_values: torch.FloatTensor,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-    ):
-        """
-        Encodes images into continuous embeddings that can be forwarded to the language model. The deepstack visual features are also returned.
-
-        Args:
-            pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, image_size, image_size)`):
-                The tensors corresponding to the input images.
-            image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
-                The temporal, height and width of feature shape of each image in LLM.
-        """
-        pixel_values = pixel_values.type(self.visual.dtype)
-        image_embeds, deepstack_image_embeds = self.visual(
-            pixel_values, grid_thw=image_grid_thw
-        )
-        split_sizes = (
-            image_grid_thw.prod(-1) // self.visual.spatial_merge_size**2
-        ).tolist()
-        image_embeds = torch.split(image_embeds, split_sizes)
-        return image_embeds, deepstack_image_embeds
-
     def _process_vision_embeddings(
         self, inputs_embeds, input_ids, pixel_values, grid_thw, pad_token_id
     ):
