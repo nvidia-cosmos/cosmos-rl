@@ -232,13 +232,13 @@ class Qwen3MoE(nn.Module):
             else:
                 h = layer(h, position_embeddings=position_embeddings, **kwargs)
             # add visual features to the hidden states of first several layers
-            if deepstack_visual_embeds is not None and layer_idx in range(
+            if deepstack_visual_embeds is not None and int(layer_idx) in range(
                 len(deepstack_visual_embeds)
             ):
                 h = self._deepstack_process(
                     h,
                     visual_pos_masks,
-                    deepstack_visual_embeds[layer_idx],
+                    deepstack_visual_embeds[int(layer_idx)],
                 )
 
         # Add `if` check just in case `pp` is enabled
@@ -791,8 +791,8 @@ class Qwen3VLMoeModel(BaseModel):
         except Exception:
             head_dim = lm_config.hidden_size // lm_config.num_attention_heads
             logger.warning(f"head_dim not found in config, using {head_dim}")
-
-        lm_config.num_hidden_layers = 2
+        # for debug
+        # lm_config.num_hidden_layers = 2
         lm_args = Qwen3MoeArgs(
             dim=lm_config.hidden_size,
             ffn_dim=lm_config.moe_intermediate_size,
