@@ -99,7 +99,9 @@ RUN pip install \
 
 ###################################################
 
-FROM no-efa-base AS fa3-build
+
+# Phase for building any lib that we want to builf from source
+FROM no-efa-base AS source-build
 
 # install git
 RUN apt-get update -y && apt-get install -y git
@@ -108,7 +110,7 @@ WORKDIR /workspace
 
 RUN git clone --branch v2.8.3 --single-branch https://github.com/Dao-AILab/flash-attention.git
 
-WORKDIR /workspace/flash-attention
+WORKDIR /workspace/flash-attention/hopper
 
 RUN python setup.py bdist_wheel
 
@@ -161,14 +163,18 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 
 ###################################################
 ## Image target: cosmos_rl
-FROM ${COSMOS_RL_BUILD_MODE}-base AS package
+FROM ${COSMOS_RL_BUILD_MODE}-base AS pre-package
 
 WORKDIR /workspace
 
 # install fa3
-COPY --from=fa3-build /workspace/flash-attention/dist/*.whl /workspace
+COPY --from=source-build /workspace/flash-attention/hopper/dist/*.whl /workspace
 RUN pip install /workspace/*.whl
 RUN rm /workspace/*.whl
+
+###################################################
+## Image target: cosmos_rl
+FROM pre-package AS package
 
 COPY . /workspace/cosmos_rl
 RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
