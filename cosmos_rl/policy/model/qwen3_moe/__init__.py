@@ -44,7 +44,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
-import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
+from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
@@ -197,8 +197,9 @@ class Attention(nn.Module):
             bias="o_proj" in model_args.biases,
         )
         self.rope_func = rope.RotaryPositionEmbedding()
-        self.attn_func = modeling_utils.flash_attn_func
-        self.attn_func_varlen = modeling_utils.flash_attn_varlen_func
+        flash_meta = FlashAttnMeta()
+        self.attn_func = flash_meta.flash_attn_func
+        self.attn_func_varlen = flash_meta.flash_attn_varlen_func
 
     def forward(
         self,

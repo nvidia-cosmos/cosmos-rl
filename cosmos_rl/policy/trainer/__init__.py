@@ -38,7 +38,7 @@ from typing import Dict, Optional
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
-from cosmos_rl.policy.kernel.modeling_utils import set_flash_attn_deterministic
+from cosmos_rl.policy.kernel.modeling_utils import init_flash_attn_meta
 from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
 
 
@@ -56,7 +56,8 @@ class Trainer(CommMixin):
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             torch.use_deterministic_algorithms(mode=True, warn_only=True)
-        set_flash_attn_deterministic(config.train.deterministic)
+
+        init_flash_attn_meta(config.train.deterministic)
 
         self.config = config
         if self.config.policy.parallelism.dp_shard_size == -1:
