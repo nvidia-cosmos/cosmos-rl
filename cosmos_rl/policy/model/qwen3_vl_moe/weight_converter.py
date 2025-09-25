@@ -97,53 +97,12 @@ def qwen3_moe_lm_weight_from_hf(
             shard = tensor.tensor_split(tp_ep_size, dim=-1)[tp_ep_rank]
     elif (
         match := re.search(  # noqa: F841
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj)\.(weight|bias)",
+            r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)\.(weight|bias)",
             dest_name,
         )
     ) is not None:
-        # shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
-        # Check whether this expert belongs to the current process
-        # Groups example (with 32 experts, and 4 EP groups):
-        #  EP=0: 0, 1, 2, 3, 4, 5, 6, 7
-        #  EP=1: 8, 9, 10, 11, 12, 13, 14, 15
-        #  EP=2: 16, 17, 18, 19, 20, 21, 22, 23
-        #  EP=3: 24, 25, 26, 27, 28, 29, 30, 31
-        n_expert_per_ep = n_experts // tp_ep_size
-        belongs_to_current_ep = (
-            tp_ep_rank * n_expert_per_ep
-            <= int(match.group(2))  # Expert index
-            < (tp_ep_rank + 1) * n_expert_per_ep
-        )
-        belongs_to_current_dp_shard = (
-            int(match.group(2)) - tp_ep_rank * n_expert_per_ep
-        ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
-        if belongs_to_current_ep and belongs_to_current_dp_shard:
-            should_do_fsdp_sharding = False
-            shard = tensor
-        else:
-            # If the expert does not belong to the current process, return None to skip this weight
-            return None, None
-    elif (
-        match := re.search(
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)", dest_name
-        )  # noqa: F841
-    ) is not None:
-        # The same logic as the up_proj/gate_proj
-        n_expert_per_ep = n_experts // tp_ep_size
-        belongs_to_current_ep = (
-            tp_ep_rank * n_expert_per_ep
-            <= int(match.group(2))
-            < (tp_ep_rank + 1) * n_expert_per_ep
-        )
-        belongs_to_current_dp_shard = (
-            int(match.group(2)) - tp_ep_rank * n_expert_per_ep
-        ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
-        if belongs_to_current_ep and belongs_to_current_dp_shard:
-            should_do_fsdp_sharding = False
-            shard = tensor
-        else:
-            # If the expert does not belong to the current process, return None to skip this weight
-            return None, None
+        should_do_fsdp_sharding = False
+        shard = tensor
     elif (
         match := re.search(  # noqa: F841
             r"layers\.(\d+)\.post_attention_layernorm\.(weight|bias)", dest_name

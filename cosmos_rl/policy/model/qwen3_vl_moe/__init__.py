@@ -592,21 +592,69 @@ class Qwen3VLMoeModel(BaseModel):
                         # This is due to the expert parallelism grouping
                         continue
                     # For MoE LM
-                    expert_id = None
                     if match := re.search(  # noqa: F841
-                        r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
+                        r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)\.(weight|bias)",
                         dest_name,
                     ):
-                        # remove `experts.$ID.` from dest_name
-                        expert_id = int(match.group(2))
-                        dest_name = dest_name.replace(f"experts.{expert_id}.", "")
-                        # Convert expert_id to local_expert_id
-                        n_local_experts = (
-                            n_experts
-                            // parallel_dims.tp
-                            // (parallel_dims.dp_shard * parallel_dims.cp)
-                        )
-                        expert_id = expert_id % n_local_experts
+                        tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
+                        assert (
+                            n_experts % tp_ep_size == 0
+                        ), "n_experts must be divisible by tp_ep_size"
+
+                        if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+                            dp_shard_rank = parallel_dims.mesh[
+                                tuple(("dp_shard_cp",))
+                            ].get_local_rank()
+                            dp_shard_size = parallel_dims.mesh[
+                                tuple(("dp_shard_cp",))
+                            ].size()
+                        else:
+                            dp_shard_rank = 0
+                            dp_shard_size = 1
+
+                        dest_name = dest_name.replace("experts.", "")
+                        n_expert_per_ep = n_experts // tp_ep_size
+
+                        for expert_id in range(n_experts):
+                            belongs_to_current_ep = (
+                                tp_ep_rank * n_expert_per_ep
+                                <= int(match.group(2))  # Expert index
+                                < (tp_ep_rank + 1) * n_expert_per_ep
+                            )
+
+                            belongs_to_current_dp_shard = (
+                                int(match.group(2)) - tp_ep_rank * n_expert_per_ep
+                            ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
+
+                            if belongs_to_current_ep and belongs_to_current_dp_shard:
+                                expert_shard_weight = shared_weight[expert_id]
+                                # Convert expert_id to local_expert_id
+                                n_local_experts = (
+                                    n_experts
+                                    // parallel_dims.tp
+                                    // (parallel_dims.dp_shard * parallel_dims.cp)
+                                )
+                                expert_id = expert_id % n_local_experts
+                                target_tensor = lm_state_dict[dest_name]
+
+                                is_dist_tensor = isinstance(
+                                    target_tensor, torch.distributed.tensor.DTensor
+                                )
+                                local_view = (
+                                    target_tensor.to_local()
+                                    if is_dist_tensor
+                                    else target_tensor
+                                )
+
+                                local_view = local_view[expert_id]
+
+                                assert (
+                                    local_view.shape == expert_shard_weight.shape
+                                ), f"Shape mismatch: {local_view.shape} != {expert_shard_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                                with torch.no_grad():
+                                    local_view.data.copy_(expert_shard_weight)
+                            else:
+                                continue
 
                     if dest_name in lm_state_dict:
                         target_tensor = lm_state_dict[dest_name]
@@ -616,7 +664,20 @@ class Qwen3VLMoeModel(BaseModel):
                         # logger.warning(f"Skipping weight: {dest_name} because it's not in the model due to pipeline split")
                         continue
                     else:
-                        raise ValueError(f"Unsupported weight: {dest_name}")
+                        should_skip = True
+                        for layer_id in range(
+                            self.hf_config.text_config.num_hidden_layers
+                        ):
+                            contain_name = f"layers.{layer_id}."
+                            if contain_name not in dest_name:
+                                continue
+                            else:
+                                should_skip = False
+                                break
+                        if should_skip:
+                            continue
+                        else:
+                            raise ValueError(f"Unsupported weight: {dest_name}")
 
                     is_dist_tensor = isinstance(
                         target_tensor, torch.distributed.tensor.DTensor
@@ -624,9 +685,6 @@ class Qwen3VLMoeModel(BaseModel):
                     local_view = (
                         target_tensor.to_local() if is_dist_tensor else target_tensor
                     )
-                    # Write to the correct expert of the target tensor
-                    if expert_id is not None:
-                        local_view = local_view[expert_id]
 
                     assert (
                         local_view.shape == shared_weight.shape
@@ -690,6 +748,7 @@ class Qwen3VLMoeModel(BaseModel):
             head_dim = lm_config.hidden_size // lm_config.num_attention_heads
             logger.warning(f"head_dim not found in config, using {head_dim}")
 
+        lm_config.num_hidden_layers = 2
         lm_args = Qwen3MoeArgs(
             dim=lm_config.hidden_size,
             ffn_dim=lm_config.moe_intermediate_size,
