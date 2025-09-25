@@ -306,6 +306,32 @@ def parallelize(
     )
     assert parallel_dims.tp == 1, "Tensor parallelism not support for DeepSeek model"
 
+<<<<<<< HEAD
+=======
+    if parallel_dims.cp_enabled:
+        _apply_cp(model, meshes["default"]["cp"], parallel_dims)
+
+    if parallel_dims.ep_enabled:
+        assert "moe" in meshes
+        _apply_ep(model, meshes["moe"]["ep"])
+
+    _apply_ac(model)
+
+    _apply_fsdp(model, meshes, parallel_dims)
+
+    if parallel_dims.pp_enabled:
+        return model
+    return None, None
+
+
+def parallelize(
+    model: nn.Module,
+    parallel_dims: ParallelDims,
+    config: CosmosConfig,
+    pp_loss_fn: Optional[Callable],
+) -> nn.Module:
+
+>>>>>>> b9c9bf2 (more fixes. moved all model params to cuda)
     if parallel_dims.pp_enabled:
         local_rank = int(os.getenv("LOCAL_RANK", 0))
         device_type, _ = _get_device_info()

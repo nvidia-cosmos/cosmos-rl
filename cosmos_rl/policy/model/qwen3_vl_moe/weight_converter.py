@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import re
+<<<<<<< HEAD:cosmos_rl/policy/model/qwen3_vl_moe/weight_converter.py
 import torch
 from typing import Tuple, Dict, Any
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -21,6 +22,13 @@ from cosmos_rl.utils.parallelism_registry import (
     ParallelismStrategyRole,
     register_parallelism_strategy,
 )
+=======
+from typing import Any, Dict, Tuple
+
+import torch
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.parallelism_registry import register_parallelism_strategy
+>>>>>>> b9c9bf2 (more fixes. moved all model params to cuda):cosmos_rl/tools/model/deepseek_v3/weight_converter.py
 
 
 def map_key_from_hf(name: str, src_model_type: str) -> str:
@@ -115,9 +123,7 @@ def qwen3_moe_lm_weight_from_hf(
     ) is not None:
         shard = tensor
     elif (
-        match := re.search(  # noqa: F841
-            r"layers\.(\d+)\.mlp\.gate\.weight", dest_name
-        )
+        match := re.search(r"layers\.(\d+)\.mlp\.gate\.weight", dest_name)  # noqa: F841
     ) is not None:
         # TODO(cjx): Small enough, forbid FSDP sharding is better
         shard = tensor
@@ -201,9 +207,14 @@ def map_weight_parallel_dims(
     pp_size = parallel_dims.pp
     n_layers = model_config.text_config.num_hidden_layers
 
+<<<<<<< HEAD:cosmos_rl/policy/model/qwen3_vl_moe/weight_converter.py
     assert dest_name.startswith("model.language_model.") or dest_name.startswith(
         "lm_head."
     )
+=======
+    assert dest_name.startswith("model.") or dest_name.startswith("lm_head.")
+
+>>>>>>> b9c9bf2 (more fixes. moved all model params to cuda):cosmos_rl/tools/model/deepseek_v3/weight_converter.py
     if tp_ep_size > 1:
         if "lm_head.weight" == dest_name:
             dims_map[dim] = 0

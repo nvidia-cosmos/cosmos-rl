@@ -137,6 +137,8 @@ class DeepseekV3MoEModel(BaseModel):
         logger.debug(
             f"[model] input ids shape: {input_ids.shape}, position_ids: {position_ids.shape}"
         )
+        # Moving all model parameters to cuda
+        self.model = self.model.to("cuda")
 
         logits, aux_loss = self.model(
             tokens=input_ids,
@@ -293,12 +295,147 @@ class DeepseekV3MoEModel(BaseModel):
             if name == embed_tokens_weight_key:
                 reserved[name] = tensor.clone()
 
+<<<<<<< HEAD
             dest_name, sharded_weight, expert_id = convert_weight_from_hf(
                 tensor,
                 name,
                 model_type,
                 parallel_dims,
                 n_experts=self.config.n_routed_experts,
+=======
+            self_state_dict = self.state_dict()
+            self_state_dict = {
+                clear_weight_name(k): v for k, v in self_state_dict.items()
+            }
+
+            lm_head_weight_key = "model.model.lm_head.weight"
+            embed_tokens_weight_key = "model.model.embed_tokens.weight"
+            weights_of_ckpt_names = set()
+            reserved = {}
+            scale_inv_paths = {}
+
+            for f in safetensors_files:
+                ckpt = retry(safe_open)(
+                    os.path.join(model_path, f), framework="pt", device=str(device)
+                )
+                keys = ckpt.keys()
+                for name in keys:
+                    if name.endswith("weight_scale_inv"):
+                        scale_inv_paths[name] = os.path.join(model_path, f)
+
+            for f in safetensors_files:
+                logger.info(f"Loading safetensors: {f}")
+                weights_of_ckpt = {}
+                ckpt = retry(safe_open)(
+                    os.path.join(model_path, f), framework="pt", device=str(device)
+                )
+                keys = ckpt.keys()
+                for name in keys:
+                    ckpt_tensor = ckpt.get_tensor(name)
+                    weights_of_ckpt[name] = ckpt_tensor
+                    weights_of_ckpt_names.add(name)
+                    if name == embed_tokens_weight_key:
+                        reserved[name] = ckpt_tensor
+
+                for name in weights_of_ckpt.keys():
+                    tensor = weights_of_ckpt[name]
+                    if name.endswith("weight_scale_inv") or "layers.61" in name:
+                        # Skip since this weight is used for dequantization
+                        continue
+
+                    if (
+                        "down_proj" in name
+                        or "up_proj" in name
+                        or "gate_proj" in name
+                        or "self_attn.kv_a_proj_with_mqa" in name
+                        or "self_attn.kv_b_proj" in name
+                        or "self_attn.o_proj" in name
+                        or "self_attn.q_a_proj" in name
+                        or "self_attn.q_b_proj" in name
+                    ) and "weight" in name:
+                        inv_name = name + "_scale_inv"
+                        inv_tensor = retry(safe_open)(
+                            scale_inv_paths[inv_name],
+                            framework="pt",
+                            device=str(device),
+                        ).get_tensor(inv_name)
+                        tensor = weight_dequant(tensor, inv_tensor)
+
+                    dest_name, shared_weight, expert_id = convert_weight_from_hf(
+                        tensor,
+                        name,
+                        model_type,
+                        parallel_dims,
+                        n_experts=self.config.n_routed_experts,
+                    )
+
+                    if dest_name is None:
+                        # This is due to the expert parallelism grouping
+                        continue
+
+                    if dest_name not in self_state_dict and parallel_dims.pp_enabled:
+                        logger.info(
+                            f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
+                        )
+                        continue
+
+                    target_tensor = self_state_dict[dest_name]
+                    if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                        target_tensor = target_tensor.to_local()
+                    # Write to the correct expert of the target tensor
+                    if expert_id is not None:
+                        # Convert expert_id to local_expert_id
+                        n_local_experts = (
+                            self.config.n_routed_experts
+                            // parallel_dims.tp
+                            // parallel_dims.dp_shard
+                        )
+
+                        expert_id = expert_id % n_local_experts
+                        target_tensor = target_tensor[expert_id]
+
+                    assert (
+                        target_tensor.shape == shared_weight.shape
+                    ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
+                    with torch.no_grad():
+                        target_tensor.data.copy_(shared_weight)
+                torch.distributed.barrier()
+                logger.info(f"Loaded safetensors: {f} successfully.")
+
+            if (
+                lm_head_weight_key not in weights_of_ckpt_names
+                and embed_tokens_weight_key in weights_of_ckpt_names
+            ):
+                # tied with embed_tokens.weight
+                name = lm_head_weight_key
+                assert embed_tokens_weight_key in reserved
+                tensor = reserved[embed_tokens_weight_key]
+                dest_name, shared_weight = convert_weight_from_hf(
+                    tensor,
+                    name,
+                    model_type,
+                    parallel_dims,
+                    n_experts=self.config.n_routed_experts,
+                )
+                if dest_name in self_state_dict:
+                    target_tensor = self_state_dict[dest_name]
+                    is_dist_tensor = isinstance(
+                        target_tensor, torch.distributed.tensor.DTensor
+                    )
+                    local_view = (
+                        target_tensor.to_local() if is_dist_tensor else target_tensor
+                    )
+                    assert (
+                        local_view.shape == shared_weight.shape
+                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                    with torch.no_grad():
+                        local_view.data.copy_(shared_weight)
+
+            logger.info(f"Dumping the tensors to DCP folder {dcp_checkpoint_path}")
+            os.makedirs(dcp_checkpoint_path, exist_ok=True)
+            fs_storage_writer = torch.distributed.checkpoint.FileSystemWriter(
+                dcp_checkpoint_path
+>>>>>>> b9c9bf2 (more fixes. moved all model params to cuda)
             )
 
             if dest_name is None:
