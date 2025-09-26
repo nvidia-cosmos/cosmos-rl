@@ -16,7 +16,10 @@
 import torch
 import atexit
 import threading
+import requests
 from queue import Queue
+from functools import partial
+from urllib.parse import urljoin
 from typing import List, Tuple, Optional, Any
 
 
@@ -32,6 +35,13 @@ from cosmos_rl.rollout.trtllm_rollout import patch_trtllm  # noqa: F401
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.rollout import State, TRTLLMRolloutWorkerBase
 from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.network_util import make_request_with_retry
+from cosmos_rl.utils.api_suffix import (
+    COSMOS_API_NEXT_PROMPT_SUFFIX,
+    COSMOS_API_ROLLOUT_SUFFIX,
+    COSMOS_API_VALIDATION_REPORT_SUFFIX,
+)
+from cosmos_rl.utils import constant
 
 
 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout import TRTLLM_Rollout
@@ -123,17 +133,50 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         atexit.register(self.handle_shutdown)
 
+    def get_alternative_urls(self, suffix: str):
+        # Get the alternative URLs for the given suffix
+        urls = []
+        for remote_host in self.remote_hosts:
+            urls.append(urljoin(remote_host, suffix))
+        return urls
+
     def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
         """
         Request new prompts from the controller for both training and validation.
         """
-        prompts = None
+        prompts_and_is_end = (None, False)
+
+        prompt_id_and_payload_list = None
         is_end = False
+        url_suffix = COSMOS_API_NEXT_PROMPT_SUFFIX
+        try:
+            if prompt_queue.empty():
+                # blocking request
+                prompt_meta = make_request_with_retry(
+                    partial(
+                        requests.get,
+                        params={
+                            "n": batch_size,
+                            **kwargs,
+                        },
+                    ),
+                    self.get_alternative_urls(url_suffix),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+                prompt_meta = prompt_meta.json()
+                payload = prompt_meta["prompt_id_and_payload_list"]
+                if len(payload) > 0:
+                    prompt_id_and_payload_list = payload
+                is_end = prompt_meta.get("is_end", is_end)
+            else:
+                prompt_id_and_payload_list = None
+        except Exception as e:
+            logger.error(f"[Rollout] Failed in query prompts from controller: {str(e)}")
+            prompt_id_and_payload_list = None
+        prompts_and_is_end = (prompt_id_and_payload_list, is_end)
+        del prompt_id_and_payload_list, is_end
 
-        if prompt_queue.empty():
-            payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
-            prompts = payloads if len(payloads) > 0 else None
-
+        prompts, is_end = prompts_and_is_end
         if prompts is not None:
             prompt_queue.put(prompts)
         return is_end
@@ -150,8 +193,22 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             completions=[],
             is_end=True,
         )
-        logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
-        self.api_client.post_rollout_completion(response)
+        try:
+            logger.info(
+                f"[Rollout] Posting rollout end signal to controller: {response}"
+            )
+            make_request_with_retry(
+                partial(
+                    requests.post,
+                    json=response.model_dump(),
+                ),
+                self.get_alternative_urls(url_suffix),
+                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+            )
+        except Exception as e:
+            logger.error(
+                f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
+            )
 
     @torch.no_grad()
     def main_loop(self):
@@ -206,7 +263,21 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         completions=validation_results,
                         is_end=True,
                     )
-                    self.api_client.post_validation_report(response)
+                    try:
+                        make_request_with_retry(
+                            partial(
+                                requests.post,
+                                json=response.model_dump(),
+                            ),
+                            self.get_alternative_urls(
+                                COSMOS_API_VALIDATION_REPORT_SUFFIX
+                            ),
+                            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
+                        )
 
                 self.validation_event.clear()
             # 2. Rollout Generation
@@ -223,7 +294,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
                     if self._prompt_queue.empty():
                         self.state.set_prompt_consume_end()
-                        self.send_end_signal()
+                        self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
 
             if self.state.prompt_consume_end():
                 assert (
@@ -290,6 +361,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 should_report = len(valid_completions) > 0
 
                 if should_report:
+                    url_suffix = COSMOS_API_ROLLOUT_SUFFIX
                     # only the first tp rank in the rollout replica will post the completion to the controller.
                     prompt_idxs = [prompt[0] for prompt in prompts]
                     payloads = [prompt[1] for prompt in prompts]
@@ -301,11 +373,23 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         completions=valid_completions,
                         is_end=False,
                     )
-                    self.api_client.post_rollout_completion(response)
+                    try:
+                        make_request_with_retry(
+                            partial(
+                                requests.post,
+                                json=response.model_dump(),
+                            ),
+                            self.get_alternative_urls(url_suffix),
+                            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
+                        )
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()
-                    self.send_end_signal()
+                    self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
 
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 

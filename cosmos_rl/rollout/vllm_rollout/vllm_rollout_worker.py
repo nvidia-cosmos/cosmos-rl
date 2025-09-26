@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import torch
+import requests
 import threading
 from queue import Queue
 import atexit
@@ -29,6 +30,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import (
     COSMOS_ROLLOUT_STEP_INTERVAL,
 )
+from cosmos_rl.utils.util import list_to_b64, b64_to_list
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
@@ -52,8 +54,18 @@ from cosmos_rl.utils.parallelism_map import (
     WeightSyncInstructionsGroup,
 )
 import cosmos_rl.utils.distributed as dist_util
+from cosmos_rl.utils.network_util import make_request_with_retry
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
+from cosmos_rl.utils.api_suffix import (
+    COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
+    COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
+    COSMOS_API_NEXT_PROMPT_SUFFIX,
+    COSMOS_API_ROLLOUT_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
+    COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
+    COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
+)
 from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
     IdxAndRLPayload,
@@ -63,6 +75,7 @@ from cosmos_rl.rollout.schema import RolloutResult
 
 from vllm import SamplingParams
 import time
+import msgpack
 
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
@@ -307,11 +320,26 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
         ]
         if self.global_rank == 0:
-            self.api_client.post_rollout_shard_info(
-                shard_infos=self.all_rank_local_shard_infos,
-                param_groups=list(merged_groups.values()),
-                sorted_params=sorted_params_all_rank,
-            )
+            body = {
+                "shard_infos": self.all_rank_local_shard_infos,
+                "param_groups": list(merged_groups.values()),
+                "sorted_params": sorted_params_all_rank,
+            }
+            data = msgpack.packb(body)
+            try:
+                make_request_with_retry(
+                    partial(
+                        requests.post,
+                        data=data,
+                        headers={"Content-Type": "application/msgpack"},
+                    ),
+                    self.get_alternative_urls(COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Rollout] Failed in post shard infos to controller after retries {e}."
+                )
 
     def handle_shutdown(self):
         # Only call once
@@ -363,9 +391,23 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         if self.rank_in_rollout_repicas == 0:
             # only replica_rank == 0 have the right to generate nccl id.
             nccl_group_id = create_nccl_uid()
-            self.api_client.post_nccl_comm_initiator(
-                unique_rollout_group_key, nccl_group_id
-            )
+            base64_nccl_group_id = list_to_b64(nccl_group_id)
+            try:
+                make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json={
+                            "unique_pair_name": unique_rollout_group_key,
+                            "handle_base64": base64_nccl_group_id,
+                        },
+                    ),
+                    self.get_alternative_urls(COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Rollout] Failed in post nccl group_id to controller after retries {e}."
+                )
 
         if self.rank_in_rollout_repicas != 0:
             # other replicas should query the nccl group id from controller
@@ -392,14 +434,44 @@ class vLLMRolloutWorker(RolloutWorkerBase):
 
     def query_nccl_unique_id_from_controller(self, unique_id_key: str):
         # We don't have something like dist.barrier(), so just use while True loop to query it like synchronize.
+        nccl_group_id = None
         # all ranks not zero in replica 0 or all ranks of other replicas need to query the group_id from controller
-        return self.api_client.post_nccl_comm_acceptor(unique_id_key)
+        try:
+            r = make_request_with_retry(
+                partial(
+                    requests.post,
+                    json={"unique_pair_name": unique_id_key},
+                ),
+                self.get_alternative_urls(COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX),
+                max_retries=constant.COSMOS_HTTP_LONG_WAIT_MAX_RETRY,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"[Rollout] Failed in post nccl group_id to controller after retries {e}."
+            )
+        base64_nccl_group_id = r.json()["handle_base64"]
+        nccl_group_id = b64_to_list(base64_nccl_group_id)
+        return nccl_group_id
 
     def prepare_trainable_params(self):
         # TODO: (lms/feng) Refactor the param management logic for P2R and R2R, incluing trainable params for P2R and non-trainable params for R2R.
         if not hasattr(self, "trainable_params"):
             if self.global_rank == 0:
-                trainable_params = self.api_client.get_trainable_params()
+                try:
+                    trainable_meta = make_request_with_retry(
+                        partial(
+                            requests.get,
+                        ),
+                        self.get_alternative_urls(
+                            COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX
+                        ),
+                        max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                    )
+                    trainable_params = trainable_meta.json()["trainable_params"]
+                except Exception as e:
+                    raise RuntimeError(
+                        f"[Rollout] Failed in fetching trainable params from controller after retries {e}."
+                    )
             else:
                 trainable_params = None
             trainable_params = dist_utils.broadcast_object_cpu(
@@ -837,9 +909,29 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             logger.info(
                 "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
             )
-            self.policy_to_rollout_recv_insts = (
-                self.api_client.post_rollout_shard_recv_insts(self.global_rank)
-            )
+            self.policy_to_rollout_recv_insts = []
+            try:
+                insts_meta = make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json={
+                            "rank": self.global_rank,
+                        },
+                    ),
+                    self.get_alternative_urls(
+                        COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX
+                    ),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+                insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
+                self.policy_to_rollout_recv_insts = [
+                    WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
+                ]
+
+            except Exception as e:
+                raise RuntimeError(
+                    f"[Rollout] Failed in fetching rollout from policy insts from controller after retries {e}."
+                )
             logger.info(
                 "[Rollout] Finished policy_to_rollout_recv_insts from controller."
             )
@@ -1099,13 +1191,37 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         """
         prompts_and_is_end = (None, False)
         if self.global_rank == 0:
-            if prompt_queue.empty():
-                # blocking request
-                payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
-                prompts_and_is_end = (
-                    payloads if len(payloads) > 0 else None,
-                    is_end,
+            prompt_id_and_payload_list: List[IdxAndRLPayload] | None = None
+            is_end = False
+            url_suffix = COSMOS_API_NEXT_PROMPT_SUFFIX
+            try:
+                if prompt_queue.empty():
+                    # blocking request
+                    prompt_meta = make_request_with_retry(
+                        partial(
+                            requests.get,
+                            params={
+                                "n": batch_size,
+                                **kwargs,
+                            },
+                        ),
+                        self.get_alternative_urls(url_suffix),
+                        max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                    )
+                    prompt_meta = prompt_meta.json()
+                    payload = prompt_meta["prompt_id_and_payload_list"]
+                    if len(payload) > 0:
+                        prompt_id_and_payload_list = payload
+                    is_end = prompt_meta.get("is_end", is_end)
+                else:
+                    prompt_id_and_payload_list = None
+            except Exception as e:
+                logger.error(
+                    f"[Rollout] Failed in query prompts from controller: {str(e)}"
                 )
+                prompt_id_and_payload_list = None
+            prompts_and_is_end = (prompt_id_and_payload_list, is_end)
+            del prompt_id_and_payload_list, is_end
 
         # Broadcast the prompts and is_end to all ranks
         prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
@@ -1180,7 +1296,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 break
             time.sleep(constant.COSMOS_ROLLOUT_CMD_WAIT_INTERVAL)
 
-    def send_end_signal(self):
+    def send_end_signal(self, url_suffix: str):
         """
         Send end signal to the controller.
         This is used to notify the controller that the rollout worker has finished processing all prompts.
@@ -1192,8 +1308,22 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             completions=[],
             is_end=True,
         )
-        logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
-        self.api_client.post_rollout_completion(response)
+        try:
+            logger.info(
+                f"[Rollout] Posting rollout end signal to controller: {response}"
+            )
+            make_request_with_retry(
+                partial(
+                    requests.post,
+                    json=response.model_dump(),
+                ),
+                self.get_alternative_urls(url_suffix),
+                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+            )
+        except Exception as e:
+            logger.error(
+                f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
+            )
 
     @torch.no_grad()
     def main_loop(self):
@@ -1221,7 +1351,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     if self._prompt_queue.empty():
                         self.state.set_prompt_consume_end()
                         if self.global_rank == 0:
-                            self.send_end_signal()
+                            self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
 
             if self.state.prompt_consume_end():
                 assert (
@@ -1334,6 +1464,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 )
 
                 if should_report:
+                    url_suffix = COSMOS_API_ROLLOUT_SUFFIX
                     # only the first tp rank in the rollout replica will post the completion to the controller.
                     valid_payloads: List[RLPayload] = []
                     valid_prompt_idxs: List[int] = []
@@ -1356,12 +1487,24 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         payloads=valid_payloads,
                         is_end=False,
                     )
-                    self.api_client.post_rollout_completion(response)
+                    try:
+                        make_request_with_retry(
+                            partial(
+                                requests.post,
+                                json=response.model_dump(),
+                            ),
+                            self.get_alternative_urls(url_suffix),
+                            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
+                        )
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()
                     if self.global_rank == 0:
-                        self.send_end_signal()
+                        self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
     def work(self):

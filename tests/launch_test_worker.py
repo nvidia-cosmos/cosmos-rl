@@ -16,7 +16,7 @@
 import os
 import torch
 import time
-from multiprocessing import shared_memory, Event as mp_Event
+from multiprocessing import shared_memory
 import numpy as np
 import torch.distributed as dist
 import toml
@@ -49,7 +49,6 @@ from cosmos_rl.utils.distributed import (
     init_distributed,
     destroy_distributed,
 )
-from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.policy.model.gpt.weight_converter import convert_weight_from_hf
 from cosmos_rl.policy.model.gpt.weight_mapper import GPTWeightMapper
@@ -574,11 +573,7 @@ def policy_to_policy_sync_common(
         def dummy(self, *args, **kwargs):
             pass
 
-        def dummy_init_comm(self):
-            self.api_client = APIClient(self.role, ["localhost"], 8000)
-            self.shutdown_mp_signal = mp_Event()  # Must be a multiprocessing event
-
-        def dummy_init_nccl(self, replica_name, global_rank, api_client):
+        def dummy_init_nccl(self, replica_name, global_rank, controller_hosts):
             pass
 
         HighAvailabilitylNccl.__init__ = dummy_init_nccl
@@ -610,10 +605,11 @@ def policy_to_policy_sync_common(
             def shutdown(self):
                 pass
 
-        Trainer.init_comm = dummy_init_comm
+        Trainer.init_comm = dummy
         CommMixin.init_redis = dummy
         CommMixin.start_heartbeat = dummy
         CommMixin.replica_name = policy_name
+        CommMixin.remote_hosts = ["localhost:0"]
         CommMixin.shutdown_signal = threading.Event()
         GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = dummy
         policy = GRPOTrainer(cosmos_config, parallel_dims)
@@ -1418,7 +1414,6 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
-        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
         )
@@ -1426,6 +1421,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
         logger.info(f"model type {model_type}")
         self.data_packer = DecoderOnlyLLMDataPacker()
         self.data_packer.setup(self.config, self.tokenizer)
+        self.remote_hosts = ["0.0.0.0:8000"]
         pass
 
     CommMixin.init_comm = dummy
@@ -1461,7 +1457,6 @@ def run_sft_validation():
 
     def dummy(self):
         self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
-        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
         )
@@ -1469,6 +1464,7 @@ def run_sft_validation():
         logger.info(f"model type {model_type}")
         self.data_packer = DecoderOnlyLLMDataPacker()
         self.data_packer.setup(self.config, self.tokenizer)
+        self.remote_hosts = ["0.0.0.0:8000"]
         pass
 
     CommMixin.init_comm = dummy
