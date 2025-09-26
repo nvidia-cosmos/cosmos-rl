@@ -21,14 +21,47 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-try:
-    from transformer_engine.pytorch.attention import DotProductAttention
-    from transformer_engine.pytorch.module.rmsnorm import RMSNorm as _RMSNorm
-except ImportError:
-    print("transformer_engine.pytorch is not available. DeepSeek model will not work.")
+from cosmos_rl.utils.logging import logger
 
-    class _RMSNorm:
-        pass
+
+# TODO: (lms) remove the context manager after this PR is released: https://github.com/NVIDIA/TransformerEngine/pull/1913
+from contextlib import contextmanager
+from importlib.metadata import version as get_pkg_version, PackageNotFoundError
+
+
+@contextmanager
+def importlib_metadata_version_context():
+    original_version = get_pkg_version
+
+    def mocked_version(name):
+        if name == "flash-attn-3":
+            raise PackageNotFoundError
+        return original_version(name)
+
+    import importlib.metadata
+
+    importlib.metadata.version = mocked_version
+    try:
+        yield
+    finally:
+        importlib.metadata.version = original_version
+
+
+with importlib_metadata_version_context():
+    try:
+        # When FA3 installed, TE will fail for importing flash_attn_3, you could check:
+        # https://github.com/NVIDIA/TransformerEngine/pull/1913
+        # So we manually let TE think FA3 is not installed. Remove this context manager after the PR is released.
+        from transformer_engine.pytorch.attention import DotProductAttention
+        from transformer_engine.pytorch.module.rmsnorm import RMSNorm as _RMSNorm
+    except ImportError as e:
+        raise e
+        logger.warning(
+            "transformer_engine.pytorch is not available. DeepSeek model will not work."
+        )
+
+        class _RMSNorm:
+            pass
 
 
 from cosmos_rl.policy.kernel.moe.moe import MoE
