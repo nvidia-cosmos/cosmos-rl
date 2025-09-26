@@ -137,8 +137,6 @@ class DeepseekV3MoEModel(BaseModel):
         logger.debug(
             f"[model] input ids shape: {input_ids.shape}, position_ids: {position_ids.shape}"
         )
-        # Moving all model parameters to cuda
-        self.model = self.model.to("cuda")
 
         logits, aux_loss = self.model(
             tokens=input_ids,
@@ -308,7 +306,7 @@ class DeepseekV3MoEModel(BaseModel):
                 clear_weight_name(k): v for k, v in self_state_dict.items()
             }
 
-            lm_head_weight_key = "model.model.lm_head.weight"
+            lm_head_weight_key = "model.lm_head.weight"
             embed_tokens_weight_key = "model.model.embed_tokens.weight"
             weights_of_ckpt_names = set()
             reserved = {}
