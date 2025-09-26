@@ -38,7 +38,32 @@ except ImportError:
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-from transformer_engine.pytorch.attention import DotProductAttention
+
+# TODO: (lms) remove the context manager after this PR is released: https://github.com/NVIDIA/TransformerEngine/pull/1913
+from contextlib import contextmanager
+from importlib.metadata import version as get_pkg_version, PackageNotFoundError
+
+
+@contextmanager
+def importlib_metadata_version_context():
+    original_version = get_pkg_version
+
+    def mocked_version(name):
+        if name == "flash-attn-3":
+            raise PackageNotFoundError
+        return original_version(name)
+
+    import importlib.metadata
+
+    importlib.metadata.version = mocked_version
+    try:
+        yield
+    finally:
+        importlib.metadata.version = original_version
+
+
+with importlib_metadata_version_context():
+    from transformer_engine.pytorch.attention import DotProductAttention
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, MoE
