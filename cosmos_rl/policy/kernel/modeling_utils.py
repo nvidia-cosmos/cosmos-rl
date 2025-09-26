@@ -15,6 +15,7 @@
 
 import torch
 from functools import partial
+from typing import Optional
 
 from cosmos_rl.utils.logging import logger
 
@@ -38,10 +39,25 @@ class FlashAttnMetaSingleton(type):
 
 
 class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
-    def __init__(self, torch_compile: bool = True):
+    def __init__(
+        self,
+        torch_compile: bool = True,
+        user_specified_fa_version: Optional[int] = None,
+    ):
         # FA3 is not compatible with torch.compile
         # The support is in WIP: https://github.com/Dao-AILab/flash-attention/pull/1769
-        if decide_fa_version() == 3 and not torch_compile:
+        self.fa_version = decide_fa_version()
+        if user_specified_fa_version is not None:
+            # Respect the user's specified version
+            self.fa_version = user_specified_fa_version
+
+        if self.fa_version == 3 and torch_compile:
+            logger.warning(
+                "FlashAttention3 is not compatible with torch.compile. Using FlashAttention2 instead."
+            )
+            self.fa_version = 2
+
+        if self.fa_version == 3:
             try:
                 # Just as a check to see if flash_attn_3 is installed
                 import flash_attn_3  # noqa: F401
@@ -57,7 +73,6 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
                 self.fa_version = 2
                 from flash_attn import flash_attn_func, flash_attn_varlen_func
         else:
-            self.fa_version = 2
             from flash_attn import flash_attn_func, flash_attn_varlen_func
         logger.info(f"[Cosmos-RL] Using FlashAttention-{self.fa_version}.")
         self.flash_attn_func = flash_attn_func
@@ -75,6 +90,9 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
         )
 
 
-def init_flash_attn_meta(deterministic: bool = False, compile: bool = True):
-    FlashAttnMeta(torch_compile=compile).set_deterministic(deterministic)
-    assert FlashAttnMeta() is FlashAttnMeta(), "FlashAttnMeta is not a singleton"
+def init_flash_attn_meta(
+    deterministic: bool = False, compile: bool = True, fa_version: Optional[int] = None
+):
+    FlashAttnMeta(
+        torch_compile=compile, user_specified_fa_version=fa_version
+    ).set_deterministic(deterministic)
