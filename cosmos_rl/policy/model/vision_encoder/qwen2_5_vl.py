@@ -284,7 +284,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         return hidden_states
 
 
-class qQwen2_5_VisionTransformerPretrainedModel(nn.Module):
+class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         self.config = config
