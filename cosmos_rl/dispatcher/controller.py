@@ -104,7 +104,9 @@ class Controller:
         val_data_packer: Optional[DataPacker] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
         sampler: Optional[Callable] = None,
+        batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
+        val_batch_sampler: Optional[Callable] = None,
     ):
         if self.config is not None:
             raise Exception(
@@ -171,20 +173,13 @@ class Controller:
             if sampler is not None:
                 logger.info("[Controller] Using provided sampler for training")
                 if isinstance(sampler, Callable):
-                    try:
-                        train_sampler = sampler(
-                            self.dataset.train_set,
-                            num_replicas=1,
-                            rank=0,
-                            shuffle=config.train.train_policy.dataloader_shuffle,
-                            drop_last=False,
-                            batch_size=self.rollout_batch_size,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"[Controller] Failed to create training sampler from provided callable: {e}. Please check the arguments of the sampler __init__ function. The arguments should include all of (dataset, num_replicas, rank, shuffle, drop_last, batch_size)."
-                        )
-                        raise e
+                    train_sampler = sampler(
+                        self.dataset.train_set,
+                        num_replicas=1,
+                        rank=0,
+                        shuffle=config.train.train_policy.dataloader_shuffle,
+                        drop_last=False,
+                    )
                 else:
                     train_sampler = sampler
             else:
@@ -195,6 +190,13 @@ class Controller:
                     shuffle=config.train.train_policy.dataloader_shuffle,
                     drop_last=False,
                 )
+            if batch_sampler is not None and isinstance(batch_sampler, Callable):
+                batch_sampler = batch_sampler(
+                    train_sampler,
+                    batch_size=self.rollout_batch_size,
+                    drop_last=False,
+                )
+
             if config.train.resume:
                 try:
                     # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
@@ -235,11 +237,6 @@ class Controller:
                             % len(self.dataset.train_set)
                         ),
                     )
-                    train_dataloader_bias //= (
-                        len(list(islice(iter(train_sampler), 1))[0])
-                        if isinstance(list(islice(iter(train_sampler), 1))[0], list)
-                        else 1
-                    )  # in case of custom batch sampler
                     logger.info(
                         f"[Controller] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
                     )
@@ -247,8 +244,26 @@ class Controller:
 
                     train_sampler = SkippingSampler(
                         base_sampler=train_sampler,
-                        skip_samples=train_dataloader_bias,
+                        skip_samples=train_dataloader_bias
+                        // (
+                            len(list(islice(iter(train_sampler), 1))[0])
+                            if isinstance(list(islice(iter(train_sampler), 1))[0], list)
+                            else 1
+                        ),
                     )
+
+                    if batch_sampler is not None:
+                        batch_sampler = SkippingSampler(
+                            base_sampler=batch_sampler,
+                            skip_samples=train_dataloader_bias
+                            // (
+                                len(list(islice(iter(batch_sampler), 1))[0])
+                                if isinstance(
+                                    list(islice(iter(batch_sampler), 1))[0], list
+                                )
+                                else 1
+                            ),
+                        )
                 except Exception as e:
                     import traceback
 
@@ -256,9 +271,7 @@ class Controller:
                     logger.error(
                         f"[Controller] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
                     )
-            if len(self.dataset.train_set) > 0 and isinstance(
-                list(islice(iter(train_sampler), 1))[0], list
-            ):
+            if batch_sampler is not None:
                 logger.info(
                     "[Controller] Using custom batch Sampler that yields list of indices for training dataset."
                 )
@@ -267,7 +280,7 @@ class Controller:
                     num_workers=config.train.train_policy.dataloader_num_workers,
                     prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=RLPayload.collate_fn,
-                    sampler=train_sampler,
+                    batch_sampler=batch_sampler,
                 )
             else:
                 self.train_dataloader = DataLoader(
@@ -305,34 +318,37 @@ class Controller:
                 if val_sampler is not None:
                     logger.info("[Controller] Using provided sampler for validation")
                     if isinstance(val_sampler, Callable):
-                        try:
-                            val_sampler = val_sampler(
+                        val_sampler = val_sampler(
+                            self.val_dataset.val_set,
+                            num_replicas=1,
+                            rank=0,
+                            shuffle=False,
+                            drop_last=False,
+                        )
+                if val_batch_sampler is not None:
+                    logger.info(
+                        "Using custom batch Sampler that yields list of indices for validation dataset."
+                    )
+                    if isinstance(val_batch_sampler, Callable):
+                        val_batch_sampler = val_batch_sampler(
+                            val_sampler
+                            if val_sampler is not None
+                            else DistributedSampler(
                                 self.val_dataset.val_set,
                                 num_replicas=1,
                                 rank=0,
                                 shuffle=False,
                                 drop_last=False,
-                                batch_size=self.val_batch_size,
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"[Controller] Failed to create validation sampler from provided callable: {e}. Please check the arguments of the sampler __init__ function. The arguments should include all of (dataset, num_replicas, rank, shuffle, drop_last, batch_size)."
-                            )
-                            raise e
-                if (
-                    val_sampler is not None
-                    and len(self.val_dataset.val_set) > 0
-                    and isinstance(list(islice(iter(val_sampler), 1))[0], list)
-                ):
-                    logger.info(
-                        "Using custom batch Sampler that yields list of indices for validation dataset."
-                    )
+                            ),
+                            batch_size=self.val_batch_size,
+                            drop_last=False,
+                        )
                     val_dataloader = DataLoader(
                         self.val_dataset.val_set,
                         num_workers=config.train.train_policy.dataloader_num_workers,
                         prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
                         collate_fn=RLPayload.collate_fn,
-                        sampler=val_sampler,
+                        batch_sampler=val_batch_sampler,
                     )
                 else:
                     val_dataloader = DataLoader(

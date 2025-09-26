@@ -1722,7 +1722,6 @@ def run_sft_custom_sampler():
             shuffle: bool = True,
             seed: int = 0,
             drop_last: bool = False,
-            batch_size: int = 8,
         ):
             self.base = DistributedSampler(
                 dataset,
@@ -1735,11 +1734,13 @@ def run_sft_custom_sampler():
         def __iter__(self):
             it = iter(self.base)
             dp_rank = dist.get_rank() // 2
-            cnt = 0
-            for i in it:
-                assert (i - dp_rank) % 2 == 0
-                cnt += 1
-            assert cnt == 8
+            if not hasattr(self, "checked"):
+                cnt = 0
+                for i in it:
+                    assert (i - dp_rank) % 2 == 0
+                    cnt += 1
+                assert cnt == 8
+                self.checked = True
             it = iter(self.base)
             return it
 
@@ -1774,10 +1775,16 @@ def run_sft_custom_sampler():
         sampler=test_sampler,
         val_sampler=test_sampler,
     )
-    for _ in trainer.train_data_loader:
-        pass
-    for _ in trainer.val_data_loader:
-        pass
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 1
+        cnt += 1
+    assert cnt == 8
 
     trainer = SFTTrainer(
         config=config,
@@ -1788,23 +1795,41 @@ def run_sft_custom_sampler():
         sampler=TestSampler,
         val_sampler=TestSampler,
     )
-    for _ in trainer.train_data_loader:
-        pass
-    for _ in trainer.val_data_loader:
-        pass
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 1
+        cnt += 1
+    assert cnt == 8
 
-    test_sampler = TestSampler(
-        dataset,
-        num_replicas=dp_world_size,
-        rank=dp_rank,
-        shuffle=False,
-        drop_last=False,
-    )
     batch_sampler = BatchSampler(
         test_sampler,
         batch_size=config.train.train_batch_per_replica,
         drop_last=False,
     )
+    trainer = SFTTrainer(
+        config=config,
+        parallel_dims=parallel_dims,
+        dataset=dataset,
+        val_dataset=dataset,
+        val_data_packer=DecoderOnlyLLMDataPacker(),
+        batch_sampler=batch_sampler,
+        val_batch_sampler=batch_sampler,
+    )
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
 
     trainer = SFTTrainer(
         config=config,
@@ -1812,34 +1837,21 @@ def run_sft_custom_sampler():
         dataset=dataset,
         val_dataset=dataset,
         val_data_packer=DecoderOnlyLLMDataPacker(),
-        sampler=batch_sampler,
-        val_sampler=batch_sampler,
+        sampler=TestSampler,
+        val_sampler=TestSampler,
+        batch_sampler=BatchSampler,
+        val_batch_sampler=BatchSampler,
     )
-    for _ in trainer.train_data_loader:
-        pass
-    for _ in trainer.val_data_loader:
-        pass
-
-    class TestBatchSampler(BatchSampler):
-        def __init__(
-            self,
-            dataset: Dataset,
-            num_replicas=None,
-            rank=None,
-            shuffle: bool = False,
-            seed: int = 0,
-            drop_last: bool = False,
-            batch_size: int = 8,
-        ):
-            self.sampler = TestSampler(
-                dataset,
-                num_replicas=num_replicas,
-                rank=rank,
-                shuffle=False,
-                drop_last=False,
-            )
-            self.batch_size = batch_size
-            self.drop_last = drop_last
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 1
+        cnt += 1
+    assert cnt == 8
 
     trainer = SFTTrainer(
         config=config,
@@ -1847,13 +1859,21 @@ def run_sft_custom_sampler():
         dataset=dataset,
         val_dataset=dataset,
         val_data_packer=DecoderOnlyLLMDataPacker(),
-        sampler=TestBatchSampler,
-        val_sampler=TestBatchSampler,
+        sampler=test_sampler,
+        val_sampler=test_sampler,
+        batch_sampler=BatchSampler,
+        val_batch_sampler=BatchSampler,
     )
-    for _ in trainer.train_data_loader:
-        pass
-    for _ in trainer.val_data_loader:
-        pass
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 1
+        cnt += 1
+    assert cnt == 8
 
 
 async def main():
