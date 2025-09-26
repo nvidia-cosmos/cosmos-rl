@@ -319,6 +319,11 @@ def apply_tp_ep(
             desired_output_layouts=Shard(1),
             use_local_output=True,
         )
+        tp_plan["gather_layer"] = PrepareModuleOutput(
+            output_layouts=Shard(1),
+            desired_output_layouts=Replicate(),
+            use_local_output=True,
+        )
 
     parallelize_module(
         model.model,

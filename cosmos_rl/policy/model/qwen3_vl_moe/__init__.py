@@ -164,6 +164,7 @@ class Qwen3MoE(nn.Module):
         else:
             self.tie_embed_tokens = True
         self.identity_layer = IdentityLayer()
+        self.gather_layer = IdentityLayer()
 
     def forward(
         self,
@@ -235,11 +236,13 @@ class Qwen3MoE(nn.Module):
             if deepstack_visual_embeds is not None and int(layer_idx) in range(
                 len(deepstack_visual_embeds)
             ):
+                h = self.gather_layer(h)
                 h = self._deepstack_process(
                     h,
                     visual_pos_masks,
                     deepstack_visual_embeds[int(layer_idx)],
                 )
+                h = self.identity_layer(h)
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
@@ -260,6 +263,7 @@ class Qwen3MoE(nn.Module):
     ):
         visual_pos_masks = visual_pos_masks.to(hidden_states.device)
         visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
+        hidden_states = hidden_states.clone()
         local_this = hidden_states[visual_pos_masks, :].clone() + visual_embeds
         hidden_states[visual_pos_masks, :] = local_this
         return hidden_states
@@ -424,9 +428,6 @@ class Qwen3VLMoeModel(BaseModel):
                 )
 
             if image_mask is not None and video_mask is not None:
-                # aggregate visual_pos_masks and deepstack_visual_embeds
-                image_mask = image_mask[..., 0]
-                video_mask = video_mask[..., 0]
                 visual_pos_masks = image_mask | video_mask
                 deepstack_visual_embeds = []
                 image_mask_joint = image_mask[visual_pos_masks]
@@ -441,11 +442,9 @@ class Qwen3VLMoeModel(BaseModel):
                     embed_joint[video_mask_joint, :] = vid_embed
                     deepstack_visual_embeds.append(embed_joint)
             elif image_mask is not None:
-                image_mask = image_mask[..., 0]
                 visual_pos_masks = image_mask
                 deepstack_visual_embeds = deepstack_image_embeds
             elif video_mask is not None:
-                video_mask = video_mask[..., 0]
                 visual_pos_masks = video_mask
                 deepstack_visual_embeds = deepstack_video_embeds
         else:
@@ -461,7 +460,7 @@ class Qwen3VLMoeModel(BaseModel):
             position_ids=position_ids.permute(1, 0, 2).contiguous(),
             interested_tokens=kwargs.pop("interested_tokens", None),
             visual_pos_masks=visual_pos_masks,
-            deepstack_visual_embeds=deepstack_image_embeds,
+            deepstack_visual_embeds=deepstack_visual_embeds,
             **kwargs,  # Additional arguments for compatibility
         )
         return outputs
@@ -598,7 +597,10 @@ class Qwen3VLMoeModel(BaseModel):
                     #     self.hf_config.text_config.num_hidden_layers
                     # ):
                     #     contain_name = f"layers.{layer_id}."
-                    #     if contain_name not in dest_name:
+                    #     if "embed_tokens" in name or "lm_head" in name or "visual" in name:
+                    #         should_skip = False
+                    #         break
+                    #     elif contain_name not in dest_name:
                     #         continue
                     #     else:
                     #         should_skip = False
@@ -791,8 +793,8 @@ class Qwen3VLMoeModel(BaseModel):
         except Exception:
             head_dim = lm_config.hidden_size // lm_config.num_attention_heads
             logger.warning(f"head_dim not found in config, using {head_dim}")
-        # for debug
-        # lm_config.num_hidden_layers = 2
+        # For debug
+        # lm_config.num_hidden_layers = 1
         lm_args = Qwen3MoeArgs(
             dim=lm_config.hidden_size,
             ffn_dim=lm_config.moe_intermediate_size,
