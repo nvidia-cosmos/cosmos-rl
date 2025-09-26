@@ -148,8 +148,6 @@ def convert_weight_from_hf(
     )
     if lm_part_name is not None:
         return lm_part_name, lm_part_shard
-    elif "experts" in name:
-        return None, None
 
     # For Visual
     visual_prefix = "model.visual."
