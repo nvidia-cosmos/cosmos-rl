@@ -57,7 +57,9 @@ class Trainer(CommMixin):
             torch.backends.cudnn.benchmark = False
             torch.use_deterministic_algorithms(mode=True, warn_only=True)
 
-        init_flash_attn_meta(config.train.deterministic, config.train.compile)
+        init_flash_attn_meta(
+            config.train.deterministic, config.train.compile, config.train.fa_version
+        )
 
         self.config = config
         if self.config.policy.parallelism.dp_shard_size == -1:
