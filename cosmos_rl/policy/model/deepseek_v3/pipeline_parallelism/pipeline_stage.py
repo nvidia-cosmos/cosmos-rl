@@ -26,12 +26,17 @@ from torch._subclasses.fake_tensor import FakeTensor
 
 try:
     from torch.distributed.fsdp import FSDPModule, fully_shard
-    from torch.distributed.pipelining._backward import (stage_backward,
-                                                        stage_backward_input,
-                                                        stage_backward_weight)
+    from torch.distributed.pipelining._backward import (
+        stage_backward,
+        stage_backward_input,
+        stage_backward_weight,
+    )
     from torch.distributed.pipelining._debug import map_debug_info
-    from torch.distributed.pipelining._utils import (PipeInfo, flatten_args,
-                                                     validate_tensors_metadata)
+    from torch.distributed.pipelining._utils import (
+        PipeInfo,
+        flatten_args,
+        validate_tensors_metadata,
+    )
     from torch.fx.node import Argument, map_aggregate
     from torch.nn.parallel import DistributedDataParallel
     from torch.utils._pytree import tree_map_only
@@ -1430,6 +1435,7 @@ class PipelineStage(_PipelineStageBase):
 
         # cache input shapes for use during recv buffer allocation
         self.inputs_meta = args
+
         args = tree_map_only(
             torch.Tensor, lambda x: torch.zeros_like(x, device=self.device), args
         )
