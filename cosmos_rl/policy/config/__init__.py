@@ -22,6 +22,7 @@ import os
 import json
 import hashlib
 from cosmos_rl.utils.modelscope import update_config_if_modelscope
+from cosmos_rl.utils.logging import logger
 
 
 def config_hash(config: BaseModel) -> str:
@@ -389,6 +390,9 @@ class GrpoConfig(BaseModel):
         if isinstance(self.filter_reward_metric, str):
             self.filter_reward_metric = [self.filter_reward_metric]
         if self.dataloader_batch_size is not None and self.dataloader_batch_size <= 0:
+            logger.warning(
+                "dataloader_batch_size is not positive so disable it as None."
+            )
             self.dataloader_batch_size = None
         return self
 
