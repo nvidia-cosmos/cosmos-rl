@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 import math
 import torch
 import torch.nn as nn
@@ -241,6 +241,27 @@ def inject_lora_adapters(
         ][0]
 
     replaced_names = []
+
+    # Normalize optional patterns
+    alpha_pattern = getattr(config, "alpha_pattern", None) or {}
+    r_pattern = getattr(config, "r_pattern", None) or {}
+    dropout_pattern = getattr(config, "dropout_pattern", None) or {}
+
+    def _pick_override(name: str, table: dict) -> Optional[Tuple[str, Any]]:
+        """Return (key, value) of the longest substring key matched in name, if any."""
+        best_key = None
+        best_val = None
+        best_len = -1
+        for k, v in table.items():
+            if k and k in name:
+                if len(k) > best_len:
+                    best_len = len(k)
+                    best_key = k
+                    best_val = v
+        if best_key is None:
+            return None
+        return best_key, best_val
+
     for module_name, module in list(model.named_modules()):
         parent: Optional[nn.Module] = _get_parent_by_qualified_name(model, module_name)
         if parent is None:
@@ -270,16 +291,44 @@ def inject_lora_adapters(
                     )
                     continue
 
+                # Resolve effective hyperparameters via longest-substring override
+                r_eff = config.r
+                alpha_eff = config.lora_alpha
+                dropout_eff = config.lora_dropout
+
+                r_sel = _pick_override(module_name, r_pattern)
+                if r_sel is not None:
+                    r_eff = int(r_sel[1])
+
+                alpha_sel = _pick_override(module_name, alpha_pattern)
+                if alpha_sel is not None:
+                    alpha_eff = float(alpha_sel[1])
+
+                dropout_sel = _pick_override(module_name, dropout_pattern)
+                if dropout_sel is not None:
+                    dropout_eff = float(dropout_sel[1])
+
                 lora_linear = LoraInjectedLinear.from_linear(
                     base=module,
-                    r=config.r,
-                    lora_alpha=config.lora_alpha,
-                    lora_dropout=config.lora_dropout,
+                    r=r_eff,
+                    lora_alpha=alpha_eff,
+                    lora_dropout=dropout_eff,
                     use_rslora=config.use_rslora,
                 )
                 setattr(parent, child_name, lora_linear)
                 replaced.append(module_name)
                 replaced_names.append(module_name)
+                if os.environ.get("RANK", "0") == "0":
+                    # Log effective settings for observability
+                    scaling = (
+                        alpha_eff / math.sqrt(max(1, r_eff))
+                        if config.use_rslora
+                        else alpha_eff / max(1, r_eff)
+                    )
+                    logger.info(
+                        f"[LoRA] Injected into {module_name}: r={r_eff}, alpha={alpha_eff}, dropout={dropout_eff}, "
+                        f"use_rslora={config.use_rslora}, scaling={scaling:.6f}"
+                    )
 
     if not replaced:
         raise RuntimeError(

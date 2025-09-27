@@ -640,6 +640,19 @@ class LoraConfig(BaseModel):
         default=None,
         description="List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint. ",
     )
+    # Pattern overrides by module qualified name substring. Longest-match wins.
+    alpha_pattern: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Optional per-module overrides for lora_alpha, keyed by qualified module name substring.",
+    )
+    r_pattern: Optional[Dict[str, int]] = Field(
+        default=None,
+        description="Optional per-module overrides for LoRA rank r, keyed by qualified module name substring.",
+    )
+    dropout_pattern: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Optional per-module overrides for lora_dropout, keyed by qualified module name substring.",
+    )
     init_lora_weights: Union[
         bool,
         Literal["gaussian", "eva", "olora", "pissa", "pissa_niter_[number of iters]"],
