@@ -62,6 +62,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_NCCL_COMM_ACCEPTOR_SUFFIX,
     COSMOS_API_NEXT_PROMPT_SUFFIX,
     COSMOS_API_ROLLOUT_SUFFIX,
+    COSMOS_API_VALIDATION_REPORT_SUFFIX,
     COSMOS_API_ROLLOUT_SHARD_INFOS_SUFFIX,
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
@@ -843,7 +844,19 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 payloads=validation_payloads,
                 is_end=True,
             )
-            self.api_client.post_validation_report(response)
+            try:
+                make_request_with_retry(
+                    partial(
+                        requests.post,
+                        json=response.model_dump(),
+                    ),
+                    self.get_alternative_urls(COSMOS_API_VALIDATION_REPORT_SUFFIX),
+                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                )
+            except Exception as e:
+                logger.error(
+                    f"[Rollout] Failed in post validation report to controller: {str(e)}"
+                )
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
