@@ -1013,7 +1013,10 @@ class GRPOTrainer(Trainer):
                     raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
 
     def execute_command(self, command: Command):
-        logger.debug(f"[Policy] Process command {command._serialize()}")
+        logger.info(
+            f"[Policy] Process command {command._serialize()} in rank {self.global_rank}"
+        )
+        # logger.debug(f"[Policy] Process command {command._serialize()}")
 
         handler = self.get_policy_command_handler(type(command))
         if handler is None:

@@ -1184,10 +1184,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         current_command = dist_utils.broadcast_object_cpu(current_command)
 
         if current_command is not None:
+            logger.info(
+                f"[Rollout] Process command {current_command._serialize()} in rank {self.global_rank}"
+            )
             handler = self.get_rollout_command_handler(type(current_command))
             if handler is None:
                 raise Exception(
-                    f"No such command supoorted in rollout {current_command}"
+                    f"No such command supported in rollout {current_command}"
                 )
             try:
                 handler(self, current_command)
