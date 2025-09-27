@@ -597,7 +597,7 @@ class Qwen3VLMoeModel(BaseModel):
                     #     self.hf_config.text_config.num_hidden_layers
                     # ):
                     #     contain_name = f"layers.{layer_id}."
-                    #     if "embed_tokens" in name or "lm_head" in name or "visual" in name:
+                    #     if "embed_tokens" in name or "lm_head" in name or "visual" in name or dest_name in ["norm.weight", "norm.bias"]:
                     #         should_skip = False
                     #         break
                     #     elif contain_name not in dest_name:
