@@ -1029,7 +1029,7 @@ class GRPOTrainer(Trainer):
         if self.global_rank == 0:
             while len(self.fetch_command_buffer.queue) > 0:
                 command.append(self.fetch_command_buffer.get_nowait())
-        logger.info(f"[Policy] Broadcasting command to all ranks: {command}")
+        # logger.info(f"[Policy] Broadcasting command to all ranks: {command}")
         command = dist_util.broadcast_object_cpu(
             command, src=0, device=torch.device("cpu")
         )
