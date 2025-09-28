@@ -1259,6 +1259,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.reward_dispatcher.dequeue_rewards_cal()
             )
             if payloads is not None:
+                payloads_len = len(payloads)
+                completions_len = sum(
+                    [len(payload.completions) for payload in payloads]
+                )
+                logger.info(
+                    f"[Rollout] Report {payloads_len} payloads with {completions_len} completions/samples"
+                )
                 if is_validation:
                     break
                 response = RolloutRequest(
