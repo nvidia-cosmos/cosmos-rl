@@ -1156,9 +1156,14 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 )
 
         # Broadcast the prompts and is_end to all ranks
-        logger.info(
-            f"[Rollout] Broadcasting prompts and is_end to all ranks: {prompts_and_is_end[1]}"
-        )
+        if self.global_rank == 0:
+            total_prompts = (
+                len(prompts_and_is_end[0]) if prompts_and_is_end[0] is not None else 0
+            )
+            if total_prompts > 0:
+                logger.info(
+                    f"[Rollout] Broadcasting prompts and is_end to all ranks: {prompts_and_is_end[1]} with {total_prompts} prompts."
+                )
         prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
         prompts, is_end = prompts_and_is_end
         if prompts is not None:

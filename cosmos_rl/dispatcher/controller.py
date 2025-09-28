@@ -483,7 +483,9 @@ class Controller:
                 prompt_id_and_payload_list[i][1].weight_version = (
                     self.prompt_fetch_count + i
                 ) // global_batch_size
-            # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}, prompt_fetch_count: {self.prompt_fetch_count}")
+            logger.info(
+                f"[Controller] Fully Synchronized mode is enabled, weight_versions: {[payload.weight_version for _, payload in prompt_id_and_payload_list]}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}, prompt_fetch_count: {self.prompt_fetch_count}"
+            )
             self.prompt_fetch_count += current_fetch_count
         else:
             for i in range(current_fetch_count):
