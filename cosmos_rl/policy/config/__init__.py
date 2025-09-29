@@ -460,6 +460,10 @@ class TrainingConfig(BaseModel):
         default=20,
         description="Warmup steps for optimizer, can be an integer or a float, if it is a float and range in [0.0, 1.0], it will be multiplied by the total steps",
     )
+    optm_warmup_epochs: Optional[Union[int, float]] = Field(
+        default=None,
+        description="Warmup epochs for optimizer, can be an integer or a float. If provided, takes priority over optm_warmup_steps.",
+    )
     optm_decay_ratio: Optional[float] = Field(
         default=None,
         description="Ratio of total steps for decay, range in [0.0, 1.0], 0 means no decay.",
@@ -568,6 +572,20 @@ class TrainingConfig(BaseModel):
             )
         if self.max_num_steps is not None and self.max_num_steps <= 0:
             raise ValueError("max_num_steps must be positive if specified")
+
+        # Validate warmup configuration
+        if self.optm_warmup_epochs is not None and self.optm_warmup_steps != 20:  # 20 is the default
+            # Import logger here to avoid circular imports
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Both optm_warmup_epochs ({self.optm_warmup_epochs}) and optm_warmup_steps ({self.optm_warmup_steps}) are set. "
+                f"optm_warmup_epochs will take priority and optm_warmup_steps will be ignored."
+            )
+
+        if self.optm_warmup_epochs is not None:
+            if self.optm_warmup_epochs < 0:
+                raise ValueError("optm_warmup_epochs must be non-negative")
 
         if isinstance(self.train_policy, GrpoConfig):
             if self.train_policy.on_policy:
