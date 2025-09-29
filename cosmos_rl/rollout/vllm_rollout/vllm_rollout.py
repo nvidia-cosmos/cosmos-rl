@@ -18,8 +18,7 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 
 import vllm
 import torch
-import copy
-from typing import List, Optional, Dict
+from typing import List, Tuple, Any, Optional, Dict
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
@@ -31,15 +30,6 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.model import WeightMapper
-from cosmos_rl.utils.tools_use import ToolParser
-from cosmos_rl.dispatcher.data.packer.multi_turn import (
-    ConversationType,
-    add_tool_response_messages,
-    add_assistant_message,
-)
-from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
-from cosmos_rl.dispatcher.data import RLPayload
-from cosmos_rl.rollout.schema import RolloutResult
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -49,28 +39,6 @@ def vllm_version_check(rollout_config: RolloutConfig):
             "Pipeline parallelism is not supported for vLLM < 0.9.0, current version is %s"
             % vllm_version
         )
-
-
-def update_conversation_wth_rollout_result(
-    conversation: ConversationType,
-    rollout_result: str,
-    tool_parser: ToolParser,
-    tools: list[OpenAIFunctionToolSchema],
-) -> ConversationType:
-    """
-    Update the conversation with the rollout result.
-
-    1. if the rollout result contains tool calls, add the tool response messages to the conversation
-    2. otherwise, add the assistant message to the conversation
-    """
-    content, function_calls = tool_parser.extract_tool_calls(rollout_result)
-
-    if function_calls:
-        conversation = add_tool_response_messages(conversation, function_calls)
-    else:
-        conversation = add_assistant_message(conversation, content)
-
-    return conversation
 
 
 class vLLMRollout(RolloutBase):
@@ -198,32 +166,41 @@ class vLLMRollout(RolloutBase):
                     apply_fp8_linear_patch(self.get_underlying_model())
 
     @torch.no_grad()
-    def rollout_generation_single_turn(
+    def rollout_generation(
         self,
-        payloads: List[RLPayload],
+        prompt_id_and_payload_list: List[Tuple[int, Any]],
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
-    ) -> List[RolloutResult]:
+    ) -> List[List[str]]:
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
 
+        # List of payloads.
+        # [
+        #   payload,
+        #   payload,
+        #   ...
+        # ]
+        payloads = [x[1] for x in prompt_id_and_payload_list]
+
         # Pack the payloads into prompts for vllm.
-        prompts = []
-        for pl in payloads:
-            assert (
-                pl.prompt is not None
-            ), "Prompt should not be None for single turn rollout generation."
-            prompts.append(data_packer.get_rollout_input(pl.prompt))
+        prompts = [data_packer.get_rollout_input(payload) for payload in payloads]
         prompts = data_packer.rollout_collate_fn(prompts)
         if self.is_vlm:
             new_prompts = util.decode_vision_info(prompts)
         else:
             new_prompts = prompts
 
-        response: List[RolloutResult] = []
+        # List of completions per prompt.
+        # [
+        #   [completion_str, completion_str, ...],
+        #   [completion_str, completion_str, ...],
+        #   ...
+        # ]
+        response: List[List[str]] = []
 
         stream = torch.cuda.current_stream() if stream is None else stream
         try:
@@ -234,14 +211,9 @@ class vLLMRollout(RolloutBase):
                     use_tqdm=False,
                 )
 
-            for i, output in enumerate(results):
+            for output in results:
                 response.append(
-                    RolloutResult(
-                        prompt=payloads[i].prompt,
-                        completions=[
-                            output.outputs[i].text for i in range(len(output.outputs))
-                        ],
-                    )
+                    [output.outputs[i].text for i in range(len(output.outputs))]
                 )
         except Exception as e:
             logger.error(f"[Rollout] Failed in rollout generation: {str(e)}")
@@ -250,108 +222,6 @@ class vLLMRollout(RolloutBase):
             traceback.print_exc()
             return []
         return response
-
-    @torch.no_grad()
-    def rollout_generation_multi_turn(
-        self,
-        payloads: List[RLPayload],
-        stream: torch.cuda.Stream,
-        data_packer: DataPacker,
-        sampling_params: SamplingParams,
-    ) -> List[RolloutResult]:
-        if not self._engine_initialized:
-            raise RuntimeError(
-                "[Rollout] Engine is not initialized, please call init_engine first."
-            )
-        stream = torch.cuda.current_stream() if stream is None else stream
-
-        def generation_multi_turn_for_one_payload(
-            current_conversation: ConversationType,
-        ):
-            assistant_turn_count = 0
-            assert (
-                payload.conversation is not None
-            ), "Conversation should not be None for multi-turn rollout generation."
-            while (
-                assistant_turn_count
-                < self.rollout_config.multi_turn_config.max_assistant_turns
-            ):
-                # Pack the payloads into prompts for vllm.
-                prompts = [data_packer.get_rollout_input(current_conversation)]
-                prompts = data_packer.rollout_collate_fn(prompts)
-
-                with torch.cuda.stream(stream):
-                    results = self.rollout_engine.generate(
-                        prompts=prompts,
-                        sampling_params=sampling_params,
-                        use_tqdm=False,
-                    )
-
-                # TODO(zjx): support multi-path conversations search for multi-turn rollout generation
-                # extend the conversation with the rollout result
-                responses = [output.text for output in results[0].outputs]
-                current_conversation = data_packer.extend_conversation(
-                    current_conversation,
-                    responses,
-                    ground_truth=payload.reference_answer,
-                )
-
-                # check if the sequence length is reached the max_sequence_length
-                if (
-                    len(results[0].prompt_token_ids)
-                    + len(results[0].outputs[0].token_ids)
-                    > self.rollout_config.max_response_length
-                ):
-                    logger.warning(
-                        "[Rollout] The sequence length is reached the max_response_length, stop the multi-turn generation."
-                    )
-                    break
-
-                assistant_turn_count += 1
-
-            # return the last assistant message as the completion to compute the reward in controller
-            completion = current_conversation[-1].content
-            return current_conversation, completion
-
-        n_generation = sampling_params.n
-        sampling_params = copy.deepcopy(sampling_params)
-        sampling_params.n = 1
-        response: List[RolloutResult] = []
-        for payload in payloads:
-            conversations = []
-            completions = []
-            for _ in range(n_generation):
-                new_conversation, completion = generation_multi_turn_for_one_payload(
-                    copy.deepcopy(payload.conversation)
-                )
-                conversations.append(new_conversation)
-                completions.append(completion)
-
-            response.append(
-                RolloutResult(
-                    conversation=payload.conversation,
-                    completions=completions,
-                    completed_conversations=conversations,
-                )
-            )
-
-        return response
-
-    def rollout_generation(
-        self,
-        payloads: List[RLPayload],
-        stream: torch.cuda.Stream,
-        data_packer: DataPacker,
-        sampling_params: SamplingParams,
-    ) -> List[RolloutResult]:
-        if self.rollout_config.multi_turn_config.enable:
-            return self.rollout_generation_multi_turn(
-                payloads, stream, data_packer, sampling_params
-            )
-        else:
-            return self.rollout_generation_single_turn(
-                payloads, stream, data_packer, sampling_params
-            )
 
     def get_underlying_model(self):
         """

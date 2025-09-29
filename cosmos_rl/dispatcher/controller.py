@@ -57,7 +57,6 @@ from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
-from cosmos_rl.dispatcher.data import IdxAndRLPayload
 from concurrent.futures import ProcessPoolExecutor
 
 
@@ -401,11 +400,9 @@ class Controller:
         self,
         n: int,
         validation_step: Optional[int] = None,
-    ) -> Tuple[List[IdxAndRLPayload], bool]:
-        add_answer = self.config.rollout.multi_turn_config.enable
-
-        # query n prompts from the dataset [idx, payload]
-        prompt_id_and_payload_list: List[IdxAndRLPayload] = []
+    ) -> Tuple[List[Tuple[int, str]], bool]:
+        # query n prompts from the dataset
+        prompt_id_and_payload_list: List[Tuple[int, str]] = []
         is_end = False
 
         is_validation = validation_step is not None
@@ -437,27 +434,14 @@ class Controller:
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                     )
 
-        def _next_payload(iterator, add_answer: bool) -> tuple[int, RLPayload]:
-            idxs, payloads = next(iterator)
-            assert len(idxs) == 1
-            assert len(payloads) == 1
-            idx = idxs[0]
-            payload: RLPayload = payloads[0]
-            if add_answer:
-                if is_validation:
-                    payload.reference_answer = (
-                        self.val_dataset.val_set.get_reference_answer(idx)
-                    )
-                else:
-                    payload.reference_answer = (
-                        self.dataset.train_set.get_reference_answer(idx)
-                    )
-            return idx, payload
-
         for _ in range(n):
-            payload: RLPayload | None = None
+            payload = None
             try:
-                idx, payload = _next_payload(iterator, add_answer)
+                idx, payload = next(iterator)
+                assert len(idx) == 1
+                assert len(payload) == 1
+                idx = idx[0]
+                payload = payload[0].payload
             except StopIteration:
                 if not is_validation:
                     self.epoch += 1
@@ -465,8 +449,11 @@ class Controller:
                         logger.info(f"[Controller] Epoch {self.epoch} start.")
                         iterator = iter(self.train_dataloader)
                         self.train_dataloader_iter = iterator
-
-                        idx, payload = _next_payload(iterator, add_answer)
+                        idx, payload = next(iterator)
+                        assert len(idx) == 1
+                        assert len(payload) == 1
+                        idx = idx[0]
+                        payload = payload[0].payload
                     else:
                         if self.epoch == self.config.train.epoch + 1:
                             # We only log this all finished information once.
@@ -488,21 +475,27 @@ class Controller:
             and len(self.rollout_status_manager.replica_scaling_log) == 0
         ):
             # Fully Synchronized mode is enabled, we need to tag the prompt with specific weight-version
+            weight_versions = []
             global_batch_size = (
                 self.config.train.train_batch_per_replica
                 * len(self.policy_status_manager)
                 // self.config.rollout.n_generation
             )
             for i in range(current_fetch_count):
-                prompt_id_and_payload_list[i][1].weight_version = (
-                    self.prompt_fetch_count + i
-                ) // global_batch_size
+                weight_versions.append(
+                    (self.prompt_fetch_count + i) // global_batch_size
+                )
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}, prompt_fetch_count: {self.prompt_fetch_count}")
             self.prompt_fetch_count += current_fetch_count
         else:
-            for i in range(current_fetch_count):
-                prompt_id_and_payload_list[i][1].weight_version = 0
+            weight_versions = [0] * current_fetch_count
 
+        prompt_id_and_payload_list = [
+            (idx, payload, weight_version)
+            for (idx, payload), weight_version in zip(
+                prompt_id_and_payload_list, weight_versions
+            )
+        ]
         return prompt_id_and_payload_list, is_end
 
     def query_reference_answer(

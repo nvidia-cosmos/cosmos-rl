@@ -14,15 +14,9 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict, Type, Union, Optional
+from typing import Any, List, Dict, Type, Union
 from transformers import AutoTokenizer
 from cosmos_rl.policy.config import Config
-from cosmos_rl.utils.tools_use.tool_agent import ToolAgent
-from cosmos_rl.dispatcher.data.packer.multi_turn import (
-    ConversationType,
-    add_assistant_message,
-)
-from cosmos_rl.utils.logging import logger
 
 import argparse
 
@@ -96,16 +90,7 @@ class DataPacker(ABC):
             raise ValueError(f"DataPacker for {model_type} is not registered")
         return DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]()
 
-    def __init__(self, tool_agent: Optional[ToolAgent] = None, *args, **kwargs):
-        self.tool_agent = tool_agent
-
-    def setup(
-        self,
-        config: Config,
-        tokenizer: AutoTokenizer,
-        *args,
-        **kwargs,
-    ):
+    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
         """
         Called by launcher after being mounted
         """
@@ -113,21 +98,6 @@ class DataPacker(ABC):
         assert tokenizer is not None, "tokenizer should be set"
         self.config = config
         self.tokenizer = tokenizer
-        if not self.config.rollout.multi_turn_config.enable:
-            self.tool_agent = None
-
-        self.custom_chat_template = None
-        if self.config.rollout.multi_turn_config.custom_chat_template_path:
-            try:
-                with open(
-                    self.config.rollout.multi_turn_config.custom_chat_template_path, "r"
-                ) as f:
-                    self.custom_chat_template = f.read()
-            except FileNotFoundError:
-                logger.warning(
-                    f"Custom chat template file not found: {self.config.rollout.multi_turn_config.custom_chat_template_path}, use model default template instead."
-                )
-                self.custom_chat_template = None
 
     @abstractmethod
     def get_rollout_input(self, item: Any) -> Any:
@@ -202,15 +172,3 @@ class DataPacker(ABC):
         raise NotImplementedError(
             "This method should be implemented by the subclass for SFT training"
         )
-
-    def extend_conversation(
-        self,
-        conversation: ConversationType,
-        responses: List[str],
-        ground_truth: Optional[str] = None,
-    ) -> ConversationType:
-        """
-        Extend the conversation by models response.
-        """
-        # By default, we always add response as assistant message
-        return add_assistant_message(conversation, "" if responses else responses[0])

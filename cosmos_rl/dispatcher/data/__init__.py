@@ -18,13 +18,24 @@ from datasets import concatenate_datasets
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.util import load_data_from_disk_or_hf
 from cosmos_rl.utils.logging import logger
-from typing import Optional, Any
+from typing import Optional, Any, List, Tuple
 from transformers import AutoTokenizer
 
-from .schema import RLPayload, IdxAndRLPayload
 
+class RLPayload:
+    payload: Any
 
-# TODO: we should add a Dataset interface for all the dataset classes.
+    def __init__(self, payload: Any):
+        self.payload = payload
+
+    @staticmethod
+    def collate_fn(
+        batch: List[Tuple[int, "RLPayload"]],
+    ) -> Tuple[List[int], List["RLPayload"]]:
+        return (
+            [item[0] for item in batch],
+            [item[1] for item in batch],
+        )
 
 
 class RLDataset(Dataset):
@@ -36,11 +47,11 @@ class RLDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> IdxAndRLPayload:
-        prompt = self.dataset[idx]
-        if isinstance(prompt, RLPayload):
-            return idx, prompt
-        return idx, RLPayload(prompt=prompt)
+    def __getitem__(self, idx: int) -> Tuple[int, RLPayload]:
+        payload = self.dataset[idx]
+        if isinstance(payload, RLPayload):
+            return idx, payload
+        return idx, RLPayload(payload)
 
     def get_reference_answer(self, idx: int) -> Any:
         assert hasattr(
@@ -63,9 +74,9 @@ class RLInternalDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> IdxAndRLPayload:
-        prompt: str = self.dataset[idx][self.prompt_column]
-        return idx, RLPayload(prompt=prompt)
+    def __getitem__(self, idx: int) -> Tuple[int, RLPayload]:
+        payload = self.dataset[idx][self.prompt_column]
+        return idx, RLPayload(payload)
 
     def get_reference_answer(self, idx: int) -> Any:
         ref = self.dataset[idx][self.response_column]

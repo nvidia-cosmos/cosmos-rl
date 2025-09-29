@@ -25,8 +25,43 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 import msgpack
 import time
-from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
 from concurrent.futures import ProcessPoolExecutor
+
+
+@dataclass
+class Rollout:
+    payload: Any
+    completion: str
+    is_end: bool
+    reward: float
+    advantage: float
+    prompt_idx: int
+    n_ignore_prefix_tokens: int = 0
+    filter_reward: float = 0.0
+
+    def __init__(
+        self,
+        payload: Any,
+        completion: str,
+        is_end: bool,
+        reward: float,
+        advantage: float,
+        prompt_idx: int,
+        n_ignore_prefix_tokens: int = 0,
+        filter_reward: float = 0.0,
+    ):
+        self.payload = payload
+        self.completion = completion
+        self.is_end = is_end
+        self.reward = reward
+        self.advantage = advantage
+        self.prompt_idx = prompt_idx
+        self.n_ignore_prefix_tokens = n_ignore_prefix_tokens
+        self.filter_reward = filter_reward
+
+    @classmethod
+    def from_dict(cls, dict_v: Dict[str, Any]) -> "Rollout":
+        return cls(**dict_v)
 
 
 class RolloutGroup:
@@ -38,12 +73,14 @@ class RolloutGroup:
     def __init__(
         self,
         prompt_idx: int,
-        payload: RLPayload,
+        payload: Any,
+        completions: List[str],
         is_end: bool,
         reference_answer: str,
     ):
         self.prompt_idx: int = prompt_idx
-        self.payload: RLPayload = payload
+        self.payload: Any = payload
+        self.completions: List[str] = completions
         self.is_end: bool = is_end
         self.reference_answer: str = reference_answer
 
@@ -67,7 +104,7 @@ class RolloutGroup:
         else:
             rewards = [
                 algo.compute_reward(completion, self.reference_answer)
-                for completion in self.payload.completions
+                for completion in self.completions
             ]
         logger.debug(f"[RolloutGroup] Rewards: {rewards}")
         if executor is not None:
@@ -79,26 +116,18 @@ class RolloutGroup:
             advantages = algo.compute_advantage([r[0] for r in rewards])
         logger.debug(f"[RolloutGroup] Advantages: {advantages}")
 
-        # If the completed_conversations is not provided, we use None for all the rollouts
-        if self.payload.completed_conversations is not None:
-            completed_conversations = self.payload.completed_conversations
-        else:
-            completed_conversations = [None] * len(self.payload.completions)
-
         return [
             Rollout(
-                prompt=self.payload.prompt,
-                conversation=self.payload.conversation,
+                payload=self.payload,
                 completion=completion,
-                completed_conversation=completed_conversation,
                 is_end=self.is_end,
                 reward=reward[0],
                 advantage=advantage,
                 prompt_idx=self.prompt_idx,
                 filter_reward=reward[1],
             )
-            for completion, completed_conversation, reward, advantage in zip(
-                self.payload.completions, completed_conversations, rewards, advantages
+            for completion, reward, advantage in zip(
+                self.completions, rewards, advantages
             )
         ]
 
@@ -385,7 +414,7 @@ class Replica:
         ), f"Replica {self.name} tries to put rollout but not all atoms have arrived"
         # Check which atom should handle this rollout
         # Publish the rollout to the redis stream to be consumed by policy replicas
-        redis_handler.publish_rollout(msgpack.packb(rollout.model_dump()), self.name)
+        redis_handler.publish_rollout(msgpack.packb(rollout.__dict__), self.name)
 
     async def find_atom(self, global_rank: int) -> Atom:
         key = f"{self.name}_{global_rank}"

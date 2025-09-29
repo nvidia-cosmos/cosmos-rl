@@ -14,8 +14,7 @@
 # limitations under the License.
 
 from pydantic import BaseModel, model_validator
-from typing import List, Dict, Any
-from cosmos_rl.dispatcher.data.schema import RLPayload
+from typing import List, Dict, Any, Optional
 
 
 MESH_NAMES: List[str] = ["pp", "dp_shard", "cp", "tp"]
@@ -65,15 +64,19 @@ class ValidationReportRequest(BaseModel):
     src_replica_name: str
     validation_step: int
     prompt_idxs: List[int]
-    payloads: List[RLPayload]
+    payloads: List[Any]
+    completions: List[List[str]]
     is_end: bool = False
+    reference_answer: Optional[str] = None
 
 
 class RolloutRequest(BaseModel):
     src_replica_name: str
     prompt_idxs: List[int]
-    payloads: List[RLPayload]
+    payloads: List[Any]
+    completions: List[List[str]]
     is_end: bool = False
+    reference_answer: Optional[str] = None
 
 
 class UnregisterRequest(BaseModel):

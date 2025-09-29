@@ -82,9 +82,6 @@ from torch.utils.data import DataLoader, DistributedSampler, Sampler
 from cosmos_rl.policy.trainer.sft_trainer import collate_fn, construct_dataset
 from torch.utils.data import Dataset
 from datasets import concatenate_datasets
-from typing import List
-from cosmos_rl.dispatcher.data.schema import RLPayload
-from cosmos_rl.rollout.schema import RolloutResult
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
@@ -903,7 +900,7 @@ def run_dummy_rollout():
     vLLMRolloutWorker.get_rollout_command_handler = get_rollout_command_handler
     vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts = dummy
 
-    def dummy_init(self, config: CosmosConfig, tokenizer, **kwargs):
+    def dummy_init(self, config, tokenizer, **kwargs):
         class Llm_engine:
             def step(self, *args, **kwargs):
                 pass
@@ -911,22 +908,19 @@ def run_dummy_rollout():
         class Rollout_engine:
             llm_engine = Llm_engine()
 
-        self.rollout_config = config.rollout
         self.rollout_engine = Rollout_engine()
         self.eos_token_ids = [0]
         self._engine_initialized = True
 
         def rollout_generation(
             self,
-            payloads: List[RLPayload],
+            prompt_id_and_payload_list,
             stream,
             data_packer,
             sampling_params,
-        ) -> List[RolloutResult]:
-            completions_per_prompt = [
-                RolloutResult(prompt=payload.prompt, completions=[payload.prompt])
-                for payload in payloads
-            ]
+        ):
+            payloads = [x[1] for x in prompt_id_and_payload_list]
+            completions_per_prompt = [[x] for x in payloads]
             return completions_per_prompt
 
         self.rollout_generation = types.MethodType(rollout_generation, self)

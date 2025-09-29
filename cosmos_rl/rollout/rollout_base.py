@@ -14,9 +14,6 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import List
-
-from cosmos_rl.rollout.schema import RolloutResult
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers import AutoTokenizer
@@ -29,7 +26,7 @@ class RolloutBase(ABC):
         self.pad_token_id = self.tokenizer.pad_token_id
 
     @abstractmethod
-    def rollout_generation(self, prompts, *args, **kwargs) -> List[RolloutResult]:
+    def rollout_generation(self, prompts, *args, **kwargs):
         """Generate sequences"""
         pass
 
