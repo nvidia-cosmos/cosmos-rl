@@ -1168,7 +1168,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         prompts, is_end = prompts_and_is_end
         if prompts is not None:
             prompts = [
-                (prompt[0], RLPayload.model_validate(prompt[1])) for prompt in prompts
+                # prompt[0] is prompt_idx, prompt[1] is str
+                (prompt[0], RLPayload.model_validate(prompt[1]))
+                for prompt in prompts
             ]
             prompt_queue.put(prompts)
         return is_end
@@ -1269,7 +1271,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     [len(payload.completions) for payload in payloads]
                 )
                 logger.info(
-                    f"[Rollout] Report {payloads_len} payloads with {completions_len} completions/samples"
+                    f"[Rollout] Report {payloads_len} payloads with {completions_len} completions/samples from rank: {self.global_rank}"
                 )
                 if is_validation:
                     break
@@ -1311,6 +1313,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         self.state.set_prompt_consume_end()
                         if self.global_rank == 0:
                             self.send_end_signal()
+            # For non-zero ranks, reward will always be Empty, so we do not need filter ranks here.
             _, is_validation, _, _ = self.report_rollouts()
             assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
             if self.state.prompt_consume_end():

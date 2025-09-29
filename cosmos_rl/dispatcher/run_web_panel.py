@@ -490,7 +490,9 @@ async def put_rollout_group(rollout: RolloutRequest):
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
                 f"example: rollouts[0]\n{valid_rollouts[0]}"
             )
-
+        logger.info(
+            f"[Controller] Put {len(valid_rollouts)} valid rollouts and {len(invalid_rollouts)} invalid rollouts from {len(rollout.payloads)} payloads"
+        )
         await controller.put_rollouts(valid_rollouts, invalid_rollouts)
         return {"message": "Rollout put"}
     except Exception as e:
