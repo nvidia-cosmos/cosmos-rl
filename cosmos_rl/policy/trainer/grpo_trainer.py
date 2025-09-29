@@ -960,7 +960,6 @@ class GRPOTrainer(Trainer):
 
         # Train ACK
         if is_master_rank(self.parallel_dims, self.global_rank):
-            logger.info(f"[Policy] train report data: {report_data}")
             self.api_client.post_policy_train_ack(
                 self.replica_name,
                 command.global_step,
