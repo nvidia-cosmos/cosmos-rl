@@ -234,8 +234,8 @@ class GrpoConfig(BaseModel):
     type: Literal["grpo"]
     variant: str = Field(
         default="grpo",
-        description="Variant of the GRPO, currently support `grpo`, and `dapo`",
-        choices=["grpo", "dapo"],
+        description="Variant of the GRPO, currently support `grpo`, `gspo`, `dapo`",
+        choices=["grpo", "gspo", "dapo"],
     )
 
     dataset: DatasetConfig = Field(
@@ -376,7 +376,8 @@ class GrpoConfig(BaseModel):
         assert self.variant in [
             "grpo",
             "dapo",
-        ], "variant must be one of ['grpo', 'dapo']"
+            "gspo",
+        ], "variant must be one of ['grpo', 'dapo', 'gspo']"
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
