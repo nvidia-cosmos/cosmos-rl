@@ -77,97 +77,6 @@ from cosmos_rl.utils.sequence_packing import (
 )
 
 
-def compute_gspo_loss(
-    current_token_logps: torch.Tensor,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
-    old_per_token_logps: torch.Tensor,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
-    ref_per_token_logps: Optional[
-        torch.Tensor
-    ],  # per-token logprobs of shape `[n_tokens_of_logprobs]`
-    current_advantages: torch.Tensor,  # of shape `[batch_size, max_len]`
-    cu_seqlens: torch.Tensor,  # of shape `[batch_size + 1]`
-    config: CosmosConfig,
-    logprob_masks: torch.Tensor,  # of shape `[batch_size, max_len]`
-    dp_group: Optional[torch.distributed.ProcessGroup] = None,
-    ddp_comm: HighAvailabilitylNccl = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Compute the GSPO (Group Sequential Policy Optimization) loss.
-    
-    See https://arxiv.org/pdf/2507.18071 for more details.
-    """
-    logger.info(f'[Policy] Use GSPO loss')
-    # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
-    current_advantages = torch.masked_select(current_advantages, logprob_masks)
-    assert (
-        current_token_logps.shape == current_advantages.shape
-    ), "current_token_logps and current_advantages should have the same shape"
-    assert (
-        old_per_token_logps.shape == current_token_logps.shape
-    ), "old_per_token_logps and current_token_logps should have the same shape"
-    if ref_per_token_logps is not None:
-        assert (
-            ref_per_token_logps.shape == current_token_logps.shape
-        ), "ref_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
-            ref_per_token_logps.shape, current_token_logps.shape
-        )
-
-    negative_approx_kl = current_token_logps - old_per_token_logps
-
-    # compute sequence-level importance ratio:
-    bsz, max_len = logprob_masks.shape
-    negative_approx_kl_seq = torch.zeros(
-        bsz, device=negative_approx_kl.device, dtype=negative_approx_kl.dtype
-    )
-    for i in range(bsz):
-        seq_tokens = negative_approx_kl[cu_seqlens[i] : cu_seqlens[i + 1]]
-        seq_length = len(seq_tokens)
-        if seq_length > 0:
-            negative_approx_kl_seq[i] = seq_tokens.sum() / seq_length
-
-    # Combined ratio at token level:
-    # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
-    # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
-    # We need to expand negative_approx_kl_seq to match the token-level shape
-    expanded_seq_kl = torch.zeros_like(current_token_logps)
-    for i in range(bsz):
-        start_idx = cu_seqlens[i]
-        end_idx = cu_seqlens[i + 1]
-        expanded_seq_kl[start_idx:end_idx] = negative_approx_kl_seq[i]
-    
-    log_seq_importance_ratio = current_token_logps - current_token_logps.detach() + expanded_seq_kl.detach()
-    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)  # clamp for numerical stability
-    # Finally exp() to remove log
-    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
-
-    # GSPO clipping parameters
-    clip_ratio_low = config.train.train_policy.epsilon_low
-    clip_ratio_high = config.train.train_policy.epsilon_high
-    
-    # GSPO loss calculation
-    coef_1 = -current_advantages * seq_importance_ratio
-    coef_2 = -current_advantages * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
-    seq_coef = torch.maximum(coef_1, coef_2)
-    shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
-    # GSPO loss aggregation must be "seq-mean-token-mean"
-    assert config.train.train_policy.loss_type == "seq-mean-token-mean", f"GSPO loss type must be 'seq-mean-token-mean', but got {config.train.train_policy.loss_type}"
-    
-    per_seq_loss_sum = torch.zeros(
-        bsz, device=seq_coef.device, dtype=seq_coef.dtype
-    )
-    # token mean
-    for i in range(bsz):
-        per_seq_loss_sum[i] = seq_coef[cu_seqlens[i] : cu_seqlens[i + 1]].sum() / shifted_length[i]
-    # seq mean
-    loss = per_seq_loss_sum.mean() 
-
-
-    # KL loss is not needed
-    kl_loss = torch.zeros(1, device=loss.device, dtype=loss.dtype) 
-    
-    return (loss, loss, kl_loss)
-
-
-
 def compute_loss(
     current_token_logps: torch.Tensor,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
     old_per_token_logps: torch.Tensor,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
@@ -1685,8 +1594,7 @@ class GRPOTrainer(Trainer):
                                             i_mu > 0
                                         ), "Only inner iteration should reuse `old_per_token_logps`"
 
-                                    loss_func = compute_gspo_loss if self.config.train.train_policy.loss_mode == "gspo" else compute_loss
-                                    loss, per_token_loss, kl_loss = loss_func(
+                                    loss, per_token_loss, kl_loss = compute_loss(
                                         current_per_token_logprobs,
                                         self.old_per_token_logps[local_mini_step],
                                         self.ref_per_token_logps[local_mini_step],
