@@ -10,7 +10,7 @@ toml
 StrEnum
 redis
 msgpack
-qwen_vl_utils
+qwen_vl_utils==0.0.11
 pynvml
 boto3
 modelscope
@@ -22,3 +22,4 @@ blobfile
 nvidia-nccl-cu12>=2.26.2
 liger_kernel
 leptonai
+decord
