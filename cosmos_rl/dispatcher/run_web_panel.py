@@ -486,7 +486,7 @@ async def put_rollout_group(rollout: RolloutRequest):
         ]
 
         if len(valid_rollouts) > 0:
-            logger.debug(
+            logger.info(
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
                 f"example: rollouts[0]\n{valid_rollouts[0]}"
             )
