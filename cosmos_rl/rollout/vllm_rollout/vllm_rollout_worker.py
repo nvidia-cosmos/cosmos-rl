@@ -76,7 +76,10 @@ def _patch_vllm_rollout_locked_step(
     orig_step = llm_engine.step
 
     def cmd_pred(cmd: Command, enable_validation: bool):
-        if enable_validation and isinstance(cmd, RolloutToRolloutBroadcastCommand):
+        if enable_validation and (
+            isinstance(cmd, RolloutToRolloutBroadcastCommand)
+            or isinstance(cmd, PolicyToRolloutUnicastCommand)
+        ):
             return False
         return True
 
