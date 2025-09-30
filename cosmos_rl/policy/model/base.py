@@ -501,7 +501,7 @@ class ModelRegistry:
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
-        with torch.device("meta"):
+        with torch.device("cuda"):
             with util.cosmos_default_dtype(
                 util.str2torch_dtype(
                     config.train.master_dtype

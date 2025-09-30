@@ -13,20 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import argparse
-import toml
-
 from torch.utils.data import Dataset
-from datasets import concatenate_datasets
-import cosmos_rl.utils.util as util
-import cosmos_rl.utils.cache as cache
 from transformers import AutoTokenizer
-from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
 from cosmos_rl.policy.config import (
     Config,
-    config_hash,
 )
+from cosmos_rl.dispatcher.run_web_panel import main as launch_dispatcher
+from torch.utils.data import DataLoader
+from torch.utils.data._utils.collate import default_collate
+from datasets import load_dataset
+from torchvision.transforms import ToTensor
+from PIL import Image
 
 
 # This dataset is used for SFT with raw text input, which is used for models like Mistral
@@ -34,8 +31,58 @@ from cosmos_rl.policy.config import (
 # This handles cases like Mistral where conversation dicts need string conversion
 # to avoid role alternation errors
 class SFTRawTextDataset(Dataset):
-    def __init__(self, dataset: Dataset):
+    def __init__(self):
+        # --- dataset (streaming + shuffle) ---
+        base_url = "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_{i:06d}.tar"
+        num_shards = 46
+        urls = [base_url.format(i=i) for i in range(num_shards)]
+
+        dataset = load_dataset(
+            "webdataset",
+            data_files={"train": urls},
+            split="train",
+            streaming=True,
+        )
+
+        # Shuffle via buffer (DataLoader's shuffle doesn't apply to Iterable-style streams)
+        dataset = dataset.shuffle(buffer_size=1000)
+
+        # --- collate helper: turn PIL -> torch.Tensor, keep metadata as-is ---
+        to_tensor = ToTensor()
+
+        def collate_pil(batch):
+            def convert(x):
+                if isinstance(x, Image.Image):
+                    x = x.convert("RGB")
+                    # resize to 384x384
+                    x = x.resize((384, 384))
+                    return to_tensor(x)  # [C,H,W], float32 in [0,1]
+                return x
+
+            # Items are usually dicts from WebDataset (e.g., {"jpg": PIL.Image, "txt": "...", ...})
+            if isinstance(batch[0], dict):
+                out = {}
+                for k in batch[0].keys():
+                    vals = [convert(b[k]) for b in batch if k in b]
+                    # Try to stack; if it fails (e.g., variable-length strings), keep as list
+                    try:
+                        out[k] = default_collate(vals)
+                    except Exception:
+                        out[k] = vals
+                return out
+            else:
+                return default_collate([convert(b) for b in batch])
+
+        self.collate_pil = collate_pil
         self.dataset = dataset
+        self.loader = DataLoader(
+            dataset,
+            batch_size=1,
+            num_workers=1,
+            pin_memory=True,
+            collate_fn=collate_pil,
+        )
+        self.iterator = iter(self.loader)
 
     def setup(
         self,
@@ -46,68 +93,27 @@ class SFTRawTextDataset(Dataset):
         self.tokenizer = tokenizer
         self.column_name = self.config.conversation_column_name
         self.cache = None
-        if self.config.enable_dataset_cache:
-            cache_folder = os.path.join(
-                os.environ.get(
-                    "COSMOS_CACHE",
-                    os.path.join(os.path.expanduser("~"), ".cache/cosmos/"),
-                ),
-                "datasets_cache",
-                f"{self.config.dataset.name}-{config_hash(config)}",
-            )
-            print(f"SFTRawTextDataset Cache folder: {cache_folder}")
-            self.cache = cache.DiskCache(cache_folder)
 
     def __len__(self):
-        return len(self.dataset)
+        return 649_000
 
     def __getitem__(self, idx):
-        # Check cache first if enabled
-        if self.cache is not None:
-            cached_item = self.cache.get(idx)
-            if cached_item is not None:
-                return cached_item
-
-        # Retrieve raw item from dataset
-        raw_item = (
-            self.dataset[idx][self.column_name]
-            if self.column_name
-            else self.dataset[idx]
-        )
-
-        # Convert conversation list to string format
-        if isinstance(raw_item, list):
-            raw_item = "\n".join(
-                [f"{turn['role']}: {turn['content']}" for turn in raw_item]
-            )
-
-        # Cache the processed item if caching is enabled
-        if self.cache is not None:
-            self.cache.set(idx, raw_item)
-
-        return raw_item
+        # get random item from loader
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            self.iterator = iter(self.loader)
+            return next(self.iterator)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
-    args = parser.parse_known_args()[0]
-    with open(args.config, "r") as f:
-        config = toml.load(f)
-    config = Config.from_dict(config)
-    # Download HF dataset only on launcher worker
-    dataset = util.load_data_from_disk_or_hf(
-        config.train.train_policy.dataset.name,
-        config.train.train_policy.dataset.subset,
-        config.train.train_policy.dataset.revision or None,
-    )
-    dataset_list = []
-    for split_name in config.train.train_policy.dataset.split:
-        print(
-            f"Appending split {split_name}, dataset size = {len(dataset[split_name])}"
-        )
-        dataset_list.append(dataset[split_name])
-    train_dataset = concatenate_datasets(dataset_list)
+
+    def create_dataset(config):
+        return SFTRawTextDataset()
+
     launch_dispatcher(
-        dataset=SFTRawTextDataset(dataset=train_dataset),
+        dataset=create_dataset,
     )
+    # dataset = SFTRawTextDataset()
+    # next_item = dataset[0]
+    # print(f"next_item: {next_item}")

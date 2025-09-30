@@ -33,6 +33,7 @@ from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 from cosmos_rl.utils.logging import logger
 import inspect
 import math
+import os
 
 try:
     from torchao.optim import Adam8bit, AdamW8bit
@@ -115,7 +116,8 @@ class OptimizersContainer(Optimizer, Generic[T]):
                         total_trainable_params += p.numel()
                         all_trainable_params.append(name)
         logger.info(f"Total number of trainable parameters: {total_trainable_params}")
-        logger.debug(f"Trainable parameters: {all_trainable_params}")
+        if os.environ.get("RANK", "0") == "0":
+            logger.info(f"Trainable parameters: {all_trainable_params}")
 
         self._post_init(all_params, optimizer_kwargs)
 

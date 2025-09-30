@@ -717,7 +717,7 @@ class SFTTrainer(Trainer):
                         #     return
                         # #########################################################################################
 
-                        logits = self.model(**batch)
+                        logits, loss = self.model(**batch)
 
                         # recover from ulysses if cp is enabled
                         if self.parallel_dims.cp_enabled:
@@ -726,13 +726,15 @@ class SFTTrainer(Trainer):
                             if padding_mask_before_cp is not None:
                                 batch["padding_mask"] = padding_mask_before_cp
 
-                        loss = self.loss_fn(
-                            logits,
-                            labels,
-                            output_packing_mask=batch.get("input_packing_mask", None),
-                            target_packing_mask=batch.get("label_packing_mask", None),
-                            loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
-                        )
+                        loss = loss / len(mini_batch_begin_idxs)
+                        # loss = torch.nn.functional.mse_loss(mm_h, image_embeds) / len(mini_batch_begin_idxs)
+                        # loss = self.loss_fn(
+                        #     logits,
+                        #     labels,
+                        #     output_packing_mask=batch.get("input_packing_mask", None),
+                        #     target_packing_mask=batch.get("label_packing_mask", None),
+                        #     loss_scaling_factor=1.0 / len(mini_batch_begin_idxs),
+                        # )
 
                         # # Hint FSDP to do all-reduce on the last backward pass
                         # if hasattr(self.model, "set_is_last_backward"):

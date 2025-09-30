@@ -111,7 +111,7 @@ class Trainer(CommMixin):
                 self.model_converter.convert_model(model)
 
         if config.train.fsdp_offload:
-            model.to_empty(device="cpu")
+            model.to(device="cpu")
 
         try:
             # Apply parallelism to the model
@@ -122,7 +122,7 @@ class Trainer(CommMixin):
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )
             if not config.train.fsdp_offload:
-                model.to_empty(device=self.device)
+                model.to(device=self.device)
             model.post_to_empty_hook(config)
             if config.policy.lora is not None:
                 from cosmos_rl.policy.lora.plugin import reinitialize_lora_params

@@ -40,6 +40,10 @@ from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
+from naruto.q_former import QformerEncoder
+from naruto.util import vae_encode_mode
+from diffusers import AutoencoderKL
+from cosmos_rl.policy.model.gpt.diffuse_head import DiffusionCondAttentionNet
 
 
 def build_norm(
@@ -56,6 +60,7 @@ class GPTArgs:
     n_layers: int
     n_heads: int
     n_kv_heads: int
+
     head_dim: int
     vocab_size: int
     max_seq_len: int
@@ -146,6 +151,48 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.attn_func = modeling_utils.flash_attn_func
         self.attn_func_varlen = modeling_utils.flash_attn_varlen_func
+        self.dim = model_args.dim
+        # MM
+        self.mm_q_proj = nn.Linear(
+            model_args.dim,
+            model_args.n_heads * self.head_dim,
+            bias="mm_q_proj" in model_args.biases,
+        )
+        self.mm_k_proj = nn.Linear(
+            model_args.dim,
+            model_args.n_kv_heads * self.head_dim,
+            bias="mm_k_proj" in model_args.biases,
+        )
+        self.mm_q_norm = (
+            build_norm(
+                model_args.norm_type,
+                dim=self.head_dim,
+                eps=model_args.norm_eps,
+                casting_mode=model_args.hf_config.model_type,
+            )
+            if model_args.q_k_norm_enabled
+            else None
+        )
+        self.mm_k_norm = (
+            build_norm(
+                model_args.norm_type,
+                dim=self.head_dim,
+                eps=model_args.norm_eps,
+                casting_mode=model_args.hf_config.model_type,
+            )
+            if model_args.q_k_norm_enabled
+            else None
+        )
+        self.mm_v_proj = nn.Linear(
+            model_args.dim,
+            model_args.n_kv_heads * self.head_dim,
+            bias="mm_v_proj" in model_args.biases,
+        )
+        self.mm_o_proj = nn.Linear(
+            model_args.n_heads * self.head_dim,
+            model_args.dim,
+            bias="mm_o_proj" in model_args.biases,
+        )
 
         self.q_proj = nn.Linear(
             model_args.dim,
@@ -191,10 +238,22 @@ class Attention(nn.Module):
         )
         self.rope_func = rope.RotaryPositionEmbedding()
 
+        for module in [
+            self.q_proj,
+            self.k_proj,
+            self.v_proj,
+            self.o_proj,
+            self.q_norm,
+            self.k_norm,
+        ]:
+            for param in module.parameters():
+                param.requires_grad_(False)
+
     def forward(
         self,
         x: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor],
+        vision_token_mask: Optional[torch.Tensor] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
         max_seqlen: Optional[int] = None,
     ):
@@ -213,11 +272,52 @@ class Attention(nn.Module):
         """
 
         bs, seqlen, _ = x.shape
-        xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
-        if self.q_norm is not None:
-            xq = self.q_norm(xq.view(bs, seqlen, -1, self.head_dim))
-        if self.k_norm is not None:
-            xk = self.k_norm(xk.view(bs, seqlen, -1, self.head_dim))
+
+        xq = torch.zeros(
+            [bs, seqlen, self.head_dim * self.n_heads], device=x.device, dtype=x.dtype
+        )
+        xk = torch.zeros(
+            [bs, seqlen, self.head_dim * self.n_kv_heads],
+            device=x.device,
+            dtype=x.dtype,
+        )
+        xv = torch.zeros(
+            [bs, seqlen, self.head_dim * self.n_kv_heads],
+            device=x.device,
+            dtype=x.dtype,
+        )
+
+        # Separate the query, key, value for text and vision tokens
+        # print(f"x[~vision_token_mask].view(-1, self.n_heads * self.head_dim)): {x[~vision_token_mask].view(-1, self.n_heads * self.head_dim).shape}")
+        xq[~vision_token_mask] = self.q_norm(
+            self.q_proj(x[~vision_token_mask].view(-1, self.dim)).view(
+                -1, self.n_heads, self.head_dim
+            )
+        ).view(-1, self.head_dim * self.n_heads)
+        xk[~vision_token_mask] = self.k_norm(
+            self.k_proj(x[~vision_token_mask].view(-1, self.dim)).view(
+                -1, self.n_kv_heads, self.head_dim
+            )
+        ).view(-1, self.head_dim * self.n_kv_heads)
+        xv[~vision_token_mask] = self.v_proj(x[~vision_token_mask])
+
+        xq[vision_token_mask] = self.mm_q_norm(
+            self.mm_q_proj(x[vision_token_mask].view(-1, self.dim)).view(
+                -1, self.n_heads, self.head_dim
+            )
+        ).view(-1, self.head_dim * self.n_heads)
+        xk[vision_token_mask] = self.mm_k_norm(
+            self.mm_k_proj(x[vision_token_mask].view(-1, self.dim)).view(
+                -1, self.n_kv_heads, self.head_dim
+            )
+        ).view(-1, self.head_dim * self.n_kv_heads)
+        xv[vision_token_mask] = self.mm_v_proj(x[vision_token_mask])
+
+        # xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        # if self.q_norm is not None:
+        #     xq = self.q_norm(xq.view(bs, seqlen, -1, self.head_dim))
+        # if self.k_norm is not None:
+        #     xk = self.k_norm(xk.view(bs, seqlen, -1, self.head_dim))
 
         # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
         # local heads from sizes of xq, xk, and xv as TP may have sharded them
@@ -259,7 +359,11 @@ class Attention(nn.Module):
         else:
             output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
-        return self.o_proj(output)
+
+        o_output = torch.zeros([bs, seqlen, self.dim], device=x.device, dtype=x.dtype)
+        o_output[~vision_token_mask] = self.o_proj(output[~vision_token_mask])
+        o_output[vision_token_mask] = self.mm_o_proj(output[vision_token_mask])
+        return o_output
 
 
 class FeedForward(nn.Module):
@@ -284,17 +388,47 @@ class FeedForward(nn.Module):
         model_args: GPTArgs,
     ):
         super().__init__()
+        self.ffn_dim = hidden_dim
+        self.dim = dim
         self.up_proj = nn.Linear(dim, hidden_dim, bias="up_proj" in model_args.biases)
+        self.mm_up_proj = nn.Linear(
+            dim, hidden_dim, bias="mm_up_proj" in model_args.biases
+        )
         self.down_proj = nn.Linear(
             hidden_dim, dim, bias="down_proj" in model_args.biases
+        )
+        self.mm_down_proj = nn.Linear(
+            hidden_dim, dim, bias="mm_down_proj" in model_args.biases
         )
         self.gate_proj = nn.Linear(
             dim, hidden_dim, bias="gate_proj" in model_args.biases
         )
+        self.mm_gate_proj = nn.Linear(
+            dim, hidden_dim, bias="mm_gate_proj" in model_args.biases
+        )
         self.act_mul_func = MLPActMulFunc(nn.SiLU())
 
-    def forward(self, x):
-        return self.down_proj(self.act_mul_func(self.gate_proj(x), self.up_proj(x)))
+        for module in [self.up_proj, self.down_proj, self.gate_proj]:
+            for param in module.parameters():
+                param.requires_grad_(False)
+
+    def forward(self, x, vision_token_mask: Optional[torch.Tensor] = None):
+        bs, seqlen, _ = x.shape
+        x_output = torch.zeros([bs, seqlen, self.dim], device=x.device, dtype=x.dtype)
+        x_output[~vision_token_mask] = self.down_proj(
+            self.act_mul_func(
+                self.gate_proj(x[~vision_token_mask]),
+                self.up_proj(x[~vision_token_mask]),
+            )
+        )
+        x_output[vision_token_mask] = self.mm_down_proj(
+            self.act_mul_func(
+                self.mm_gate_proj(x[vision_token_mask]),
+                self.mm_up_proj(x[vision_token_mask]),
+            )
+        )
+        return x_output
+        # return self.down_proj(self.act_mul_func(self.gate_proj(x), self.up_proj(x)))
 
 
 class GPTBlock(nn.Module):
@@ -342,6 +476,22 @@ class GPTBlock(nn.Module):
             eps=model_args.norm_eps,
             casting_mode=model_args.hf_config.model_type,
         )
+        self.mm_input_layernorm = build_norm(
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
+        )
+        self.mm_post_attention_layernorm = build_norm(
+            model_args.norm_type,
+            dim=model_args.dim,
+            eps=model_args.norm_eps,
+            casting_mode=model_args.hf_config.model_type,
+        )
+
+        for module in [self.input_layernorm, self.post_attention_layernorm]:
+            for param in module.parameters():
+                param.requires_grad_(False)
 
     def forward(
         self,
@@ -349,6 +499,7 @@ class GPTBlock(nn.Module):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # necessary, but kept here for BC
+        vision_token_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         """
@@ -363,13 +514,27 @@ class GPTBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
+        bs, seqlen, _ = x.shape
+        x_input = torch.zeros([bs, seqlen, self.dim], device=x.device, dtype=x.dtype)
+        x_input[~vision_token_mask] = self.input_layernorm(x[~vision_token_mask])
+        x_input[vision_token_mask] = self.mm_input_layernorm(x[vision_token_mask])
         h = x + self.self_attn(
-            self.input_layernorm(x),
+            x_input,
             position_embeddings,
+            vision_token_mask,
             cu_seqlens=kwargs.get("cu_seqlens", None),
             max_seqlen=kwargs.get("max_seqlen", None),
         )
-        out = h + self.mlp(self.post_attention_layernorm(h))
+        h_post_attention = torch.zeros(
+            [bs, seqlen, self.dim], device=x.device, dtype=x.dtype
+        )
+        h_post_attention[~vision_token_mask] = self.post_attention_layernorm(
+            h[~vision_token_mask]
+        )
+        h_post_attention[vision_token_mask] = self.mm_post_attention_layernorm(
+            h[vision_token_mask]
+        )
+        out = h + self.mlp(h_post_attention, vision_token_mask)
         return out
 
 
@@ -427,14 +592,118 @@ class GPT(BaseModel):
             self.tie_embed_tokens = True
         self.identity_layer = IdentityLayer()
 
+        for module in [
+            self.embed_tokens,
+            self.lm_head if hasattr(self, "lm_head") else None,
+            self.norm,
+        ]:
+            if module is not None:
+                for param in module.parameters():
+                    param.requires_grad_(False)
+
+        self.vae = (
+            AutoencoderKL.from_pretrained(
+                "stabilityai/stable-diffusion-3-medium-diffusers", subfolder="vae"
+            )
+            .eval()
+            .to(torch.float32)
+        )
+        ENCODER_PATCH_SIZE = 2
+        COND_DIM = 1536
+        N_LAYERS = 32
+        # TODO: Change to 2048
+        COND_LEN = self.COND_LEN = 2048
+        VAE_SCALE_IN_SPATIAL = 8
+        ENCODER_TIME_ADALN = True
+        vae_latent_channels = self.vae.config.latent_channels
+        IMG_SIZE = 384
+
+        self.encoder = QformerEncoder(
+            patch_size=ENCODER_PATCH_SIZE,
+            hidden_size=COND_DIM,
+            num_heads=4,
+            depth=N_LAYERS,
+            K=COND_LEN,
+            query_dim=COND_DIM,
+            query_heads=8,
+            bidirectional=False,
+            in_channels=vae_latent_channels,
+            input_size=IMG_SIZE // VAE_SCALE_IN_SPATIAL,
+            gradient_checkpointing=False,
+            time_adaln=ENCODER_TIME_ADALN,
+        )
+        # Load checkpoint of encoder
+        # TODO(cjx): Change to local path
+        # encoder_checkpoint = torch.load("/lustre/fsw/portfolios/sw/users/jiaxinc/.cache//huggingface/hub/models--Jiaxincc--naruto-beta/snapshots/bbae08ec14251afb4fdc8fcfc6a27cf0b8f9b402/latest_xl.pt", map_location="cpu")
+        # self.encoder.load_state_dict(encoder_checkpoint["modelA"])
+        from huggingface_hub import hf_hub_download
+
+        # Download checkpoint from Hugging Face Hub at a given revision
+        checkpoint_path = hf_hub_download(
+            repo_id="Jiaxincc/naruto-beta",  # HF repo
+            filename="latest_xl.pt",  # file inside repo
+            revision="10489cf9848d87667455c6fcb46303a11a2c4e1d",  # commit hash / tag / branch
+        )
+        # Load encoder checkpoint
+        encoder_checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        self.encoder.load_state_dict(encoder_checkpoint["modelA"])
+        logger.info(f"Loaded encoder checkpoint from {checkpoint_path}")
+        self.mm_proj = nn.Linear(
+            COND_DIM,
+            model_args.dim,
+        )
+        self.COND_DIM = COND_DIM
+        self.mm_transformer = DiffusionCondAttentionNet(
+            d_in=COND_DIM,
+            d_cond=model_args.dim,
+            d_model=256,
+            n_heads=8,
+            d_ff=1024,
+            num_layers=6,
+            x_tokens=128,
+            cond_tokens=128,
+            use_timestep=True,
+        )
+        # self.mm_head = nn.Sequential(
+        #     nn.Linear(model_args.dim, model_args.dim),
+        #     nn.SiLU(),
+        #     nn.Linear(model_args.dim, COND_DIM),
+        # )
+
+        for param in self.vae.parameters():
+            param.requires_grad_(False)
+        for param in self.encoder.parameters():
+            param.requires_grad_(False)
+
+        self.counter = 0
+
     def forward(
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor = None,
+        imgs: torch.Tensor = None,  # [B, C, H, W]
         interested_tokens: Optional[torch.BoolTensor] = None,
         *args,
         **kwargs,
     ):
+        vision_start_id = 151652
+        vision_end_id = 151653
+        image_token_id = 151655
+        # TODO(cjx)
+        SCALE = 2.0
+        # TODO: Remove this line
+        # input_ids[:, -128:] = image_token_id
+
+        vision_token_includes_start_end = (
+            (input_ids == vision_start_id)
+            | (input_ids == vision_end_id)
+            | (input_ids == image_token_id)
+        )
+        vision_token_mask = input_ids == image_token_id
+        shifted_input_ids = torch.zeros_like(input_ids)
+        shifted_input_ids[:, :-1] = input_ids[:, 1:]
+        shifted_vision_token_mask = shifted_input_ids == image_token_id
+
         if self.embed_tokens is not None:
             inputs_embeds = self.embed_tokens(input_ids)
             # Do not remove this line
@@ -444,7 +713,24 @@ class GPT(BaseModel):
             inputs_embeds = input_ids
             h = inputs_embeds
 
+        # Tuple of (cos, sin)
+        # cos: [B, seq_len, head_dim]
         position_embeddings = self.rotary_emb(h, position_ids.to(dtype=torch.long))
+
+        # TODO: Process the vision tokens
+        # Causal Encoder(image) -> image tokens
+        # [N_IMAGES, L, D] -> [N_IMAGES, L, Hidden_dim]
+
+        # Fake data
+        # imgs = torch.randn(input_ids.shape[0], 3, 384, 384).to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+        img_z1 = vae_encode_mode(self.vae, imgs)
+        # [B, L, D]
+        encoded_img = self.encoder(img_z1) * SCALE
+        inputs_embeds[vision_token_mask] = (
+            self.mm_proj(encoded_img)
+            .view(input_ids.shape[0], -1, self.model_args.dim)
+            .view(-1, self.model_args.dim)
+        )
 
         if "valid_input_len" in kwargs:
             valid_input_len = kwargs["valid_input_len"]
@@ -477,11 +763,44 @@ class GPT(BaseModel):
                     layer,
                     h,
                     position_embeddings,
+                    vision_token_includes_start_end,
                     **kwargs,
                     use_reentrant=False,
                 )
             else:
-                h = layer(h, position_embeddings=position_embeddings, **kwargs)
+                h = layer(
+                    h,
+                    position_embeddings=position_embeddings,
+                    vision_token_mask=vision_token_includes_start_end,
+                    **kwargs,
+                )
+
+        noise = torch.randn(
+            [input_ids.shape[0] * self.COND_LEN, self.COND_DIM],
+            device=input_ids.device,
+            dtype=inputs_embeds.dtype,
+        )
+        t = torch.rand([noise.shape[0], 1], device=input_ids.device)
+        mm_h = self.mm_transformer(
+            noise * (1 - t) + t * encoded_img.view(noise.shape),
+            h[shifted_vision_token_mask],
+            t.squeeze(-1),
+        )
+        loss = torch.nn.functional.mse_loss(
+            mm_h.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM),
+            (encoded_img.view(noise.shape) - noise).view(
+                input_ids.shape[0] * self.COND_LEN, self.COND_DIM
+            ),
+            reduction="none",
+        )
+        # mm_h = self.mm_head(h[shifted_vision_token_mask])
+        # loss = torch.nn.functional.mse_loss(mm_h.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM), encoded_img.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM), reduction="none")
+        if self.counter % 100 == 0:
+            logger.info(
+                f"loss: {loss.view(input_ids.shape[0], -1, self.COND_DIM)}, variance: {loss.var(dim=-1)}, mean: {loss.mean(dim=-1)}"
+            )
+        self.counter += 1
+        loss = loss.mean()
 
         # Add `if` check just in case `pp` is enabled
         if self.norm is not None:
@@ -505,7 +824,7 @@ class GPT(BaseModel):
                 is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
                 h = h.full_tensor() if is_a_dist_tensor else h
                 output = h @ embed_tokens_weight.t()
-            return output
+            return output, loss
         else:
             return h
 

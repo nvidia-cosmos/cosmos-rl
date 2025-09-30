@@ -1,7 +1,6 @@
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from typing import List, Any, Dict, Union
 import torch
-import copy
 
 
 IGNORE_LABEL_ID = -100
@@ -168,89 +167,22 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         Process the sample into the format required by the SFT model.
         Accepts either raw text or conversation format.
         """
-        # 1. if item is a string, then assume it is a raw text
-        if isinstance(sample, str):
-            token_ids = self.tokenizer(sample, add_special_tokens=False).input_ids
-            label_ids = token_ids.copy()
-        # 2. if item is a list, then assume it is in conversation format of:
-        # [
-        #     {
-        #         "role": "user",
-        #         "content": "..."
-        #     },
-        #     {
-        #         "role": "assistant",
-        #         "content": "..."
-        #     }
-        # ]
-        else:
-            assert isinstance(sample, list), "All items should be list, got: {}".format(
-                sample
-            )
-            # Check `role` and `content` in each item
-            for x in sample:
-                assert isinstance(x, dict), "Each item should be a dict"
-                assert "role" in x, "Each item should have 'role'"
-                assert "content" in x, "Each item should have 'content'"
+        assert isinstance(sample, dict), "Sample should be a dict"
+        jpg = sample["jpg"]
+        caption = sample["json"]["prompt"]
 
-            original_sample = copy.deepcopy(sample)
+        chat = f"""<|im_start|>system
+You are a helpful assistant to generate image given the following prompt: {caption}.<|im_end|>
+<|im_start|>assistant
+This is the generated image: <|vision_start|>{"<|image_pad|>" * 2048}<|vision_end|><|im_end|>
+"""
 
-            try:
-                if (
-                    self.tokenizer.pad_token is None
-                    or self.tokenizer.pad_token_id is None
-                ):
-                    raise ValueError("pad_token and pad_token_id should be set")
-
-                assistant_contents = []
-                pad_token = self.tokenizer.pad_token
-                pad_token_id = self.tokenizer.pad_token_id
-                eos_token_id = self.tokenizer.eos_token_id
-                pad_run_length = 10
-
-                for x in sample:
-                    if x["role"] == "assistant":
-                        assistant_contents.append(x["content"])
-                        x["content"] = pad_token * pad_run_length
-
-                token_ids = self.tokenizer.apply_chat_template(
-                    sample,
-                    return_dict=True,
-                    add_generation_prompt=False,
-                )["input_ids"]
-                label_ids = [IGNORE_LABEL_ID] * len(token_ids)
-
-                for assistant_content in assistant_contents:
-                    replaced, token_ids, label_ids = self._replace_assistant_content(
-                        token_ids,
-                        label_ids,
-                        pad_token_id=pad_token_id,
-                        eos_token_id=eos_token_id,
-                        replacement_ids=self.tokenizer.encode(
-                            assistant_content, add_special_tokens=False
-                        ),
-                        pad_run_length=pad_run_length,
-                    )
-                    if not replaced:
-                        raise ValueError("No assistant content to replace")
-                    if len(token_ids) != len(label_ids):
-                        raise ValueError(
-                            f"token_ids and label_ids should have the same length, but got {len(token_ids)} and {len(label_ids)}"
-                        )
-            except Exception:
-                # Fall back to the non-assistant-masking
-                token_ids = self.tokenizer.apply_chat_template(
-                    original_sample,
-                    return_assistant_tokens_mask=False,
-                    return_dict=True,
-                    add_generation_prompt=False,
-                )["input_ids"]
-                label_ids = token_ids.copy()
-        assert isinstance(token_ids, list), "token_ids should be a list"
-        assert isinstance(token_ids[0], int), "Each item in token_ids should be an int"
+        token_ids = self.tokenizer(chat, add_special_tokens=False).input_ids
+        label_ids = token_ids.copy()
         return {
             "token_ids": token_ids,
             "label_ids": label_ids,
+            "jpg": jpg,
         }
 
     def sft_compute_max_len(self, processed_samples: List[List[int]]) -> int:
@@ -276,6 +208,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         list_of_label_ids = [
             x["label_ids"][:computed_max_len] for x in processed_samples
         ]
+        list_of_jpg = [x["jpg"] for x in processed_samples]
 
         # Then pad the samples to the computed_max_len
         input_ids = torch.tensor(
@@ -296,12 +229,17 @@ class DecoderOnlyLLMDataPacker(DataPacker):
             dtype=torch.long,
         )
 
-        # valid_label_mask = label_ids != ignore_label_id
-        # assert torch.all(input_ids[valid_label_mask] == label_ids[valid_label_mask]), "input_ids and label_ids should have the same value"
-        # print(f"input_ids: {self.tokenizer.decode(input_ids[0])}")
-        # print(f"label_ids: {self.tokenizer.decode(label_ids[0][label_ids[0] != ignore_label_id])}")
+        images = torch.cat(list_of_jpg, dim=0)
+        assert (
+            images.shape[0] == input_ids.shape[0]
+        ), "The number of images should be the same as the number of input_ids"
+        assert images.shape[1] == 3, "The number of channels should be 3"
+        assert images.shape[2] == 384, "The height should be 384"
+        assert images.shape[3] == 384, "The width should be 384"
+        assert images.ndim == 4, "The number of dimensions should be 4"
 
         return {
             "input_ids": input_ids,
             "label_ids": label_ids,
+            "imgs": images,
         }
