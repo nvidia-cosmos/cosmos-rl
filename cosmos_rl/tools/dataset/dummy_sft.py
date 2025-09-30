@@ -47,7 +47,7 @@ class SFTRawTextDataset(Dataset):
 
         # Shuffle via buffer (DataLoader's shuffle doesn't apply to Iterable-style streams)
         dataset = dataset.shuffle(buffer_size=10000, seed=int(os.getenv("RANK", 0)))
-        print(f"Rank {os.getenv('RANK', 0)} dataset size: {len(dataset)}")
+        print(f"Rank {os.getenv('RANK', 0)}")
 
         # --- collate helper: turn PIL -> torch.Tensor, keep metadata as-is ---
         to_tensor = ToTensor()
