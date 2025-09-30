@@ -24,6 +24,7 @@ from torch.utils.data._utils.collate import default_collate
 from datasets import load_dataset
 from torchvision.transforms import ToTensor
 from PIL import Image
+import os
 
 
 # This dataset is used for SFT with raw text input, which is used for models like Mistral
@@ -45,7 +46,7 @@ class SFTRawTextDataset(Dataset):
         )
 
         # Shuffle via buffer (DataLoader's shuffle doesn't apply to Iterable-style streams)
-        dataset = dataset.shuffle(buffer_size=1000)
+        dataset = dataset.shuffle(buffer_size=10000, seed=os.getenv("RANK"))
 
         # --- collate helper: turn PIL -> torch.Tensor, keep metadata as-is ---
         to_tensor = ToTensor()
