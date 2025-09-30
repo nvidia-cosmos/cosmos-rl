@@ -795,11 +795,6 @@ class GPT(BaseModel):
         )
         # mm_h = self.mm_head(h[shifted_vision_token_mask])
         # loss = torch.nn.functional.mse_loss(mm_h.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM), encoded_img.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM), reduction="none")
-        if self.counter % 100 == 0:
-            logger.info(
-                f"loss: {loss.view(input_ids.shape[0], -1, self.COND_DIM)}, variance: {loss.var(dim=-1)}, mean: {loss.mean(dim=-1)}"
-            )
-        self.counter += 1
         loss = loss.mean()
 
         # Add `if` check just in case `pp` is enabled
