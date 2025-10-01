@@ -172,10 +172,16 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         caption = sample["json"]["prompt"]
 
         chat = f"""<|im_start|>system
-You are a helpful assistant to generate image given the following prompt: {caption}.<|im_end|>
+You are a helpful assistant to generate image given the following prompt: 
+{caption}.<|im_end|>
 <|im_start|>assistant
 This is the generated image: <|vision_start|>{"<|image_pad|>" * 2048}<|vision_end|><|im_end|>
 """
+        #         chat = f"""<|im_start|>system
+        # You are a helpful assistant to generate image given the following prompt:
+        # {caption}.<|im_end|>
+        # <|im_start|>assistant
+        # This is the generated image: <|vision_start|>"""
 
         token_ids = self.tokenizer(chat, add_special_tokens=False).input_ids
         label_ids = token_ids.copy()

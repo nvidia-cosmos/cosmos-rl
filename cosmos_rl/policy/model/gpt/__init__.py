@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import math
 import torch
 from torch import nn
 from dataclasses import dataclass, field
@@ -39,7 +40,6 @@ import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.policy.kernel.fused import MLPActMulFunc
-from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
 from naruto.q_former import QformerEncoder
 from naruto.util import vae_encode_mode
 from diffusers import AutoencoderKL
@@ -431,6 +431,27 @@ class FeedForward(nn.Module):
         # return self.down_proj(self.act_mul_func(self.gate_proj(x), self.up_proj(x)))
 
 
+def modulate(
+    x: torch.Tensor,
+    shift: Optional[torch.Tensor],
+    scale: Optional[torch.Tensor],
+    dim: int = 1,
+):
+    """
+    x: [..., D]
+    shift, scale: shape broadcastable to x, expand along dim (sequence dim or batch dim depending on caller).
+    - If shift/scale is None, treat as 0 / 0 respectively (i.e., identity).
+    """
+    if scale is None and shift is None:
+        return x
+    # We want: (1 + scale) * x + shift
+    if scale is not None:
+        x = x * (1 + scale.unsqueeze(dim))
+    if shift is not None:
+        x = x + shift.unsqueeze(dim)
+    return x
+
+
 class GPTBlock(nn.Module):
     """
     GPTBlock Module
@@ -488,6 +509,15 @@ class GPTBlock(nn.Module):
             eps=model_args.norm_eps,
             casting_mode=model_args.hf_config.model_type,
         )
+        self.mm_adaln = nn.Sequential(
+            nn.SiLU(), nn.Linear(model_args.dim, 2 * model_args.dim, bias=True)
+        )
+        self.t_dim = 64
+        self.t_proj = nn.Linear(self.t_dim, model_args.dim, bias=False)
+        # buffer of frequencies (shared across dtypes; cast at use time)
+        half = 32
+        freqs = torch.exp(-math.log(10000) * torch.arange(0, half).float() / half)
+        self.register_buffer("t_freqs", freqs, persistent=False)
 
         for module in [self.input_layernorm, self.post_attention_layernorm]:
             for param in module.parameters():
@@ -500,6 +530,7 @@ class GPTBlock(nn.Module):
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # necessary, but kept here for BC
         vision_token_mask: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         """
@@ -517,7 +548,17 @@ class GPTBlock(nn.Module):
         bs, seqlen, _ = x.shape
         x_input = torch.zeros([bs, seqlen, self.dim], device=x.device, dtype=x.dtype)
         x_input[~vision_token_mask] = self.input_layernorm(x[~vision_token_mask])
-        x_input[vision_token_mask] = self.mm_input_layernorm(x[vision_token_mask])
+
+        mods = self.mm_adaln(
+            self.time_embed(timestep, self.dim, x.device, x.dtype)
+        ).chunk(2, dim=1)
+        shift_msa, scale_msa = mods
+
+        before_mod = self.mm_input_layernorm(x[vision_token_mask]).view(
+            x.shape[0], -1, self.dim
+        )
+        after_mod = modulate(before_mod, shift_msa, scale_msa, dim=1)
+        x_input[vision_token_mask] = after_mod.view(-1, self.dim)
         h = x + self.self_attn(
             x_input,
             position_embeddings,
@@ -536,6 +577,12 @@ class GPTBlock(nn.Module):
         )
         out = h + self.mlp(h_post_attention, vision_token_mask)
         return out
+
+    def time_embed(self, t: torch.Tensor, dim: int, device, dtype):
+        freqs = self.t_freqs.to(device=device, dtype=dtype)
+        ang = t.unsqueeze(1) * freqs.unsqueeze(0)  # [B, half]
+        emb = torch.cat([ang.sin(), ang.cos()], dim=-1)  # [B, 64]
+        return self.t_proj(emb)  # [B, hidden_size_img]
 
 
 @ModelRegistry.register(GPTWeightMapper)
@@ -657,18 +704,18 @@ class GPT(BaseModel):
             d_in=COND_DIM,
             d_cond=model_args.dim,
             d_model=256,
-            n_heads=8,
-            d_ff=1024,
-            num_layers=6,
-            x_tokens=128,
-            cond_tokens=128,
+            n_heads=4,
+            d_ff=512,
+            num_layers=3,
+            x_tokens=32,
+            cond_tokens=32,
             use_timestep=True,
         )
-        # self.mm_head = nn.Sequential(
-        #     nn.Linear(model_args.dim, model_args.dim),
-        #     nn.SiLU(),
-        #     nn.Linear(model_args.dim, COND_DIM),
-        # )
+        self.mm_head = nn.Sequential(
+            nn.Linear(model_args.dim, model_args.dim),
+            nn.SiLU(),
+            nn.Linear(model_args.dim, COND_DIM),
+        )
 
         for param in self.vae.parameters():
             param.requires_grad_(False)
@@ -683,6 +730,7 @@ class GPT(BaseModel):
         position_ids: torch.Tensor = None,
         imgs: torch.Tensor = None,  # [B, C, H, W]
         interested_tokens: Optional[torch.BoolTensor] = None,
+        current_emb: list[torch.Tensor] = None,
         *args,
         **kwargs,
     ):
@@ -693,72 +741,24 @@ class GPT(BaseModel):
         SCALE = 2.0
         # TODO: Remove this line
         # input_ids[:, -128:] = image_token_id
-
-        vision_token_includes_start_end = (
-            (input_ids == vision_start_id)
-            | (input_ids == vision_end_id)
-            | (input_ids == image_token_id)
-        )
-        vision_token_mask = input_ids == image_token_id
-        shifted_input_ids = torch.zeros_like(input_ids)
-        shifted_input_ids[:, :-1] = input_ids[:, 1:]
-        shifted_vision_token_mask = shifted_input_ids == image_token_id
-
-        if self.embed_tokens is not None:
+        if current_emb is not None:
             inputs_embeds = self.embed_tokens(input_ids)
             # Do not remove this line
             # This is a trick for TP with torch.compile
             h = self.identity_layer(inputs_embeds)
-        else:
-            inputs_embeds = input_ids
-            h = inputs_embeds
-
-        # Tuple of (cos, sin)
-        # cos: [B, seq_len, head_dim]
-        position_embeddings = self.rotary_emb(h, position_ids.to(dtype=torch.long))
-
-        # TODO: Process the vision tokens
-        # Causal Encoder(image) -> image tokens
-        # [N_IMAGES, L, D] -> [N_IMAGES, L, Hidden_dim]
-
-        # Fake data
-        # imgs = torch.randn(input_ids.shape[0], 3, 384, 384).to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-        img_z1 = vae_encode_mode(self.vae, imgs)
-        # [B, L, D]
-        encoded_img = self.encoder(img_z1) * SCALE
-        inputs_embeds[vision_token_mask] = (
-            self.mm_proj(encoded_img)
-            .view(input_ids.shape[0], -1, self.model_args.dim)
-            .view(-1, self.model_args.dim)
-        )
-
-        if "valid_input_len" in kwargs:
-            valid_input_len = kwargs["valid_input_len"]
-            updated_kwargs = pack_sequences_for_inputs(
-                inputs_embeds,
-                valid_input_len,
-                list(position_embeddings),
-                interested_tokens,
-                inputs_seq_dim=1,
-                inputs_batch_dim=0,
-                position_ids_seq_dim=1,
-                position_ids_batch_dim=0,
-                interested_tokens_seq_dim=1,
-                interested_tokens_batch_dim=0,
-                padding_mask=kwargs.get("padding_mask", None),
-                cp_mesh=kwargs.get("cp_mesh", None),
+            n_emb = len(current_emb)
+            position_embeddings = self.rotary_emb(h, position_ids.to(dtype=torch.long))
+            if n_emb > 0:
+                assert torch.all(input_ids[:, -n_emb:] == image_token_id)
+                inputs_embeds[input_ids == image_token_id] = self.mm_proj(
+                    torch.stack(current_emb, dim=0)
+                ).squeeze()
+            vision_token_includes_start_end = (
+                (input_ids == vision_start_id)
+                | (input_ids == vision_end_id)
+                | (input_ids == image_token_id)
             )
-            position_embeddings = tuple(updated_kwargs.pop("position_ids"))
-            interested_tokens = updated_kwargs.pop("interested_tokens")
-            h = updated_kwargs.pop("inputs")
-            h = self.identity_layer(h)
-            kwargs.update(updated_kwargs)
-
-        for layer in self.layers.values():
-            if (
-                hasattr(layer, "_gradient_checkpointing_enabled")
-                and layer._gradient_checkpointing_enabled
-            ):
+            for layer in self.layers.values():
                 h = torch.utils.checkpoint.checkpoint(
                     layer,
                     h,
@@ -767,66 +767,126 @@ class GPT(BaseModel):
                     **kwargs,
                     use_reentrant=False,
                 )
-            else:
-                h = layer(
-                    h,
-                    position_embeddings=position_embeddings,
-                    vision_token_mask=vision_token_includes_start_end,
-                    **kwargs,
-                )
 
-        noise = torch.randn(
-            [input_ids.shape[0] * self.COND_LEN, self.COND_DIM],
-            device=input_ids.device,
-            dtype=inputs_embeds.dtype,
-        )
-        t = torch.rand([noise.shape[0], 1], device=input_ids.device)
-        mm_h = self.mm_transformer(
-            noise * (1 - t) + t * encoded_img.view(noise.shape),
-            h[shifted_vision_token_mask],
-            t.squeeze(-1),
-        )
-        loss = torch.nn.functional.mse_loss(
-            mm_h.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM),
-            (encoded_img.view(noise.shape) - noise).view(
-                input_ids.shape[0] * self.COND_LEN, self.COND_DIM
-            ),
-            reduction="none",
-        )
-        # mm_h = self.mm_head(h[shifted_vision_token_mask])
-        # loss = torch.nn.functional.mse_loss(mm_h.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM), encoded_img.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM), reduction="none")
-        # if self.counter % 100 == 0:
-        #     logger.info(
-        #         f"loss: {loss.view(input_ids.shape[0], -1, self.COND_DIM)}, variance: {loss.var(dim=-1)}, mean: {loss.mean(dim=-1)}"
-        #     )
-        # self.counter += 1
-        loss = loss.mean()
-
-        # Add `if` check just in case `pp` is enabled
-        if self.norm is not None:
-            if interested_tokens is not None:
-                assert not isinstance(
-                    h, torch.distributed.tensor.DTensor
-                ), "logprob_masks must be a local tensor"
-                h = h[interested_tokens]
-            h = self.norm(h)
-            if not self.tie_embed_tokens:
-                output = self.lm_head(h)
-            else:
-                is_w_dist_tensor = isinstance(
-                    self.embed_tokens.weight, torch.distributed.tensor.DTensor
+            # return self.mm_head(h[:, -1].reshape(1, self.model_args.dim))
+            last_emb = h[:, -1].reshape(1, self.model_args.dim)
+            noise = torch.randn(
+                1, self.COND_DIM, device=input_ids.device, dtype=inputs_embeds.dtype
+            )
+            for t in torch.linspace(0, 1, 100):
+                t_tensor = torch.tensor([t.item()], device=input_ids.device)
+                mm_h = self.mm_transformer(
+                    noise,
+                    last_emb,
+                    t_tensor,
                 )
-                embed_tokens_weight = (
-                    self.embed_tokens.weight.full_tensor()
-                    if is_w_dist_tensor
-                    else self.embed_tokens.weight
-                )
-                is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
-                h = h.full_tensor() if is_a_dist_tensor else h
-                output = h @ embed_tokens_weight.t()
-            return output, loss
+                noise = noise + mm_h * 0.01
+            return noise.view(self.COND_DIM)
         else:
-            return h
+            vision_token_includes_start_end = (
+                (input_ids == vision_start_id)
+                | (input_ids == vision_end_id)
+                | (input_ids == image_token_id)
+            )
+            vision_token_mask = input_ids == image_token_id
+            shifted_input_ids = torch.zeros_like(input_ids)
+            shifted_input_ids[:, :-1] = input_ids[:, 1:]
+            shifted_vision_token_mask = shifted_input_ids == image_token_id
+
+            if self.embed_tokens is not None:
+                inputs_embeds = self.embed_tokens(input_ids)
+                # Do not remove this line
+                # This is a trick for TP with torch.compile
+                h = self.identity_layer(inputs_embeds)
+            else:
+                inputs_embeds = input_ids
+                h = inputs_embeds
+
+            # Tuple of (cos, sin)
+            # cos: [B, seq_len, head_dim]
+            position_embeddings = self.rotary_emb(h, position_ids.to(dtype=torch.long))
+
+            # TODO: Process the vision tokens
+            # Causal Encoder(image) -> image tokens
+            # [N_IMAGES, L, D] -> [N_IMAGES, L, Hidden_dim]
+
+            # Fake data
+            # imgs = torch.randn(input_ids.shape[0], 3, 384, 384).to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+            img_z1 = vae_encode_mode(self.vae, imgs)
+            # [B, L, D]
+            encoded_img = self.encoder(img_z1) * SCALE
+
+            timestep = torch.rand([input_ids.shape[0], 1, 1], device=input_ids.device)
+            noise = torch.randn_like(encoded_img)
+            target = encoded_img - noise
+            inputs_embeds[vision_token_mask] = (
+                self.mm_proj(encoded_img * timestep + noise * (1 - timestep))
+                .view(input_ids.shape[0], -1, self.model_args.dim)
+                .view(-1, self.model_args.dim)
+            )
+
+            for layer in self.layers.values():
+                h = torch.utils.checkpoint.checkpoint(
+                    layer,
+                    h,
+                    position_embeddings,
+                    vision_token_includes_start_end,
+                    timestep.view(-1),
+                    **kwargs,
+                    use_reentrant=False,
+                )
+
+            loss = torch.nn.functional.mse_loss(
+                self.mm_head(h[shifted_vision_token_mask]).view(target.shape),
+                target,
+            )
+            return None, loss
+
+            # noise = torch.randn(
+            #     [input_ids.shape[0] * self.COND_LEN, self.COND_DIM],
+            #     device=input_ids.device,
+            #     dtype=inputs_embeds.dtype,
+            # )
+            # t = torch.rand([noise.shape[0], 1], device=input_ids.device)
+            # mm_h = self.mm_transformer(
+            #     noise * (1 - t) + t * encoded_img.view(noise.shape),
+            #     h[shifted_vision_token_mask],
+            #     t.squeeze(-1),
+            # )
+            # loss = torch.nn.functional.mse_loss(
+            #     mm_h.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM),
+            #     (encoded_img.view(noise.shape) - noise).view(
+            #         input_ids.shape[0] * self.COND_LEN, self.COND_DIM
+            #     ),
+            #     reduction="none",
+            # )
+            # loss = loss.mean()
+
+            # Add `if` check just in case `pp` is enabled
+            # if self.norm is not None:
+            #     if interested_tokens is not None:
+            #         assert not isinstance(
+            #             h, torch.distributed.tensor.DTensor
+            #         ), "logprob_masks must be a local tensor"
+            #         h = h[interested_tokens]
+            #     h = self.norm(h)
+            #     if not self.tie_embed_tokens:
+            #         output = self.lm_head(h)
+            #     else:
+            #         is_w_dist_tensor = isinstance(
+            #             self.embed_tokens.weight, torch.distributed.tensor.DTensor
+            #         )
+            #         embed_tokens_weight = (
+            #             self.embed_tokens.weight.full_tensor()
+            #             if is_w_dist_tensor
+            #             else self.embed_tokens.weight
+            #         )
+            #         is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
+            #         h = h.full_tensor() if is_a_dist_tensor else h
+            #         output = h @ embed_tokens_weight.t()
+            #     return output, loss
+            # else:
+            #     return h
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         # rotary.inv_freq could get deleted and not re-initialized

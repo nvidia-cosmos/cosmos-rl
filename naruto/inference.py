@@ -24,7 +24,8 @@ def rk4_integrate(x0, t0, t1, steps, f, condition=None):
     count = None
     ts = torch.linspace(t0.item(), t1.item(), steps + 1, device=x.device)
     for i in range(steps):
-        cond = f(x, ts[i].reshape(1), condition=condition, count=count)#
+        tt = ts[i].reshape(1)
+        cond = f(x, tt, condition=condition, count=count)#
         # uncond = f(x, ts[i].reshape(1), condition=torch.zeros_like(condition), count=count)
         # vel = (cond - uncond) * 2.0 + uncond
         vel = cond
@@ -179,9 +180,9 @@ def reconstruct_from_most_blur(
     # Integrate from t=1 -> t=0 (reduce blur)
     with torch.autocast(device_type=device.type, dtype=dtype):
         condition = modelA(z1)
-        print(f"condition: {condition}")
-        # condition[:, 1900:] = 0.0
-        print(f"condition: {condition.shape}, {condition.norm(dim=1)}")
+        # condition[:, :100] = 0.0
+        # condition = torch.load(f"../cond_var_3.pt").to(device).view(1, COND_LEN, COND_DIM) / 2.0
+        # print(f"condition: {condition}")
     zT = rk4_integrate(zt_s, t0, torch.tensor([END_T], device=device, dtype=torch.float32), steps, partial(vel), condition=condition)
 
     # Decode to image: [3, H, W]
