@@ -885,8 +885,8 @@ class ParallelismConfig(BaseModel):
         description="Pipeline parallelism schedule",
         choices=["Interleaved1F1B"],
     )
-    pp_layers_per_stage: int = Field(
-        default=2,
+    pp_layers_per_stage: Optional[int] = Field(
+        default=None,
         description="Number of MOE layers per PP stage",
     )
 

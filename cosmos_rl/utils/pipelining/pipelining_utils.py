@@ -17,18 +17,27 @@ import math
 from typing import Callable
 
 import torch
-from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_schedules import (
+# from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_schedules import (
+#     PipelineScheduleSingle,
+#     ScheduleZBVZeroBubble,
+#     _PipelineSchedule,
+#     get_schedule_class,
+# )
+# from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_stage import (
+#     PipelineStage,
+# )
+from cosmos_rl.utils.logging import logger
+from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
+
+from torch.distributed.pipelining.schedules import (
     PipelineScheduleSingle,
     ScheduleZBVZeroBubble,
     _PipelineSchedule,
     get_schedule_class,
 )
-from cosmos_rl.policy.model.deepseek_v3.pipeline_parallelism.pipeline_stage import (
-    PipelineStage,
-)
-from cosmos_rl.utils.logging import logger
-from torch import nn
-from torch.distributed.device_mesh import DeviceMesh
+
+from torch.distributed.pipelining.stage import PipelineStage
 
 __all__ = ["build_pipeline_schedule", "generate_split_points", "stage_ids_this_rank"]
 
@@ -206,7 +215,7 @@ def build_pipeline_schedule(
     model_parts: list[nn.Module],
     device: torch.device,
     loss_fn: Callable[..., torch.Tensor] | None,
-    has_backward: bool,
+    # has_backward: bool,
 ) -> _PipelineSchedule:
     """
     Builds a pipeline schedule for the given model configuration and pipeline
@@ -226,7 +235,7 @@ def build_pipeline_schedule(
         device (torch.device): The device to use for the model parts.
         loss_fn (Callable): The loss function to use for training and validation.
             Set this to None for generation.
-        has_backward (bool): Whether the pipeline schedule executes the backward
+        # has_backward (bool): Whether the pipeline schedule executes the backward
             pass as well.
 
     Returns:
@@ -280,7 +289,7 @@ def build_pipeline_schedule(
         stages[0] if is_single_stage_schedule else stages,
         n_microbatches=n_microbatches,
         loss_fn=loss_fn,
-        has_backward=has_backward,
+        # has_backward=has_backward,
     )
 
     return schedule

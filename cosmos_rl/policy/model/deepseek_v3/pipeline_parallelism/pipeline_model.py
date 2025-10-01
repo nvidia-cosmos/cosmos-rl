@@ -245,6 +245,6 @@ def _build_stage(
 
     if stage_idx != (num_stages - 1):
         model.model.model.norm = None
-        model.model.model.lm_head = None
+        model.model.lm_head = None
 
     return model
