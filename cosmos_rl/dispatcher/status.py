@@ -16,6 +16,7 @@
 import time
 import math
 from queue import Queue
+import os
 from strenum import StrEnum
 from typing import Dict, List, Iterator, Any, Optional, Callable
 from torch.utils.data import DataLoader
@@ -919,6 +920,7 @@ class PolicyStatusManager:
                     )
                 lengths_np = np.array(completion_lengths)
                 rewards_np = np.array(rewards)
+                completions = [rollout.completion for rollout in rollouts_of_this_step]
                 # Reward of the longest completion in this batch
                 if len(lengths_np) > 0:
                     idx_max_len = int(np.argmax(lengths_np))
@@ -950,6 +952,55 @@ class PolicyStatusManager:
                 else:
                     length_p50 = length_p90 = length_p99 = 0.0
                     at_max_frac = near_max_frac = 0.0
+
+                # Conditional alert logging for long and high-reward completions
+                try:
+                    # Config via env vars (optional)
+                    default_min_len = int(0.9 * self.config.rollout.max_response_length)
+                    min_len_thr = int(
+                        os.environ.get(
+                            "COSMOS_LOG_LONG_COMPLETION_MIN_LEN", default_min_len
+                        )
+                    )
+                    reward_min_thr = float(
+                        os.environ.get("COSMOS_LOG_HIGH_REWARD_MIN", 0.9)
+                    )
+                    top_k_to_log = int(os.environ.get("COSMOS_LOG_MAX_SAMPLES", 3))
+                    preview_chars = int(
+                        os.environ.get(
+                            "COSMOS_LOG_COMPLETION_PREVIEW_CHARS",
+                            self.config.rollout.max_response_length,
+                        )
+                    )
+
+                    if len(lengths_np) > 0:
+                        mask = (lengths_np >= min_len_thr) & (
+                            rewards_np >= reward_min_thr
+                        )
+                        idxs = np.where(mask)[0].tolist()
+                        if len(idxs) > 0:
+                            # sort by length desc, then reward desc
+                            idxs.sort(
+                                key=lambda i: (
+                                    int(lengths_np[i]),
+                                    float(rewards_np[i]),
+                                ),
+                                reverse=True,
+                            )
+                            for i in idxs[: max(1, top_k_to_log)]:
+                                comp = completions[i]
+                                comp_to_show = (
+                                    comp
+                                    if len(comp) <= preview_chars
+                                    else (comp[:preview_chars] + " ...[truncated]")
+                                )
+                                logger.warning(
+                                    f"[Controller][LongCompletionAlert] step={self.current_step}, sample_idx={i}, length={int(lengths_np[i])}, reward={float(rewards_np[i]):.4f}\nCompletion: {comp_to_show}"
+                                )
+                except Exception as e:
+                    logger.debug(
+                        f"[Controller] LongCompletionAlert skipped due to: {e}"
+                    )
 
                 report_data = {
                     "train/reward_mean": np.mean(rewards),
