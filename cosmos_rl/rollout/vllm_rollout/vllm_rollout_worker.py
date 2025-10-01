@@ -87,10 +87,7 @@ def _patch_vllm_rollout_locked_step(
         if not hasattr(self, "_cosmos_step_counter"):
             self._cosmos_step_counter = 0
         self._cosmos_step_counter += 1
-        if (
-            COSMOS_ROLLOUT_STEP_INTERVAL > 0
-            and self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0
-        ):
+        if self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0:
             # IMPORTANT:
             # If validation is enabled, R2R is not expected to be called in this step function
             # to avoid recursive inference execution.
@@ -1112,7 +1109,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             prompt_queue.put(prompts)
         return is_end
 
-    def consume_one_command(self, cmd_pred: Optional[Callable[[Command], bool]] = None):
+    def consume_command(self, cmd_pred: Optional[Callable[[Command], bool]] = None):
         current_command = None
         if self.global_rank == 0:
             if not self._command_queue.empty():
@@ -1142,38 +1139,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 raise RuntimeError(
                     f"[Rollout] Command execution failed for {current_command._serialize()}"
                 ) from e
-        return current_command
-
-    def consume_command(
-        self,
-        cmd_pred: Optional[Callable[[Command], bool]] = None,
-        timeout=constant.COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT,
-    ):
-        # Consume all pending commands for weight sync.
-        # To ensure the weight update is using the up-to-date commands.
-        last_cmd = None
-        none_cnt = 0
-        start_time = time.time()
-        while time.time() - start_time < float(timeout):
-            cmd = self.consume_one_command(cmd_pred=cmd_pred)
-            if cmd is not None:
-                last_cmd = cmd
-                none_cnt = 0
-                start_time = time.time()
-            else:
-                none_cnt += 1
-            if none_cnt >= constant.COSMOS_ROLLOUT_CMD_WAIT_TIMES and (
-                (
-                    last_cmd is not None
-                    and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
-                )
-                or last_cmd is None
-            ):
-                # If continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times, and the last command is not P2R command, we break.
-                # Since P2R must be followed by another R2R broadcast command, we need wait.
-                # Continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times to make sure the command queue is empty at that time.
-                break
-            time.sleep(constant.COSMOS_ROLLOUT_CMD_WAIT_INTERVAL)
 
     def send_end_signal(self):
         """
