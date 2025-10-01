@@ -72,7 +72,7 @@ def init_distributed(cpu_enabled: bool = True):
     else:
         torch.distributed.init_process_group(
             backend="cuda:nccl,cpu:gloo",
-            timeout=timedelta(seconds=600),
+            timeout=timedelta(seconds=6000),
         )
 
 
