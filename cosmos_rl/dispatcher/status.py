@@ -917,6 +917,40 @@ class PolicyStatusManager:
                     completion_lengths.append(
                         len(self.tokenizer.encode(rollout.completion))
                     )
+                lengths_np = np.array(completion_lengths)
+                rewards_np = np.array(rewards)
+                # Reward of the longest completion in this batch
+                if len(lengths_np) > 0:
+                    idx_max_len = int(np.argmax(lengths_np))
+                    reward_of_max_length = float(rewards_np[idx_max_len])
+                else:
+                    reward_of_max_length = 0.0
+                # Length/Reward correlation (Pearson)
+                if (
+                    len(lengths_np) > 1
+                    and np.std(lengths_np) > 1e-8
+                    and np.std(rewards_np) > 1e-8
+                ):
+                    len_reward_corr = float(np.corrcoef(lengths_np, rewards_np)[0, 1])
+                else:
+                    len_reward_corr = 0.0
+                # Length quantiles and near-max ratios
+                if len(lengths_np) > 0:
+                    length_p50 = float(np.percentile(lengths_np, 50))
+                    length_p90 = float(np.percentile(lengths_np, 90))
+                    length_p99 = float(np.percentile(lengths_np, 99))
+                    at_max_frac = float(
+                        np.mean(lengths_np >= self.config.rollout.max_response_length)
+                    )
+                    near_max_frac = float(
+                        np.mean(
+                            lengths_np >= 0.9 * self.config.rollout.max_response_length
+                        )
+                    )
+                else:
+                    length_p50 = length_p90 = length_p99 = 0.0
+                    at_max_frac = near_max_frac = 0.0
+
                 report_data = {
                     "train/reward_mean": np.mean(rewards),
                     "train/reward_std": np.std(rewards),
@@ -924,6 +958,15 @@ class PolicyStatusManager:
                     "train/reward_min": np.min(rewards),
                     "train/completion_length_mean": np.mean(completion_lengths),
                     "train/completion_length_max": np.max(completion_lengths),
+                    # Additional diagnostics for length–reward dynamics
+                    "train/completion_length_p50": length_p50,
+                    "train/completion_length_p90": length_p90,
+                    "train/completion_length_p99": length_p99,
+                    "train/completion_length_at_max_frac": at_max_frac,
+                    "train/completion_length_near_max_frac": near_max_frac,
+                    "train/reward_of_max_length": reward_of_max_length,
+                    "train/len_reward_corr": len_reward_corr,
+                    "train/num_rollouts": int(len(rewards)),
                 }
                 self.train_report_data[self.current_step] = report_data
 
