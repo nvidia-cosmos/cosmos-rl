@@ -789,9 +789,6 @@ class GPT(BaseModel):
                 | (input_ids == image_token_id)
             )
             vision_token_mask = input_ids == image_token_id
-            shifted_input_ids = torch.zeros_like(input_ids)
-            shifted_input_ids[:, :-1] = input_ids[:, 1:]
-            shifted_vision_token_mask = shifted_input_ids == image_token_id
 
             if self.embed_tokens is not None:
                 inputs_embeds = self.embed_tokens(input_ids)
@@ -837,56 +834,10 @@ class GPT(BaseModel):
                 )
 
             loss = torch.nn.functional.mse_loss(
-                self.mm_head(h[shifted_vision_token_mask]).view(target.shape),
+                self.mm_head(h[vision_token_mask]).view(target.shape),
                 target,
             )
             return None, loss
-
-            # noise = torch.randn(
-            #     [input_ids.shape[0] * self.COND_LEN, self.COND_DIM],
-            #     device=input_ids.device,
-            #     dtype=inputs_embeds.dtype,
-            # )
-            # t = torch.rand([noise.shape[0], 1], device=input_ids.device)
-            # mm_h = self.mm_transformer(
-            #     noise * (1 - t) + t * encoded_img.view(noise.shape),
-            #     h[shifted_vision_token_mask],
-            #     t.squeeze(-1),
-            # )
-            # loss = torch.nn.functional.mse_loss(
-            #     mm_h.view(input_ids.shape[0] * self.COND_LEN, self.COND_DIM),
-            #     (encoded_img.view(noise.shape) - noise).view(
-            #         input_ids.shape[0] * self.COND_LEN, self.COND_DIM
-            #     ),
-            #     reduction="none",
-            # )
-            # loss = loss.mean()
-
-            # Add `if` check just in case `pp` is enabled
-            # if self.norm is not None:
-            #     if interested_tokens is not None:
-            #         assert not isinstance(
-            #             h, torch.distributed.tensor.DTensor
-            #         ), "logprob_masks must be a local tensor"
-            #         h = h[interested_tokens]
-            #     h = self.norm(h)
-            #     if not self.tie_embed_tokens:
-            #         output = self.lm_head(h)
-            #     else:
-            #         is_w_dist_tensor = isinstance(
-            #             self.embed_tokens.weight, torch.distributed.tensor.DTensor
-            #         )
-            #         embed_tokens_weight = (
-            #             self.embed_tokens.weight.full_tensor()
-            #             if is_w_dist_tensor
-            #             else self.embed_tokens.weight
-            #         )
-            #         is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
-            #         h = h.full_tensor() if is_a_dist_tensor else h
-            #         output = h @ embed_tokens_weight.t()
-            #     return output, loss
-            # else:
-            #     return h
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         # rotary.inv_freq could get deleted and not re-initialized
