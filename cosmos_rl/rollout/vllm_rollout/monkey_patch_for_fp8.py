@@ -9,7 +9,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils import w8a8_utils
 
 from cosmos_rl.policy.model import WeightMapper
-
+from cosmos_rl.utils.parallelism import ParallelDims
 
 """
 This file is used to patch the vllm model to use rowwise fp8 linear.
@@ -98,6 +98,7 @@ def cache_weight_of_quantized_module(
     vllm_model: torch.nn.Module,
     promotion_dtype: torch.dtype,
     weight_mapper: WeightMapper,
+    parallel_dims: ParallelDims,
 ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     """Get the weight from the quantized module."""
     original_weight_map = {}

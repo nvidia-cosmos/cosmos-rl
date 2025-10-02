@@ -37,6 +37,9 @@ from cosmos_rl.dispatcher.data.packer import DataPacker
 from transformers import AutoTokenizer
 from transformers import AutoConfig
 from transformers import GenerationConfig
+from cosmos_rl.dispatcher.data.schema import (
+    RLPayload,
+)
 
 
 class TRTLLM_Rollout(RolloutBase):
@@ -122,7 +125,7 @@ class TRTLLM_Rollout(RolloutBase):
 
     def rollout_generation(
         self,
-        prompt_id_and_payload_list: List[Tuple[int, str]],
+        prompt_id_and_payload_list: List[Tuple[int, RLPayload]],
         data_packer: DataPacker,
         sampling_params: SamplingParams,
     ) -> List[List[str]]:
@@ -140,7 +143,9 @@ class TRTLLM_Rollout(RolloutBase):
         payloads = [x[1] for x in prompt_id_and_payload_list]
 
         # Pack the payloads into prompts for vllm.
-        prompts = [data_packer.get_rollout_input(payload) for payload in payloads]
+        prompts = [
+            data_packer.get_rollout_input(payload.prompt) for payload in payloads
+        ]
         prompts = data_packer.rollout_collate_fn(prompts)
 
         # List of completions per prompt.

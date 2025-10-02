@@ -13,6 +13,7 @@ import ast
 import logging
 
 # Import the base class from tao-core
+from cosmos_rl.utils.lora_utils import merge_lora_model
 from nvidia_tao_core.microservices.handlers.base_inference_microservice_server import BaseInferenceMicroserviceServer
 
 # Cosmos-specific imports
@@ -60,16 +61,23 @@ class CosmosInferenceMicroservice(BaseInferenceMicroserviceServer):
             model_name = kwargs.get('model_path')
             torch_dtype = kwargs.get('torch_dtype', 'auto')
             device_map = kwargs.get('device_map', 'auto')
+            enable_lora = kwargs.get('enable_lora', False)
+            base_model_path = kwargs.get('base_model_path')
 
             print(f"Loading Cosmos model: {model_name}")
 
+            # Handle LoRA merging if enabled
+            if enable_lora:
+                model_name = merge_lora_model(model_name, base_model_path)
+                print(f"LoRA merging enabled. Using merged model: {model_name}")
+
             # Load Cosmos-Reason1 model
             self.model = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_name, 
-                torch_dtype=torch_dtype, 
+                model_name,
+                torch_dtype=torch_dtype,
                 device_map=device_map
             )
-            
+
             # Load processor
             self.processor = transformers.AutoProcessor.from_pretrained(model_name)
 
@@ -266,10 +274,10 @@ def main():
     # Configure auto-deletion settings
     server.idle_timeout_minutes = args.idle_timeout_minutes
     server.auto_deletion_enabled = not args.disable_auto_deletion
-    
+
     if server.auto_deletion_enabled:
         logger.info(f"Auto-deletion enabled with {server.idle_timeout_minutes} minute timeout")
-    
+
     logger.info("Cosmos model server created")
 
     # Start server immediately - initialization and model loading will happen in background

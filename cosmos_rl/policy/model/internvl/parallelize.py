@@ -68,10 +68,7 @@ def parallelize(
             enable_async_tp=config.train.async_tp_enabled,
             parallel_dims=parallel_dims,
         )
-    assert (
-        not parallel_dims.cp_enabled
-    ), "Context Parallel is not supported for InternVL currently."
-    # TODO(huik): support Context Parallel for InternVL
+
     if parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims)
         logger.info("Applied Context Parallel to the model")

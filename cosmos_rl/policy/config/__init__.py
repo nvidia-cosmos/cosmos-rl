@@ -22,6 +22,7 @@ import os
 import json
 import hashlib
 from cosmos_rl.utils.modelscope import update_config_if_modelscope
+from cosmos_rl.utils.logging import logger
 
 
 def config_hash(config: BaseModel) -> str:
@@ -257,6 +258,10 @@ class GrpoConfig(BaseModel):
         default=None,
         description="Number of batches loaded in advance by each worker.",
     )
+    dataloader_batch_size: Optional[int] = Field(
+        default=1,
+        description="Batch size for each iteration of the dataloader for when fetch prompts from controller. This is only the setting of the dataloader iterator on the controller side.",
+    )
     prompt_column_name: str = Field(
         default="",
         description="Column name for prompt",
@@ -384,6 +389,11 @@ class GrpoConfig(BaseModel):
         ), "reward_function must be a dict of reward functions"
         if isinstance(self.filter_reward_metric, str):
             self.filter_reward_metric = [self.filter_reward_metric]
+        if self.dataloader_batch_size is not None and self.dataloader_batch_size <= 0:
+            logger.warning(
+                "dataloader_batch_size is not positive so disable it as None."
+            )
+            self.dataloader_batch_size = None
         return self
 
 
@@ -546,6 +556,10 @@ class TrainingConfig(BaseModel):
         default=False,
         description="Whether to use deterministic training. If set to True, will use deterministic training, which is expected to be slower.",
     )
+    activation_offload: bool = Field(
+        default=False,
+        description="Whether to use activation offload",
+    )
 
     seed: Optional[int] = Field(
         default=None,
@@ -678,22 +692,27 @@ class LoraConfig(BaseModel):
 
 class PolicyConfig(BaseModel):
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
+
     model_name_or_path: str = Field(
         # default="Qwen/Qwen2.5-3B-Instruct",  #'Qwen/Qwen2.5-VL-7B-Instruct'
         default="Qwen/Qwen2.5-VL-7B-Instruct",
         description="The model name or path, compatible with huggingface model name or local path",
     )
+
     model_revision: Optional[str] = Field(
         default=None,
         description="The revision of the model to use",
     )
+
     model_max_length: int = Field(
         default=4096,
         description="The maximum length for training, longer than this will be ignored for training stability",
     )
+
     model_gradient_checkpointing: bool = Field(
         default=True, description="Whether to use gradient checkpointing"
     )
+
     lora: LoraConfig | None = Field(default=None, description="LoRA configuration")
     trainable_map: Optional[Dict[str, bool]] = Field(
         default=None,
@@ -751,6 +770,39 @@ class SamplingConfig(BaseModel):
     )
 
 
+class MultiTurnRolloutConfig(BaseModel):
+    enable: bool = Field(
+        default=False, description="Whether to enable multi-turn rollout."
+    )
+    enable_tools: bool = Field(
+        default=False, description="Whether to enable tools in multi-turn rollout."
+    )
+    enable_thinking: bool = Field(
+        default=False, description="Whether to enable thinking in multi-turn rollout."
+    )
+    custom_chat_template_path: Optional[str] = Field(
+        default=None, description="The path to the custom chat template in chat."
+    )
+    max_assistant_turns: int = Field(
+        default=5, description="Max assistant turn count for multi-turn rollout."
+    )
+    add_generation_prompt: bool = Field(
+        default=True,
+        description="Whether to add generation prompt in multi-turn rollout.",
+    )
+    continue_final_message: bool = Field(
+        default=False,
+        description="Whether to continue the final message in multi-turn rollout.",
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if self.enable_tools:
+            if self.add_generation_prompt:
+                assert not self.continue_final_message, "continue_final_message must be False when add_generation_prompt is True"
+        return self
+
+
 class ValidationConfig(BaseModel):
     enable: bool = Field(
         default=False,
@@ -794,7 +846,7 @@ class ValidationConfig(BaseModel):
         description="Max output length of rollout generation during validation.",
     )
     reward_function: Union[str, List[str], Dict[str, float]] = Field(
-        default_factory=lambda: ["single_choice"],
+        default=[],
         description="Reward functions for the model. Currently support `single_choice`, `boxed_math`, and `format`. You can add weight to each reward function by passing a dict, e.g., {'single_choice': 0.9, 'format': 0.1}",
     )
 
@@ -804,8 +856,8 @@ class ValidationConfig(BaseModel):
             self.reward_function = {self.reward_function: 1.0}
         elif isinstance(self.reward_function, list):
             self.reward_function = {k: 1.0 for k in self.reward_function}
-        assert (
-            len(self.reward_function) > 0
+        assert isinstance(
+            self.reward_function, dict
         ), "reward_function must be a dict of reward functions"
 
         if self.enable:
@@ -861,6 +913,16 @@ class RolloutConfig(BaseModel):
         default="vllm",
         description="Backend for rollout. Currently support `vllm` and `trtllm`.",
         choices=["vllm", "trtllm"],
+    )
+
+    multi_turn_config: MultiTurnRolloutConfig = Field(
+        default_factory=MultiTurnRolloutConfig,
+        description="Configuration for multi-turn rollout.",
+    )
+
+    reference_answer_in_local: bool = Field(
+        default=False,
+        description="Whether to store the dataset in local rollout worker for fetching reference answer.",
     )
 
     @model_validator(mode="after")
@@ -997,10 +1059,9 @@ class Config(BaseModel):
                     "Invalid config: GRPO with LoRA requires policy.parallelism.tp_size == 1."
                 )
 
-        if self.train.train_policy.type == "grpo":
-            # Handle for evaludation configuration.
-            if isinstance(self.validation.dataset.split, str):
-                self.validation.dataset.split = [self.validation.dataset.split]
+        # Handle for evaludation configuration.
+        if isinstance(self.validation.dataset.split, str):
+            self.validation.dataset.split = [self.validation.dataset.split]
 
         if self.train.transfer_dtype is None:
             # Default use param_dtype as transfer_dtype

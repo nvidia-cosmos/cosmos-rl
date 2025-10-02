@@ -20,7 +20,7 @@ ENV TZ=Etc/UTC
 
 RUN apt-get update -y && apt-get upgrade -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
-    curl git gpg lsb-release tzdata wget unzip nginx default-jre && \
+    curl git gpg lsb-release tzdata wget unzip nginx default-jre dnsutils && \
     apt-get purge -y cuda-compat-* && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -82,6 +82,7 @@ RUN apt-get update -qq && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 ## Create a virtual environment
+
 RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv/cosmos_rl"
@@ -95,16 +96,20 @@ RUN pip install --no-cache-dir -U pip setuptools wheel packaging
 
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
-RUN pip install --no-cache-dir torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128 && \
+RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128 && \
     pip cache purge
 
 # Install additional heavy dependencies
+# Install flash-attn after PyTorch to ensure compatibility
 RUN pip install --no-cache-dir \
-    torchao==0.12.0 \
+    torchao==0.13.0 \
     vllm==0.10.1.1 \
-    flash-attn==2.8.2 \
-    transformer_engine[pytorch] \
-    https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl && \
+    flashinfer-python \
+    transformer_engine[pytorch] && \
+    pip cache purge
+
+# Install flash-attn from source to ensure compatibility with PyTorch 2.8.0
+RUN pip install --no-cache-dir flash-attn --no-build-isolation && \
     pip cache purge
 
 WORKDIR /workspace/cosmos_rl
@@ -115,10 +120,20 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip cache purge
 
+# Install triton and triton_kernels
+RUN pip uninstall -y triton triton_kernels && \
+    pip install -U triton --pre --extra-index-url https://download.pytorch.org/whl/nightly --no-deps && \
+    pip install -U triton_kernels --extra-index-url https://wheels.vllm.ai/gpt-oss/ --no-deps
+    
 # Copy source code last - this layer will rebuild when code changes
 # but pip installs above will be cached
 COPY . .
 
+# TODO: (lms) remove nightly version of vllm and triton in later vllm release.
+# Here we install nightly version of triton in pytorch nightly index.
+# and install triton_kernels from vllm gpt-oss index, because vllm gpt-oss needs 
+# some triton kernels. Install triton and triton_kernels after vllm installation
+# to avoid version error.
 ###################################################
 FROM no-efa-base AS efa-base
 

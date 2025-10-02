@@ -24,6 +24,7 @@ import subprocess
 import time
 import os
 import sys
+from argparse import REMAINDER
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from util import NodeLaunchMetadata
@@ -45,7 +46,16 @@ if __name__ == "__main__":
         default=None,
         help="Path to the config file for the policy or rollout script.",
     )
-    parser.add_argument("--script", type=str)
+
+    parser.add_argument(
+        "script",
+        nargs="?",  # “?” means 0 or 1 occurrences
+        default=None,
+        help="A user script which can be provided for custom dataset, reward functions, and model registration.",
+    )
+
+    parser.add_argument("script_args", nargs=REMAINDER)
+
     args = parser.parse_args()
 
     node_list = os.environ["LOCAL_NODE_LIST"].split(" ")
@@ -98,6 +108,9 @@ if __name__ == "__main__":
             cmd += ["--config", args.config]
         if args.script:
             cmd += ["--script", args.script]
+        if args.script_args:
+            cmd.extend(args.script_args)
+
         cmds.append(cmd)
         envs.append(env)
 

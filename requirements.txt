@@ -24,3 +24,5 @@ liger_kernel
 leptonai
 seaborn
 decord
+accelerate
+kernels
