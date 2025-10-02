@@ -966,13 +966,6 @@ class PolicyStatusManager:
                         os.environ.get("COSMOS_LOG_HIGH_REWARD_MIN", 0.9)
                     )
                     top_k_to_log = int(os.environ.get("COSMOS_LOG_MAX_SAMPLES", 3))
-                    preview_chars = int(
-                        os.environ.get(
-                            "COSMOS_LOG_COMPLETION_PREVIEW_CHARS",
-                            self.config.rollout.max_response_length,
-                        )
-                    )
-
                     if len(lengths_np) > 0:
                         mask = (lengths_np >= min_len_thr) & (
                             rewards_np >= reward_min_thr
@@ -989,14 +982,18 @@ class PolicyStatusManager:
                             )
                             for i in idxs[: max(1, top_k_to_log)]:
                                 comp = completions[i]
-                                comp_to_show = (
-                                    comp
-                                    if len(comp) <= preview_chars
-                                    else (comp[:preview_chars] + " ...[truncated]")
-                                )
-                                logger.warning(
-                                    f"[Controller][LongCompletionAlert] step={self.current_step}, sample_idx={i}, length={int(lengths_np[i])}, reward={float(rewards_np[i]):.4f}\nCompletion: {comp_to_show}"
-                                )
+                                print_completion = str(
+                                    os.environ.get("COSMOS_LOG_COMPLETION_ENABLE", "1")
+                                ).lower() in ("1", "true", "yes", "y")
+                                header = "========== [LongCompletionAlert] =========="
+                                meta = f"step={self.current_step}, sample_idx={i}, length={int(lengths_np[i])}, reward={float(rewards_np[i]):.4f}"
+                                footer = "========== [End LongCompletionAlert] ========"
+                                if print_completion:
+                                    logger.warning(
+                                        f"{header}\n{meta}\nCompletion:\n{comp}\n{footer}"
+                                    )
+                                else:
+                                    logger.warning(f"{header}\n{meta}\n{footer}")
                 except Exception as e:
                     logger.debug(
                         f"[Controller] LongCompletionAlert skipped due to: {e}"
