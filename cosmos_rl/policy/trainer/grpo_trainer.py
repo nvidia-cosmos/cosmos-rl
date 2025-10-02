@@ -26,7 +26,6 @@ import cosmos_rl.utils.distributed as dist_util
 import time
 import torch.distributed as dist
 import numpy as np
-import requests
 import threading
 import asyncio
 from queue import Queue, Empty
@@ -42,23 +41,19 @@ from cosmos_rl.dispatcher.command import (
 )
 import atexit
 from cosmos_rl.utils.util import (
-    list_to_b64,
     msgpack_c_long,
     msgunpack_c_long,
     fix_data_type_size,
-    sanitize,
     compute_mfu,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
-    WeightSyncInstructionsGroup,
 )
 from functools import cached_property
 from typing import List, Callable, Dict, Any, Tuple, Optional
 import types
 from functools import partial
 import msgpack
-from cosmos_rl.utils.network_util import make_request_with_retry
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
 )
@@ -66,12 +61,6 @@ from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils import constant
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.dispatcher.replica import Rollout
-from cosmos_rl.utils.api_suffix import (
-    COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX,
-    COSMOS_API_POLICY_TRAIN_ACK_SUFFIX,
-    COSMOS_API_POLICY_SHARD_INFOS_SUFFIX,
-    COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX,
-)
 from cosmos_rl.utils.pynccl import (
     create_nccl_uid,
     create_nccl_comm,
@@ -244,7 +233,7 @@ class GRPOTrainer(Trainer):
         self.inter_policy_nccl = HighAvailabilitylNccl(
             replica_name=self.replica_name,
             global_rank=self.global_rank,
-            controller_hosts=self.remote_hosts,
+            api_client=self.api_client,
         )
         self.rollouts_comm = {}
         self.kv_store = dist_util.DistKVStore(
@@ -332,28 +321,12 @@ class GRPOTrainer(Trainer):
             logger.info(
                 f"[Policy] Parse {len(self.trainable_params)} trainable params to controller."
             )
-
-            body = {
-                "shard_infos": self.all_rank_local_shard_infos,
-                "param_groups": [],
-                "sorted_params": sorted_params_all_rank,
-                "trainable_params": list(self.trainable_params),
-            }
-            data = msgpack.packb(body)
-            try:
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        data=data,
-                        headers={"Content-Type": "application/msgpack"},
-                    ),
-                    self.get_alternative_urls(COSMOS_API_POLICY_SHARD_INFOS_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"[Policy] Failed to post policy shard infos to controller after retries {e}."
-                )
+            self.api_client.post_policy_shard_info(
+                shard_infos=self.all_rank_local_shard_infos,
+                param_groups=[],
+                sorted_params=sorted_params_all_rank,
+                trainable_params=list(self.trainable_params),
+            )
 
     def handle_shutdown(self):
         if not hasattr(self, "_handle_shutdown_called"):
@@ -417,7 +390,7 @@ class GRPOTrainer(Trainer):
             rollouts = []
             try:
                 rollouts = [
-                    Rollout.from_dict(msgpack.unpackb(x))
+                    Rollout.model_validate(msgpack.unpackb(x))
                     for x in self.redis_controller.subscribe_rollout(self.replica_name)
                 ]
             except Exception as e:
@@ -503,7 +476,16 @@ class GRPOTrainer(Trainer):
         Sync all states of the model and optimizer.
         """
         len_params = 0
-        model_state_dict = [self.model.state_dict()]
+        # It's a HFModel, we need to sync the named buffers
+        if hasattr(self.model, "reset_named_buffers"):
+            # Convert the model to the hf_config.torch_dtype, which is param_dtype
+            self.model.model = self.model.model.to(
+                dtype=self.model.hf_config.torch_dtype
+            )
+            named_buffers_dict = dict(self.model.named_buffers())
+            model_state_dict = [self.model.state_dict(), named_buffers_dict]
+        else:
+            model_state_dict = [self.model.state_dict()]
 
         # If KL-divergence is enabled, we need to also sync the reference model state dict
         if self.config.train.train_policy.kl_beta != 0.0:
@@ -701,26 +683,8 @@ class GRPOTrainer(Trainer):
             if self.global_rank == 0:
                 # Only create nccl group id in rank 0.
                 nccl_uuid = create_nccl_uid()
-                base64_nccl_group_id = list_to_b64(nccl_uuid)
                 logger.debug(f"[Policy] mesh_key: {mesh_key}")
-                try:
-                    make_request_with_retry(
-                        partial(
-                            requests.post,
-                            json={
-                                "unique_pair_name": mesh_key,
-                                "handle_base64": base64_nccl_group_id,
-                            },
-                        ),
-                        self.get_alternative_urls(
-                            COSMOS_API_NCCL_COMM_INITIATOR_SUFFIX
-                        ),
-                        max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                    )
-                except Exception as e:
-                    raise RuntimeError(
-                        f"[Policy] Failed in post nccl group_id to controller after retries {e}."
-                    )
+                self.api_client.post_nccl_comm_initiator(mesh_key, nccl_uuid)
             # broadcast the nccl group id to all ranks
             nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
             self.p2r_nccl_uuids[mesh_key] = nccl_uuid
@@ -749,27 +713,9 @@ class GRPOTrainer(Trainer):
 
         if self.policy_to_rollout_insts is None:
             self.policy_to_rollout_insts = []
-            try:
-                insts_meta = make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={
-                            "rank": self.global_rank,
-                        },
-                    ),
-                    self.get_alternative_urls(
-                        COSMOS_API_POLICY_SHARD_SEND_INSTS_SUFFIX
-                    ),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-                insts = msgpack.unpackb(insts_meta.content, strict_map_key=False)
-                self.policy_to_rollout_insts = [
-                    WeightSyncInstructionsGroup.from_dict(inst) for inst in insts
-                ]
-            except Exception as e:
-                raise RuntimeError(
-                    f"[Policy] Failed in fetching policy to rollout insts from controller after retries {e}."
-                )
+            self.policy_to_rollout_insts = self.api_client.post_policy_shard_send_insts(
+                self.global_rank
+            )
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
         # There is a local-replica comm in training step
@@ -975,25 +921,13 @@ class GRPOTrainer(Trainer):
 
         # Train ACK
         if is_master_rank(self.parallel_dims, self.global_rank):
-            try:
-                make_request_with_retry(
-                    partial(
-                        requests.post,
-                        json={
-                            "replica_name": self.replica_name,
-                            "weight_step": command.global_step,
-                            "total_steps": command.total_steps,
-                            "profile_finished": self.profiler.check_finished(),
-                            "report_data": sanitize(report_data),
-                        },
-                    ),
-                    self.get_alternative_urls(COSMOS_API_POLICY_TRAIN_ACK_SUFFIX),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"[Policy] Failed in in send train ack to controller after retries {e}."
-                )
+            self.api_client.post_policy_train_ack(
+                self.replica_name,
+                command.global_step,
+                command.total_steps,
+                self.profiler.check_finished(),
+                report_data,
+            )
 
         logger.debug(f"[Policy] Train ack sent for global step {command.global_step}.")
         return command.replica_should_stop()
@@ -1277,7 +1211,12 @@ class GRPOTrainer(Trainer):
         logger.debug("[Policy] Prepare training data.")
         rollouts: List[Rollout] = self.dispatch_rollouts()
 
-        payloads_list = [rollout.payload for rollout in rollouts]
+        # For single-turn rollout, we use the prompt, for multi-turn rollout, we use the completed conversation
+        if self.config.rollout.multi_turn_config.enable:
+            samples = [rollout.completed_conversation for rollout in rollouts]
+        else:
+            samples = [rollout.prompt for rollout in rollouts]
+
         completions_list = [rollout.completion for rollout in rollouts]
         advantages_list = [rollout.advantage for rollout in rollouts]
         # Optional Positive-NLL support: only compute flags when coefficient > 0
@@ -1296,11 +1235,11 @@ class GRPOTrainer(Trainer):
         ]
         processed_samples: List[Any] = [
             self.data_packer.get_policy_input(
-                payloads_list[i],
+                samples[i],
                 completions_list[i],
                 n_ignore_prefix_tokens_list[i],
             )
-            for i in range(len(payloads_list))
+            for i in range(len(samples))
         ]
 
         # user_info_keys = list(kwargs.keys())
@@ -1446,8 +1385,15 @@ class GRPOTrainer(Trainer):
                             input_ids_before_cp = user_mini_batch["input_ids"]
                             position_ids_before_cp = user_mini_batch["position_ids"]
                             padding_mask_before_cp = padding_mask
-
-                            if self.parallel_dims.cp_enabled and not packing_seq:
+                            # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
+                            delay_cp_slice_inputs = getattr(
+                                self.model, "delay_cp_slice_inputs", False
+                            )
+                            if (
+                                self.parallel_dims.cp_enabled
+                                and not packing_seq
+                                and not delay_cp_slice_inputs
+                            ):
                                 [input_ids, position_ids, padding_mask] = (
                                     slice_inputs_for_ulysses(
                                         [input_ids, position_ids, padding_mask],
@@ -1459,7 +1405,7 @@ class GRPOTrainer(Trainer):
                                 user_mini_batch["input_ids"] = input_ids
                                 if padding_mask is not None:
                                     user_mini_batch["padding_mask"] = padding_mask
-                            if self.parallel_dims.cp_enabled and packing_seq:
+                            if self.parallel_dims.cp_enabled:
                                 # Slice for cp after embedding generation and sequence packing in the model forward later.
                                 user_mini_batch["cp_mesh"] = self.parallel_dims.mesh[
                                     "cp"
@@ -1579,7 +1525,8 @@ class GRPOTrainer(Trainer):
                                         else torch.tensor([-1.0], device=self.device)
                                     )
                             else:
-                                raw_logits = self.model(**user_mini_batch)
+                                with self.act_offloading_ctx_manager:
+                                    raw_logits = self.model(**user_mini_batch)
 
                                 if self.parallel_dims.cp_enabled:
                                     # reset the position ids and input ids

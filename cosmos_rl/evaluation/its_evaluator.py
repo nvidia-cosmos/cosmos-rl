@@ -41,7 +41,7 @@ from PIL import Image
 from qwen_vl_utils import process_vision_info
 
 from cosmos_rl.utils.tao_status_logger import log_tao_status
-from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.lora_utils import merge_lora_model, should_enable_lora, get_base_model_path
 
 # Set up image processing
 Image.MAX_IMAGE_PIXELS = 933120000
@@ -111,7 +111,7 @@ class ITSOutputStructure:
 class ITSEvaluator:
     """
     Integrated ITS evaluator that combines inference and scoring.
-    
+
     This class handles the complete evaluation pipeline:
     1. Loading and preparing datasets
     2. Running model inference
@@ -122,7 +122,7 @@ class ITSEvaluator:
     def __init__(self, config: Dict[str, Any], enable_lora: bool = False):
         """
         Initialize the ITS evaluator with configuration.
-        
+
         Args:
             config: Evaluation configuration dictionary
             enable_lora: Whether to enable LoRA model merging
@@ -134,119 +134,41 @@ class ITSEvaluator:
         self.vision_config = config.get("vision", {})
         self.datasets = {"eval_set_name": config["dataset"]}
         self.enable_lora = enable_lora
-        
+
         self.model = None
         self.processor = None
-        
+
     def _load_model(self) -> Tuple[Any, Any]:
         """Load the model and processor."""
         log.info("Loading model and processor...")
         start_time = time.time()
-        
+
         model_name = self.model_config.get("model_name")
         tokenizer_model_name = self.model_config.get("tokenizer_model_name", "qwen2.5-vl-7b")
         dtype = self.model_config.get("dtype", "bfloat16")
         tp_size = self.model_config.get("tp_size", 1)
         max_length = self.model_config.get("max_length", 128000)
-        
+
         if DEBUG_MODEL:
             log.warning("DEBUG_MODEL is enabled. Using DummyModel and DummyTokenizer.")
             model = DummyModel()
             processor = DummyTokenizer()
         else:
             # Handle LoRA merging if enabled (from CLI flag or config)
-            enable_lora_config = self.model_config.get("enable_lora", False)
-            if self.enable_lora or enable_lora_config:
-                model_name = self._merge_lora_model(model_name)
+
+            if should_enable_lora(self.config, self.enable_lora):
+                base_model_path = get_base_model_path(self.config)
+                model_name = merge_lora_model(model_name, base_model_path)
                 log.info(f"LoRA merging enabled. Using merged model: {model_name}")
-            
+
             model, processor = self._define_model(
                 tokenizer_model_name, model_name, dtype, tp_size, max_length
             )
-        
+
         log.info(f"Model loaded in {time.time() - start_time:.2f} seconds")
         return model, processor
-    
-    def _merge_lora_model(self, lora_path: str) -> str:
-        """
-        Merge LoRA weights with base model.
-        
-        Args:
-            lora_path: Path to the LoRA model directory
-            
-        Returns:
-            Path to the merged model directory
-        """
-        log.info(f"Merging LoRA model: {lora_path}")
-        
-        # Check if already merged
-        merged_path = lora_path.replace("safetensors", "merged")
-        if os.path.exists(merged_path) and os.path.isdir(merged_path):
-            log.info(f"Merged model already exists at: {merged_path}")
-            return merged_path
-        
-        try:
-            # Import required libraries for LoRA merging
-            from transformers import Qwen2_5_VLForConditionalGeneration
-            from peft import PeftModel
-            import torch
-            
-            # Get base model path from config or use default
-            base_model_path = self.model_config.get("base_model_path")
-            
-            log.info(f"Loading base model: {base_model_path}")
-            log.info(f"Loading LoRA adapter: {lora_path}")
-            
-            # Load base model
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                base_model_path, 
-                torch_dtype="auto"
-            )
-            
-            # Load LoRA adapter
-            peft_model = PeftModel.from_pretrained(model, lora_path)
-            
-            # Merge and unload
-            log.info("Merging LoRA weights with base model...")
-            merged_model = peft_model.merge_and_unload()
-            
-            # Save merged model
-            os.makedirs(merged_path, exist_ok=True)
-            log.info(f"Saving merged model to: {merged_path}")
-            merged_model.save_pretrained(merged_path)
-            
-            # Clean up GPU memory
-            del model, peft_model, merged_model
-            torch.cuda.empty_cache()
-            
-            log.info(f"LoRA merging completed successfully: {merged_path}")
-            
-            # Log LoRA merge success to TAO
-            log_tao_status(
-                data={
-                    "lora_merge_status": "success",
-                    "merged_model_path": merged_path
-                },
-                component_name=COMPONENT_NAME
-            )
-            
-            return merged_path
-            
-        except Exception as e:
-            log.error(f"LoRA merging failed: {e}")
-            log.warning(f"Falling back to original model path: {lora_path}")
-            
-            # Log LoRA merge failure to TAO
-            log_tao_status(
-                data={
-                    "lora_merge_status": "failed",
-                    "lora_merge_error": str(e)
-                },
-                component_name=COMPONENT_NAME
-            )
-            
-            return lora_path
-    
+
+
     def _define_model(
         self,
         tokenizer_model_name: str,
@@ -258,7 +180,7 @@ class ITSEvaluator:
         """Define and load the language model and processor."""
         # Import evaluation utilities
         from cosmos_rl.evaluation.utils.model_download import download_checkpoint, download_tokenizer
-        
+
         if os.path.isabs(model_name) and os.path.exists(model_name):
             checkpoint_output_dir = model_name
         else:
@@ -274,7 +196,7 @@ class ITSEvaluator:
 
         log.info("Using VLLM backend.")
         os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-        
+
         llm = LLM(
             model=checkpoint_output_dir,
             tokenizer=checkpoint_output_dir,
@@ -291,7 +213,7 @@ class ITSEvaluator:
         )
 
         return llm, processor
-    
+
     def _make_all_tasks(
         self,
         results_output_folder: Path,
@@ -302,7 +224,7 @@ class ITSEvaluator:
         """Gather all evaluation tasks from datasets."""
         input_tasks = []
         output_results = []
-        
+
         qa_pairs = []
         for datasource_name, datasource_config in self.datasets.items():
             log.info(f"Gathering tasks from dataset: {datasource_name}")
@@ -310,7 +232,7 @@ class ITSEvaluator:
             media_dir = datasource_config.get("media_dir", None)
             annotation_path = datasource_config.get("annotation_path")
             system_prompt = datasource_config.get(
-                "system_prompt", 
+                "system_prompt",
                 ""
             )
 
@@ -319,7 +241,7 @@ class ITSEvaluator:
                                 "\\n<think>\\nyour reasoning\\n</think> <answer>\\nyour answer\\n</answer>.")
 
             log.info(f"System prompt: {system_prompt}")
-            
+
             # Check if media directory exists
             if media_dir and not os.path.exists(media_dir):
                 log.error(f"Media path does not exist: {media_dir}")
@@ -327,12 +249,12 @@ class ITSEvaluator:
 
             with open(annotation_path, 'r') as f:
                 annotations = json.load(f)
-                
+
                 for item in annotations:
                     # Clean question text
-                    question = re.sub(r"(\\n)?</?(image|video)>(\\n)?", "", 
+                    question = re.sub(r"(\\n)?</?(image|video)>(\\n)?", "",
                                     item['conversations'][0]['value']).strip()
-                    
+
                     conversation = [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": question},
@@ -361,7 +283,7 @@ class ITSEvaluator:
                         media_paths = [os.path.join(media_dir, path) for path in relative_media_paths]
                     else:
                         media_paths = relative_media_paths
-                        
+
                     qa_pairs.append({
                         "datasource": datasource_name,  # Add the datasource name
                         "media_id": relative_media_paths[0],
@@ -375,11 +297,11 @@ class ITSEvaluator:
         shard_qa_pairs = qa_pairs[shard_id::total_shard]
         log.info(f"Sharding {len(qa_pairs)} tasks into {total_shard} shards, "
                 f"shard {shard_id} has {len(shard_qa_pairs)} tasks.")
-        
+
         for qa_pair in shard_qa_pairs:
             output_json_fname = results_output_folder / qa_pair["datasource"] / f"{qa_pair['media_id']}.json"
             output_json_fname.parent.mkdir(parents=True, exist_ok=True)
-            
+
             input_task = ITSInputStructure.from_dict(qa_pair["datasource"], qa_pair)
             output_result = ITSOutputStructure(
                 datasource=qa_pair["datasource"],
@@ -388,12 +310,12 @@ class ITSEvaluator:
                 output_json_fname=str(output_json_fname),
                 prompt="",
             )
-            
+
             input_tasks.append(input_task)
             output_results.append(output_result)
 
         return input_tasks, output_results
-    
+
     def _prepare_model_inputs_parallel(
         self,
         input_tasks: List[ITSInputStructure],
@@ -441,7 +363,7 @@ class ITSEvaluator:
             log.warning(f"Successfully prepared inputs for {len(inputs)} out of {len(input_tasks)} tasks.")
 
         return inputs
-    
+
     def _prepare_single_model_input(
         self,
         input_task: ITSInputStructure,
@@ -453,7 +375,7 @@ class ITSEvaluator:
         if (len(input_task.prompt) > 1
             and input_task.prompt[1]["role"] == "user"
             and isinstance(input_task.prompt[1]["content"], str)):
-            
+
             content = []
             media_mode = input_task.media_mode
             for media_path in input_task.media_paths:
@@ -465,7 +387,7 @@ class ITSEvaluator:
                 for k, v in vision_config.items():
                     video_content[k] = v
                 content.append(video_content)
-            
+
             content.append({
                 "type": "text",
                 "text": input_task.prompt[1]["content"]
@@ -502,7 +424,7 @@ class ITSEvaluator:
         log.debug(f"Prepared model input for task: media_id={input_task.media_id}, "
                  f"question_idx={input_task.question_idx}")
         return model_input
-    
+
     def _run_model(
         self,
         inputs: List[str],
@@ -518,7 +440,7 @@ class ITSEvaluator:
         presence_penalty = self.gen_config.get("presence_penalty", 0.0)
         frequency_penalty = self.gen_config.get("frequency_penalty", 0.0)
         seed = self.eval_config.get("seed", 1)
-        
+
         stop_token_id = self.processor.tokenizer.eos_token_id
 
         # Configure sampling parameters
@@ -551,7 +473,7 @@ class ITSEvaluator:
             zip(list_of_requestoutput, input_tasks, output_results, strict=False)
         ):
             output_text = requestoutput.outputs[0].text
-            
+
             # Parse based on answer type
             if answer_type == "letter":
                 answer, reasoning = self._parse_letter_response(output_text)
@@ -567,26 +489,26 @@ class ITSEvaluator:
             output_result.answer = answer
             output_result.full_response = output_text
             output_result.is_correct = (answer.lower() == input_task.correct_answer.lower())
-    
+
     def _parse_letter_response(self, response: str) -> Tuple[str, str]:
         """Parse letter-format response."""
         # Simple implementation - can be enhanced
         return response.strip()[:1], ""
-    
+
     def _parse_reasoning_response(self, response: str) -> Tuple[str, str]:
         """Parse reasoning-format response."""
         # Extract answer and reasoning from <think> and <answer> tags
         reasoning_match = re.search(r'<think>(.*?)</think>', response, re.DOTALL)
         answer_match = re.search(r'<answer>(.*?)</answer>', response, re.DOTALL)
-        
+
         reasoning = reasoning_match.group(1).strip() if reasoning_match else ""
         answer = answer_match.group(1).strip() if answer_match else response.strip()
-        
+
         return answer, reasoning
-    
+
     def _save_results_parallel(
-        self, 
-        output_results: List[ITSOutputStructure], 
+        self,
+        output_results: List[ITSOutputStructure],
         num_processes: int
     ) -> None:
         """Save results to JSON files in parallel."""
@@ -601,7 +523,7 @@ class ITSEvaluator:
                 executor.submit(self._save_single_result, result)
                 for result in output_results
             ]
-            
+
             for future in tqdm(
                 concurrent.futures.as_completed(futures),
                 total=len(futures),
@@ -611,7 +533,7 @@ class ITSEvaluator:
                     future.result()
                 except Exception as e:
                     log.error(f"Error saving result: {e}")
-    
+
     def _save_single_result(self, result: ITSOutputStructure) -> None:
         """Save a single result to JSON file."""
         result_data = {
@@ -623,22 +545,22 @@ class ITSEvaluator:
             "full_response": result.full_response,
             "is_correct": result.is_correct,
         }
-        
+
         os.makedirs(os.path.dirname(result.output_json_fname), exist_ok=True)
         with open(result.output_json_fname, 'w') as f:
             json.dump([result_data], f, indent=2)
-    
+
     def _evaluate_directionality(self, result_path: Path) -> Dict[str, Any]:
         """
         Evaluate directionality metrics from results.
-        
+
         This is the scoring logic from the original score.py.
         """
         log.info("Computing directionality metrics...")
-        
+
         results = glob.glob(str(result_path / "eval_set_name" / "**" / "*.json"), recursive=True)
         log.info(f"Found {len(results)} result files.")
-        
+
         correct_count = 0
         total_count = 0
         result_dict = {
@@ -646,21 +568,21 @@ class ITSEvaluator:
             DIRECTION_LEFT: {"correct": 0, "total": 0},
             DIRECTION_RIGHT: {"correct": 0, "total": 0}
         }
-        
+
         word_classes = [DIRECTION_STRAIGHT, DIRECTION_LEFT, DIRECTION_RIGHT]
         confusion_matrix = np.zeros((len(word_classes), len(word_classes)), dtype=int)
         word_to_idx = {w: i for i, w in enumerate(word_classes)}
-        
+
         for result_file in results:
             try:
                 with open(result_file, "r") as f:
                     data = json.load(f)
-                
+
                 for item in data:
                     total_count += 1
                     gt = item["correct_answer"].lower()
                     response = item["answer"].lower()
-                    
+
                     # Determine ground truth type
                     if 'straight' in gt:
                         gt_type = DIRECTION_STRAIGHT
@@ -670,9 +592,9 @@ class ITSEvaluator:
                         gt_type = DIRECTION_LEFT
                     else:
                         continue
-                    
+
                     result_dict[gt_type]["total"] += 1
-                    
+
                     # Determine response type
                     if 'straight' in response:
                         response_type = DIRECTION_STRAIGHT
@@ -684,18 +606,18 @@ class ITSEvaluator:
                         response_type = "unknown"
                         # For confusion matrix, treat unknown as a miss
                         continue
-                    
+
                     if response_type == gt_type:
                         correct_count += 1
                         result_dict[gt_type]["correct"] += 1
-                    
+
                     # Update confusion matrix (only for known responses)
                     if response_type in word_to_idx:
                         confusion_matrix[word_to_idx[gt_type], word_to_idx[response_type]] += 1
-                        
+
             except Exception as e:
                 log.error(f"Error processing result file {result_file}: {e}")
-        
+
         # Calculate accuracies
         for k, v in result_dict.items():
             if v["total"] > 0:
@@ -703,19 +625,19 @@ class ITSEvaluator:
                 result_dict[k]["accuracy"] = accuracy
             else:
                 result_dict[k]["accuracy"] = 0.0
-        
+
         overall_accuracy = correct_count / total_count if total_count > 0 else 0.0
         result_dict["overall"] = {
             "correct": correct_count,
             "total": total_count,
             "accuracy": overall_accuracy
         }
-        
+
         # Save results
         results_file = result_path / "directionality_score.json"
         with open(results_file, "w") as f:
             json.dump(result_dict, f, indent=2)
-        
+
         # Create and save confusion matrix
         plt.figure(figsize=(6, 5))
         sns.heatmap(confusion_matrix, annot=True, fmt="d", cmap="Blues",
@@ -726,7 +648,7 @@ class ITSEvaluator:
         plt.tight_layout()
         plt.savefig(result_path / "directionality_confusion_matrix.png")
         plt.close()
-        
+
         log.info("Directionality evaluation completed:")
         log.info(f"  Overall accuracy: {overall_accuracy:.4f} ({correct_count}/{total_count})")
         for category, metrics in result_dict.items():
@@ -735,9 +657,9 @@ class ITSEvaluator:
                 correct = metrics.get("correct", 0)
                 total = metrics.get("total", 0)
                 log.info(f"  {category}: {acc:.4f} ({correct}/{total})")
-        
+
         return result_dict
-    
+
     def run_evaluation(
         self,
         results_dir: Path,
@@ -748,26 +670,26 @@ class ITSEvaluator:
     ) -> Dict[str, Any]:
         """
         Run the complete evaluation pipeline.
-        
+
         Args:
             results_dir: Directory to save results
             skip_saved: Whether to skip already saved results
             limit: Limit number of tasks (for debugging)
             total_shard: Total number of shards
             shard_id: Current shard ID
-            
+
         Returns:
             Dictionary containing evaluation metrics
         """
         start_time = time.time()
-        
+
         # Load model
         self.model, self.processor = self._load_model()
-        
+
         # Get evaluation parameters
         answer_type = self.eval_config.get("answer_type", "freeform")
         num_processes = self.eval_config.get("num_processes", 40)
-        
+
         # Create results directory structure
         save_folder = self.model_config.get("save_folder", None)
         if save_folder:
@@ -775,16 +697,16 @@ class ITSEvaluator:
         else:
             model_name = self.model_config.get("model_name", "unknown_model")
             results_output_dir = results_dir / Path(model_name).name / answer_type
-        
+
         results_output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Step 1: Gather tasks
         log.info("Gathering evaluation tasks...")
         input_tasks, output_results = self._make_all_tasks(
             results_output_dir, answer_type, total_shard, shard_id
         )
         log.info(f"Gathered {len(input_tasks)} tasks")
-        
+
         # Log progress to TAO
         lora_status_data = {
             "evaluation_phase": "task_gathering",
@@ -793,12 +715,12 @@ class ITSEvaluator:
             "total_shards": total_shard,
             "lora_enabled": self.enable_lora or self.model_config.get("enable_lora", False)
         }
-        
+
         log_tao_status(
             data=lora_status_data,
             component_name=COMPONENT_NAME
         )
-        
+
         # Step 2: Skip saved results if requested
         if skip_saved:
             log.info("Checking for saved results...")
@@ -811,22 +733,22 @@ class ITSEvaluator:
                     filtered_results.append(result)
             input_tasks, output_results = filtered_tasks, filtered_results
             log.info(f"Tasks remaining after skipping saved: {len(input_tasks)}")
-        
+
         # Apply limit if specified
         if limit > 0 and len(input_tasks) > limit:
             input_tasks = input_tasks[:limit]
             output_results = output_results[:limit]
             log.info(f"Limited tasks to {len(input_tasks)} for debugging")
-        
+
         if not input_tasks:
             log.info("No tasks to evaluate. Exiting.")
             return {"overall": {"accuracy": 0.0, "total": 0, "correct": 0}}
-        
+
         # Step 3: Prepare model inputs
         log.info("Preparing model inputs...")
         inputs = self._prepare_model_inputs_parallel(input_tasks, num_processes)
         log.info(f"Prepared {len(inputs)} model inputs")
-        
+
         # Log progress to TAO
         log_tao_status(
             data={
@@ -835,14 +757,14 @@ class ITSEvaluator:
             },
             component_name=COMPONENT_NAME
         )
-        
+
         # Step 4: Run model inference
         log.info("Running model inference...")
         inference_start = time.time()
         self._run_model(inputs, input_tasks, output_results, answer_type)
         inference_time = time.time() - inference_start
         log.info(f"Model inference completed in {inference_time:.2f} seconds")
-        
+
         # Log progress to TAO
         log_tao_status(
             data={
@@ -852,25 +774,25 @@ class ITSEvaluator:
             },
             component_name=COMPONENT_NAME
         )
-        
+
         # Step 5: Save results
         log.info("Saving results...")
         self._save_results_parallel(output_results, num_processes)
-        
+
         # Step 6: Compute metrics
         log.info("Computing evaluation metrics...")
         metrics = self._evaluate_directionality(results_output_dir)
-        
+
         total_time = time.time() - start_time
         log.info(f"Complete evaluation pipeline finished in {total_time:.2f} seconds")
-        
+
         return metrics
 
 
 def main():
     """
     Main entry point for cosmos-rl-evaluate command.
-    
+
     This function provides a command-line interface for the ITS evaluator
     that can be called directly or through the pyproject.toml script entry point.
     """

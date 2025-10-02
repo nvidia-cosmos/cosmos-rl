@@ -19,6 +19,7 @@ from typing import List, Tuple, Dict, Any
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils import util
 from transformers import AutoConfig
+from functools import cached_property
 
 
 class HFModelWeightMapper(WeightMapper):
@@ -38,6 +39,13 @@ class HFModelWeightMapper(WeightMapper):
                 text_config.num_attention_heads // text_config.num_key_value_heads
             )
             self.head_dim = text_config.hidden_size // text_config.num_attention_heads
+        elif getattr(self.config, "llm_config", None) is not None:
+            # VLM models like InternVL could has num_attention_heads in llm_config
+            text_config = self.config.llm_config
+            self.kv_head_ratio = (
+                text_config.num_attention_heads // text_config.num_key_value_heads
+            )
+            self.head_dim = text_config.hidden_size // text_config.num_attention_heads
         else:
             raise ValueError(
                 f"Can not determine kv_head_ratio and head_dim from config: {self.config}"
@@ -47,6 +55,29 @@ class HFModelWeightMapper(WeightMapper):
 
     def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
         # Happen to be the same as policy name mapping.
+        model_type = self.config.model_type
+        if model_type == "gpt_oss":
+            # Some special cases for GPT-OSS.
+            gpt_oss_rename_mapping = {
+                # Please do not change the order of the keys.
+                "attn": "self_attn",
+                "embedding": "embed_tokens",
+            }
+            for key, value in gpt_oss_rename_mapping.items():
+                if key in rollout_weight_name:
+                    return rollout_weight_name.replace(key, value)
+            # gate_up_proj
+            if "w13_weight" in rollout_weight_name:
+                return rollout_weight_name.replace("w13_weight", "gate_up_proj")
+            elif "w2_weight" in rollout_weight_name:
+                return rollout_weight_name.replace("w2_weight", "down_proj")
+            elif "w13_bias" in rollout_weight_name:
+                return rollout_weight_name.replace("w13_bias", "gate_up_proj_bias")
+            elif "w2_bias" in rollout_weight_name:
+                return rollout_weight_name.replace("w2_bias", "down_proj_bias")
+            else:
+                pass
+
         return self.policy_map_local_key_to_hf_key(rollout_weight_name)
 
     def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
@@ -63,6 +94,7 @@ class HFModelWeightMapper(WeightMapper):
             v_weight = weight[unit_dim * 2 :]
             return q_weight, k_weight, v_weight
         # weight has shape [q_num_heads * head_dim + k_num_heads * head_dim + v_num_heads * head_dim, hidden_dim]
+        # bias has shape [(q_num_heads + k_num_heads + v_num_heads) * head_dim]
         shares = self.kv_head_ratio + 2
         dim_0 = weight.shape[0]  # for both weight and bias
         unit_dim = dim_0 // shares
@@ -84,28 +116,33 @@ class HFModelWeightMapper(WeightMapper):
     def rollout_prepare_recv(
         self, vllm_model: Any
     ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
+        models_do_not_split_gate_up_proj = ["gpt_oss"]
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            # print(f"[Rollout] compatible_key: {param_name=} {compatible_key=}")
-            if "qkv_proj" in compatible_key:
+            if any(rule in compatible_key for rule in ["qkv_proj", "qkv"]):
                 # must be inplace slicing.
                 # split qkv weight
+                rule = "qkv_proj" if "qkv_proj" in compatible_key else "qkv"
                 q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
                     compatible_key, param
                 )
-                q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
-                k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
-                v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
+                q_proj_weight_key = compatible_key.replace(rule, "q_proj")
+                k_proj_weight_key = compatible_key.replace(rule, "k_proj")
+                v_proj_weight_key = compatible_key.replace(rule, "v_proj")
+
                 vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
                 group_keys.append((q_proj_weight_key, q_weight.ndim))
                 vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
                 group_keys.append((k_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
                 group_keys.append((v_proj_weight_key, v_weight.ndim))
-            elif "gate_up_proj" in compatible_key:
+            elif (
+                "gate_up_proj" in compatible_key
+                and self.config.model_type not in models_do_not_split_gate_up_proj
+            ):
                 # split gate and up proj
                 gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
                     compatible_key, param
@@ -273,16 +310,58 @@ class HFModelWeightMapper(WeightMapper):
             return split_strategy
         return []
 
+    @cached_property
+    def packed_modules_mapping(self):
+        mapping_dict = {
+            "qkv": [
+                "q",
+                "k",
+                "v",
+            ],
+            "gate_up_proj": [
+                "gate_proj",
+                "up_proj",
+            ],
+            "qkv_proj": [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+            ],
+        }
+        if self.config.model_type == "gpt_oss":
+            mapping_dict["qkv"] = ["q_proj", "k_proj", "v_proj"]
+        return mapping_dict
+
     def get_unsplited_weight_name(self, weight_key: str) -> str:
         for key in ["q_proj", "k_proj", "v_proj"]:
             if key in weight_key:
-                return weight_key.replace(key, "qkv_proj")
-        for key in ["gate_proj", "up_proj"]:
+                if "gpt_oss" in self.config.model_type:
+                    return weight_key.replace(key, "qkv")
+                else:
+                    return weight_key.replace(key, "qkv_proj")
+        for key in ["gate_proj.weight", "up_proj.weight"]:
             if key in weight_key:
-                return weight_key.replace(key, "gate_up_proj")
+                return weight_key.replace(key, "gate_up_proj.weight")
         for key in ["q", "k", "v"]:
             if (
                 "visual" in weight_key or "vision_tower" in weight_key
             ) and key in weight_key:
                 return weight_key.replace(key, "qkv")
         return weight_key  # return full weight key
+
+    def update_tensor_view(
+        self,
+        tensor_view: torch.Tensor,
+        recv_tensor: torch.Tensor,
+        inst_dest_name: str,
+        **kwargs,
+    ):
+        tmp_recv_tensor = recv_tensor.to(tensor_view.dtype)
+        if self.config.model_type == "gpt_oss" and "down_proj_bias" in inst_dest_name:
+            assert (
+                "parallel_dims" in kwargs
+            ), "parallel_dims is required for update_tensor_view"
+            tp_rank, _ = kwargs["parallel_dims"].tp_coord
+            if tp_rank != 0:
+                tmp_recv_tensor.zero_()
+        tensor_view.copy_(tmp_recv_tensor)

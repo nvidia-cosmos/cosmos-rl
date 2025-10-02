@@ -49,10 +49,11 @@ Example:
 
 import argparse
 from pathlib import Path
-
 import qwen_vl_utils
 import transformers
+
 from cosmos_rl.utils.decorators import monitor_status
+from cosmos_rl.utils.lora_utils import merge_lora_model
 from nvidia_tao_core.loggers.logging import get_status_logger, Status, Verbosity
 
 ROOT = Path(__file__).parents[1]
@@ -124,6 +125,17 @@ def parse_args():
         required=True,
         help="Results directory"
     )
+    parser.add_argument(
+        "--enable_lora",
+        type=bool,
+        default=False,
+        help="Enable LoRA model merging"
+    )
+    parser.add_argument(
+        "--base_model_path",
+        type=str,
+        help="Base model path for LoRA merging (required if enable_lora is True)"
+    )
 
     return parser.parse_args()
 
@@ -141,12 +153,23 @@ def main():
             message=f"Loading model from: {args.model_path}"
         )
 
+        # Handle LoRA merging if enabled
+        model_path = args.model_path
+        if args.enable_lora:
+            if not args.base_model_path:
+                raise ValueError("--base_model_path is required when --enable_lora is specified")
+            model_path = merge_lora_model(args.model_path, args.base_model_path)
+            s_logger.write(
+                status_level=Status.SUCCESS,
+                message=f"LoRA merging enabled. Using merged model: {model_path}"
+            )
+
         # Load model
         model = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            args.model_path, torch_dtype=args.torch_dtype, device_map=args.device_map
+            model_path, torch_dtype=args.torch_dtype, device_map=args.device_map
         )
         processor: transformers.Qwen2_5_VLProcessor = (
-            transformers.AutoProcessor.from_pretrained(args.model_path)
+            transformers.AutoProcessor.from_pretrained(model_path)
         )
 
         s_logger.write(

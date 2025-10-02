@@ -16,11 +16,10 @@
 import torch
 import atexit
 import threading
-import requests
 from queue import Queue
-from functools import partial
-from urllib.parse import urljoin
-from typing import List, Tuple, Optional, Any
+from typing import List, Tuple, Optional, Any, Callable, Union
+from torch.utils.data import Dataset
+import multiprocessing as mp
 
 
 from cosmos_rl.utils.logging import logger
@@ -35,13 +34,6 @@ from cosmos_rl.rollout.trtllm_rollout import patch_trtllm  # noqa: F401
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.rollout import State, TRTLLMRolloutWorkerBase
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.network_util import make_request_with_retry
-from cosmos_rl.utils.api_suffix import (
-    COSMOS_API_NEXT_PROMPT_SUFFIX,
-    COSMOS_API_ROLLOUT_SUFFIX,
-    COSMOS_API_VALIDATION_REPORT_SUFFIX,
-)
-from cosmos_rl.utils import constant
 
 
 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout import TRTLLM_Rollout
@@ -52,6 +44,11 @@ from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
 
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.executor.ipc import ZeroMqQueue as IpcQueue
+from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.dispatcher.data.schema import (
+    RLPayload,
+)
+from cosmos_rl.reward.reward_calculator import RewardDispatcher
 
 
 class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
@@ -66,6 +63,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         super(TRTLLMRolloutWrapper, self).__init__()
         self.post_init(config, None, init_comm=False)
         # only init some meta info.
+        self.api_client = APIClient(self.role)
         self.init_meta()  # This wrapper won't handle commands, it only handle prompt fetching and end signal.
 
         self.state = State()
@@ -127,65 +125,82 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         # Note: Unlike vLLM backend, trtllm main process receive shutdown signal from trtllm worker with IPCQueue.
         self.shutdown_signal = threading.Event()
+        self.shutdown_mp_signal = mp.Event()
         self.validation_event = threading.Event()
 
         self.life_control_thread: Optional[threading.Thread] = None
 
+        self.reward_dispatcher = RewardDispatcher()
+
         atexit.register(self.handle_shutdown)
 
-    def get_alternative_urls(self, suffix: str):
-        # Get the alternative URLs for the given suffix
-        urls = []
-        for remote_host in self.remote_hosts:
-            urls.append(urljoin(remote_host, suffix))
-        return urls
+    def setup(
+        self,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        reward_fns: Optional[List[Callable]] = None,
+        filter_reward_fns: Optional[List[Callable]] = None,
+        val_dataset: Optional[Dataset] = None,
+        val_reward_fns: Optional[List[Callable]] = None,
+        num_workers: int = 8,
+    ):
+        self.reward_dispatcher.setup(
+            config=self.config,
+            dataset=dataset,
+            reward_fns=reward_fns,
+            filter_reward_fns=filter_reward_fns,
+            val_dataset=val_dataset,
+            val_reward_fns=val_reward_fns,
+            data_packer=self.data_packer,
+            val_data_packer=self.val_data_packer,
+            num_workers=num_workers,
+        )
+
+    def report_rollouts(self, block=False):
+        while True:
+            payloads, is_validation, step, empty = (
+                self.reward_dispatcher.dequeue_rewards_cal()
+            )
+            if payloads is not None:
+                if is_validation:
+                    break
+                response = RolloutRequest(
+                    src_replica_name=self.replica_name,
+                    prompt_idxs=[],
+                    payloads=payloads,
+                    is_end=False,
+                )
+                self.api_client.post_rollout_completion(response)
+            elif not block or empty:
+                break
+        return payloads, is_validation, step, empty
 
     def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
         """
         Request new prompts from the controller for both training and validation.
         """
-        prompts_and_is_end = (None, False)
-
-        prompt_id_and_payload_list = None
+        prompts = None
         is_end = False
-        url_suffix = COSMOS_API_NEXT_PROMPT_SUFFIX
-        try:
-            if prompt_queue.empty():
-                # blocking request
-                prompt_meta = make_request_with_retry(
-                    partial(
-                        requests.get,
-                        params={
-                            "n": batch_size,
-                            **kwargs,
-                        },
-                    ),
-                    self.get_alternative_urls(url_suffix),
-                    max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                )
-                prompt_meta = prompt_meta.json()
-                payload = prompt_meta["prompt_id_and_payload_list"]
-                if len(payload) > 0:
-                    prompt_id_and_payload_list = payload
-                is_end = prompt_meta.get("is_end", is_end)
-            else:
-                prompt_id_and_payload_list = None
-        except Exception as e:
-            logger.error(f"[Rollout] Failed in query prompts from controller: {str(e)}")
-            prompt_id_and_payload_list = None
-        prompts_and_is_end = (prompt_id_and_payload_list, is_end)
-        del prompt_id_and_payload_list, is_end
 
-        prompts, is_end = prompts_and_is_end
+        if prompt_queue.empty():
+            payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
+            prompts = payloads if len(payloads) > 0 else None
+
         if prompts is not None:
+            prompts = [
+                (prompt[0], RLPayload.model_validate(prompt[1])) for prompt in prompts
+            ]
             prompt_queue.put(prompts)
         return is_end
 
-    def send_end_signal(self, url_suffix: str):
+    def send_end_signal(self):
         """
         Send end signal to the controller.
         This is used to notify the controller that the rollout worker has finished processing all prompts.
         """
+        payloads, is_validation, _, empty = self.report_rollouts(block=True)
+        assert (
+            not is_validation and payloads is None and empty
+        ), f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
         response = RolloutRequest(
             src_replica_name=self.replica_name,
             prompt_idxs=[],
@@ -193,25 +208,14 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             completions=[],
             is_end=True,
         )
-        try:
-            logger.info(
-                f"[Rollout] Posting rollout end signal to controller: {response}"
-            )
-            make_request_with_retry(
-                partial(
-                    requests.post,
-                    json=response.model_dump(),
-                ),
-                self.get_alternative_urls(url_suffix),
-                max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-            )
-        except Exception as e:
-            logger.error(
-                f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
-            )
+        logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
+        self.api_client.post_rollout_completion(response)
 
     @torch.no_grad()
     def main_loop(self):
+        assert (
+            not self.rollout.rollout_config.multi_turn_config.enable
+        ), "[Rollout] multi_turn_config.enable must be False for trtllm rollout."
         while (replica_name := self.cosmos_replica_name_queue.get()) is not None:
             # Main process will be blocked here until the trtllm worker has all done the registration.
             # So the worker processes has done the registration.
@@ -232,7 +236,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 validation_queue = Queue()
                 validation_results = []
                 prompt_idxs: List[int] = []
-                payloads: List[Any] = []
+                prompt_payloads: List[Any] = []
                 while True:
                     is_end = self.request_new_prompts(
                         self.val_batch_size,
@@ -249,37 +253,51 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         )
                         if completions:
                             prompt_idxs.extend([prompt[0] for prompt in prompts])
-                            payloads.extend([prompt[1] for prompt in prompts])
+                            prompt_payloads.extend([prompt[1] for prompt in prompts])
                             validation_results.extend(completions)
 
                     if is_end:
                         break
 
-                    response = ValidationReportRequest(
-                        src_replica_name=self.replica_name,
-                        validation_step=self.validation_step,
-                        prompt_idxs=prompt_idxs,
-                        payloads=payloads,
-                        completions=validation_results,
-                        is_end=True,
-                    )
-                    try:
-                        make_request_with_retry(
-                            partial(
-                                requests.post,
-                                json=response.model_dump(),
-                            ),
-                            self.get_alternative_urls(
-                                COSMOS_API_VALIDATION_REPORT_SUFFIX
-                            ),
-                            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
-                        )
+                    validation_payloads = []
+                    for old_payload, completions in zip(
+                        prompt_payloads, validation_results
+                    ):
+                        old_payload.completions = completions
+                        validation_payloads.append(old_payload)
 
+                    self.reward_dispatcher.enqueue_rewards_cal(
+                        validation_payloads, True, self.validation_step, prompt_idxs
+                    )
+                    payloads, is_validation, current_step, empty = self.report_rollouts(
+                        block=True
+                    )
+                    assert (
+                        (is_validation and payloads is not None or payloads is None)
+                        and not empty
+                    ), "Validation report should be handled in the broadcast command."
+                    while not empty:
+                        assert (
+                            is_validation or payloads is None
+                        ), "Validation report should be handled in the broadcast command."
+                        if payloads is not None:
+                            response = ValidationReportRequest(
+                                src_replica_name=self.replica_name,
+                                validation_step=current_step,
+                                prompt_idxs=[],
+                                payloads=payloads,
+                                is_end=True,
+                            )
+                            self.api_client.post_validation_report(response)
+                        payloads, is_validation, current_step, empty = (
+                            self.reward_dispatcher.dequeue_rewards_cal()
+                        )
                 self.validation_event.clear()
+
+            _, is_validation, _, _ = self.report_rollouts()
+            assert (
+                not is_validation
+            ), "Validation report should be handled in the broadcast command."
             # 2. Rollout Generation
             if not self.state.prompt_fetch_end():
                 # query new prompts
@@ -294,7 +312,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
                     if self._prompt_queue.empty():
                         self.state.set_prompt_consume_end()
-                        self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
+                        self.send_end_signal()
 
             if self.state.prompt_consume_end():
                 assert (
@@ -305,7 +323,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 continue
             else:
                 logger.debug(f"[Rollout] Rollout Generation for {self.replica_name}")
-                prompts: List[Tuple[int, str]] = self._prompt_queue.get()
+                prompts: List[Tuple[int, RLPayload]] = self._prompt_queue.get()
                 logger.debug(f"[Rollout] generate start for prompts: {prompts}")
 
                 completions: List[List[str]] = self.rollout.rollout_generation(
@@ -361,35 +379,25 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 should_report = len(valid_completions) > 0
 
                 if should_report:
-                    url_suffix = COSMOS_API_ROLLOUT_SUFFIX
                     # only the first tp rank in the rollout replica will post the completion to the controller.
                     prompt_idxs = [prompt[0] for prompt in prompts]
                     payloads = [prompt[1] for prompt in prompts]
 
-                    response = RolloutRequest(
-                        src_replica_name=self.replica_name,
-                        prompt_idxs=prompt_idxs,
-                        payloads=payloads,
-                        completions=valid_completions,
-                        is_end=False,
+                    valid_payloads = []
+                    for old_payload, completions in zip(payloads, valid_completions):
+                        old_payload.completions = completions
+                        valid_payloads.append(old_payload)
+
+                    self.reward_dispatcher.enqueue_rewards_cal(
+                        valid_payloads,
+                        False,
+                        0,
+                        prompt_idxs,
                     )
-                    try:
-                        make_request_with_retry(
-                            partial(
-                                requests.post,
-                                json=response.model_dump(),
-                            ),
-                            self.get_alternative_urls(url_suffix),
-                            max_retries=constant.COSMOS_HTTP_RETRY_CONFIG.max_retries,
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"[Rollout] Failed in post rollout completion to controller: {str(e)}"
-                        )
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()
-                    self.send_end_signal(COSMOS_API_ROLLOUT_SUFFIX)
+                    self.send_end_signal()
 
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 

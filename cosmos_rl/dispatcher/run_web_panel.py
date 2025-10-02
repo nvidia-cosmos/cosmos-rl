@@ -23,14 +23,15 @@ from torch.utils.data import Dataset
 import asyncio
 import base64
 import cloudpickle
+import threading
 
 
 from fastapi.responses import HTMLResponse, JSONResponse
-from typing import Dict, List, Optional, Callable, Tuple, Union
+from typing import Dict, List, Optional, Callable, Union
 from cosmos_rl.dispatcher.controller import Controller
 import cosmos_rl.utils.constant as constant
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
-from cosmos_rl.dispatcher.replica import Atom, RolloutGroup, Rollout, Replica
+from cosmos_rl.dispatcher.replica import Atom, Replica
 from cosmos_rl.dispatcher.protocol import (
     RegisterRequest,
     ErrorResponse,
@@ -77,8 +78,10 @@ from cosmos_rl.utils.api_suffix import (
 )
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.utils.decorators import monitor_status
+from cosmos_rl.utils.payload import extract_rollouts
 from fastapi.responses import Response
 from fastapi import Request
+from concurrent.futures import ThreadPoolExecutor
 
 
 def create_error_response(
@@ -97,16 +100,25 @@ server = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async def monitor_replica_status():
-        while True:
+    shutdown_event = threading.Event()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_running_loop()
+
+    def monitor_replica_status():
+        while not shutdown_event.is_set():
+            # Run in separate process
             controller.policy_status_manager.maintain_life_status()
             controller.rollout_status_manager.maintain_life_status(
                 controller.policy_status_manager
             )
-            await asyncio.sleep(COSMOS_ROLLOUT_SCAN_INTERVAL)
+            if shutdown_event.wait(timeout=COSMOS_ROLLOUT_SCAN_INTERVAL):
+                break  # Exit early if shutdown signaled during sleep
 
-    util.create_async_task(monitor_replica_status())
+    task = loop.run_in_executor(executor, monitor_replica_status)
     yield
+    # Signal shutdown
+    shutdown_event.set()
+    await task
 
 
 app = FastAPI(lifespan=lifespan)
@@ -392,26 +404,10 @@ async def get_batched_prompt(n: int, validation_step: Optional[int] = None):
 
 @app.post(COSMOS_API_VALIDATION_REPORT_SUFFIX)
 async def validation_report(request: ValidationReportRequest):
-    rollout_groups: List[RolloutGroup] = [
-        RolloutGroup(
-            prompt_idx=prompt_idx,
-            payload=payload,
-            # Only report once per replica, so is_end is always True
-            is_end=True,
-            completions=completions,
-            reference_answer=controller.query_reference_answer(
-                prompt_idx, dataset_type="val"
-            ),
-        )
-        for prompt_idx, payload, completions in zip(
-            request.prompt_idxs, request.payloads, request.completions
-        )
-    ]
-
-    rollouts_list: List[List[Rollout]] = [
-        rollout_group.compute_rollouts(controller.val_rl_algo)
-        for rollout_group in rollout_groups
-    ]
+    rollouts_list, invalid_rollouts_list = extract_rollouts(
+        request.payloads, True, request.prompt_idxs
+    )
+    assert len(invalid_rollouts_list) == 0, "Validation rollouts should all be valid"
     controller.policy_status_manager.validation_report_validation_results(
         request.validation_step, rollouts_list, controller.rollout_status_manager
     )
@@ -474,67 +470,10 @@ async def put_rollout_group(rollout: RolloutRequest):
 
             return {"message": "Rollout end signal received"}
 
-        rollout_groups: List[RolloutGroup] = [
-            RolloutGroup(
-                prompt_idx=prompt_idx,
-                payload=payload,
-                completions=completions,
-                is_end=rollout.is_end,
-                reference_answer=controller.query_reference_answer(prompt_idx),
-            )
-            for prompt_idx, payload, completions in zip(
-                rollout.prompt_idxs, rollout.payloads, rollout.completions
-            )
-        ]
-
-        rollouts_list: List[List[Rollout]] = [
-            rollout_group.compute_rollouts(controller.rl_algo)
-            for rollout_group in rollout_groups
-        ]
-
         # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
-        valid_rollouts_list: List[List[Rollout]] = []
-        invalid_rollouts_list: List[List[Rollout]] = []
-        for rollouts_group in rollouts_list:
-            # Only filter_reward is considered for dynamic sampling
-            if len(set([rollout.filter_reward for rollout in rollouts_group])) > 1:
-                # Preprocess the valid rollouts to find if shared prefix exists
-                # If exists,
-                #   - if the shared prefix hold different rewards, the prefix may lead to bias
-                #   - else: do nothing
-                # (shared_prefix) -> index of rollouts
-                shared_prefix_groups: Dict[Tuple[int, ...], List[int]] = (
-                    util.find_maximal_prefix_groups(
-                        [
-                            controller.tokenizer(
-                                rollout.completion, add_special_tokens=False
-                            ).input_ids
-                            for rollout in rollouts_group
-                        ],
-                        N=controller.config.train.train_policy.min_filter_prefix_tokens,
-                    )
-                )
-                for shared_prefix, rollout_indices in shared_prefix_groups.items():
-                    assert (
-                        len(rollout_indices) > 1
-                    ), "Shared prefix group should not be empty"
-                    # Check if the shared prefix holds different rewards
-                    rewards = [rollouts_group[i].reward for i in rollout_indices]
-                    if len(set(rewards)) > 1:
-                        n_ignore_prefix_tokens = len(shared_prefix)
-                        prefix_str = controller.tokenizer.decode(shared_prefix)
-                        for rollout_index in rollout_indices:
-                            # Only do this if shared_prefix != rollout.completion
-                            # Else the whole sample will be ignored, which cause training issues.
-                            if prefix_str != rollouts_group[rollout_index].completion:
-                                rollouts_group[
-                                    rollout_index
-                                ].n_ignore_prefix_tokens = n_ignore_prefix_tokens
-                valid_rollouts_list.append(rollouts_group)
-            else:
-                # If the rewards are all the same, we need to sample one rollout from the group
-                invalid_rollouts_list.append(rollouts_group)
-
+        valid_rollouts_list, invalid_rollouts_list = extract_rollouts(
+            rollout.payloads, rollout.is_end, rollout.prompt_idxs
+        )
         # Flatten the rollouts into a single list
         valid_rollouts = [
             rollout
@@ -549,7 +488,7 @@ async def put_rollout_group(rollout: RolloutRequest):
 
         if len(valid_rollouts) > 0:
             logger.debug(
-                f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.completions)} samples:"
+                f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
                 f"example: rollouts[0]\n{valid_rollouts[0]}"
             )
 
@@ -603,6 +542,11 @@ def main(
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[DataPacker] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
+    sampler: Optional[Callable] = None,
+    batch_sampler: Optional[Callable] = None,
+    val_sampler: Optional[Callable] = None,
+    val_batch_sampler: Optional[Callable] = None,
+    args: Optional[argparse.Namespace] = None,
     **kwargs,
 ):
     if kwargs:
@@ -623,11 +567,26 @@ def main(
         if role == "Policy":
             from cosmos_rl.policy.train import main as policy_main
 
-            policy_main()
+            policy_main(
+                dataset=dataset,
+                data_packer=data_packer,
+                val_dataset=val_dataset,
+                val_data_packer=val_data_packer,
+                sampler=sampler,
+                batch_sampler=batch_sampler,
+                val_sampler=val_sampler,
+                val_batch_sampler=val_batch_sampler,
+            )
         else:
             from cosmos_rl.rollout.rollout_entrance import run_rollout
 
-            run_rollout()
+            run_rollout(
+                dataset=dataset,
+                reward_fns=reward_fns,
+                filter_reward_fns=filter_reward_fns,
+                val_dataset=val_dataset,
+                val_reward_fns=val_reward_fns,
+            )
         return
 
     parser = argparse.ArgumentParser(
@@ -690,13 +649,14 @@ def main(
             redis_port=args.redis_port,
             redis_logfile_path=args.redis_logfile_path,
             dataset=dataset,
-            reward_fns=reward_fns,
-            filter_reward_fns=filter_reward_fns,
             data_packer=data_packer,
             val_dataset=val_dataset,
-            val_reward_fns=val_reward_fns,
             val_data_packer=val_data_packer,
             custom_logger_fns=custom_logger_fns,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
+            val_sampler=val_sampler,
+            val_batch_sampler=val_batch_sampler,
         )
         logger.info(f"Successfully loaded configuration from {args.config_file}")
     except FileNotFoundError:

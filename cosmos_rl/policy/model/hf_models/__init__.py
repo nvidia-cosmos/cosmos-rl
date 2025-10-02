@@ -16,7 +16,10 @@
 import torch
 from torch import nn
 import inspect
+from transformers.utils import quantization_config as transformers_quantization_config
+from functools import partial, cached_property
 from typing import Tuple, List, Optional, Callable
+
 from transformers import AutoConfig
 from cosmos_rl.utils.util import (
     clear_weight_name,
@@ -31,7 +34,10 @@ from cosmos_rl.policy.model.hf_models.weight_converter import convert_weight_fro
 from cosmos_rl.policy.model.hf_models.weight_mapper import HFModelWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from functools import cached_property
+from cosmos_rl.policy.model.hf_models.patch import (
+    pre_hf_models_patch,
+    post_hf_models_patch,
+)
 
 
 @ModelRegistry.register(HFModelWeightMapper)
@@ -52,12 +58,15 @@ class HFModel(BaseModel):
     def supported_model_types():
         return [COSMOS_HF_MODEL_TYPES]
 
-    def __init__(self, hf_config, model, model_class, is_vlm=False):
+    def __init__(
+        self, hf_config, model, model_class, is_vlm=False, need_dequantization=False
+    ):
         super().__init__(hf_config)
         self.hf_config = hf_config
         self.model = model
         self.model_class = model_class
         self.is_vlm = is_vlm
+        self.need_dequantization = need_dequantization
         if getattr(model, "_checkpoint_conversion_mapping", None):
             if hf_config.model_type in ["R"]:
                 logger.warning(
@@ -78,30 +87,6 @@ class HFModel(BaseModel):
         sig = inspect.signature(self.model.forward)
         return sig.parameters.keys()
 
-    def _process_vision_embeddings(
-        self, inputs_embeds, input_ids, pixel_values, grid_thw, pad_token_id
-    ):
-        """Helper function to process vision embeddings (images or videos)"""
-        n_tokens = (input_ids == pad_token_id).sum().item()
-        if n_tokens > 0:
-            # TODO: check whether vision_model.forward has grid_thw as input
-            # e.g. vision models like SiglipVisionModel do not have grid_thw as input
-            kwargs = {}
-            if grid_thw is not None:
-                kwargs["grid_thw"] = grid_thw
-            vision_embeds = self.vision_model(pixel_values, **kwargs)
-            assert (
-                vision_embeds.shape[0] == n_tokens
-            ), "vision_embeds.shape[0] must be equal to n_tokens"
-            mask = input_ids == pad_token_id
-            mask_unsqueezed = mask.unsqueeze(-1)
-            mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
-            vision_mask = mask_expanded.to(inputs_embeds.device)
-
-            vision_embeds = vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(vision_mask, vision_embeds)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -114,9 +99,8 @@ class HFModel(BaseModel):
         }
 
         out = self.model(
-            input_ids,
+            input_ids=input_ids,
             position_ids=position_ids,
-            # attention_mask=None,
             past_key_values=None,
             use_cache=False,
             *args,
@@ -175,6 +159,8 @@ class HFModel(BaseModel):
                 "vision_model.encoder.layers",  # SiglipVisionModel(Gemma)
                 "transformer.layers",  # PixtralVisionModel（Mistral）
                 "model.layers",  # Llama4VisionModel
+                "encoder.layer",  # InternVLVisionModel(qwen)
+                "encoder.layers",  # InternVLVisionModel(gpt-oss)
             ]:
                 vision_layers = safe_deep_getattr(self.vision_model, path, None)
                 if vision_layers is not None:
@@ -211,8 +197,12 @@ class HFModel(BaseModel):
     def text_config(self):
         text_config = None
         if self.is_vlm:
-            text_config = getattr(self.hf_config, "text_config", None)
-            if text_config is None:
+            if hasattr(self.hf_config, "text_config"):
+                text_config = self.hf_config.text_config
+            elif hasattr(self.hf_config, "llm_config"):
+                text_config = self.hf_config.llm_config
+            else:
+                logger.warning(f"Can not get text config from {self.hf_config}.")
                 text_config = self.hf_config
         else:
             text_config = self.hf_config
@@ -266,8 +256,17 @@ class HFModel(BaseModel):
     def multi_modal_projector(self):
         multi_modal_projector = None
         if self.is_vlm:
-            multi_modal_projector = getattr(self.model, "multi_modal_projector", None)
+            if hasattr(self.model, "multi_modal_projector"):
+                multi_modal_projector = self.model.multi_modal_projector
+            elif hasattr(self.model, "mlp1"):
+                # InternVL
+                multi_modal_projector = self.model.mlp1
+
         return multi_modal_projector
+
+    @property
+    def delay_cp_slice_inputs(self):
+        return self.is_vlm
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
         # Will reset all named buffers in load_hf_weights
@@ -315,24 +314,38 @@ class HFModel(BaseModel):
         model_type = self.hf_config.model_type
         dtype = self.hf_config.torch_dtype
         self.model = self.model.to(dtype=dtype)
+
+        kwargs = {
+            "config": self.hf_config,
+            "revision": revision,
+            "trust_remote_code": True,
+        }
+        if self.need_dequantization:
+            quantization_config = self.hf_config.quantization_config
+            mxfp4_quantization_config = transformers_quantization_config.Mxfp4Config(
+                dequantize=True,
+                modules_to_not_convert=quantization_config["modules_to_not_convert"],
+            )
+            kwargs["quantization_config"] = mxfp4_quantization_config
+
         hf_model = self.model_class.from_pretrained(
             model_name_or_path,
-            revision=revision,
-            config=self.hf_config,
-            trust_remote_code=True,
+            **kwargs,
         ).to(device="cpu", dtype=dtype)
 
         self.reset_named_buffers(hf_model)
 
-        state_dict = hf_model.state_dict()
+        hf_state_dict = hf_model.state_dict()
+
         self_state_dict = self.model.state_dict()
+
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         all_tensor_names = self_state_dict.keys()
         lm_head_weight_key = "lm_head.weight"
         embed_tokens_weight_key = "model.embed_tokens.weight"
         reserved = {}
 
-        for name, tensor in state_dict.items():
+        for name, tensor in hf_state_dict.items():
             if name == embed_tokens_weight_key:
                 reserved[name] = tensor
             dest_name, shared_weight = convert_weight_from_hf(
@@ -493,6 +506,21 @@ class HFModel(BaseModel):
         """
         is_vlm = getattr(hf_config, "vision_config", None) is not None
         model_class = None
+        quantization_config = getattr(hf_config, "quantization_config", None)
+        need_dequantization = False
+        if quantization_config is not None:
+            if quantization_config["quant_method"] in ["mxfp4"]:
+                assert hasattr(
+                    transformers_quantization_config, "Mxfp4Config"
+                ), "Mxfp4Config is not supported in this version of transformers. Please upgrade transformers to version 4.45.0 or higher."
+                logger.warning(
+                    "We don't support mxfp4 training for HFModel currently, will default to dequantizing the model to bf16/fp16."
+                )
+                need_dequantization = True
+            hf_config.quantization_config["dequantize"] = need_dequantization
+
+        pre_hf_models_patch(hf_config)
+
         try:
             model_class = load_model_class_by_config(hf_config)
             model = model_class(hf_config)
@@ -505,11 +533,14 @@ class HFModel(BaseModel):
             model_class = AutoModel
             model = AutoModel.from_config(hf_config, trust_remote_code=True)
 
+        post_hf_models_patch(hf_config, model)
+
         return cls(
             hf_config,
             model,
             model_class,
             is_vlm=is_vlm,
+            need_dequantization=need_dequantization,
         )
 
     @classmethod
@@ -556,3 +587,15 @@ class HFModel(BaseModel):
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         assert cp_size == 1, "cp is not supported for HFModel"
         assert tp_size == 1, "tp is not supported for HFModel"
+
+    def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
+        if "gpt_oss" in self.hf_config.model_type:
+            if "bias" not in name:  # bias is not transposed
+                if "gate_up_proj" in name or "down_proj" in name:
+
+                    def transform(view):
+                        return view.transpose(-2, -1).contiguous()
+
+                    return partial(transform, local_view)
+
+        return local_view

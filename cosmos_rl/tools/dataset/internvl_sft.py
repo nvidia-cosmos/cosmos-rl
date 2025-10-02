@@ -289,12 +289,16 @@ class InternVL_DataPacker(DataPacker):
 
         if "pixel_values" in inputs:
             result_dict["pixel_values"] = inputs["pixel_values"]
+
+        image_flags = torch.ones(pixel_values.shape[0], dtype=torch.long)
+        result_dict["image_flags"] = image_flags
         return result_dict
 
     def _collate_fn(
         self, processed_samples: List[Dict[str, Any]], computed_max_len: int
     ) -> Dict[str, Any]:
         pixel_values = [x["pixel_values"] for x in processed_samples]
+        image_flags = [x["image_flags"] for x in processed_samples]
 
         if all([x is not None for x in pixel_values]):
             pixel_values = torch.cat(pixel_values, dim=0)
@@ -303,9 +307,18 @@ class InternVL_DataPacker(DataPacker):
             assert all([x is None for x in pixel_values]), "pixel_values should be None"
             pixel_values = None
 
+        if all([x is not None for x in image_flags]):
+            image_flags = torch.cat(image_flags, dim=0)
+        else:
+            assert all([x is None for x in image_flags]), "image_flags should be None"
+            image_flags = None
+
         batch = {}
         if pixel_values is not None:
             batch["pixel_values"] = pixel_values
+
+        if image_flags is not None:
+            batch["image_flags"] = image_flags
 
         # Pad the input_ids, logprob_masks
         batch["input_ids"] = torch.tensor(
@@ -317,6 +330,7 @@ class InternVL_DataPacker(DataPacker):
             ],
             dtype=torch.long,
         )
+
         if "label_ids" in processed_samples[0]:
             batch["label_ids"] = torch.tensor(
                 [
@@ -356,6 +370,11 @@ class InternVL_DataPacker(DataPacker):
             return_dict["pixel_values"] = x["pixel_values"]
         else:
             return_dict["pixel_values"] = None
+
+        if "image_flags" in x:
+            return_dict["image_flags"] = x["image_flags"]
+        else:
+            return_dict["image_flags"] = None
 
         # Common fields
         input_ids = x["input_ids"]

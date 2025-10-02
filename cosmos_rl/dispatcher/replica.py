@@ -19,126 +19,12 @@ import math
 from cosmos_rl.dispatcher.protocol import Role, MESH_NAMES, RegisterRequest
 from cosmos_rl.policy.config import SubProfilerConfig
 import asyncio
-from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo
 import weakref
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 import msgpack
 import time
-
-
-@dataclass
-class Rollout:
-    payload: Any
-    completion: str
-    is_end: bool
-    reward: float
-    advantage: float
-    prompt_idx: int
-    n_ignore_prefix_tokens: int = 0
-    filter_reward: float = 0.0
-
-    def __init__(
-        self,
-        payload: Any,
-        completion: str,
-        is_end: bool,
-        reward: float,
-        advantage: float,
-        prompt_idx: int,
-        n_ignore_prefix_tokens: int = 0,
-        filter_reward: float = 0.0,
-    ):
-        self.payload = payload
-        self.completion = completion
-        self.is_end = is_end
-        self.reward = reward
-        self.advantage = advantage
-        self.prompt_idx = prompt_idx
-        self.n_ignore_prefix_tokens = n_ignore_prefix_tokens
-        self.filter_reward = filter_reward
-
-    @classmethod
-    def from_dict(cls, dict_v: Dict[str, Any]) -> "Rollout":
-        return cls(**dict_v)
-
-
-class RolloutGroup:
-    """
-    RolloutGroup is a data structure that contains the prompt and completions of a rollout.
-    For MutliModal-LM, image/video/audio could be included in the extra_info.
-    """
-
-    def __init__(
-        self,
-        prompt_idx: int,
-        payload: Any,
-        completions: List[str],
-        is_end: bool,
-        reference_answer: str,
-    ):
-        self.prompt_idx: int = prompt_idx
-        self.payload: Any = payload
-        self.completions: List[str] = completions
-        self.is_end: bool = is_end
-        self.reference_answer: str = reference_answer
-
-    def compute_rollouts(self, algo: RuleBasedAlgo) -> List[Rollout]:
-        assert (
-            self.reference_answer is not None
-        ), "[RolloutGroup] Reference answer is not provided"
-
-        rewards = [
-            algo.compute_reward(completion, self.reference_answer)
-            for completion in self.completions
-        ]
-        logger.debug(f"[RolloutGroup] Rewards: {rewards}")
-        advantages = algo.compute_advantage([r[0] for r in rewards])
-        logger.debug(f"[RolloutGroup] Advantages: {advantages}")
-
-        return [
-            Rollout(
-                payload=self.payload,
-                completion=completion,
-                is_end=self.is_end,
-                reward=reward[0],
-                advantage=advantage,
-                prompt_idx=self.prompt_idx,
-                filter_reward=reward[1],
-            )
-            for completion, reward, advantage in zip(
-                self.completions, rewards, advantages
-            )
-        ]
-
-
-class BatchedRolloutGroup:
-    """
-    Batched Wrapper of the RolloutGroup
-    """
-
-    def __init__(self):
-        self.rollout_groups: List[RolloutGroup] = []
-
-    def __len__(self):
-        return len(self.rollout_groups)
-
-    def __getitem__(self, idx: int) -> RolloutGroup:
-        return self.rollout_groups[idx]
-
-    def __setitem__(self, idx: int, rollout_group: RolloutGroup):
-        self.rollout_groups[idx] = rollout_group
-
-    def __delitem__(self, idx: int):
-        del self.rollout_groups[idx]
-
-    @classmethod
-    def from_rollout_groups(
-        cls, rollout_groups: List[RolloutGroup]
-    ) -> "BatchedRolloutGroup":
-        batched_rollout_group = cls()
-        batched_rollout_group.rollout_groups = rollout_groups
-        return batched_rollout_group
+from cosmos_rl.dispatcher.data.schema import Rollout
 
 
 @dataclass
@@ -394,7 +280,7 @@ class Replica:
         ), f"Replica {self.name} tries to put rollout but not all atoms have arrived"
         # Check which atom should handle this rollout
         # Publish the rollout to the redis stream to be consumed by policy replicas
-        redis_handler.publish_rollout(msgpack.packb(rollout.__dict__), self.name)
+        redis_handler.publish_rollout(msgpack.packb(rollout.model_dump()), self.name)
 
     async def find_atom(self, global_rank: int) -> Atom:
         key = f"{self.name}_{global_rank}"

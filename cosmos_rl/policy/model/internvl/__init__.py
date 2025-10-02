@@ -27,6 +27,9 @@ from cosmos_rl.utils.util import (
     clear_weight_name,
     sync_model_vocab,
 )
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
 from cosmos_rl.utils.logging import logger
 from safetensors import safe_open
 from cosmos_rl.policy.model.internvl.weight_converter import (
@@ -109,6 +112,8 @@ class Qwen3MoE(nn.Module):
 
         position_embeddings = self.rotary_emb(h, position_ids)
 
+        cp_mesh = kwargs.get("cp_mesh", None)
+
         if "valid_input_len" in kwargs:
             valid_input_len = kwargs["valid_input_len"]
             updated_kwargs = pack_sequences_for_inputs(
@@ -118,18 +123,33 @@ class Qwen3MoE(nn.Module):
                 interested_tokens,
                 inputs_seq_dim=1,
                 inputs_batch_dim=0,
-                position_ids_seq_dim=2,
-                position_ids_batch_dim=1,
+                position_ids_seq_dim=1,
+                position_ids_batch_dim=0,
                 interested_tokens_seq_dim=1,
                 interested_tokens_batch_dim=0,
                 padding_mask=kwargs.get("padding_mask", None),
-                cp_mesh=kwargs.get("cp_mesh", None),
+                cp_mesh=cp_mesh,
             )
             position_embeddings = tuple(updated_kwargs.pop("position_ids"))
             interested_tokens = updated_kwargs.pop("interested_tokens")
             h = updated_kwargs.pop("inputs")
             h = self.identity_layer(h)
             kwargs.update(updated_kwargs)
+        elif cp_mesh is not None:
+            [inputs_embeds, interested_tokens] = slice_inputs_for_ulysses(
+                [inputs_embeds, interested_tokens],
+                cp_mesh,
+                seq_dims=[1, 1],
+            )
+            position_embeddings = tuple(
+                slice_inputs_for_ulysses(
+                    list(position_embeddings),
+                    cp_mesh,
+                    seq_dims=[1] * len(position_embeddings),
+                )
+            )
+            h = self.identity_layer(inputs_embeds)
+
         for layer in self.layers.values():
             if (
                 hasattr(layer, "_gradient_checkpointing_enabled")
@@ -365,7 +385,6 @@ class InternVLChatModel(BaseModel):
         # to avoid computing the logits which are not needed for the model
         outputs = self.model(
             inputs_embeds=inputs_embeds,
-            # Permute back to [3, batch_size, seq_len] for Pipeline Parallelism micro batch
             position_ids=position_ids,
             interested_tokens=kwargs.pop("interested_tokens", None),
             **kwargs,  # Additional arguments for compatibility
@@ -383,6 +402,10 @@ class InternVLChatModel(BaseModel):
         # TODO: fix this
         # <IMG_CONTEXT> is a special token for video context
         return 151671
+
+    @property
+    def delay_cp_slice_inputs(self):
+        return True
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         if self.lm_arch == "Qwen3MoeForCausalLM":
@@ -600,8 +623,7 @@ class InternVLChatModel(BaseModel):
         lm_args = None
         if (
             architecture := hf_config.llm_config.architectures[0]
-            == "Qwen3MoeForCausalLM"
-        ):
+        ) == "Qwen3MoeForCausalLM":
             lm_config = hf_config.llm_config
             # Qwen3MoE does not have any biases
             bias_list = []

@@ -28,6 +28,9 @@ from cosmos_rl.utils.util import (
     sync_model_vocab,
     retry,
 )
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
 from safetensors import safe_open
 from cosmos_rl.policy.model.qwen2_5_vl.weight_converter import (
     convert_weight_from_hf,
@@ -397,6 +400,8 @@ class Qwen2_5_VLModel(nn.Module):
 
         position_embeddings = self.rotary_emb(h, position_ids)
 
+        cp_mesh = kwargs.get("cp_mesh", None)
+
         if "valid_input_len" in kwargs:
             valid_input_len = kwargs["valid_input_len"]
             updated_kwargs = pack_sequences_for_inputs(
@@ -411,13 +416,27 @@ class Qwen2_5_VLModel(nn.Module):
                 interested_tokens_seq_dim=1,
                 interested_tokens_batch_dim=0,
                 padding_mask=kwargs.get("padding_mask", None),
-                cp_mesh=kwargs.get("cp_mesh", None),
+                cp_mesh=cp_mesh,
             )
             position_embeddings = tuple(updated_kwargs.pop("position_ids"))
             interested_tokens = updated_kwargs.pop("interested_tokens")
             h = updated_kwargs.pop("inputs")
             h = self.identity_layer(h)
             kwargs.update(updated_kwargs)
+        elif cp_mesh is not None:
+            [inputs_embeds, interested_tokens] = slice_inputs_for_ulysses(
+                [inputs_embeds, interested_tokens],
+                cp_mesh,
+                seq_dims=[1, 1],
+            )
+            position_embeddings = tuple(
+                slice_inputs_for_ulysses(
+                    list(position_embeddings),
+                    cp_mesh,
+                    seq_dims=[2] * len(position_embeddings),
+                )
+            )
+            h = self.identity_layer(inputs_embeds)
 
         for layer in self.layers.values():
             if (
@@ -570,6 +589,10 @@ class Qwen2_5_VLConditionalModel(BaseModel):
     @property
     def video_token_id(self):
         return self.config.hf_config.video_token_id
+
+    @property
+    def delay_cp_slice_inputs(self):
+        return True
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         seq_dim_idx = 2
