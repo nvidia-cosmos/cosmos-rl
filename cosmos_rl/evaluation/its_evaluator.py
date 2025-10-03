@@ -38,33 +38,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
-from qwen_vl_utils import process_vision_info
 
-from cosmos_rl.utils.tao_status_logger import log_tao_status
-from cosmos_rl.utils.lora_utils import merge_lora_model, should_enable_lora, get_base_model_path
+from cosmos_rl.evaluation.base import BaseEvaluator
 
 # Set up image processing
 Image.MAX_IMAGE_PIXELS = 933120000
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
-
-# Check if debug model is enabled
-DEBUG_MODEL: bool = os.getenv("DEBUG_MODEL", "0") == "1"
 
 # Constants
 COMPONENT_NAME = "Cosmos-RL ITS Evaluation"
 DIRECTION_STRAIGHT = "going straight"
 DIRECTION_LEFT = "turning left"
 DIRECTION_RIGHT = "turning right"
-
-# Import model and tokenizer based on DEBUG_MODEL flag
-if DEBUG_MODEL:
-    from tools.eval_utils.dummy_model import DummyModel, DummyTokenizer, SamplingParams
-    LLM = DummyModel
-    Processor = DummyTokenizer
-else:
-    from transformers import AutoProcessor
-    from vllm import LLM, SamplingParams
-    Processor = AutoProcessor
 
 
 @attrs.define(slots=False)
@@ -108,15 +93,11 @@ class ITSOutputStructure:
     is_correct: bool = False
 
 
-class ITSEvaluator:
+class ITSEvaluator(BaseEvaluator):
     """
-    Integrated ITS evaluator that combines inference and scoring.
+    ITS evaluator that inherits from BaseEvaluator.
 
-    This class handles the complete evaluation pipeline:
-    1. Loading and preparing datasets
-    2. Running model inference
-    3. Computing and reporting metrics
-    4. Integrating with TAO status callbacks
+    Handles ITS-specific dataset loading, task creation, and directionality metrics.
     """
 
     def __init__(self, config: Dict[str, Any], enable_lora: bool = False):
@@ -127,114 +108,23 @@ class ITSEvaluator:
             config: Evaluation configuration dictionary
             enable_lora: Whether to enable LoRA model merging
         """
-        self.config = config
-        self.model_config = config.get("model", {})
-        self.eval_config = config.get("evaluation", {})
-        self.gen_config = config.get("generation", {})
-        self.vision_config = config.get("vision", {})
+        super().__init__(config, enable_lora=enable_lora)
         self.datasets = {"eval_set_name": config["dataset"]}
-        self.enable_lora = enable_lora
 
-        self.model = None
-        self.processor = None
-
-    def _load_model(self) -> Tuple[Any, Any]:
-        """Load the model and processor."""
-        log.info("Loading model and processor...")
-        start_time = time.time()
-
-        model_name = self.model_config.get("model_name")
-        tokenizer_model_name = self.model_config.get("tokenizer_model_name", "qwen2.5-vl-7b")
-        dtype = self.model_config.get("dtype", "bfloat16")
-        tp_size = self.model_config.get("tp_size", 1)
-        max_length = self.model_config.get("max_length", 128000)
-
-        if DEBUG_MODEL:
-            log.warning("DEBUG_MODEL is enabled. Using DummyModel and DummyTokenizer.")
-            model = DummyModel()
-            processor = DummyTokenizer()
-        else:
-            # Handle LoRA merging if enabled (from CLI flag or config)
-
-            if should_enable_lora(self.config, self.enable_lora):
-                base_model_path = get_base_model_path(self.config)
-                model_name = merge_lora_model(model_name, base_model_path)
-                log.info(f"LoRA merging enabled. Using merged model: {model_name}")
-
-            model, processor = self._define_model(
-                tokenizer_model_name, model_name, dtype, tp_size, max_length
-            )
-
-        log.info(f"Model loaded in {time.time() - start_time:.2f} seconds")
-        return model, processor
-
-
-    def _define_model(
-        self,
-        tokenizer_model_name: str,
-        model_name: str,
-        dtype: str,
-        tp_size: int,
-        max_length: int = 128000,
-    ) -> Tuple[Any, Any]:
-        """Define and load the language model and processor."""
-        # Import evaluation utilities
-        from cosmos_rl.evaluation.utils.model_download import download_checkpoint, download_tokenizer
-
-        if os.path.isabs(model_name) and os.path.exists(model_name):
-            checkpoint_output_dir = model_name
-        else:
-            hf_cache_dir = os.environ.get(
-                "HF_HOME", os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
-            )
-            checkpoint_output_dir = os.path.join(hf_cache_dir, model_name)
-            os.makedirs(checkpoint_output_dir, exist_ok=True)
-
-        # Download checkpoint and tokenizer if needed
-        download_checkpoint(model_name, checkpoint_output_dir)
-        download_tokenizer(tokenizer_model_name, checkpoint_output_dir)
-
-        log.info("Using VLLM backend.")
-        os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-
-        llm = LLM(
-            model=checkpoint_output_dir,
-            tokenizer=checkpoint_output_dir,
-            trust_remote_code=True,
-            dtype=dtype,
-            limit_mm_per_prompt={"video": 10, "image": 10},
-            tensor_parallel_size=tp_size,
-            max_seq_len_to_capture=16384,
-            max_model_len=max_length,
-        )
-
-        processor = AutoProcessor.from_pretrained(
-            checkpoint_output_dir, max_length=max_length
-        )
-
-        return llm, processor
-
-    def _make_all_tasks(
-        self,
-        results_output_folder: Path,
-        answer_type: str,
-        total_shard: int,
-        shard_id: int,
-    ) -> Tuple[List[ITSInputStructure], List[ITSOutputStructure]]:
+    def make_tasks(self, results_dir: Path, total_shard: int, shard_id: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Gather all evaluation tasks from datasets."""
         input_tasks = []
         output_results = []
 
         qa_pairs = []
+        answer_type = self.eval_config.get("answer_type", "freeform")
+        
         for datasource_name, datasource_config in self.datasets.items():
             log.info(f"Gathering tasks from dataset: {datasource_name}")
 
             media_dir = datasource_config.get("media_dir", None)
             annotation_path = datasource_config.get("annotation_path")
-            system_prompt = datasource_config.get(
-                "system_prompt",
-                ""
-            )
+            system_prompt = datasource_config.get("system_prompt", "")
 
             if answer_type == "reasoning" and '<think>' not in system_prompt:
                 system_prompt += ("Answer the question with provided options in the following format: "
@@ -285,12 +175,13 @@ class ITSEvaluator:
                         media_paths = relative_media_paths
 
                     qa_pairs.append({
-                        "datasource": datasource_name,  # Add the datasource name
+                        "datasource": datasource_name,
                         "media_id": relative_media_paths[0],
                         "id": item['id'],
                         "media_paths": media_paths,
                         "media_mode": media_mode,
-                        "conversations": conversation
+                        "conversations": conversation,
+                        "correct_answer": item['conversations'][1]['value']
                     })
 
         # Shard the tasks
@@ -299,200 +190,66 @@ class ITSEvaluator:
                 f"shard {shard_id} has {len(shard_qa_pairs)} tasks.")
 
         for qa_pair in shard_qa_pairs:
-            output_json_fname = results_output_folder / qa_pair["datasource"] / f"{qa_pair['media_id']}.json"
+            output_json_fname = results_dir / qa_pair["datasource"] / f"{qa_pair['media_id']}.json"
             output_json_fname.parent.mkdir(parents=True, exist_ok=True)
 
-            input_task = ITSInputStructure.from_dict(qa_pair["datasource"], qa_pair)
-            output_result = ITSOutputStructure(
-                datasource=qa_pair["datasource"],
-                video_id=qa_pair['media_id'],
-                correct_answer=qa_pair['conversations'][-1]["content"],
-                output_json_fname=str(output_json_fname),
-                prompt="",
-            )
+            # Create task in format expected by base class
+            input_task = {
+                "id": qa_pair["id"],
+                "datasource": qa_pair["datasource"],
+                "media_id": qa_pair["media_id"],
+                "prompt": qa_pair["conversations"][:-1],  # Exclude the answer
+                "media_paths": qa_pair["media_paths"],
+                "media_mode": qa_pair["media_mode"],
+                "correct_answer": qa_pair["correct_answer"]
+            }
+            
+            output_result = {
+                "id": qa_pair["id"],
+                "output_path": str(output_json_fname),
+                "datasource": qa_pair["datasource"],
+                "video_id": qa_pair['media_id'],
+                "correct_answer": qa_pair["correct_answer"]
+            }
 
             input_tasks.append(input_task)
             output_results.append(output_result)
 
         return input_tasks, output_results
 
-    def _prepare_model_inputs_parallel(
-        self,
-        input_tasks: List[ITSInputStructure],
-        num_processes: int,
-    ) -> List[Any]:
-        """Prepare model inputs for tasks in parallel."""
-        if not input_tasks:
-            log.info("No input tasks to prepare model inputs for.")
-            return []
-
-        num_workers = min(num_processes, len(input_tasks))
-        log.info(f"Preparing model inputs in parallel for {len(input_tasks)} tasks "
-                f"using {num_workers} threads.")
-
-        worker_fn = partial(
-            self._prepare_single_model_input,
-            processor=self.processor,
-            vision_config=self.vision_config,
-        )
-
-        processed_inputs_with_index = []
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_to_idx = {
-                executor.submit(worker_fn, task): i for i, task in enumerate(input_tasks)
-            }
-
-            for future in tqdm(
-                concurrent.futures.as_completed(future_to_idx),
-                total=len(future_to_idx),
-                desc="Preparing model inputs",
-            ):
-                idx = future_to_idx[future]
-                try:
-                    model_input = future.result()
-                    if model_input is not None:
-                        processed_inputs_with_index.append((idx, model_input))
-                except Exception as e:
-                    log.error(f"Error preparing model input for task {idx}: {e}. Skipping task.")
-
-        processed_inputs_with_index.sort(key=lambda x: x[0])
-        inputs = [inp for idx, inp in processed_inputs_with_index]
-
-        if len(inputs) < len(input_tasks):
-            log.warning(f"Successfully prepared inputs for {len(inputs)} out of {len(input_tasks)} tasks.")
-
-        return inputs
-
-    def _prepare_single_model_input(
-        self,
-        input_task: ITSInputStructure,
-        processor: Any,
-        vision_config: Dict[str, Any],
-    ) -> Optional[Any]:
-        """Prepare input data for a single model inference task."""
-        # Add video/image information to the user message content
-        if (len(input_task.prompt) > 1
-            and input_task.prompt[1]["role"] == "user"
-            and isinstance(input_task.prompt[1]["content"], str)):
-
-            content = []
-            media_mode = input_task.media_mode
-            for media_path in input_task.media_paths:
-                video_content = {
-                    "type": media_mode,
-                    media_mode: media_path,
-                }
-                # Add vision config parameters
-                for k, v in vision_config.items():
-                    video_content[k] = v
-                content.append(video_content)
-
-            content.append({
-                "type": "text",
-                "text": input_task.prompt[1]["content"]
-            })
-            input_task.prompt[1]["content"] = content
-
-        # Apply chat template
-        processed_text_prompt = processor.apply_chat_template(
-            input_task.prompt, tokenize=False, add_generation_prompt=True
-        )
-
-        # Process vision information
-        image_inputs, video_inputs, video_kwargs = process_vision_info(
-            input_task.prompt, return_video_kwargs=True
-        )
-
-        if not video_inputs and not image_inputs:
-            log.error(f"No video or image inputs found for task: media_id={input_task.media_id}, "
-                     f"question_idx={input_task.question_idx}. Cannot prepare model input.")
-            return None
-
-        if video_inputs:
-            model_input = {
-                "prompt": processed_text_prompt,
-                "multi_modal_data": {"video": video_inputs},
-                "mm_processor_kwargs": video_kwargs,
-            }
-        else:
-            model_input = {
-                "prompt": processed_text_prompt,
-                "multi_modal_data": {"image": image_inputs},
-            }
-
-        log.debug(f"Prepared model input for task: media_id={input_task.media_id}, "
-                 f"question_idx={input_task.question_idx}")
-        return model_input
-
-    def _run_model(
-        self,
-        inputs: List[str],
-        input_tasks: List[ITSInputStructure],
-        output_results: List[ITSOutputStructure],
-        answer_type: str,
-    ) -> None:
-        """Run the model on inputs and process outputs."""
-        # Get generation parameters
-        max_tokens = self.gen_config.get("max_tokens", 1024)
-        temperature = self.gen_config.get("temperature", 0)
-        repetition_penalty = self.gen_config.get("repetition_penalty", 1.0)
-        presence_penalty = self.gen_config.get("presence_penalty", 0.0)
-        frequency_penalty = self.gen_config.get("frequency_penalty", 0.0)
-        seed = self.eval_config.get("seed", 1)
-
-        stop_token_id = self.processor.tokenizer.eos_token_id
-
-        # Configure sampling parameters
-        if answer_type == "letter":
-            sampling_params = SamplingParams(
-                temperature=0.0,
-                max_tokens=10,
-                stop_token_ids=[stop_token_id],
-                top_k=1,
-                seed=seed,
-            )
-        else:
-            sampling_params = SamplingParams(
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=0.95,
-                stop_token_ids=[stop_token_id],
-                repetition_penalty=repetition_penalty,
-                presence_penalty=presence_penalty,
-                frequency_penalty=frequency_penalty,
-                seed=seed,
-            )
-
-        log.info(f"Generating outputs for {len(inputs)} tasks using VLLM...")
-        list_of_requestoutput = self.model.generate(inputs, sampling_params)
-        log.info(f"Finished VLLM generation. Received {len(list_of_requestoutput)} outputs.")
-
-        # Process outputs
-        for i, (requestoutput, input_task, output_result) in enumerate(
-            zip(list_of_requestoutput, input_tasks, output_results, strict=False)
-        ):
-            output_text = requestoutput.outputs[0].text
-
+    def save(self, outputs: List[Dict[str, Any]], predictions: List[str]) -> None:
+        """Save ITS evaluation results to JSON files."""
+        answer_type = self.eval_config.get("answer_type", "freeform")
+        
+        for output, prediction in zip(outputs, predictions):
             # Parse based on answer type
             if answer_type == "letter":
-                answer, reasoning = self._parse_letter_response(output_text)
+                answer, reasoning = self._parse_letter_response(prediction)
             elif answer_type == "reasoning":
-                answer, reasoning = self._parse_reasoning_response(output_text)
+                answer, reasoning = self._parse_reasoning_response(prediction)
             else:
-                answer = output_text
+                answer = prediction
                 reasoning = ""
 
-            # Store results
-            output_result.prompt = input_task.prompt
-            output_result.reasoning = reasoning
-            output_result.answer = answer
-            output_result.full_response = output_text
-            output_result.is_correct = (answer.lower() == input_task.correct_answer.lower())
+            # Check correctness
+            is_correct = (answer.lower() == output["correct_answer"].lower())
+
+            result_data = {
+                "datasource": output.get("datasource", "unknown"),
+                "video_id": output.get("video_id", output.get("id", "unknown")),
+                "correct_answer": output["correct_answer"],
+                "answer": answer,
+                "reasoning": reasoning,
+                "full_response": prediction,
+                "is_correct": is_correct,
+            }
+
+            os.makedirs(os.path.dirname(output["output_path"]), exist_ok=True)
+            with open(output["output_path"], 'w') as f:
+                json.dump([result_data], f, indent=2)
 
     def _parse_letter_response(self, response: str) -> Tuple[str, str]:
         """Parse letter-format response."""
-        # Simple implementation - can be enhanced
         return response.strip()[:1], ""
 
     def _parse_reasoning_response(self, response: str) -> Tuple[str, str]:
@@ -506,49 +263,9 @@ class ITSEvaluator:
 
         return answer, reasoning
 
-    def _save_results_parallel(
-        self,
-        output_results: List[ITSOutputStructure],
-        num_processes: int
-    ) -> None:
-        """Save results to JSON files in parallel."""
-        if not output_results:
-            return
-
-        num_workers = min(num_processes, len(output_results))
-        log.info(f"Saving results in parallel using {num_workers} threads...")
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = [
-                executor.submit(self._save_single_result, result)
-                for result in output_results
-            ]
-
-            for future in tqdm(
-                concurrent.futures.as_completed(futures),
-                total=len(futures),
-                desc="Saving results"
-            ):
-                try:
-                    future.result()
-                except Exception as e:
-                    log.error(f"Error saving result: {e}")
-
-    def _save_single_result(self, result: ITSOutputStructure) -> None:
-        """Save a single result to JSON file."""
-        result_data = {
-            "datasource": result.datasource,
-            "video_id": result.video_id,
-            "correct_answer": result.correct_answer,
-            "answer": result.answer,
-            "reasoning": result.reasoning,
-            "full_response": result.full_response,
-            "is_correct": result.is_correct,
-        }
-
-        os.makedirs(os.path.dirname(result.output_json_fname), exist_ok=True)
-        with open(result.output_json_fname, 'w') as f:
-            json.dump([result_data], f, indent=2)
+    def compute_metrics(self, results_dir: Path, outputs: List[Dict[str, Any]], predictions: List[str]) -> Dict[str, Any]:
+        """Compute ITS directionality metrics."""
+        return self._evaluate_directionality(results_dir)
 
     def _evaluate_directionality(self, result_path: Path) -> Dict[str, Any]:
         """
@@ -659,134 +376,6 @@ class ITSEvaluator:
                 log.info(f"  {category}: {acc:.4f} ({correct}/{total})")
 
         return result_dict
-
-    def run_evaluation(
-        self,
-        results_dir: Path,
-        skip_saved: bool = False,
-        limit: int = -1,
-        total_shard: int = 1,
-        shard_id: int = 0,
-    ) -> Dict[str, Any]:
-        """
-        Run the complete evaluation pipeline.
-
-        Args:
-            results_dir: Directory to save results
-            skip_saved: Whether to skip already saved results
-            limit: Limit number of tasks (for debugging)
-            total_shard: Total number of shards
-            shard_id: Current shard ID
-
-        Returns:
-            Dictionary containing evaluation metrics
-        """
-        start_time = time.time()
-
-        # Load model
-        self.model, self.processor = self._load_model()
-
-        # Get evaluation parameters
-        answer_type = self.eval_config.get("answer_type", "freeform")
-        num_processes = self.eval_config.get("num_processes", 40)
-
-        # Create results directory structure
-        save_folder = self.model_config.get("save_folder", None)
-        if save_folder:
-            results_output_dir = results_dir / save_folder
-        else:
-            model_name = self.model_config.get("model_name", "unknown_model")
-            results_output_dir = results_dir / Path(model_name).name / answer_type
-
-        results_output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Step 1: Gather tasks
-        log.info("Gathering evaluation tasks...")
-        input_tasks, output_results = self._make_all_tasks(
-            results_output_dir, answer_type, total_shard, shard_id
-        )
-        log.info(f"Gathered {len(input_tasks)} tasks")
-
-        # Log progress to TAO
-        lora_status_data = {
-            "evaluation_phase": "task_gathering",
-            "total_tasks": len(input_tasks),
-            "shard_id": shard_id,
-            "total_shards": total_shard,
-            "lora_enabled": self.enable_lora or self.model_config.get("enable_lora", False)
-        }
-
-        log_tao_status(
-            data=lora_status_data,
-            component_name=COMPONENT_NAME
-        )
-
-        # Step 2: Skip saved results if requested
-        if skip_saved:
-            log.info("Checking for saved results...")
-            # Simple implementation - can be enhanced
-            filtered_tasks = []
-            filtered_results = []
-            for task, result in zip(input_tasks, output_results):
-                if not os.path.exists(result.output_json_fname):
-                    filtered_tasks.append(task)
-                    filtered_results.append(result)
-            input_tasks, output_results = filtered_tasks, filtered_results
-            log.info(f"Tasks remaining after skipping saved: {len(input_tasks)}")
-
-        # Apply limit if specified
-        if limit > 0 and len(input_tasks) > limit:
-            input_tasks = input_tasks[:limit]
-            output_results = output_results[:limit]
-            log.info(f"Limited tasks to {len(input_tasks)} for debugging")
-
-        if not input_tasks:
-            log.info("No tasks to evaluate. Exiting.")
-            return {"overall": {"accuracy": 0.0, "total": 0, "correct": 0}}
-
-        # Step 3: Prepare model inputs
-        log.info("Preparing model inputs...")
-        inputs = self._prepare_model_inputs_parallel(input_tasks, num_processes)
-        log.info(f"Prepared {len(inputs)} model inputs")
-
-        # Log progress to TAO
-        log_tao_status(
-            data={
-                "evaluation_phase": "input_preparation",
-                "prepared_inputs": len(inputs)
-            },
-            component_name=COMPONENT_NAME
-        )
-
-        # Step 4: Run model inference
-        log.info("Running model inference...")
-        inference_start = time.time()
-        self._run_model(inputs, input_tasks, output_results, answer_type)
-        inference_time = time.time() - inference_start
-        log.info(f"Model inference completed in {inference_time:.2f} seconds")
-
-        # Log progress to TAO
-        log_tao_status(
-            data={
-                "evaluation_phase": "inference",
-                "inference_time_seconds": inference_time,
-                "tasks_processed": len(input_tasks)
-            },
-            component_name=COMPONENT_NAME
-        )
-
-        # Step 5: Save results
-        log.info("Saving results...")
-        self._save_results_parallel(output_results, num_processes)
-
-        # Step 6: Compute metrics
-        log.info("Computing evaluation metrics...")
-        metrics = self._evaluate_directionality(results_output_dir)
-
-        total_time = time.time() - start_time
-        log.info(f"Complete evaluation pipeline finished in {total_time:.2f} seconds")
-
-        return metrics
 
 
 def main():

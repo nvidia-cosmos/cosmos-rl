@@ -107,7 +107,7 @@ def log_tao_status(data: Dict[str, Any], step: int = None, component_name: str =
         elif 'val/loss' in data:
             message = f"Validation {log_key} {current_value}/{max_value} - Loss: {data['val/loss']:.6f}"
         else:
-            message = "Training loop in progress"
+            message = f"{component_name} in progress"
 
         # Write to TAO status log (same format as TAO PyTorch loggers.py)
         status_logger.write(
