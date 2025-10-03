@@ -24,5 +24,9 @@ liger_kernel
 leptonai
 seaborn
 decord
+evaluate
+sacrebleu
+rouge_score
+bert-score
 accelerate
 kernels

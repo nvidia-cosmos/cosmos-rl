@@ -21,4 +21,9 @@ def get_its_evaluator():
     from .its_evaluator import ITSEvaluator
     return ITSEvaluator
 
-__all__ = ["get_its_evaluator"]
+def get_general_evaluator():
+    """Get Evaluator class with lazy import."""
+    from .evaluator import Evaluator
+    return Evaluator
+
+__all__ = ["get_its_evaluator", "get_general_evaluator"]

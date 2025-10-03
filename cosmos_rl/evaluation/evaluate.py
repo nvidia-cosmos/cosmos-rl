@@ -1,4 +1,3 @@
-#!/usr/bin/env -S uv run --script
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -24,10 +23,8 @@ cosmos-rl-evaluate --config cosmos_rl/evaluation/configs/its_evaluate.toml
 """
 
 import argparse
-import os
-import json
 import toml
-import logging as log
+import logging
 from pathlib import Path
 from typing import Dict, Any
 
@@ -36,9 +33,14 @@ from cosmos_rl.utils.tao_status_logger import log_tao_status
 from nvidia_tao_core.loggers.logging import get_status_logger, Status, Verbosity
 
 # Constants
-COMPONENT_NAME = "Cosmos-RL ITS Evaluation"
+COMPONENT_NAME = "Cosmos-RL Evaluation"
 SEPARATOR = "-" * 50
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def parse_args():
     """Parse command line arguments."""
@@ -88,13 +90,11 @@ def parse_args():
 
 def run_evaluation(args):
     """
-    Run the ITS evaluation pipeline.
+    Run the evaluation pipeline.
     
     Args:
         args: Parsed command line arguments
     """
-    # Set up logging
-    log.basicConfig(level=log.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     
     # Get status logger for TAO integration
     s_logger = get_status_logger()
@@ -102,13 +102,13 @@ def run_evaluation(args):
     try:
         s_logger.write(
             status_level=Status.RUNNING,
-            message="Starting ITS evaluation...",
+            message="Starting evaluation...",
             verbosity_level=Verbosity.INFO
         )
         
         # Load configuration
         config_path = Path(args.config)
-        log.info(f"Loading configuration from {config_path}")
+        logger.info(f"Loading configuration from {config_path}")
         
         if not config_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
@@ -119,19 +119,24 @@ def run_evaluation(args):
         # Override model name if provided
         if args.model_name:
             eval_config["model"]["model_name"] = args.model_name
-            log.info(f"Overriding model name with: {args.model_name}")
+            logger.info(f"Overriding model name with: {args.model_name}")
             
         # Create results directory
         results_dir = eval_config.get("results_dir", "/results")
         results_dir = Path(results_dir)
         results_dir.mkdir(parents=True, exist_ok=True)
-        log.info(f"Results will be saved to: {results_dir}")
+        logger.info(f"Results will be saved to: {results_dir}")
         
         # Initialize evaluator
-        log.info("Initializing ITS evaluator...")
-        from cosmos_rl.evaluation.its_evaluator import ITSEvaluator
+        task_type = eval_config.get("task", {}).get("type", "its_directionality")
+        logger.info(f"Initializing evaluator for task: {task_type}")
         lora_enabled = eval_config.get("model", {}).get("enable_lora", False)
-        evaluator = ITSEvaluator(eval_config, enable_lora=lora_enabled)
+        if task_type == "its_directionality":
+            from cosmos_rl.evaluation.its_evaluator import ITSEvaluator
+            evaluator = ITSEvaluator(eval_config, enable_lora=lora_enabled)
+        else:
+            from cosmos_rl.evaluation.evaluator import Evaluator
+            evaluator = Evaluator(eval_config, enable_lora=lora_enabled)
         
         # Log evaluation start to TAO
         log_tao_status(
@@ -144,20 +149,17 @@ def run_evaluation(args):
             component_name=COMPONENT_NAME
         )
         
-        print(SEPARATOR)
-        print("STARTING ITS EVALUATION PIPELINE")
-        print(SEPARATOR)
-        print(f"Config: {config_path}")
-        print(f"Results: {results_dir}")
-        print(f"Model: {eval_config.get('model', {}).get('model_name', 'unknown')}")
-        if args.limit > 0:
-            print(f"Limit: {args.limit} tasks")
-        if args.total_shard > 1:
-            print(f"Shard: {args.shard_id + 1}/{args.total_shard}")
-        print(SEPARATOR)
+        logger.info(SEPARATOR)
+        logger.info("STARTING EVALUATION PIPELINE")
+        logger.info(SEPARATOR)
+        logger.info(f"Task: {task_type}")
+        logger.info(f"Config: {config_path}")
+        logger.info(f"Results: {results_dir}")
+        logger.info(f"Model: {eval_config.get('model', {}).get('model_name', 'unknown')}")
+        logger.info(SEPARATOR)
         
         # Run evaluation pipeline (inference + scoring)
-        log.info("Starting evaluation pipeline...")
+        logger.info("Starting evaluation pipeline...")
         results = evaluator.run_evaluation(
             results_dir=results_dir,
             skip_saved=args.skip_saved,
@@ -207,7 +209,7 @@ def run_evaluation(args):
         
         s_logger.write(
             status_level=Status.SUCCESS,
-            message=f"ITS evaluation completed successfully. Accuracy: {overall_accuracy:.4f}",
+            message=f"Evaluation completed successfully. Accuracy: {overall_accuracy:.4f}",
             verbosity_level=Verbosity.INFO
         )
         
@@ -240,11 +242,11 @@ def run_evaluation(args):
             },
             component_name=COMPONENT_NAME
         )
-        log.error(error_msg)
+        logger.error(error_msg)
         raise
 
 
-@monitor_status(name="Cosmos-RL ITS Evaluation", mode="evaluate")
+@monitor_status(name="Cosmos-RL Evaluation", mode="evaluate")
 def main():
     """Main entry point for the cosmos-rl-evaluate command."""
     args = parse_args()
