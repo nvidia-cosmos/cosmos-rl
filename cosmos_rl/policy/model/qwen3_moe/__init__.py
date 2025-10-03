@@ -46,14 +46,11 @@ from safetensors import safe_open
 from torch import nn
 from transformers import AutoConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-<<<<<<< HEAD
 from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
-=======
->>>>>>> 79c95ac (PP WIP)
 
 
 def build_norm(
