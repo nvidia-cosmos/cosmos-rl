@@ -14,15 +14,12 @@
 # limitations under the License.
 
 import torch
+from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
 from cosmos_rl.utils import util
-from cosmos_rl.utils.distributed import (
-    destroy_distributed,
-    get_controller_metadata,
-    init_distributed,
-)
+from cosmos_rl.utils.distributed import destroy_distributed, init_distributed
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 

@@ -15,7 +15,8 @@
 
 import os
 from functools import partial
-from typing import Any, Dict, Optional
+from itertools import islice
+from typing import Any, Callable, Dict, Optional, Union
 
 import cosmos_rl.utils.cache as cache
 import cosmos_rl.utils.distributed as dist_util
@@ -30,11 +31,15 @@ from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.policy.trainer.sampler import SkippingSampler
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_for_labels,
+    pack_sequences_for_masks,
+    pack_sequences_info_collect,
+)
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from cosmos_rl.utils.wandb_logger import init_wandb, is_wandb_available, log_wandb
 from datasets import concatenate_datasets
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, Sampler
-from tqdm import tqdm
 from transformers import AutoTokenizer
 
 
