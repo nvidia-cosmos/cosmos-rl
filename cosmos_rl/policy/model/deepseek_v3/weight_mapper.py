@@ -404,15 +404,6 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("deepseek_v3")]
 
-    def get_unsplited_weight_name(self, weight_key: str) -> str:
-        for key in ["q_proj", "k_proj", "v_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "qkv_proj")
-        for key in ["gate_proj", "up_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "gate_up_proj")
-        return weight_key  # return full weight key`
-
 
 @register_parallelism_strategy("deepseek_v3", role=ParallelismStrategyRole.ROLLOUT)
 def map_weight_parallel_dims(
