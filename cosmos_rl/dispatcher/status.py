@@ -936,22 +936,12 @@ class PolicyStatusManager:
                     len_reward_corr = float(np.corrcoef(lengths_np, rewards_np)[0, 1])
                 else:
                     len_reward_corr = 0.0
-                # Length quantiles and near-max ratios
                 if len(lengths_np) > 0:
                     length_p50 = float(np.percentile(lengths_np, 50))
                     length_p90 = float(np.percentile(lengths_np, 90))
                     length_p99 = float(np.percentile(lengths_np, 99))
-                    at_max_frac = float(
-                        np.mean(lengths_np >= self.config.rollout.max_response_length)
-                    )
-                    near_max_frac = float(
-                        np.mean(
-                            lengths_np >= 0.9 * self.config.rollout.max_response_length
-                        )
-                    )
                 else:
                     length_p50 = length_p90 = length_p99 = 0.0
-                    at_max_frac = near_max_frac = 0.0
 
                 # Conditional alert logging for long and high-reward completions
                 try:
@@ -999,6 +989,30 @@ class PolicyStatusManager:
                         f"[Controller] LongCompletionAlert skipped due to: {e}"
                     )
 
+                breakdown_sums = {}
+                breakdown_counts = {}
+                try:
+                    for rollout in rollouts_of_this_step:
+                        b = getattr(rollout, "reward_breakdown", None)
+                        if isinstance(b, dict):
+                            for k, v in b.items():
+                                try:
+                                    breakdown_sums[k] = breakdown_sums.get(
+                                        k, 0.0
+                                    ) + float(v)
+                                    breakdown_counts[k] = breakdown_counts.get(k, 0) + 1
+                                except Exception:
+                                    pass
+                except Exception:
+                    breakdown_sums = {}
+                    breakdown_counts = {}
+
+                breakdown_means = {}
+                for k, s in breakdown_sums.items():
+                    c = breakdown_counts.get(k, 0)
+                    if c > 0:
+                        breakdown_means[k] = s / c
+
                 report_data = {
                     "train/reward_mean": np.mean(rewards),
                     "train/reward_std": np.std(rewards),
@@ -1010,12 +1024,12 @@ class PolicyStatusManager:
                     "train/completion_length_p50": length_p50,
                     "train/completion_length_p90": length_p90,
                     "train/completion_length_p99": length_p99,
-                    "train/completion_length_at_max_frac": at_max_frac,
-                    "train/completion_length_near_max_frac": near_max_frac,
                     "train/reward_of_max_length": reward_of_max_length,
                     "train/len_reward_corr": len_reward_corr,
                     "train/num_rollouts": int(len(rewards)),
                 }
+                for k, v in breakdown_means.items():
+                    report_data[f"train/reward_breakdown/{k}"] = float(v)
                 self.train_report_data[self.current_step] = report_data
 
 

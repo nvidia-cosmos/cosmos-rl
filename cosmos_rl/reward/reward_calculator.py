@@ -89,6 +89,7 @@ class RolloutGroup:
                 advantage=advantage,
                 prompt_idx=self.prompt_idx,
                 filter_reward=reward[1],
+                reward_breakdown=(reward[2] if len(reward) > 2 else None),
             )
             for completion, completed_conversation, reward, advantage in zip(
                 self.payload.completions, completed_conversations, rewards, advantages

@@ -345,6 +345,12 @@ class Reward:
                 f"[Reward] Using provided reward functions: {self.reward_funcs}, `config.train.train_policy.reward_function` will be ignored"
             )
             self.is_filter = [0.0] * len(self.reward_funcs)
+            # Record reward names for dynamic breakdown reporting
+            self.reward_names = []
+            for item in self.reward_funcs:
+                fn = item[0] if isinstance(item, tuple) else item
+                name = getattr(fn, "__name__", str(fn))
+                self.reward_names.append(name)
             for i, weight in index_for_filter_in_explicit:
                 assert (
                     i < len(self.reward_funcs)
@@ -353,6 +359,7 @@ class Reward:
         else:
             self.reward_funcs = []
             self.is_filter = []
+            self.reward_names = []
             for name, weight in reward_function.items():
                 reward_func = RewardFn.from_string(name)
                 if reward_func not in REWARD_FUNC_MAPPING:
@@ -361,6 +368,7 @@ class Reward:
                     )
                 self.is_filter.append(filter_reward_name_to_weight.get(name, 0.0))
                 self.reward_funcs.append((REWARD_FUNC_MAPPING[name], weight))
+                self.reward_names.append(name)
                 logger.info(f"[Reward] Using reward functions: {reward_function}")
         logger.info(
             f"[Reward] Using filtered reward functions: {self.filter_reward_fns}"
@@ -374,10 +382,11 @@ class Reward:
         reference: Union[str, None],
         prompt: Union[str, List] = "",
         **kwargs,
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, Dict[str, float]]:
         total_reward = 0.0
         filter_reward = 0.0
-        for x, filter in zip(self.reward_funcs, self.is_filter):
+        breakdown: Dict[str, float] = {}
+        for i, (x, filter) in enumerate(zip(self.reward_funcs, self.is_filter)):
             if isinstance(x, tuple):
                 func, weight = x
             else:
@@ -393,6 +402,15 @@ class Reward:
             )
             total_reward += weight * val
             filter_reward += filter * val
+            try:
+                key = (
+                    self.reward_names[i]
+                    if i < len(self.reward_names)
+                    else getattr(func, "__name__", "reward_fn")
+                )
+                breakdown[str(key)] = float(val)
+            except Exception:
+                pass
 
         for func, weight in self.filter_reward_fns:
             val = func(
@@ -407,4 +425,4 @@ class Reward:
 
         if all([f == 0.0 for f in self.is_filter]) and len(self.filter_reward_fns) == 0:
             filter_reward = total_reward
-        return total_reward, filter_reward
+        return total_reward, filter_reward, breakdown

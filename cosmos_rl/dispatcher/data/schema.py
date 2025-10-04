@@ -152,3 +152,7 @@ class Rollout(BaseModel):
     filter_reward: float = Field(
         default=0.0, description="The filter reward for the rollout."
     )
+
+    reward_breakdown: Optional[Dict[str, float]] = Field(
+        default=None, description="Per-component reward values keyed by metric name."
+    )
