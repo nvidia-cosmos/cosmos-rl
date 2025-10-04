@@ -384,6 +384,10 @@ class GrpoConfig(BaseModel):
             self.reward_function = {self.reward_function: 1.0}
         elif isinstance(self.reward_function, list):
             self.reward_function = {k: 1.0 for k in self.reward_function}
+        elif isinstance(self.reward_function, dict):
+            self.reward_function = {
+                str(k): float(v) for k, v in self.reward_function.items()
+            }
         assert (
             len(self.reward_function) > 0
         ), "reward_function must be a dict of reward functions"
