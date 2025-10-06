@@ -1286,6 +1286,10 @@ class PipelineScheduleMulti(_PipelineSchedule):
         """
         arg_mbs, kwarg_mbs = self._check_inputs(arg_mbs, kwarg_mbs, target_mbs, losses)
 
+        # print("ARGS_MBS", arg_mbs[0].keys())
+        # print("KWRG_MBS", kwarg_mbs[0].keys())
+        # exit(0)
+
         if not self._stages_initialized:
             self._initialize_stages(arg_mbs[0], kwarg_mbs[0])
 
