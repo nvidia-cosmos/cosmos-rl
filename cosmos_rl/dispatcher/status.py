@@ -1030,7 +1030,9 @@ class PolicyStatusManager:
                 }
                 for k, v in breakdown_means.items():
                     report_data[f"train/reward_breakdown/{k}"] = float(v)
-                self.train_report_data[self.current_step] = report_data
+                self.train_report_data.setdefault(self.current_step, {}).update(
+                    report_data
+                )
 
 
 class RolloutStatusManager:
