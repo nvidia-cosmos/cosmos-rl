@@ -1094,9 +1094,6 @@ cosmos-rl --config config.toml"""
                 else None,
             ),
         )
-        # import json
-        # print(json.dumps(job_spec.model_dump(), indent=4))
-        # Create the （main） job
         created_job = client.job.create(job)
         new_job_id = created_job.metadata.id_
         logger.info("🎉 Job Created Successfully!")
@@ -1150,9 +1147,6 @@ cosmos-rl --config config.toml"""
         reps_map = _parse_role_map(args.lepton_subjob_replicas)
 
         all_roles = set(images_map.keys()) | set(cmds_map.keys()) | set(reps_map.keys())
-        if len(all_roles) == 0 and has_subjobs:
-            # If any flag present but no explicit role parsed, create a default 'sub' role
-            all_roles.add("sub")
 
         for role in sorted(all_roles):
             sub_spec = copy.deepcopy(job_spec)
@@ -1169,7 +1163,6 @@ cosmos-rl --config config.toml"""
             # Command override
             if role in cmds_map:
                 role_cmd = cmds_map[role]
-                # Prefix wait-for-head
                 role_cmd = (
                     f"{wait_prefix}{role_cmd}"
                     if not role_cmd.lstrip().startswith("until getent hosts ")
@@ -1208,7 +1201,6 @@ cosmos-rl --config config.toml"""
             else:
                 sub_spec.envs.extend(sub_env_objs)
 
-            # Build sub job object with new name; do not set id_ explicitly (let platform allocate)
             sub_job = LeptonJob(
                 spec=sub_spec,
                 metadata=Metadata(
