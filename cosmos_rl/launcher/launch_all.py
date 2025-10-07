@@ -28,6 +28,7 @@ from argparse import REMAINDER
 from typing import List, Dict, Optional, Any, Callable
 import toml
 import tempfile
+import copy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")
@@ -374,6 +375,34 @@ def parse_args():
         "-lg",
         type=bool,
         help="Enable or disable log collection",
+    )
+    # Subjob (additional role-specific jobs) options
+    lepton_group.add_argument(
+        "--lepton-subjob-image",
+        type=str,
+        action="append",
+        help=(
+            "Role-specific subjob image mapping. Accepts 'role=image' or 'image' (defaults role=sub). "
+            "Can be provided multiple times to configure multiple roles."
+        ),
+    )
+    lepton_group.add_argument(
+        "--lepton-subjob-command",
+        type=str,
+        action="append",
+        help=(
+            "Role-specific subjob command mapping. Accepts 'role=command' or 'command' (defaults role=sub). "
+            "If omitted for a role, main job command will be used."
+        ),
+    )
+    lepton_group.add_argument(
+        "--lepton-subjob-replicas",
+        type=str,
+        action="append",
+        help=(
+            "Role-specific subjob replicas mapping. Accepts 'role=N' or 'N' (defaults role=sub). "
+            "If omitted for a role, replicas will match main job's parallelism."
+        ),
     )
     lepton_group.add_argument(
         "--lepton-node-id", "-ni", type=str, help="Node for the job", action="append"
@@ -849,8 +878,9 @@ def main():
         if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
         config_content = toml.dumps(cosmos_config)
+
         launch_cmd = f"""\
-cat >config.toml <<EOF
+cat >config.toml <<'EOF'
 {config_content}
 EOF
 
@@ -1020,6 +1050,12 @@ cosmos-rl --config config.toml"""
                 args.lepton_env, args.lepton_secret
             )
 
+        has_subjobs = bool(
+            args.lepton_subjob_image
+            or args.lepton_subjob_command
+            or args.lepton_subjob_replicas
+        )
+
         # Handle mounts
         if args.lepton_mount:
             job_spec.mounts = make_mounts_from_strings(args.lepton_mount)
@@ -1052,18 +1088,144 @@ cosmos-rl --config config.toml"""
             spec=job_spec,
             metadata=Metadata(
                 id=args.lepton_job_name,
+                name=args.lepton_job_name,
                 visibility=LeptonVisibility(args.lepton_visibility)
                 if args.lepton_visibility
                 else None,
             ),
         )
-
-        # Create the job
+        # import json
+        # print(json.dumps(job_spec.model_dump(), indent=4))
+        # Create the （main） job
         created_job = client.job.create(job)
         new_job_id = created_job.metadata.id_
         logger.info("🎉 Job Created Successfully!")
         logger.info(f"Name: {args.lepton_job_name}")
         logger.info(f"ID: {new_job_id}")
+
+        if not has_subjobs:
+            return
+
+        # ------------------------------------------------------------
+        # Optional: Create subjobs per role (image/command/replicas)
+        # ------------------------------------------------------------
+        wait_prefix = (
+            f'echo "[SubJob] waiting for main head: worker-0.{new_job_id}-job-svc"; '
+            f"while ! getent hosts worker-0.{new_job_id}-job-svc >/dev/null 2>&1; do echo -n '.'; sleep 1; done; echo ' connected';\n"
+        )
+
+        def _parse_role_map(
+            items: Optional[List[str]], default_role: str = "sub"
+        ) -> Dict[str, str]:
+            result: Dict[str, str] = {}
+            if not items:
+                return result
+            for raw in items:
+                s = str(raw).strip()
+                # Accept role=value only if LHS looks like a valid role token (no spaces, [a-zA-Z0-9_-]+)
+                eq_idx = s.find("=")
+                if eq_idx != -1:
+                    lhs = s[:eq_idx].strip()
+                    rhs = s[eq_idx + 1 :].strip()
+                    if lhs and re.match(r"^[A-Za-z0-9_-]+$", lhs) and " " not in lhs:
+                        role = lhs
+                        val = rhs
+                    else:
+                        role = default_role
+                        val = s
+                        logger.warning(
+                            f"[Lepton] Treating value as default role='{default_role}' (ignored '=' inside value): '{s}'"
+                        )
+                else:
+                    role = default_role
+                    val = s
+                    logger.warning(
+                        f"[Lepton] No role specified for subjob option '{s}', defaulting to role='{default_role}'"
+                    )
+                result[role] = val
+            return result
+
+        images_map = _parse_role_map(args.lepton_subjob_image)
+        cmds_map = _parse_role_map(args.lepton_subjob_command)
+        reps_map = _parse_role_map(args.lepton_subjob_replicas)
+
+        all_roles = set(images_map.keys()) | set(cmds_map.keys()) | set(reps_map.keys())
+        if len(all_roles) == 0 and has_subjobs:
+            # If any flag present but no explicit role parsed, create a default 'sub' role
+            all_roles.add("sub")
+
+        for role in sorted(all_roles):
+            sub_spec = copy.deepcopy(job_spec)
+            sub_name = f"{args.lepton_job_name[:32]}-{role}"
+
+            # Image override
+            if role in images_map:
+                sub_spec.container.image = images_map[role]
+            else:
+                logger.warning(
+                    f"[Lepton] --lepton-subjob-image not specified for role '{role}', using main job image"
+                )
+
+            # Command override
+            if role in cmds_map:
+                role_cmd = cmds_map[role]
+                # Prefix wait-for-head
+                role_cmd = (
+                    f"{wait_prefix}{role_cmd}"
+                    if not role_cmd.lstrip().startswith("until getent hosts ")
+                    else role_cmd
+                )
+                sub_spec.container.command = ["/bin/bash", "-c", role_cmd]
+            else:
+                logger.warning(
+                    f"[Lepton] --lepton-subjob-command not specified for role '{role}', reusing main job command (with wait prefix)"
+                )
+                # Prepend wait prefix to the existing launch command (list form ["/bin/bash","-c",CMD])
+                sub_spec.container.command[2] = (
+                    f"{wait_prefix}{sub_spec.container.command[2]}"
+                )
+
+            # Replicas override
+            try:
+                num_workers_sub = int(reps_map.get(role, str(num_workers)))
+            except Exception:
+                logger.warning(
+                    f"[Lepton] --lepton-subjob-replicas for role '{role}' invalid, fallback to main job parallelism {num_workers}"
+                )
+                num_workers_sub = num_workers
+            if num_workers_sub > 0:
+                sub_spec.completions = num_workers_sub
+                sub_spec.parallelism = num_workers_sub
+
+            # Env: mark role + head host id of main job
+            sub_extra_env = [
+                f"COSMOS_TRAINING_ROLE={role}",
+                f"COSMOS_TRAINING_HOST_ID=worker-0.{new_job_id}-job-svc",
+            ]
+            sub_env_objs = make_env_vars_from_strings(sub_extra_env, None)
+            if sub_spec.envs is None:
+                sub_spec.envs = sub_env_objs
+            else:
+                sub_spec.envs.extend(sub_env_objs)
+
+            # Build sub job object with new name; do not set id_ explicitly (let platform allocate)
+            sub_job = LeptonJob(
+                spec=sub_spec,
+                metadata=Metadata(
+                    id=sub_name,
+                    name=sub_name,
+                    visibility=LeptonVisibility(args.lepton_visibility)
+                    if args.lepton_visibility
+                    else None,
+                ),
+            )
+            import json
+
+            print(json.dumps(sub_job.model_dump(), indent=4))
+            created_sub_job = client.job.create(sub_job)
+            logger.info(
+                f"🎉 SubJob Created: role={role}, name={sub_name}, id={created_sub_job.metadata.id_}"
+            )
 
         return
 
