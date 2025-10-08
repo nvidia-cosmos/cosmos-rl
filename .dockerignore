@@ -51,6 +51,7 @@ Thumbs.db
 
 # GitHub workflows and GitLab configs
 .git
+**/.git
 .github/
 */.github/
 **/.github/
