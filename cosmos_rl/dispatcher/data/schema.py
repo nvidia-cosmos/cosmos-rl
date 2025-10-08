@@ -91,6 +91,11 @@ class RLPayload(BaseModel):
         default=None, description="The advantage for each completion."
     )
 
+    reward_breakdown_list: Optional[List[Dict[str, float]]] = Field(
+        default=None,
+        description="Per-completion reward breakdown dictionaries (unweighted component values).",
+    )
+
     valid: Optional[bool] = Field(
         default=True, description="Whether the rollout is valid."
     )

@@ -416,6 +416,10 @@ class RewardCalculator:
                         ],
                         rewards=[rollout.reward for rollout in rollouts_group],
                         advantages=[rollout.advantage for rollout in rollouts_group],
+                        reward_breakdown_list=[
+                            getattr(rollout, "reward_breakdown", None)
+                            for rollout in rollouts_group
+                        ],
                         valid=True,
                     )
                 )
@@ -435,6 +439,10 @@ class RewardCalculator:
                         ],
                         rewards=[rollout.reward for rollout in rollouts_group],
                         advantages=[rollout.advantage for rollout in rollouts_group],
+                        reward_breakdown_list=[
+                            getattr(rollout, "reward_breakdown", None)
+                            for rollout in rollouts_group
+                        ],
                         valid=False,
                     )
                 )

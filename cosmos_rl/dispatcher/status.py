@@ -965,7 +965,7 @@ class PolicyStatusManager:
                                 # Prefer dataset-level identifier when available
                                 sample_id = getattr(rollout, "prompt_idx", None)
                                 if sample_id is None or sample_id == -1:
-                                    sample_id = i
+                                    sample_id = "NA"
 
                                 # Per-sample breakdown (raw component values, unweighted)
                                 b = getattr(rollout, "reward_breakdown", None)
@@ -984,7 +984,7 @@ class PolicyStatusManager:
                                 reward_total = float(rewards_np[i])
                                 adv = getattr(rollout, "advantage", None)
                                 meta_line = (
-                                    f"[META] step={self.current_step}, sample_id={int(sample_id)}, "
+                                    f"[META] step={self.current_step}, sample_id={sample_id}, "
                                     f"length={int(lengths_np[i])}"
                                 )
                                 reward_line = f"[REWARD] total={reward_total:.4f}"

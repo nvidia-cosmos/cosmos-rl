@@ -37,6 +37,11 @@ def extract_rollouts(
             prompt_idx = -1
         else:
             prompt_idx = prompt_idxs[idx]
+        rb_list = (
+            payload.reward_breakdown_list
+            if getattr(payload, "reward_breakdown_list", None) is not None
+            else [None] * len(payload.completions)
+        )
         rollouts = [
             Rollout(
                 prompt=payload.prompt,
@@ -48,13 +53,15 @@ def extract_rollouts(
                 advantage=advantage,
                 prompt_idx=prompt_idx,
                 n_ignore_prefix_tokens=n_ignore_prefix_tokens,
+                reward_breakdown=rb,
             )
-            for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens in zip(
+            for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, rb in zip(
                 payload.completions,
                 payload.completed_conversations,
                 payload.rewards,
                 payload.advantages,
                 payload.n_ignore_prefix_tokens,
+                rb_list,
             )
         ]
         if payload.valid:
