@@ -70,6 +70,7 @@ jobs:
           ${LONG_DOCKER_RUN} python tests/test_integration.py --stream
           ${DOCKER_RUN} python tests/test_hf_models.py
           ${DOCKER_RUN} python tests/test_activation_offload.py
+          ${DOCKER_RUN} python tests/test_gspo.py
 
       - name: Cleanup
         if: always()

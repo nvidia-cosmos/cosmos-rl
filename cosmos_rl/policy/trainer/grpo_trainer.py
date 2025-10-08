@@ -166,7 +166,6 @@ def compute_loss(
         loss1 = importance_ratio * current_advantages
         loss2 = importance_ratio_clipped * current_advantages
         if config.train.train_policy.variant == "gspo":
-            logger.info("[Policy] Use GSPO loss")
             per_token_loss = -torch.min(loss1, loss2)
         else:
             loss3 = -config.train.train_policy.lower_bound_ratio * current_advantages
@@ -323,6 +322,8 @@ class GRPOTrainer(Trainer):
         # - Save the checkpoint/safetensors
         self.is_master_replica = True
         self.prepare_shard_infos_for_weight_sync_insts()
+        if config.train.train_policy.variant == "gspo":
+            logger.info("[Policy] Use GSPO loss in RL.")
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
