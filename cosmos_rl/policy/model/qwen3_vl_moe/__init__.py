@@ -594,23 +594,6 @@ class Qwen3VLMoeModel(BaseModel):
                         # This is due to the expert parallelism grouping
                         continue
 
-                    # For debug
-                    # should_skip = True
-                    # for layer_id in range(
-                    #     self.hf_config.text_config.num_hidden_layers
-                    # ):
-                    #     contain_name = f"layers.{layer_id}."
-                    #     if "embed_tokens" in name or "lm_head" in name or "visual" in name or dest_name in ["norm.weight", "norm.bias"]:
-                    #         should_skip = False
-                    #         break
-                    #     elif contain_name not in dest_name:
-                    #         continue
-                    #     else:
-                    #         should_skip = False
-                    #         break
-                    # if should_skip:
-                    #     continue
-
                     # For MoE LM
                     if match := re.search(  # noqa: F841
                         r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)",
@@ -796,8 +779,7 @@ class Qwen3VLMoeModel(BaseModel):
         except Exception:
             head_dim = lm_config.hidden_size // lm_config.num_attention_heads
             logger.warning(f"head_dim not found in config, using {head_dim}")
-        # For debug
-        # lm_config.num_hidden_layers = 1
+
         lm_args = Qwen3MoeArgs(
             dim=lm_config.hidden_size,
             ffn_dim=lm_config.moe_intermediate_size,
