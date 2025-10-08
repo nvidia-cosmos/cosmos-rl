@@ -943,51 +943,74 @@ class PolicyStatusManager:
                 else:
                     length_p50 = length_p90 = length_p99 = 0.0
 
-                # Conditional alert logging for long and high-reward completions
+                # Per-step sample logging (configurable)
                 try:
-                    # Config via env vars (optional)
-                    default_min_len = int(0.9 * self.config.rollout.max_response_length)
-                    min_len_thr = int(
-                        os.environ.get(
-                            "COSMOS_LOG_LONG_COMPLETION_MIN_LEN", default_min_len
-                        )
+                    log_all = str(
+                        os.environ.get("COSMOS_LOG_ALL_SAMPLES", "0")
+                    ).lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                        "y",
                     )
-                    reward_min_thr = float(
-                        os.environ.get("COSMOS_LOG_HIGH_REWARD_MIN", 0.9)
-                    )
-                    top_k_to_log = int(os.environ.get("COSMOS_LOG_MAX_SAMPLES", 3))
-                    if len(lengths_np) > 0:
-                        mask = (lengths_np >= min_len_thr) & (
-                            rewards_np >= reward_min_thr
-                        )
-                        idxs = np.where(mask)[0].tolist()
-                        if len(idxs) > 0:
-                            # sort by length desc, then reward desc
-                            idxs.sort(
-                                key=lambda i: (
-                                    int(lengths_np[i]),
-                                    float(rewards_np[i]),
-                                ),
-                                reverse=True,
-                            )
-                            for i in idxs[: max(1, top_k_to_log)]:
-                                comp = completions[i]
-                                print_completion = str(
-                                    os.environ.get("COSMOS_LOG_COMPLETION_ENABLE", "1")
-                                ).lower() in ("1", "true", "yes", "y")
-                                header = "========== [LongCompletionAlert] =========="
-                                meta = f"step={self.current_step}, sample_idx={i}, length={int(lengths_np[i])}, reward={float(rewards_np[i]):.4f}"
-                                footer = "========== [End LongCompletionAlert] ========"
-                                if print_completion:
-                                    logger.warning(
-                                        f"{header}\n{meta}\nCompletion:\n{comp}\n{footer}"
+                    meta_only = str(
+                        os.environ.get("COSMOS_LOG_SAMPLES_META_ONLY", "0")
+                    ).lower() in ("1", "true", "yes", "y")
+
+                    if log_all and len(lengths_np) > 0:
+                        header = "========== [SampleLog] =========="
+                        footer = "========== [End SampleLog] ========"
+                        for i, rollout in enumerate(rollouts_of_this_step):
+                            try:
+                                # Prefer dataset-level identifier when available
+                                sample_id = getattr(rollout, "prompt_idx", None)
+                                if sample_id is None or sample_id == -1:
+                                    sample_id = i
+
+                                # Per-sample breakdown (raw component values, unweighted)
+                                b = getattr(rollout, "reward_breakdown", None)
+                                breakdown_str = ""
+                                if isinstance(b, dict) and len(b) > 0:
+                                    try:
+                                        parts = [
+                                            f"{k}={float(v):.4f}" for k, v in b.items()
+                                        ]
+                                        breakdown_str = (
+                                            ", breakdown={" + ", ".join(parts) + "}"
+                                        )
+                                    except Exception:
+                                        breakdown_str = ""
+
+                                reward_total = float(rewards_np[i])
+                                adv = getattr(rollout, "advantage", None)
+                                meta_line = (
+                                    f"[META] step={self.current_step}, sample_id={int(sample_id)}, "
+                                    f"length={int(lengths_np[i])}"
+                                )
+                                reward_line = f"[REWARD] total={reward_total:.4f}"
+                                adv_line = (
+                                    f"[ADV] {float(adv):.4f}"
+                                    if adv is not None
+                                    else "[ADV]"
+                                )
+                                breakdown_line = "[BREAKDOWN]" + (
+                                    " " + breakdown_str if breakdown_str else ""
+                                )
+
+                                if meta_only:
+                                    logger.info(
+                                        f"{header}\n{meta_line}\n{reward_line}\n{adv_line}\n{breakdown_line}\n{footer}"
                                     )
                                 else:
-                                    logger.warning(f"{header}\n{meta}\n{footer}")
+                                    comp = completions[i]
+                                    logger.info(
+                                        f"{header}\n{meta_line}\n{reward_line}\n{adv_line}\n{breakdown_line}\n[COMPLETION]\n{comp}\n{footer}"
+                                    )
+                            except Exception:
+                                # Continue logging other samples even if one fails
+                                continue
                 except Exception as e:
-                    logger.debug(
-                        f"[Controller] LongCompletionAlert skipped due to: {e}"
-                    )
+                    logger.debug(f"[Controller] Sample logging skipped due to: {e}")
 
                 breakdown_sums = {}
                 breakdown_counts = {}
