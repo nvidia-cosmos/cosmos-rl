@@ -13,19 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import torch
-from torch import nn
 import inspect
+from torch import nn
+from safetensors import safe_open
 from transformers.utils import quantization_config as transformers_quantization_config
 from functools import partial, cached_property
 from typing import Tuple, List, Optional, Callable
 
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoModel
 from cosmos_rl.utils.util import (
     clear_weight_name,
     safe_deep_getattr,
     load_model_class_by_config,
     reverse_hf_checkpoint_mapping,
+    resolve_model_path,
 )
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
@@ -286,15 +289,181 @@ class HFModel(BaseModel):
         """
         assert False, "Pipeline split is not supported for HFModel"
 
-    def reset_named_buffers(self, hf_model):
-        # copy named buffers from hf_model to self.model
-        hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
-        for name, cosmos_hf_buffer in self.model.named_buffers():
-            assert name in hf_named_buffers, f"Buffer {name} not found in hf model"
-            hf_buf = hf_named_buffers[name].to(
-                device=cosmos_hf_buffer.device, dtype=cosmos_hf_buffer.dtype
+    def reset_named_buffers(self, hf_model=None, model_name_or_path=None):
+        reset_success = False
+        if hf_model is not None:
+            # copy named buffers from hf_model to self.model
+            hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
+            for name, cosmos_hf_buffer in self.model.named_buffers():
+                assert name in hf_named_buffers, f"Buffer {name} not found in hf model"
+                hf_buf = hf_named_buffers[name].to(
+                    device=cosmos_hf_buffer.device, dtype=cosmos_hf_buffer.dtype
+                )
+                cosmos_hf_buffer.data.copy_(hf_buf.data)
+            reset_success = True
+        else:
+            assert (
+                model_name_or_path is not None
+            ), "model_name_or_path is required for resetting named buffers"
+            config = AutoConfig.from_pretrained(
+                model_name_or_path, trust_remote_code=True
             )
-            cosmos_hf_buffer.data.copy_(hf_buf.data)
+            config.text_config.max_position_embeddings = (
+                self.hf_config.max_position_embeddings
+            )
+            # We do not need to load the full model to get all named buffers, because buffer like inv_freq is initialized
+            # in the constructor of the model in most cases, so we only load the first 2 layers to try to get all named buffers
+            num_lm_layers_to_load = 2
+            if self.is_vlm:
+                if hasattr(config, "text_config") and hasattr(
+                    config.text_config, "num_hidden_layers"
+                ):
+                    config.text_config.num_hidden_layers = num_lm_layers_to_load
+                elif hasattr(config, "llm_config") and hasattr(
+                    config.llm_config, "num_hidden_layers"
+                ):
+                    config.llm_config.num_hidden_layers = num_lm_layers_to_load
+                else:
+                    raise ValueError(f"Can not get text config from {config}")
+            else:
+                if hasattr(config, "num_hidden_layers"):
+                    config.num_hidden_layers = num_lm_layers_to_load
+                else:
+                    raise ValueError(f"Can not get num of llm layers from {config}")
+            # Try to load the model to get all named buffers
+            try:
+                hf_model = AutoModel.from_config(config)
+                hf_named_buffers = [name for name, _ in hf_model.named_buffers()]
+                self_named_buffers = [name for name, _ in self.model.named_buffers()]
+                num_equal = len(hf_named_buffers) == len(self_named_buffers)
+                if not num_equal:
+                    is_buffer_registered_in_layers = any(
+                        "layers." in name for name in hf_named_buffers
+                    )
+                    if (self.n_lm_layers - num_lm_layers_to_load) == (
+                        len(self_named_buffers) - len(hf_named_buffers)
+                    ) and is_buffer_registered_in_layers:
+                        buffer_in_layers = [
+                            buffer
+                            for name, buffer in hf_model.named_buffers()
+                            if "layers." in name
+                        ]
+                        first_buffer = buffer_in_layers[0]
+                        all_same = True
+                        for buffer in buffer_in_layers[1:]:
+                            if not buffer.equal(first_buffer):
+                                all_same = False
+                                break
+
+                        if all_same:
+                            cosmos_buffer_in_layers = [
+                                buffer
+                                for _, buffer in self.model.named_buffers()
+                                if "layers." in name
+                            ]
+                            hf_buf = first_buffer.to(
+                                device=cosmos_buffer_in_layers[0].device,
+                                dtype=cosmos_buffer_in_layers[0].dtype,
+                            )
+                            for buffer in cosmos_buffer_in_layers:
+                                buffer.data.copy_(hf_buf.data)
+
+                            return True
+                        else:
+                            logger.warning(
+                                f"Failed to reset named buffers from {model_name_or_path}: buffer names mismatch {self_named_buffers} != {hf_named_buffers}"
+                            )
+                    else:
+                        logger.warning(
+                            f"Failed to reset named buffers from {model_name_or_path}: buffer names mismatch {self_named_buffers} != {hf_named_buffers}"
+                        )
+                        return False
+
+                reset_success = self.reset_named_buffers(hf_model=hf_model)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to reset named buffers from {model_name_or_path}: {e}"
+                )
+                reset_success = False
+
+        return reset_success
+
+    def load_hf_weights_from_safetensors(
+        self,
+        model_name_or_path: str,
+        parallel_dims: ParallelDims,
+        device: torch.device,
+        revision: Optional[str] = None,
+    ):
+        model_type = self.hf_config.model_type
+        model_path = resolve_model_path(model_name_or_path, revision=revision)
+        safetensors_files = [
+            f for f in os.listdir(model_path) if f.endswith(".safetensors")
+        ]
+
+        self_state_dict = self.state_dict()
+        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
+        all_tensor_names = self_state_dict.keys()
+        lm_head_weight_key = "lm_head.weight"
+        embed_tokens_weight_key = "model.embed_tokens.weight"
+        weights_of_ckpt_names = set()
+        reserved = {}
+        for f in safetensors_files:
+            weights_of_ckpt = {}
+            ckpt = safe_open(
+                os.path.join(model_path, f), framework="pt", device=str(device)
+            )
+            keys = ckpt.keys()
+            for name in keys:
+                ckpt_tensor = ckpt.get_tensor(name)
+                weights_of_ckpt[name] = ckpt_tensor
+                weights_of_ckpt_names.add(name)
+                if name == embed_tokens_weight_key:
+                    reserved[name] = ckpt_tensor
+
+            for name in weights_of_ckpt.keys():
+                tensor = weights_of_ckpt[name]
+                dest_name, shared_weight = convert_weight_from_hf(
+                    tensor, name, model_type, parallel_dims
+                )
+
+                target_tensor = self_state_dict[dest_name]
+                is_dist_tensor = isinstance(
+                    target_tensor, torch.distributed.tensor.DTensor
+                )
+                local_view = (
+                    target_tensor.to_local() if is_dist_tensor else target_tensor
+                )
+                assert (
+                    local_view.shape == shared_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                with torch.no_grad():
+                    local_view.data.copy_(shared_weight)
+
+        if (
+            lm_head_weight_key not in all_tensor_names
+            and embed_tokens_weight_key in all_tensor_names
+        ):
+            # tied with embed_tokens.weight
+            name = lm_head_weight_key
+            assert embed_tokens_weight_key in reserved
+            tensor = reserved[embed_tokens_weight_key]
+            dest_name, shared_weight = convert_weight_from_hf(
+                tensor, name, model_type, parallel_dims
+            )
+            if dest_name in self_state_dict:
+                target_tensor = self_state_dict[dest_name]
+                is_dist_tensor = isinstance(
+                    target_tensor, torch.distributed.tensor.DTensor
+                )
+                local_view = (
+                    target_tensor.to_local() if is_dist_tensor else target_tensor
+                )
+                assert (
+                    local_view.shape == shared_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                with torch.no_grad():
+                    local_view.data.copy_(shared_weight.to(device))
 
     def load_hf_weights(
         self,
@@ -309,12 +478,10 @@ class HFModel(BaseModel):
         Args:
             model_path (str): Path to the HuggingFace model.
             parallel_dims (ParallelDims): Parallel dimensions definition.
-            info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
         model_type = self.hf_config.model_type
         dtype = self.hf_config.torch_dtype
         self.model = self.model.to(dtype=dtype)
-
         kwargs = {
             "config": self.hf_config,
             "revision": revision,
@@ -328,12 +495,32 @@ class HFModel(BaseModel):
             )
             kwargs["quantization_config"] = mxfp4_quantization_config
 
+        # There are two cases where we need to load weights using from_pretrained instead of through safetensor files
+        # 1. The model need to be dequantized like gpt-oss
+        # 2. The model's named_buffer can not be reinitialized successfully
+        load_hf_weights_from_pretrained = (
+            self.need_dequantization
+            or not self.reset_named_buffers(model_name_or_path=model_name_or_path)
+        )
+
+        if not load_hf_weights_from_pretrained:
+            return self.load_hf_weights_from_safetensors(
+                model_name_or_path,
+                parallel_dims,
+                device,
+                revision,
+            )
+
+        logger.warning(
+            "Loading weights using from_pretrained, which may take a lot of time."
+        )
+
         hf_model = self.model_class.from_pretrained(
             model_name_or_path,
             **kwargs,
         ).to(device="cpu", dtype=dtype)
 
-        self.reset_named_buffers(hf_model)
+        self.reset_named_buffers(hf_model=hf_model)
 
         hf_state_dict = hf_model.state_dict()
 
@@ -528,8 +715,6 @@ class HFModel(BaseModel):
             logger.warning(
                 f"Got error({e}) when loading {hf_config.model_type}, Using AutoModel instead."
             )
-            from transformers import AutoModel
-
             model_class = AutoModel
             model = AutoModel.from_config(hf_config, trust_remote_code=True)
 
