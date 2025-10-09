@@ -60,7 +60,7 @@ def run_rollout(*args, **kwargs):
         rollout_backend = cosmos_rollout_config.rollout.backend
         if rollout_backend == "vllm":
             parallel_dims = ParallelDims.from_config(
-                paralleism_config=cosmos_rollout_config.rollout.parallelism
+                parallelism_config=cosmos_rollout_config.rollout.parallelism
             )
             init_distributed()
             parallel_dims.build_mesh(device_type="cuda")

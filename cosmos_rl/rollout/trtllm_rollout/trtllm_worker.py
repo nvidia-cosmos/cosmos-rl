@@ -117,7 +117,7 @@ class TrtLLMRolloutWorker(TRTLLMRolloutWorkerBase):
         if TrtLLMRolloutWorker.init_count > 0:
             self.ready = True
             parallel_dims = ParallelDims.from_config(
-                paralleism_config=cosmos_config.rollout.parallelism
+                parallelism_config=cosmos_config.rollout.parallelism
             )
             self.parallel_dims = parallel_dims
 
