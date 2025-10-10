@@ -301,7 +301,6 @@ class GRPOTrainer(Trainer):
         self.init_redis()
 
         # For iteration control
-        self.mini_step = 0
         self.replica_batch_for_this_step = 0
         self.mini_batch = self.grpo_config.mini_batch
 
@@ -1674,12 +1673,13 @@ class GRPOTrainer(Trainer):
                                     loss = loss / num_mini_batch
                                     per_token_loss = per_token_loss / num_mini_batch
                                     kl_loss = kl_loss / num_mini_batch
-
+                                    logger.info(
+                                        f"[Policy] rank: {self.global_rank}, current_step: {current_step}, loss: {loss.item()}, per_token_loss: {per_token_loss.item()}, kl_loss: {kl_loss.item()}, local_mini_step: {local_mini_step}"
+                                    )
                                     loss.backward()
                                     loss_sum += per_token_loss.item()
                                     kl_loss_sum += kl_loss.item()
                                     loss_count += 1
-                            self.mini_step += 1
                             local_mini_step += 1
 
                             if (
@@ -1736,6 +1736,10 @@ class GRPOTrainer(Trainer):
                     report_data["train/kl_loss_avg"] = global_avg_kl_loss
                     report_data["train/kl_loss_max"] = global_max_kl_loss
                 report_data["train/grad_norm"] = grad_norm_sum.item()
+
+                logger.info(
+                    f"current_step: {current_step}, global_avg_loss: {global_avg_loss.item()}, global_max_loss: {global_max_loss.item()}, global_avg_kl_loss: {global_avg_kl_loss.item()}, global_max_kl_loss: {global_max_kl_loss.item()}, grad_norm_sum: {grad_norm_sum.item()}"
+                )
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.
