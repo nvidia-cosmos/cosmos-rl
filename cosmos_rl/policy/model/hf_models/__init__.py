@@ -569,7 +569,7 @@ class HFModel(BaseModel):
             )
 
         logger.warning(
-            "Loading weights using from_pretrained, which may take a lot of time."
+            "Loading weights with from_pretrained; this operation might be time-consuming."
         )
 
         hf_model = self.model_class.from_pretrained(
