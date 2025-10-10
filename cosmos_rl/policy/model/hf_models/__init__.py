@@ -78,7 +78,7 @@ class HFModel(BaseModel):
                     "skip reverse_hf_conversion_mapping"
                 )
             else:
-                # reverse the hf checkpoint conversion mapping to aligh with the vllm weights' name
+                # Reverse HuggingFace checkpoint conversion mapping to align with VLLM weight naming convention
                 self.weight_mapper.reverse_hf_conversion_mapping = (
                     reverse_hf_checkpoint_mapping(model._checkpoint_conversion_mapping)
                 )
@@ -114,7 +114,7 @@ class HFModel(BaseModel):
 
     @property
     def image_token_id(self):
-        # image_token_id or image_token_index
+        # Retrieve image token ID from either image_token_id or image_token_index attribute
         image_token_id = None
         if self.is_vlm:
             image_token_id = getattr(self.hf_config, "image_token_id", None) or getattr(
@@ -245,7 +245,7 @@ class HFModel(BaseModel):
     def vision_model(self):
         vision_model = None
         if self.is_vlm:
-            # vision_tower or visual
+            # Extract vision model from various possible attribute names
             if hasattr(self.model, "vision_tower"):
                 vision_model = self.model.vision_tower
             elif hasattr(self.model, "visual"):
@@ -263,7 +263,7 @@ class HFModel(BaseModel):
             if hasattr(self.model, "multi_modal_projector"):
                 multi_modal_projector = self.model.multi_modal_projector
             elif hasattr(self.model, "mlp1"):
-                # InternVL
+                # Handle InternVL architecture's multi-modal projector naming
                 multi_modal_projector = self.model.mlp1
 
         return multi_modal_projector
@@ -273,7 +273,7 @@ class HFModel(BaseModel):
         return self.is_vlm
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
-        # Will reset all named buffers in load_hf_weights
+        # Named buffers will be reset during the load_hf_weights process
         return
 
     @property
@@ -310,8 +310,8 @@ class HFModel(BaseModel):
                 model_name_or_path, trust_remote_code=True
             )
 
-            # We do not need to load the full model to get all named buffers, because buffer like inv_freq is initialized
-            # in the constructor of the model in most cases, so we only load the first 2 layers to try to get all named buffers
+            # Load only first 2 layers instead of full model to extract named buffers efficiently.
+            # Most buffers (e.g., inv_freq) are initialized in the model constructor, making this approach sufficient.
             num_lm_layers_to_load = 2
             if self.is_vlm:
                 if hasattr(config, "text_config") and hasattr(
@@ -338,7 +338,7 @@ class HFModel(BaseModel):
                     )
                 else:
                     raise ValueError(f"Can not get num of llm layers from {config}")
-            # Try to load the model to get all named buffers
+            # Attempt to load partial model to extract all named buffers
             try:
                 if isinstance(self.model_class, AutoModel):
                     hf_model = AutoModel.from_config(config)
@@ -348,6 +348,7 @@ class HFModel(BaseModel):
                 self_named_buffers = [name for name, _ in self.model.named_buffers()]
                 num_equal = len(hf_named_buffers) == len(self_named_buffers)
                 if not num_equal:
+                    # Check if the buffers are registered in the layers
                     is_buffer_registered_in_layers = any(
                         "layers." in name for name in hf_named_buffers
                     )
@@ -361,7 +362,7 @@ class HFModel(BaseModel):
                         ]
                         first_buffer = hf_buffer_in_layers[0]
                         all_same = True
-                        # Check if all named buffers in layers are the same
+                        # Verify that all layer buffers contain identical values
                         for buffer in hf_buffer_in_layers[1:]:
                             if not torch.equal(
                                 buffer,
@@ -371,7 +372,8 @@ class HFModel(BaseModel):
                             ):
                                 all_same = False
                                 break
-
+                        # If all buffers in the layers are the same, we can repeat the first layer's
+                        # buffer to the rest of the layers
                         if all_same:
                             cosmos_buffer_in_layers = [
                                 buffer
@@ -501,7 +503,7 @@ class HFModel(BaseModel):
             lm_head_weight_key not in weights_of_ckpt_names
             and embed_tokens_weight_key in weights_of_ckpt_names
         ):
-            # tied with embed_tokens.weight
+            # Handle weight tying: lm_head shares weights with embed_tokens
             name = lm_head_weight_key
             assert embed_tokens_weight_key in reserved
             tensor = reserved[embed_tokens_weight_key]
@@ -552,9 +554,9 @@ class HFModel(BaseModel):
             )
             kwargs["quantization_config"] = mxfp4_quantization_config
 
-        # There are two cases where we need to load weights using from_pretrained instead of through safetensor files
-        # 1. The model need to be dequantized like gpt-oss
-        # 2. The model's named_buffer can not be reinitialized successfully
+        # Use from_pretrained loading in two scenarios:
+        # 1. Model requires dequantization (e.g., gpt-oss)
+        # 2. Named buffer reinitialization failed
         load_hf_weights_from_pretrained = (
             self.need_dequantization
             or not self.reset_named_buffers(model_name_or_path=model_name_or_path)
@@ -569,7 +571,7 @@ class HFModel(BaseModel):
             )
 
         logger.warning(
-            "Loading weights with from_pretrained; this operation might be time-consuming."
+            "Loading weights via from_pretrained method - this may take considerable time."
         )
 
         hf_model = self.model_class.from_pretrained(
@@ -600,7 +602,7 @@ class HFModel(BaseModel):
 
         del hf_model
 
-        # Enable gradient checkpointing
+        # Configure gradient checkpointing if enabled
         if self._gradient_checkpointing_enabled:
             self.model.gradient_checkpointing_enable()
             assert (
@@ -618,14 +620,14 @@ class HFModel(BaseModel):
         if self.is_vlm:
             model_parts = [self.language_model, self.vision_model]
             if self.multi_modal_projector is not None:
-                logger.info("Add multi_modal_projector into model parts")
+                logger.info("Adding multi_modal_projector to model parts")
                 model_parts.append(self.multi_modal_projector)
-            # lm_head could be in the model, not in the language_model
+            # Handle cases where lm_head exists at model level rather than language_model level
             if (
                 getattr(self.language_model, "lm_head", None) is None
                 and getattr(self.model, "lm_head", None) is not None
             ):
-                logger.info("Add lm_head into model parts")
+                logger.info("Adding lm_head to model parts")
                 model_parts.append(self.model.lm_head)
             return model_parts
         else:
@@ -807,7 +809,7 @@ class HFModel(BaseModel):
 
     def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
         if "gpt_oss" in self.hf_config.model_type:
-            if "bias" not in name:  # bias is not transposed
+            if "bias" not in name:  # Bias parameters do not require transposition
                 if "gate_up_proj" in name or "down_proj" in name:
 
                     def transform(view):
