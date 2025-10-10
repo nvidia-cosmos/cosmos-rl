@@ -437,11 +437,26 @@ class HFModel(BaseModel):
 
         self_state_dict = self.model.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        all_tensor_names = self_state_dict.keys()
-        lm_head_weight_key = "lm_head.weight"
-        embed_tokens_weight_key = "model.embed_tokens.weight"
+        lm_head_weight_key = None
+        embed_tokens_weight_key = None
+        # Find the lm_head and embed_tokens weight keys in the state dict
+        for k in self_state_dict.keys():
+            if "embed_tokens" in k:
+                embed_tokens_weight_key = k
+                if lm_head_weight_key is not None:
+                    break
+            if "lm_head" in k:
+                lm_head_weight_key = k
+                if embed_tokens_weight_key is not None:
+                    break
+        assert (
+            lm_head_weight_key is not None and embed_tokens_weight_key is not None
+        ), "lm_head and embed_tokens weight keys not found in the state dict"
         weights_of_ckpt_names = set()
         reserved = {}
+        hf_checkpoint_conversion_mapping = getattr(
+            self.model, "_checkpoint_conversion_mapping", None
+        )
         for f in safetensors_files:
             weights_of_ckpt = {}
             ckpt = safe_open(
@@ -450,26 +465,25 @@ class HFModel(BaseModel):
             keys = ckpt.keys()
             for name in keys:
                 ckpt_tensor = ckpt.get_tensor(name)
-                weights_of_ckpt[name] = ckpt_tensor
-                weights_of_ckpt_names.add(name)
-                if name == embed_tokens_weight_key:
-                    reserved[name] = ckpt_tensor
-            hf_checkpoint_conversion_mapping = getattr(
-                self.model, "_checkpoint_conversion_mapping", None
-            )
-            for name in weights_of_ckpt.keys():
-                tensor = weights_of_ckpt[name]
-                dest_name, shared_weight = convert_weight_from_hf(
-                    tensor, name, model_type, parallel_dims
-                )
                 if hf_checkpoint_conversion_mapping is not None:
                     for (
                         pattern,
                         replacement,
                     ) in hf_checkpoint_conversion_mapping.items():
-                        if re.match(pattern, dest_name):
-                            dest_name = re.sub(pattern, replacement, dest_name)
+                        if re.match(pattern, name):
+                            name = re.sub(pattern, replacement, name)
                             break
+                weights_of_ckpt[name] = ckpt_tensor
+                weights_of_ckpt_names.add(name)
+                if name == embed_tokens_weight_key:
+                    reserved[name] = ckpt_tensor
+
+            for name in weights_of_ckpt.keys():
+                tensor = weights_of_ckpt[name]
+                dest_name, shared_weight = convert_weight_from_hf(
+                    tensor, name, model_type, parallel_dims
+                )
+
                 target_tensor = self_state_dict[dest_name]
                 is_dist_tensor = isinstance(
                     target_tensor, torch.distributed.tensor.DTensor
@@ -484,8 +498,8 @@ class HFModel(BaseModel):
                     local_view.data.copy_(shared_weight)
 
         if (
-            lm_head_weight_key not in all_tensor_names
-            and embed_tokens_weight_key in all_tensor_names
+            lm_head_weight_key not in weights_of_ckpt_names
+            and embed_tokens_weight_key in weights_of_ckpt_names
         ):
             # tied with embed_tokens.weight
             name = lm_head_weight_key
@@ -568,16 +582,9 @@ class HFModel(BaseModel):
         hf_state_dict = hf_model.state_dict()
 
         self_state_dict = self.model.state_dict()
-
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        all_tensor_names = self_state_dict.keys()
-        lm_head_weight_key = "lm_head.weight"
-        embed_tokens_weight_key = "model.embed_tokens.weight"
-        reserved = {}
 
         for name, tensor in hf_state_dict.items():
-            if name == embed_tokens_weight_key:
-                reserved[name] = tensor
             dest_name, shared_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims
             )
@@ -591,30 +598,6 @@ class HFModel(BaseModel):
             with torch.no_grad():
                 local_view.data.copy_(shared_weight.to(device))
 
-        if (
-            lm_head_weight_key not in all_tensor_names
-            and embed_tokens_weight_key in all_tensor_names
-        ):
-            # tied with embed_tokens.weight
-            name = lm_head_weight_key
-            assert embed_tokens_weight_key in reserved
-            tensor = reserved[embed_tokens_weight_key]
-            dest_name, shared_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims
-            )
-            if dest_name in self_state_dict:
-                target_tensor = self_state_dict[dest_name]
-                is_dist_tensor = isinstance(
-                    target_tensor, torch.distributed.tensor.DTensor
-                )
-                local_view = (
-                    target_tensor.to_local() if is_dist_tensor else target_tensor
-                )
-                assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
-                with torch.no_grad():
-                    local_view.data.copy_(shared_weight.to(device))
         del hf_model
 
         # Enable gradient checkpointing
