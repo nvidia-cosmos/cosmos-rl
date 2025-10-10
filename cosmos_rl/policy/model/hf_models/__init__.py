@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import re
 import torch
 import inspect
 from torch import nn
@@ -308,9 +309,7 @@ class HFModel(BaseModel):
             config = AutoConfig.from_pretrained(
                 model_name_or_path, trust_remote_code=True
             )
-            config.text_config.max_position_embeddings = (
-                self.hf_config.max_position_embeddings
-            )
+
             # We do not need to load the full model to get all named buffers, because buffer like inv_freq is initialized
             # in the constructor of the model in most cases, so we only load the first 2 layers to try to get all named buffers
             num_lm_layers_to_load = 2
@@ -319,20 +318,32 @@ class HFModel(BaseModel):
                     config.text_config, "num_hidden_layers"
                 ):
                     config.text_config.num_hidden_layers = num_lm_layers_to_load
+                    config.text_config.max_position_embeddings = (
+                        self.hf_config.max_position_embeddings
+                    )
                 elif hasattr(config, "llm_config") and hasattr(
                     config.llm_config, "num_hidden_layers"
                 ):
                     config.llm_config.num_hidden_layers = num_lm_layers_to_load
+                    config.llm_config.max_position_embeddings = (
+                        self.hf_config.max_position_embeddings
+                    )
                 else:
                     raise ValueError(f"Can not get text config from {config}")
             else:
                 if hasattr(config, "num_hidden_layers"):
                     config.num_hidden_layers = num_lm_layers_to_load
+                    config.max_position_embeddings = (
+                        self.hf_config.max_position_embeddings
+                    )
                 else:
                     raise ValueError(f"Can not get num of llm layers from {config}")
             # Try to load the model to get all named buffers
             try:
-                hf_model = AutoModel.from_config(config)
+                if isinstance(self.model_class, AutoModel):
+                    hf_model = AutoModel.from_config(config)
+                else:
+                    hf_model = self.model_class._from_config(config)
                 hf_named_buffers = [name for name, _ in hf_model.named_buffers()]
                 self_named_buffers = [name for name, _ in self.model.named_buffers()]
                 num_equal = len(hf_named_buffers) == len(self_named_buffers)
@@ -343,30 +354,53 @@ class HFModel(BaseModel):
                     if (self.n_lm_layers - num_lm_layers_to_load) == (
                         len(self_named_buffers) - len(hf_named_buffers)
                     ) and is_buffer_registered_in_layers:
-                        buffer_in_layers = [
+                        hf_buffer_in_layers = [
                             buffer
                             for name, buffer in hf_model.named_buffers()
                             if "layers." in name
                         ]
-                        first_buffer = buffer_in_layers[0]
+                        first_buffer = hf_buffer_in_layers[0]
                         all_same = True
-                        for buffer in buffer_in_layers[1:]:
-                            if not buffer.equal(first_buffer):
+                        # Check if all named buffers in layers are the same
+                        for buffer in hf_buffer_in_layers[1:]:
+                            if not torch.equal(
+                                buffer,
+                                first_buffer.to(
+                                    device=buffer.device, dtype=buffer.dtype
+                                ),
+                            ):
                                 all_same = False
                                 break
 
                         if all_same:
                             cosmos_buffer_in_layers = [
                                 buffer
-                                for _, buffer in self.model.named_buffers()
+                                for name, buffer in self.model.named_buffers()
                                 if "layers." in name
                             ]
-                            hf_buf = first_buffer.to(
+                            hf_first_layer_buffer = first_buffer.to(
                                 device=cosmos_buffer_in_layers[0].device,
                                 dtype=cosmos_buffer_in_layers[0].dtype,
                             )
                             for buffer in cosmos_buffer_in_layers:
-                                buffer.data.copy_(hf_buf.data)
+                                buffer.data.copy_(hf_first_layer_buffer.data)
+
+                            hf_named_buffers_not_in_layers = {
+                                k: v
+                                for k, v in hf_model.named_buffers()
+                                if "layers." not in k
+                            }
+                            for name, cosmos_hf_buffer in self.model.named_buffers():
+                                if "layers." in name:
+                                    continue
+                                assert (
+                                    name in hf_named_buffers_not_in_layers
+                                ), f"Buffer {name} not found in hf model"
+                                hf_buf = hf_named_buffers_not_in_layers[name].to(
+                                    device=cosmos_hf_buffer.device,
+                                    dtype=cosmos_hf_buffer.dtype,
+                                )
+                                cosmos_hf_buffer.data.copy_(hf_buf.data)
 
                             return True
                         else:
@@ -375,13 +409,13 @@ class HFModel(BaseModel):
                             )
                     else:
                         logger.warning(
-                            f"Failed to reset named buffers from {model_name_or_path}: buffer names mismatch {self_named_buffers} != {hf_named_buffers}"
+                            f"Failed to reset named buffers from {model_name_or_path}: num of buffers mismatch {len(self_named_buffers)} != {len(hf_named_buffers)}"
                         )
                         return False
 
                 reset_success = self.reset_named_buffers(hf_model=hf_model)
             except Exception as e:
-                logger.warning(
+                logger.error(
                     f"Failed to reset named buffers from {model_name_or_path}: {e}"
                 )
                 reset_success = False
@@ -401,7 +435,7 @@ class HFModel(BaseModel):
             f for f in os.listdir(model_path) if f.endswith(".safetensors")
         ]
 
-        self_state_dict = self.state_dict()
+        self_state_dict = self.model.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         all_tensor_names = self_state_dict.keys()
         lm_head_weight_key = "lm_head.weight"
@@ -420,13 +454,22 @@ class HFModel(BaseModel):
                 weights_of_ckpt_names.add(name)
                 if name == embed_tokens_weight_key:
                     reserved[name] = ckpt_tensor
-
+            hf_checkpoint_conversion_mapping = getattr(
+                self.model, "_checkpoint_conversion_mapping", None
+            )
             for name in weights_of_ckpt.keys():
                 tensor = weights_of_ckpt[name]
                 dest_name, shared_weight = convert_weight_from_hf(
                     tensor, name, model_type, parallel_dims
                 )
-
+                if hf_checkpoint_conversion_mapping is not None:
+                    for (
+                        pattern,
+                        replacement,
+                    ) in hf_checkpoint_conversion_mapping.items():
+                        if re.match(pattern, dest_name):
+                            dest_name = re.sub(pattern, replacement, dest_name)
+                            break
                 target_tensor = self_state_dict[dest_name]
                 is_dist_tensor = isinstance(
                     target_tensor, torch.distributed.tensor.DTensor
@@ -748,10 +791,16 @@ class HFModel(BaseModel):
 
         """
 
-        if max_position_embeddings is None:
-            max_position_embeddings = hf_config.max_position_embeddings
-        else:
+        if max_position_embeddings is not None:
             hf_config.max_position_embeddings = max_position_embeddings
+            if hasattr(hf_config, "text_config") and hasattr(
+                hf_config.text_config, "max_position_embeddings"
+            ):
+                hf_config.text_config.max_position_embeddings = max_position_embeddings
+            elif hasattr(hf_config, "llm_config") and hasattr(
+                hf_config.llm_config, "max_position_embeddings"
+            ):
+                hf_config.llm_config.max_position_embeddings = max_position_embeddings
 
         return cls.from_model_args(hf_config)
 
