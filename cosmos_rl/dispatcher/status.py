@@ -36,6 +36,7 @@ import numpy as np
 from tqdm import tqdm
 import itertools
 
+
 class ReplicaScalingEnum(StrEnum):
     """
     Enum for replica scaling event.
@@ -661,8 +662,10 @@ class PolicyStatusManager:
                         ].content += self.tokenizer.eos_token
         self.rollout_buffer.put(rollout)
         self.try_trigger_data_fetch_and_training()
-    
-    def put_rollouts(self, valid_rollouts: List[Rollout], invalid_rollouts: List[Rollout]):
+
+    def put_rollouts(
+        self, valid_rollouts: List[Rollout], invalid_rollouts: List[Rollout]
+    ):
         """
         Put the rollouts to the rollout buffer.
         """
@@ -676,7 +679,6 @@ class PolicyStatusManager:
             self.remain_samples_num -= len(invalid_rollouts)
         else:
             rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
-        
 
         if self.config.train.train_policy.on_policy:
             # record the samples that will be consumed by policy
@@ -689,7 +691,7 @@ class PolicyStatusManager:
                 if self.rollouts_enough_for_one_step():
                     break
             self.put_rollout(rollout)
-        
+
         return completion_tokens_count, n_samples
 
     def train_ack(
@@ -856,7 +858,10 @@ class PolicyStatusManager:
         """
         Check if the rollouts are enough.
         """
-        return self.total_pending_rollouts() >= (self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas()))
+        return self.total_pending_rollouts() >= (
+            self.config.train.train_batch_per_replica
+            * len(self.get_all_atoms_arrived_replicas())
+        )
 
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
         # If the validation dataloader is activated, do not trigger data fetch and training
@@ -881,7 +886,9 @@ class PolicyStatusManager:
         else:
             items_count = self.config.train.train_batch_per_replica
             required_rollouts = items_count * len(arrived_replicas)
-            all_ready_or_reduced = self.all_ready_or_reduced() and self.rollouts_enough_for_one_step()
+            all_ready_or_reduced = (
+                self.all_ready_or_reduced() and self.rollouts_enough_for_one_step()
+            )
 
         # If the last command is fake, we need to trigger data fetch and training no matter
         # whether there are enough rollouts or whether replicas are `ready` or `reduced`.
@@ -907,7 +914,7 @@ class PolicyStatusManager:
                     rollout = self.rollout_buffer.get()
                     replica.put_rollout(rollout, self.redis_handler)
                     rollouts_of_this_step.append(rollout)
-            
+
             # Decide whether to save checkpoint
             # First check if we need to save checkpoint based on epoch
             do_save = False
