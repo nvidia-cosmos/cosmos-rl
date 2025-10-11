@@ -317,26 +317,40 @@ class HFVLMDataPacker(DataPacker):
         }
         if "pixel_values_videos" in inputs:
             result_dict["pixel_values_videos"] = inputs["pixel_values_videos"]
+
             if "video_grid_thw" in inputs:
                 result_dict["video_grid_thw"] = inputs["video_grid_thw"]
             else:
                 result_dict["video_grid_thw"] = None
-            result_dict["second_per_grid_ts"] = torch.tensor(
-                inputs["second_per_grid_ts"], dtype=torch.float
-            )
-            result_dict["pixel_values_videos_lengths_per_sample"] = inputs[
-                "pixel_values_videos"
-            ].shape[0]
+
+            if "second_per_grid_ts" in inputs:
+                result_dict["second_per_grid_ts"] = torch.tensor(
+                    inputs["second_per_grid_ts"], dtype=torch.float
+                )
+            else:
+                result_dict["second_per_grid_ts"] = None
+
+            if "pixel_values_videos_lengths_per_sample" in inputs:
+                result_dict["pixel_values_videos_lengths_per_sample"] = inputs[
+                    "pixel_values_videos"
+                ].shape[0]
+            else:
+                result_dict["pixel_values_videos_lengths_per_sample"] = None
 
         if "pixel_values" in inputs:
             result_dict["pixel_values"] = inputs["pixel_values"]
+
             if "image_grid_thw" in inputs:
                 result_dict["image_grid_thw"] = inputs["image_grid_thw"]
             else:
                 result_dict["image_grid_thw"] = None
-            result_dict["pixel_values_lengths_per_sample"] = inputs[
-                "pixel_values"
-            ].shape[0]
+
+            if "pixel_values_lengths_per_sample" in inputs:
+                result_dict["pixel_values_lengths_per_sample"] = inputs[
+                    "pixel_values"
+                ].shape[0]
+            else:
+                result_dict["pixel_values_lengths_per_sample"] = None
 
         if "aspect_ratio_ids" in inputs:
             result_dict["aspect_ratio_ids"] = inputs["aspect_ratio_ids"]
@@ -394,27 +408,59 @@ class HFVLMDataPacker(DataPacker):
                     (0, 0, 0, max_len - pixel_values_videos[i].shape[1]),
                 )
             pixel_values_videos = torch.cat(pixel_values_videos, dim=0)
-            video_grid_thw = torch.cat(video_grid_thw, dim=0)
-            second_per_grid_ts = torch.cat(second_per_grid_ts, dim=0)
         else:
             assert all(
                 [x is None for x in pixel_values_videos]
             ), "pixel_values_videos should be None"
             pixel_values_videos = None
+
+        if all([x is not None for x in video_grid_thw]):
+            video_grid_thw = torch.cat(video_grid_thw, dim=0)
+        else:
+            assert all(
+                [x is None for x in video_grid_thw]
+            ), "video_grid_thw should be None"
             video_grid_thw = None
+
+        if all([x is not None for x in second_per_grid_ts]):
+            assert all(
+                [x is not None for x in second_per_grid_ts]
+            ), "second_per_grid_ts should not be None"
+            second_per_grid_ts = torch.cat(second_per_grid_ts, dim=0)
+        else:
+            assert all(
+                [x is None for x in second_per_grid_ts]
+            ), "second_per_grid_ts should be None"
             second_per_grid_ts = None
+
+        if all([x is not None for x in pixel_values_videos_lengths_per_sample]):
+            pass
+        else:
+            assert all(
+                [x is None for x in pixel_values_videos_lengths_per_sample]
+            ), "pixel_values_videos_lengths_per_sample should be None"
             pixel_values_videos_lengths_per_sample = None
 
         if all([x is not None for x in pixel_values]):
             pixel_values = torch.cat(pixel_values, dim=0)
-            if all([x is not None for x in image_grid_thw]):
-                image_grid_thw = torch.cat(image_grid_thw, dim=0)
-            else:
-                image_grid_thw = None
         else:
             assert all([x is None for x in pixel_values]), "pixel_values should be None"
             pixel_values = None
+
+        if all([x is not None for x in image_grid_thw]):
+            image_grid_thw = torch.cat(image_grid_thw, dim=0)
+        else:
+            assert all(
+                [x is None for x in image_grid_thw]
+            ), "image_grid_thw should be None"
             image_grid_thw = None
+
+        if all([x is not None for x in pixel_values_lengths_per_sample]):
+            pass
+        else:
+            assert all(
+                [x is None for x in pixel_values_lengths_per_sample]
+            ), "pixel_values_lengths_per_sample should be None"
             pixel_values_lengths_per_sample = None
 
         if all([x is not None for x in aspect_ratio_ids]):
@@ -456,15 +502,25 @@ class HFVLMDataPacker(DataPacker):
         batch = {}
         if pixel_values_videos is not None:
             batch["pixel_values_videos"] = pixel_values_videos
+
+        if video_grid_thw is not None:
             batch["video_grid_thw"] = video_grid_thw
+
+        if second_per_grid_ts is not None:
             batch["second_per_grid_ts"] = second_per_grid_ts
+
+        if pixel_values_videos_lengths_per_sample is not None:
             batch["pixel_values_videos_lengths_per_sample"] = torch.tensor(
                 pixel_values_videos_lengths_per_sample, dtype=torch.long
             ).view(-1, 1)
 
         if pixel_values is not None:
             batch["pixel_values"] = pixel_values
+
+        if image_grid_thw is not None:
             batch["image_grid_thw"] = image_grid_thw
+
+        if pixel_values_lengths_per_sample is not None:
             batch["pixel_values_lengths_per_sample"] = torch.tensor(
                 pixel_values_lengths_per_sample, dtype=torch.long
             ).view(-1, 1)
@@ -536,26 +592,41 @@ class HFVLMDataPacker(DataPacker):
         return_dict = {}
         if "pixel_values_videos" in x:
             return_dict["pixel_values_videos"] = x["pixel_values_videos"]
+        else:
+            return_dict["pixel_values_videos"] = None
+
+        if "video_grid_thw" in x:
             return_dict["video_grid_thw"] = x["video_grid_thw"]
+        else:
+            return_dict["video_grid_thw"] = None
+
+        if "second_per_grid_ts" in x:
             return_dict["second_per_grid_ts"] = x["second_per_grid_ts"]
+        else:
+            return_dict["second_per_grid_ts"] = None
+
+        if "pixel_values_videos_lengths_per_sample" in x:
             return_dict["pixel_values_videos_lengths_per_sample"] = x[
                 "pixel_values_videos_lengths_per_sample"
             ]
         else:
-            return_dict["pixel_values_videos"] = None
-            return_dict["video_grid_thw"] = None
-            return_dict["second_per_grid_ts"] = None
             return_dict["pixel_values_videos_lengths_per_sample"] = None
 
         if "pixel_values" in x:
             return_dict["pixel_values"] = x["pixel_values"]
+        else:
+            return_dict["pixel_values"] = None
+
+        if "image_grid_thw" in x:
             return_dict["image_grid_thw"] = x["image_grid_thw"]
+        else:
+            return_dict["image_grid_thw"] = None
+
+        if "pixel_values_lengths_per_sample" in x:
             return_dict["pixel_values_lengths_per_sample"] = x[
                 "pixel_values_lengths_per_sample"
             ]
         else:
-            return_dict["pixel_values"] = None
-            return_dict["image_grid_thw"] = None
             return_dict["pixel_values_lengths_per_sample"] = None
 
         if "aspect_ratio_ids" in x:
@@ -583,7 +654,6 @@ class HFVLMDataPacker(DataPacker):
         completion_ids = []
         if rollout_output:
             completion_ids = self.tokenizer(rollout_output).input_ids  # Don't pad yet
-
         return_dict["input_ids"] = input_ids + completion_ids
 
         return_dict["logprob_masks"] = (
