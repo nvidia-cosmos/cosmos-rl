@@ -13,20 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import argparse
 import toml
 
 from torch.utils.data import Dataset
 from datasets import concatenate_datasets
 import cosmos_rl.utils.util as util
-import cosmos_rl.utils.cache as cache
 from transformers import AutoTokenizer
 from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
-from cosmos_rl.policy.config import (
-    Config,
-    config_hash,
-)
+from cosmos_rl.policy.config import Config
 
 
 # This dataset is used for SFT with raw text input, which is used for models like Mistral
@@ -44,46 +39,19 @@ class SFTRawTextDataset(Dataset):
     ):
         self.config = config.train.train_policy
         self.tokenizer = tokenizer
-        self.column_name = self.config.conversation_column_name
-        self.cache = None
-        if self.config.enable_dataset_cache:
-            cache_folder = os.path.join(
-                os.environ.get(
-                    "COSMOS_CACHE",
-                    os.path.join(os.path.expanduser("~"), ".cache/cosmos/"),
-                ),
-                "datasets_cache",
-                f"{self.config.dataset.name}-{config_hash(config)}",
-            )
-            print(f"SFTRawTextDataset Cache folder: {cache_folder}")
-            self.cache = cache.DiskCache(cache_folder)
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        # Check cache first if enabled
-        if self.cache is not None:
-            cached_item = self.cache.get(idx)
-            if cached_item is not None:
-                return cached_item
-
         # Retrieve raw item from dataset
-        raw_item = (
-            self.dataset[idx][self.column_name]
-            if self.column_name
-            else self.dataset[idx]
-        )
+        raw_item = self.dataset[idx]["conversation"]
 
         # Convert conversation list to string format
         if isinstance(raw_item, list):
             raw_item = "\n".join(
                 [f"{turn['role']}: {turn['content']}" for turn in raw_item]
             )
-
-        # Cache the processed item if caching is enabled
-        if self.cache is not None:
-            self.cache.set(idx, raw_item)
 
         return raw_item
 
