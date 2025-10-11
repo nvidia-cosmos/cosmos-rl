@@ -638,16 +638,6 @@ class Controller:
         valid_rollouts: List[Rollout]: The rollouts that have valid rewards
         invalid_rollouts: List[Rollout]: The rollouts that have invalid rewards (all rewards are the same)
         """
-        # rollouts_to_put = None
-        # if self.config.train.train_policy.variant == "dapo":
-        #     rollouts_to_put = valid_rollouts
-        # else:
-        #     rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
-
-
-        # for rollout in rollouts_to_put:
-        #     self.policy_status_manager.put_rollout(rollout)
-
         completion_tokens_count, n_samples = self.policy_status_manager.put_rollouts(valid_rollouts, invalid_rollouts)
 
         self.stat_completion_tokens_count += completion_tokens_count

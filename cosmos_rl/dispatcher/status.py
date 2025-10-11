@@ -672,7 +672,7 @@ class PolicyStatusManager:
 
         if self.config.train.train_policy.variant == "dapo":
             rollouts_to_put = valid_rollouts
-            # invalid rollouts should also be decreased from the total number of samples
+            # In single-thread: invalid rollouts should also be decreased from the total number of samples
             self.remain_samples_num -= len(invalid_rollouts)
         else:
             rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
