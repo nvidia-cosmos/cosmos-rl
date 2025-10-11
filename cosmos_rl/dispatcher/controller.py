@@ -568,11 +568,12 @@ class Controller:
                 * len(self.policy_status_manager)
                 // self.config.rollout.n_generation
             ) # global_batch_size: number of prompts needed for single policy step.
+            num_of_valid_prompts_consumed = self.policy_status_manager.consumed_samples_num // self.config.rollout.n_generation
+            weight_version_for_current_batch = num_of_valid_prompts_consumed // global_batch_size
             for i in range(current_fetch_count):
                 # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
                 # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
-                num_of_valid_prompts_consumed = self.policy_status_manager.consumed_samples_num // self.config.rollout.n_generation
-                prompt_id_and_payload_list[i][1].weight_version = (num_of_valid_prompts_consumed + i) // global_batch_size
+                prompt_id_and_payload_list[i][1].weight_version = weight_version_for_current_batch
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
             for i in range(current_fetch_count):
