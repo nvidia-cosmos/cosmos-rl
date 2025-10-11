@@ -34,7 +34,7 @@ from cosmos_rl.utils.wandb_logger import (
 from transformers import AutoTokenizer
 import numpy as np
 from tqdm import tqdm
-
+import itertools
 
 class ReplicaScalingEnum(StrEnum):
     """
@@ -103,12 +103,21 @@ class PolicyStatusManager:
 
     def __init__(self):
         self.policy_replicas = {}
+        # number of steps that needed to interate over all the samples across all the epochs.
         self.total_steps = 0
+        # current step of the policy training, this step could won't reach to total_steps because of dynmaic sampling.
+        # Some samples could be filtered out due to dynamic sampling and they won't be used for policy training.
+        # This step is the actual weight update step, it is also binded to the weight version.
         self.current_step = 0
+
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
+        self.consumed_samples_num = 0
+
         self.status = {}
+
         self.train_report_data = RollingDict(maxlen=20)
+
         self.replica_scaling_log = []
 
         # Validation
@@ -652,6 +661,33 @@ class PolicyStatusManager:
                         ].content += self.tokenizer.eos_token
         self.rollout_buffer.put(rollout)
         self.try_trigger_data_fetch_and_training()
+    
+    def put_rollouts(self, valid_rollouts: List[Rollout], invalid_rollouts: List[Rollout]):
+        """
+        Put the rollouts to the rollout buffer.
+        """
+        completion_tokens_count = 0
+        n_samples = 0
+        rollouts_to_put = None
+
+        if self.config.train.train_policy.variant == "dapo":
+            rollouts_to_put = valid_rollouts
+            # invalid rollouts should also be decreased from the total number of samples
+            self.remain_samples_num -= len(invalid_rollouts)
+        else:
+            rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
+        
+
+        if self.config.train.train_policy.on_policy:
+            # record the samples that will be consumed by policy
+            self.consumed_samples_num += len(rollouts_to_put)
+
+        for rollout in rollouts_to_put:
+            completion_tokens_count += len(self.tokenizer.encode(rollout.completion))
+            n_samples += 1
+            self.put_rollout(rollout)
+        
+        return completion_tokens_count, n_samples
 
     def train_ack(
         self,
@@ -844,6 +880,7 @@ class PolicyStatusManager:
         # whether there are enough rollouts or whether replicas are `ready` or `reduced`.
         if all_ready_or_reduced:
             rollouts_of_this_step: List[Rollout] = []
+            # Decrease the consumed rollouts number.
             self.remain_samples_num -= required_rollouts
 
             # From controller's perspective, the training step is already increased
@@ -861,6 +898,7 @@ class PolicyStatusManager:
                     rollout = self.rollout_buffer.get()
                     replica.put_rollout(rollout, self.redis_handler)
                     rollouts_of_this_step.append(rollout)
+            
             # Decide whether to save checkpoint
             # First check if we need to save checkpoint based on epoch
             do_save = False

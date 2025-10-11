@@ -371,6 +371,11 @@ class GrpoConfig(BaseModel):
         "If the number of tokens is larger than the `min_filter_prefix_tokens`, the rollouts with the same prefix but different rewards will be filtered out in loss calculation.",
     )
 
+    max_retry_for_on_policy: int = Field(
+        default=10,
+        description="Maximum number of retries for on-policy rollout to have enough samples. If non-positive, will retry with no upper limit until enough samples are generated.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [

@@ -1310,6 +1310,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 is_valid_prompt_for_current_weight_version = (
                     first_payload.weight_version <= self.current_weight_version
                 )
+
                 if not is_valid_prompt_for_current_weight_version:
                     # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
                     continue
