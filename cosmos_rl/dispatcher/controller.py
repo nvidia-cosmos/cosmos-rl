@@ -140,6 +140,7 @@ class Controller:
         self.user_val_data_packer = val_data_packer
         self.dataset = None
         self.ckpt_extra_info = {}
+        self.weight_version_to_batch_num = {}  # Only for on-policy.
         remain_samples_num = 0
 
         if self.is_rl:
@@ -574,6 +575,23 @@ class Controller:
             weight_version_for_current_batch = (
                 num_of_valid_prompts_consumed // global_batch_size
             )
+            # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
+            if self.config.train.train_policy.max_retry_for_on_policy > 0:
+                if (
+                    weight_version_for_current_batch in self.weight_version_to_batch_num
+                    and self.weight_version_to_batch_num[
+                        weight_version_for_current_batch
+                    ]
+                    > self.config.train.train_policy.max_retry_for_on_policy
+                ):
+                    logger.error(
+                        f"[Controller] After {self.config.train.train_policy.max_retry_for_on_policy} retries, samples for weight version {weight_version_for_current_batch} are still not enough. May be the dataset is too difficult for current model? Or you could also set the `max_retry_for_on_policy` to 0 to always retry."
+                    )
+            if weight_version_for_current_batch not in self.weight_version_to_batch_num:
+                self.weight_version_to_batch_num[weight_version_for_current_batch] = 1
+            else:
+                self.weight_version_to_batch_num[weight_version_for_current_batch] += 1
+
             for i in range(current_fetch_count):
                 # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
                 # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
