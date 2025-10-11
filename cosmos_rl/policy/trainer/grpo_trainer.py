@@ -1738,7 +1738,7 @@ class GRPOTrainer(Trainer):
                 report_data["train/grad_norm"] = grad_norm_sum.item()
 
                 logger.info(
-                    f"current_step: {current_step}, global_avg_loss: {global_avg_loss}, global_max_loss: {global_max_loss}, global_avg_kl_loss: {global_avg_kl_loss}, global_max_kl_loss: {global_max_kl_loss}, grad_norm_sum: {grad_norm_sum}"
+                    f"current_step: {current_step}, global_avg_loss: {global_avg_loss}, global_max_loss: {global_max_loss}, grad_norm_sum: {grad_norm_sum}"
                 )
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
