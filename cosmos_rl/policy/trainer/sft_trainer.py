@@ -13,45 +13,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.policy.trainer import Trainer
-from cosmos_rl.utils.parallelism import (
-    ParallelDims,
-)
-from cosmos_rl.policy.config import (
-    Config as CosmosConfig,
-    SFTDataConfig,
-    config_hash,
-)
-from cosmos_rl.policy.trainer.optm import build_lr_schedulers
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.wandb_logger import (
-    init_wandb,
-    is_wandb_available,
-    log_wandb,
-)
-import torch
-import numpy as np
-from torch.utils.data import Dataset, DataLoader, DistributedSampler, Sampler
-from cosmos_rl.policy.trainer.sampler import SkippingSampler
-import cosmos_rl.utils.util as util
-import cosmos_rl.utils.distributed as dist_util
-import cosmos_rl.utils.cache as cache
-from transformers import AutoTokenizer
-from datasets import concatenate_datasets
-from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
-from typing import Optional, Dict, Any, Callable, Union
-from tqdm import tqdm
-from cosmos_rl.utils.ulysses import (
-    slice_inputs_for_ulysses,
-)
 from functools import partial
-from cosmos_rl.utils.sequence_packing import (
-    pack_sequences_info_collect,
-    pack_sequences_for_masks,
-    pack_sequences_for_labels,
-)
 from itertools import islice
+from typing import Any, Callable, Dict, Optional, Union
+
+import cosmos_rl.utils.cache as cache
+import cosmos_rl.utils.distributed as dist_util
+import cosmos_rl.utils.util as util
+import numpy as np
+import torch
+from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.config import SFTDataConfig, config_hash
+from cosmos_rl.policy.trainer import Trainer
+from cosmos_rl.policy.trainer.optm import build_lr_schedulers
+from cosmos_rl.policy.trainer.sampler import SkippingSampler
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.sequence_packing import (
+    pack_sequences_for_labels,
+    pack_sequences_for_masks,
+    pack_sequences_info_collect,
+)
+from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
+from cosmos_rl.utils.wandb_logger import init_wandb, is_wandb_available, log_wandb
+from datasets import concatenate_datasets
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, Sampler
+from transformers import AutoTokenizer
 
 
 def async_safe_ce(
@@ -903,9 +892,11 @@ class SFTTrainer(Trainer):
                     all_params,
                     self.config.train.optm_grad_norm_clip,
                     foreach=True,
-                    pp_mesh=self.parallel_dims.mesh["pp"]
-                    if self.parallel_dims.pp_enabled
-                    else None,
+                    pp_mesh=(
+                        self.parallel_dims.mesh["pp"]
+                        if self.parallel_dims.pp_enabled
+                        else None
+                    ),
                     return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
                 )
 
@@ -948,9 +939,9 @@ class SFTTrainer(Trainer):
                             "train/loss_avg": global_avg_loss,
                             "train/loss_max": global_max_loss,
                             "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                            "train/grad_norm": grad_norm
-                            if grad_norm is not None
-                            else -1,
+                            "train/grad_norm": (
+                                grad_norm if grad_norm is not None else -1
+                            ),
                         }
 
                         # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
@@ -1075,7 +1066,8 @@ class SFTTrainer(Trainer):
     @property
     def pp_loss_fn(self):
         # calculate the loss scaling factor
-        mini_batch_size = max(self.config.train.train_policy.mini_batch or 1, 1)
+        # mini_batch_size = max(self.config.train.train_policy.mini_batch or 1, 1)
+        mini_batch_size = self.config.policy.parallelism.pp_micro_batch_size
         mini_batch_size = min(
             mini_batch_size, self.config.train.train_batch_per_replica
         )

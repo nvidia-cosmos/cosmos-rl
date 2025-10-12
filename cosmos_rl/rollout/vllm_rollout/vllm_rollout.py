@@ -12,34 +12,31 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
-
-import vllm
-import torch
 import copy
-from typing import List, Optional, Dict
-from transformers import AutoTokenizer, AutoConfig
-from transformers import GenerationConfig
-from vllm.entrypoints.llm import LLM
-from vllm import SamplingParams
-from cosmos_rl.rollout.rollout_base import RolloutBase
-from cosmos_rl.policy.config import Config
-from cosmos_rl.utils.logging import logger
+import os
+from typing import Dict, List, Optional
+
 import cosmos_rl.utils.util as util
-from cosmos_rl.policy.config import RolloutConfig
+import torch
+from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.dispatcher.data.packer import DataPacker
-from cosmos_rl.policy.model import WeightMapper
-from cosmos_rl.utils.tools_use import ToolParser
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
-    add_tool_response_messages,
     add_assistant_message,
+    add_tool_response_messages,
 )
-from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
-from cosmos_rl.dispatcher.data import RLPayload
+from cosmos_rl.policy.config import Config, RolloutConfig
+from cosmos_rl.policy.model import WeightMapper
+from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.rollout.schema import RolloutResult
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema, ToolParser
+from transformers import AutoConfig, AutoTokenizer, GenerationConfig
+from vllm.entrypoints.llm import LLM
+
+import vllm
+from vllm import SamplingParams
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -92,7 +89,9 @@ class vLLMRollout(RolloutBase):
 
         model_path = policy_config.model_name_or_path
 
-        self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
+        self.model_config = util.retry(AutoConfig.from_pretrained)(
+            model_path, trust_remote_code=True
+        )
 
         hf_config_path = self.config.policy.model_name_or_path
         try:
@@ -173,9 +172,11 @@ class vLLMRollout(RolloutBase):
                 max_model_len=policy_config.model_max_length,
                 disable_log_stats=True,
                 # default to 2048, this is related with chunked prefill. https://docs.vllm.ai/en/latest/performance/optimization.html
-                max_num_batched_tokens=2048
-                if 2048 >= policy_config.model_max_length
-                else policy_config.model_max_length,
+                max_num_batched_tokens=(
+                    2048
+                    if 2048 >= policy_config.model_max_length
+                    else policy_config.model_max_length
+                ),
                 enable_chunked_prefill=self.rollout_config.enable_chunked_prefill,
                 # Always disable prefix caching, since RL will change the underlying model.
                 # The prefix cache will be invalid after training.
@@ -361,7 +362,9 @@ class vLLMRollout(RolloutBase):
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
-        return self.rollout_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        return (
+            self.rollout_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        )
 
     def get_engine(self):
         if not self._engine_initialized:

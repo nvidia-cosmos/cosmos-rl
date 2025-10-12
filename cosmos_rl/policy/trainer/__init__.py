@@ -15,31 +15,30 @@
 
 import json
 import os
-import torch
-import threading
 import random
+import threading
+from typing import Dict, Optional
+
+import cosmos_rl.utils.util as util
 import numpy as np
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.checkpoint import (
-    upload_folder_to_s3,
-    CheckpointMananger,
-)
-from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationConfig
-from cosmos_rl.policy.trainer.optm import build_optimizers
-from cosmos_rl.policy.model import ModelRegistry
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.dispatcher.protocol import Role
+import torch
 from cosmos_rl.comm.base import CommMixin
-from safetensors.torch import save_file
+from cosmos_rl.dispatcher.protocol import Role
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.kernel.modeling_utils import set_flash_attn_deterministic
+from cosmos_rl.policy.model import ModelRegistry
+from cosmos_rl.policy.trainer.optm import build_optimizers
+from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
+from cosmos_rl.utils.api_suffix import COSMOS_API_SET_TRACE_PATH_SUFFIX
+from cosmos_rl.utils.checkpoint import CheckpointMananger, upload_folder_to_s3
+from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.profiler import CosmosProfiler
 from huggingface_hub import create_repo, upload_folder, whoami
 from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
-from typing import Dict, Optional
-import cosmos_rl.utils.util as util
-from cosmos_rl.utils.profiler import CosmosProfiler
-from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
-from cosmos_rl.policy.kernel.modeling_utils import set_flash_attn_deterministic
-from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
+from safetensors.torch import save_file
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, GenerationConfig
 
 
 class Trainer(CommMixin):
@@ -118,7 +117,7 @@ class Trainer(CommMixin):
             parallelize_fn, _ = model.parallelize_fn
             # `pp_scheduler` is used for both `sft` and `RLHF`
             # `pp_scheduler_val` is used only for `sft`, since `RLHF` does not require policy model via validation
-            self.pp_scheduler, self.pp_scheduler_val = parallelize_fn(
+            self.pp_scheduler, self.pp_scheduler_val, model = parallelize_fn(
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )
             if not config.train.fsdp_offload:

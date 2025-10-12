@@ -19,8 +19,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-from transformers import AutoConfig
-
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils import util
 from cosmos_rl.utils.logging import logger
@@ -30,6 +28,7 @@ from cosmos_rl.utils.parallelism_registry import (
     get_rollout_parallelism_strategy,
     register_parallelism_strategy,
 )
+from transformers import AutoConfig
 
 # Pre-compile regex patterns for better performance
 _LAYER_ATTN_NORM_PATTERN = re.compile(
@@ -209,7 +208,8 @@ def convert_weight_from_hf(
             tensor_shard_size = 576 // dp_shard_size + 1
             if dp_shard_rank < (576 // tensor_shard_size):
                 shard = shard[
-                    dp_shard_rank * tensor_shard_size : (dp_shard_rank + 1)
+                    dp_shard_rank
+                    * tensor_shard_size : (dp_shard_rank + 1)
                     * tensor_shard_size
                 ]
             else:

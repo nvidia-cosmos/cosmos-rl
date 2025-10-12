@@ -14,31 +14,32 @@
 # limitations under the License.
 
 import os
+from typing import Callable, Optional
+
 import torch
 import torch.nn as nn
-from typing import Callable, Optional
-from torch.distributed.device_mesh import DeviceMesh
+from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.distributed import ReplicateParallel
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.ulysses import (
+    swizzle_cp_forward,
+    ulysses_attn_func,
+    ulysses_attn_func_varlen,
+)
+from cosmos_rl.utils.util import str2torch_dtype
 from torch.distributed._composable.replicate import replicate
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
-    parallelize_module,
     PrepareModuleInput,
     PrepareModuleOutput,
     RowwiseParallel,
     SequenceParallel,
-)
-from cosmos_rl.utils.distributed import ReplicateParallel
-from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import str2torch_dtype
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
-from cosmos_rl.utils.ulysses import (
-    ulysses_attn_func,
-    swizzle_cp_forward,
-    ulysses_attn_func_varlen,
+    parallelize_module,
 )
 
 
@@ -186,13 +187,11 @@ def parallelize(
             == 0
         ), "train_batch must be divisible by pp_micro_batch_size"
         assert (
-            (
-                config.train.train_batch_per_replica
-                // config.policy.parallelism.pp_micro_batch_size
-            )
-            % pp_size
-            == 0
-        ), "train_batch / pp_micro_batch_size must be divisible by pp_size"
+            config.train.train_batch_per_replica
+            // config.policy.parallelism.pp_micro_batch_size
+        ) % pp_size == 0, (
+            "train_batch / pp_micro_batch_size must be divisible by pp_size"
+        )
         assert pp_loss_fn is not None, "pp_loss_fn must be provided"
         n_microbatches = (
             config.train.train_batch_per_replica
@@ -205,13 +204,11 @@ def parallelize(
                 == 0
             ), "validation_batch must be divisible by pp_micro_batch_size"
             assert (
-                (
-                    config.validation.batch_size
-                    // config.policy.parallelism.pp_micro_batch_size
-                )
-                % pp_size
-                == 0
-            ), "validation_batch / pp_micro_batch_size must be divisible by pp_size"
+                config.validation.batch_size
+                // config.policy.parallelism.pp_micro_batch_size
+            ) % pp_size == 0, (
+                "validation_batch / pp_micro_batch_size must be divisible by pp_size"
+            )
             n_val_microbatches = (
                 config.validation.batch_size
                 // config.policy.parallelism.pp_micro_batch_size

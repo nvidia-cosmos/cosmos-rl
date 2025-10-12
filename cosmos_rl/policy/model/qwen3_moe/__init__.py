@@ -13,35 +13,61 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
 import os
-import torch
-from torch import nn
-import torch.nn.functional as F
-import torch.distributed as dist
-from safetensors import safe_open
+import re
 from dataclasses import dataclass, field
-from typing import Tuple, List, Optional, Callable
-from transformers import AutoConfig
+from functools import cached_property
+from typing import Callable, List, Optional, Tuple
+
+import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
+import cosmos_rl.policy.kernel.rope as rope
+import re
+from dataclasses import dataclass, field
+from functools import cached_property
+from typing import Callable, List, Optional, Tuple
+
+import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
+import cosmos_rl.policy.kernel.rope as rope
+import torch
+import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
+import torch.nn.functional as F
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
+from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
+from cosmos_rl.policy.kernel.norm import RMSNorm
+from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
+from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
+from cosmos_rl.policy.model.qwen3_moe.weight_converter import convert_weight_from_hf
+from cosmos_rl.policy.model.qwen3_moe.weight_mapper import Qwen3MoeWeightMapper
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.parallelism import ParallelDims
+import torch.nn.functional as F
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
+from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
+from cosmos_rl.policy.kernel.norm import RMSNorm
+from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
+from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
+from cosmos_rl.policy.model.qwen3_moe.weight_converter import convert_weight_from_hf
+from cosmos_rl.policy.model.qwen3_moe.weight_mapper import Qwen3MoeWeightMapper
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import (
-    resolve_model_path,
     IdentityLayer,
     clear_weight_name,
-    sync_model_vocab,
+    resolve_model_path,
+    resolve_model_path,
     retry,
+    sync_model_vocab,
+    sync_model_vocab,
 )
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.policy.model.qwen3_moe.weight_converter import (
-    convert_weight_from_hf,
-)
-from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.model.qwen3_moe.weight_mapper import Qwen3MoeWeightMapper
-from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
-from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
-from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
+from safetensors import safe_open
+from torch import nn
+from transformers import AutoConfig
+from safetensors import safe_open
+from torch import nn
+from transformers import AutoConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
