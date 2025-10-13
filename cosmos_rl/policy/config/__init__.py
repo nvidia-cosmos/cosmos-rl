@@ -22,6 +22,7 @@ import os
 import json
 import hashlib
 from cosmos_rl.utils.modelscope import update_config_if_modelscope
+from cosmos_rl.utils.logging import logger
 
 
 def config_hash(config: BaseModel) -> str:
@@ -233,8 +234,8 @@ class GrpoConfig(BaseModel):
     type: Literal["grpo"]
     variant: str = Field(
         default="grpo",
-        description="Variant of the GRPO, currently support `grpo`, and `dapo`",
-        choices=["grpo", "dapo"],
+        description="Variant of the GRPO, currently support `grpo`, `gspo`, `dapo`",
+        choices=["grpo", "gspo", "dapo"],
     )
 
     dataset: DatasetConfig = Field(
@@ -256,6 +257,10 @@ class GrpoConfig(BaseModel):
     dataloader_prefetch_factor: Optional[int] = Field(
         default=None,
         description="Number of batches loaded in advance by each worker.",
+    )
+    dataloader_batch_size: Optional[int] = Field(
+        default=1,
+        description="Batch size for each iteration of the dataloader for when fetch prompts from controller. This is only the setting of the dataloader iterator on the controller side.",
     )
     prompt_column_name: str = Field(
         default="",
@@ -371,7 +376,8 @@ class GrpoConfig(BaseModel):
         assert self.variant in [
             "grpo",
             "dapo",
-        ], "variant must be one of ['grpo', 'dapo']"
+            "gspo",
+        ], "variant must be one of ['grpo', 'dapo', 'gspo']"
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
@@ -384,6 +390,11 @@ class GrpoConfig(BaseModel):
         ), "reward_function must be a dict of reward functions"
         if isinstance(self.filter_reward_metric, str):
             self.filter_reward_metric = [self.filter_reward_metric]
+        if self.dataloader_batch_size is not None and self.dataloader_batch_size <= 0:
+            logger.warning(
+                "dataloader_batch_size is not positive so disable it as None."
+            )
+            self.dataloader_batch_size = None
         return self
 
 
