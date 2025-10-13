@@ -248,6 +248,7 @@ class Attention(nn.Module):
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
 
+        
         if cu_seqlens is not None:
             xq = xq.view(seqlen, -1, self.head_dim)
             xk = xk.view(seqlen, -1, self.head_dim)
@@ -263,6 +264,7 @@ class Attention(nn.Module):
                 causal=True,
             )
         else:
+            # print(f"xq: {xq.shape}, xk: {xk.shape}, xv: {xv.shape}")
             output = self.attn_func(xq, xk, xv, causal=True)
         output = output.view(bs, seqlen, -1)
         return self.o_proj(output)

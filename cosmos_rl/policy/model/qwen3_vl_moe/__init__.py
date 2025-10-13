@@ -33,6 +33,7 @@ from cosmos_rl.utils.ulysses import (
 )
 from cosmos_rl.utils.logging import logger
 from safetensors import safe_open
+from safetensors.torch import load_file
 from cosmos_rl.policy.model.qwen3_vl_moe.weight_converter import (
     convert_weight_from_hf,
 )
@@ -547,6 +548,7 @@ class Qwen3VLMoeModel(BaseModel):
         device: torch.device,
         revision: Optional[str] = None,
     ):
+        from imaginaire.utils import log
         """
         Load weights from a HuggingFace model.
 
@@ -574,14 +576,22 @@ class Qwen3VLMoeModel(BaseModel):
 
         with torch.device(device):
             for f in safetensors_files:
+                log.info(f"Loading safetensors: {f}")
+                import time
+                tic = time.time()
+
                 weights_of_ckpt = {}
                 ckpt = safe_open(
                     os.path.join(model_path, f), framework="pt", device=str(device)
                 )
+                log.info(f"File opened in {time.time() - tic:.2f}s, number of keys: {len(ckpt.keys())}")
+
+                tic_load = time.time()
                 keys = ckpt.keys()
                 for name in keys:
                     ckpt_tensor = ckpt.get_tensor(name)
                     weights_of_ckpt[name] = ckpt_tensor
+                log.info(f"Loaded {len(weights_of_ckpt.keys())} keys in {time.time() - tic_load:.2f}s (total: {time.time() - tic:.2f}s)")
 
                 n_experts = self.config.lm_args.n_experts
 
@@ -720,7 +730,7 @@ class Qwen3VLMoeModel(BaseModel):
 
                     assert (
                         local_view.shape == shared_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape} | is_dist_tensor={is_dist_tensor}"
                     with torch.no_grad():
                         local_view.data.copy_(shared_weight)
 

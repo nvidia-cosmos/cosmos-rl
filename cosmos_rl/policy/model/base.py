@@ -517,6 +517,9 @@ class ModelRegistry:
                 f"Model type {hf_config.model_type} not registered, using {COSMOS_HF_MODEL_TYPES} instead."
             )
             model_type = COSMOS_HF_MODEL_TYPES
+        #     print(f"Model type {hf_config.model_type} not registered, using {COSMOS_HF_MODEL_TYPES} instead.")
+        # else:
+        #     print(f"Model type {hf_config.model_type} registered, using {ModelRegistry._MODEL_REGISTRY[model_type]} instead.")
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
@@ -587,30 +590,33 @@ class ModelRegistry:
         build_model_device = _get_device_for_model_build(hf_config)
         with torch.device(build_model_device):
             with util.cosmos_default_dtype(cosmos_default_dtype):
-                try:
-                    model = _load_model_with_config(
-                        model_cls, hf_config, model_name_or_path, config
-                    )
+                model = _load_model_with_config(
+                    model_cls, hf_config, model_name_or_path, config
+                )
+                # try:
+                #     model = _load_model_with_config(
+                #         model_cls, hf_config, model_name_or_path, config
+                #     )
 
-                except Exception as e:
-                    if model_type == COSMOS_HF_MODEL_TYPES:
-                        raise e
-                    else:
-                        logger.warning(
-                            f"Failed to load model {model_name_or_path} with error={e}.\nTrying to load with {COSMOS_HF_MODEL_TYPES} instead."
-                        )
-                        model_type = COSMOS_HF_MODEL_TYPES
-                        model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
+                # except Exception as e:
+                #     if model_type == COSMOS_HF_MODEL_TYPES:
+                #         raise e
+                #     else:
+                #         logger.warning(
+                #             f"Failed to load model {model_name_or_path} with error={e}.\nTrying to load with {COSMOS_HF_MODEL_TYPES} instead."
+                #         )
+                #         model_type = COSMOS_HF_MODEL_TYPES
+                #         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
-                        try:
-                            model = _load_model_with_config(
-                                model_cls, hf_config, model_name_or_path, config
-                            )
-                        except Exception as fallback_e:
-                            raise RuntimeError(
-                                f"Both primary and fallback model loading strategies failed. "
-                                f"Primary: {e}, Fallback: {fallback_e}"
-                            ) from e
+                #         try:
+                #             model = _load_model_with_config(
+                #                 model_cls, hf_config, model_name_or_path, config
+                #             )
+                #         except Exception as fallback_e:
+                #             raise RuntimeError(
+                #                 f"Both primary and fallback model loading strategies failed. "
+                #                 f"Primary: {e}, Fallback: {fallback_e}"
+                #             ) from e
         if model is None:
             raise ValueError(f"Model {model_name_or_path} not supported.")
         return model

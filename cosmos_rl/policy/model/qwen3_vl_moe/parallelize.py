@@ -58,7 +58,6 @@ def parallelize(
     world_mesh = parallel_dims.mesh
 
     pipeline_parallelize(model, parallel_dims, config)
-
     if parallel_dims.tp_enabled:
         apply_tp_ep(
             model,
@@ -461,11 +460,15 @@ def apply_tp_ep(
             == transformer_block.mlp.local_experts
         ), f"down_proj.weight.shape[0] must be equal to local_experts, {transformer_block.mlp.down_proj.weight.to_local().shape[0]} != {transformer_block.mlp.local_experts}"
 
+        # print(f"layer_id: {layer_id}, k_proj (before apply tp_ep_mesh={tp_ep_mesh}): {transformer_block.self_attn.k_proj.weight.shape}")
+        # print(f"transformer_block before {transformer_block}")
         parallelize_module(
             module=transformer_block,
             device_mesh=tp_ep_mesh,
             parallelize_plan=layer_plan,
         )
+        # print(f"layer_id: {layer_id}, k_proj (after apply tp_ep_mesh={tp_ep_mesh}): {transformer_block.self_attn.k_proj.weight.shape}")
+        # print(f"transformer_block after {transformer_block}")
 
     if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
@@ -477,6 +480,10 @@ def apply_tp_ep(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
         "Tensor Parallelism to the model"
     )
+    # print(
+    #     f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
+    #     "Tensor Parallelism to the model"
+    # )
 
 
 # for selective op activation checkpointing
