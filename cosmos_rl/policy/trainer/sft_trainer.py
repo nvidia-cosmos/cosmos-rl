@@ -40,7 +40,7 @@ from transformers import AutoTokenizer
 from datasets import concatenate_datasets
 from cosmos_rl.dispatcher.data.packer import DataPacker
 import os
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, Union
 from tqdm import tqdm
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
@@ -51,6 +51,7 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_masks,
     pack_sequences_for_labels,
 )
+from itertools import islice
 
 
 def async_safe_ce(
@@ -274,7 +275,10 @@ class SFTDataset(Dataset):
             else self.dataset[idx]
         )
 
-        item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
+        if isinstance(idx, list):  # a batch of items
+            item = [self.data_packer.sft_process_sample(x) for x in raw_item]
+        else:
+            item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
 
         if self.cache is not None:
             # try cache obj
@@ -292,7 +296,9 @@ class SFTTrainer(Trainer):
         val_dataset: Optional[Dataset] = None,
         val_data_packer: Optional[DataPacker] = None,
         sampler: Optional[Callable] = None,
+        batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
+        val_batch_sampler: Optional[Callable] = None,
     ):
         super(SFTTrainer, self).__init__(config, parallel_dims)
 
@@ -377,13 +383,16 @@ class SFTTrainer(Trainer):
         )
         if sampler is not None:
             logger.info("Using user-provided sampler for training dataset.")
-            train_sampler = sampler(
-                train_dataset,
-                num_replicas=self.dp_world_size,
-                rank=self.dp_rank,
-                shuffle=config.train.train_policy.dataloader_shuffle,
-                drop_last=False,
-            )
+            if isinstance(sampler, Callable):
+                train_sampler = sampler(
+                    train_dataset,
+                    num_replicas=self.dp_world_size,
+                    rank=self.dp_rank,
+                    shuffle=config.train.train_policy.dataloader_shuffle,
+                    drop_last=False,
+                )
+            else:
+                train_sampler = sampler
         else:
             train_sampler = DistributedSampler(
                 train_dataset,
@@ -393,17 +402,40 @@ class SFTTrainer(Trainer):
                 drop_last=False,
             )
 
-        def get_train_data_loader(sampler: Sampler[int]):
-            return DataLoader(
-                train_dataset,
+        if batch_sampler is not None and isinstance(batch_sampler, Callable):
+            batch_sampler = batch_sampler(
+                train_sampler,
                 batch_size=config.train.train_batch_per_replica,
-                shuffle=False,
-                num_workers=config.train.train_policy.dataloader_num_workers,
-                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                sampler=sampler,
-                collate_fn=collate_fn,
                 drop_last=False,
             )
+
+        def get_train_data_loader(
+            sampler: Union[Sampler[int], Sampler[list[int]]],
+            sampler_in_batch: Optional[Sampler[list[int]]] = None,
+        ):
+            if sampler_in_batch is not None:
+                logger.info(
+                    "Using custom batch Sampler that yields list of indices for training dataset."
+                )
+                data_loader = DataLoader(
+                    train_dataset,
+                    num_workers=config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    batch_sampler=sampler_in_batch,
+                    collate_fn=collate_fn,
+                )
+            else:
+                data_loader = DataLoader(
+                    train_dataset,
+                    batch_size=config.train.train_batch_per_replica,
+                    shuffle=False,
+                    num_workers=config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    sampler=sampler,
+                    collate_fn=collate_fn,
+                    drop_last=False,
+                )
+            return data_loader
 
         if config.train.resume and self.train_step > 0:
             """
@@ -411,26 +443,45 @@ class SFTTrainer(Trainer):
             Otherwise, we need to call `set_epoch` on the sampler after each epoch.
             """
             # Resume training from the last checkpoint if needed
-            total_steps_per_epoch = len(get_train_data_loader(train_sampler))
+            total_steps_per_epoch = len(
+                get_train_data_loader(train_sampler, batch_sampler)
+            )
             data_loader_bias = self.train_step % total_steps_per_epoch
             data_loader_bias *= config.train.train_batch_per_replica
             logger.info(
                 f"Resuming training from step {self.train_step}/{ckpt_total_steps}"
             )
             train_sampler = SkippingSampler(
-                train_sampler, skip_samples=data_loader_bias
+                train_sampler,
+                skip_samples=data_loader_bias
+                // (
+                    len(list(islice(iter(train_sampler), 1))[0])
+                    if isinstance(list(islice(iter(train_sampler), 1))[0], list)
+                    else 1
+                ),
             )
+            if batch_sampler is not None:
+                batch_sampler = SkippingSampler(
+                    batch_sampler,
+                    skip_samples=data_loader_bias
+                    // (
+                        len(list(islice(iter(batch_sampler), 1))[0])
+                        if isinstance(list(islice(iter(batch_sampler), 1))[0], list)
+                        else 1
+                    ),
+                )
             self.start_epoch = self.train_step // total_steps_per_epoch
 
         if val_sampler is not None:
             logger.info("Using user-provided sampler for validation dataset.")
-            val_sampler = val_sampler(
-                val_dataset,
-                num_replicas=self.dp_world_size,
-                rank=self.dp_rank,
-                shuffle=False,
-                drop_last=False,
-            )
+            if isinstance(val_sampler, Callable):
+                val_sampler = val_sampler(
+                    val_dataset,
+                    num_replicas=self.dp_world_size,
+                    rank=self.dp_rank,
+                    shuffle=False,
+                    drop_last=False,
+                )
         else:
             val_sampler = DistributedSampler(
                 val_dataset,
@@ -444,17 +495,36 @@ class SFTTrainer(Trainer):
         assert (
             self.tokenizer.pad_token_id is not None
         ), "Tokenizer must have a pad token id"
-        self.train_data_loader = get_train_data_loader(train_sampler)
-        self.val_data_loader = DataLoader(
-            val_dataset,
-            batch_size=config.validation.batch_size
-            or config.train.train_batch_per_replica,
-            num_workers=config.train.train_policy.dataloader_num_workers,
-            prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-            sampler=val_sampler,
-            collate_fn=collate_fn,
-            drop_last=False,
-        )
+        self.train_data_loader = get_train_data_loader(train_sampler, batch_sampler)
+        if val_batch_sampler is not None:
+            logger.info(
+                "Using custom batch Sampler that yields list of indices for validation dataset."
+            )
+            if isinstance(val_batch_sampler, Callable):
+                val_batch_sampler = val_batch_sampler(
+                    val_sampler,
+                    batch_size=config.validation.batch_size
+                    or config.train.train_batch_per_replica,
+                    drop_last=False,
+                )
+            self.val_data_loader = DataLoader(
+                val_dataset,
+                num_workers=config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                batch_sampler=val_batch_sampler,
+                collate_fn=collate_fn,
+            )
+        else:
+            self.val_data_loader = DataLoader(
+                val_dataset,
+                batch_size=config.validation.batch_size
+                or config.train.train_batch_per_replica,
+                num_workers=config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                sampler=val_sampler,
+                collate_fn=collate_fn,
+                drop_last=False,
+            )
 
         steps_by_dataset = (
             ckpt_total_steps

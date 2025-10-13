@@ -67,7 +67,9 @@ def main(*args, **kwargs):
                     val_dataset=kwargs.get("val_dataset", None),
                     val_data_packer=kwargs.get("val_data_packer", None),
                     sampler=kwargs.get("sampler", None),
+                    batch_sampler=kwargs.get("batch_sampler", None),
                     val_sampler=kwargs.get("val_sampler", None),
+                    val_batch_sampler=kwargs.get("val_batch_sampler", None),
                 )
                 trainer.train()
             else:

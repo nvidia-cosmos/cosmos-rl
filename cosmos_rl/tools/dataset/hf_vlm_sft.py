@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from cosmos_rl.dispatcher.data.packer.hf_vlm_data_packer import HFVLMDataPacker
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
@@ -83,4 +84,6 @@ if __name__ == "__main__":
     # so that the dataset can be loaded on demand. (Not all workers need it)
     launch_worker(
         dataset=get_dataset,
+        data_packer=HFVLMDataPacker(),
+        val_data_packer=HFVLMDataPacker(),
     )

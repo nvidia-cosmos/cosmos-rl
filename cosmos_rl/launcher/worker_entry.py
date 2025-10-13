@@ -17,7 +17,9 @@ def main(
     val_data_packer: Optional[DataPacker] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
     sampler: Optional[Callable] = None,
+    batch_sampler: Optional[Callable] = None,
     val_sampler: Optional[Callable] = None,
+    val_batch_sampler: Optional[Callable] = None,
     args: Optional[argparse.Namespace] = None,
     **kwargs,
 ):
@@ -39,7 +41,9 @@ def main(
             val_data_packer=val_data_packer,
             custom_logger_fns=custom_logger_fns,
             sampler=sampler,
+            batch_sampler=batch_sampler,
             val_sampler=val_sampler,
+            val_batch_sampler=val_batch_sampler,
             args=args,
         )
     elif role == "Policy":
@@ -51,7 +55,9 @@ def main(
             val_dataset=val_dataset,
             val_data_packer=val_data_packer,
             sampler=sampler,
+            batch_sampler=batch_sampler,
             val_sampler=val_sampler,
+            val_batch_sampler=val_batch_sampler,
         )
         return
     else:

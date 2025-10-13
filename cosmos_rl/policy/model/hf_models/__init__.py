@@ -13,19 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import re
 import torch
-from torch import nn
 import inspect
+from torch import nn
+from safetensors import safe_open
 from transformers.utils import quantization_config as transformers_quantization_config
 from functools import partial, cached_property
 from typing import Tuple, List, Optional, Callable
 
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoModel
 from cosmos_rl.utils.util import (
     clear_weight_name,
     safe_deep_getattr,
     load_model_class_by_config,
     reverse_hf_checkpoint_mapping,
+    resolve_model_path,
 )
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
@@ -74,7 +78,7 @@ class HFModel(BaseModel):
                     "skip reverse_hf_conversion_mapping"
                 )
             else:
-                # reverse the hf checkpoint conversion mapping to aligh with the vllm weights' name
+                # Reverse HuggingFace checkpoint conversion mapping to align with VLLM weight naming convention
                 self.weight_mapper.reverse_hf_conversion_mapping = (
                     reverse_hf_checkpoint_mapping(model._checkpoint_conversion_mapping)
                 )
@@ -110,7 +114,7 @@ class HFModel(BaseModel):
 
     @property
     def image_token_id(self):
-        # image_token_id or image_token_index
+        # Retrieve image token ID from either image_token_id or image_token_index attribute
         image_token_id = None
         if self.is_vlm:
             image_token_id = getattr(self.hf_config, "image_token_id", None) or getattr(
@@ -241,7 +245,7 @@ class HFModel(BaseModel):
     def vision_model(self):
         vision_model = None
         if self.is_vlm:
-            # vision_tower or visual
+            # Extract vision model from various possible attribute names
             if hasattr(self.model, "vision_tower"):
                 vision_model = self.model.vision_tower
             elif hasattr(self.model, "visual"):
@@ -259,7 +263,7 @@ class HFModel(BaseModel):
             if hasattr(self.model, "multi_modal_projector"):
                 multi_modal_projector = self.model.multi_modal_projector
             elif hasattr(self.model, "mlp1"):
-                # InternVL
+                # Handle InternVL architecture's multi-modal projector naming
                 multi_modal_projector = self.model.mlp1
 
         return multi_modal_projector
@@ -269,7 +273,7 @@ class HFModel(BaseModel):
         return self.is_vlm
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
-        # Will reset all named buffers in load_hf_weights
+        # Named buffers will be reset during the load_hf_weights process
         return
 
     @property
@@ -286,86 +290,220 @@ class HFModel(BaseModel):
         """
         assert False, "Pipeline split is not supported for HFModel"
 
-    def reset_named_buffers(self, hf_model):
-        # copy named buffers from hf_model to self.model
-        hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
-        for name, cosmos_hf_buffer in self.model.named_buffers():
-            assert name in hf_named_buffers, f"Buffer {name} not found in hf model"
-            hf_buf = hf_named_buffers[name].to(
-                device=cosmos_hf_buffer.device, dtype=cosmos_hf_buffer.dtype
+    def reset_named_buffers(self, hf_model=None, model_name_or_path=None):
+        reset_success = False
+        if hf_model is not None:
+            # copy named buffers from hf_model to self.model
+            hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
+            for name, cosmos_hf_buffer in self.model.named_buffers():
+                assert name in hf_named_buffers, f"Buffer {name} not found in hf model"
+                hf_buf = hf_named_buffers[name].to(
+                    device=cosmos_hf_buffer.device, dtype=cosmos_hf_buffer.dtype
+                )
+                cosmos_hf_buffer.data.copy_(hf_buf.data)
+            reset_success = True
+        else:
+            assert (
+                model_name_or_path is not None
+            ), "model_name_or_path is required for resetting named buffers"
+            config = AutoConfig.from_pretrained(
+                model_name_or_path, trust_remote_code=True
             )
-            cosmos_hf_buffer.data.copy_(hf_buf.data)
 
-    def load_hf_weights(
+            # Load only first 2 layers instead of full model to extract named buffers efficiently.
+            # Most buffers (e.g., inv_freq) are initialized in the model constructor, making this approach sufficient.
+            num_lm_layers_to_load = 2
+            if self.is_vlm:
+                if hasattr(config, "text_config") and hasattr(
+                    config.text_config, "num_hidden_layers"
+                ):
+                    config.text_config.num_hidden_layers = num_lm_layers_to_load
+                    config.text_config.max_position_embeddings = (
+                        self.hf_config.max_position_embeddings
+                    )
+                elif hasattr(config, "llm_config") and hasattr(
+                    config.llm_config, "num_hidden_layers"
+                ):
+                    config.llm_config.num_hidden_layers = num_lm_layers_to_load
+                    config.llm_config.max_position_embeddings = (
+                        self.hf_config.max_position_embeddings
+                    )
+                else:
+                    raise ValueError(f"Can not get text config from {config}")
+            else:
+                if hasattr(config, "num_hidden_layers"):
+                    config.num_hidden_layers = num_lm_layers_to_load
+                    config.max_position_embeddings = (
+                        self.hf_config.max_position_embeddings
+                    )
+                else:
+                    raise ValueError(f"Can not get num of llm layers from {config}")
+            # Attempt to load partial model to extract all named buffers
+            try:
+                if isinstance(self.model_class, AutoModel):
+                    hf_model = AutoModel.from_config(config)
+                else:
+                    hf_model = self.model_class._from_config(config)
+                hf_named_buffers = [name for name, _ in hf_model.named_buffers()]
+                self_named_buffers = [name for name, _ in self.model.named_buffers()]
+                num_equal = len(hf_named_buffers) == len(self_named_buffers)
+                if not num_equal:
+                    # Check if the buffers are registered in the layers
+                    is_buffer_registered_in_layers = any(
+                        "layers." in name for name in hf_named_buffers
+                    )
+                    if (self.n_lm_layers - num_lm_layers_to_load) == (
+                        len(self_named_buffers) - len(hf_named_buffers)
+                    ) and is_buffer_registered_in_layers:
+                        hf_buffer_in_layers = [
+                            buffer
+                            for name, buffer in hf_model.named_buffers()
+                            if "layers." in name
+                        ]
+                        first_buffer = hf_buffer_in_layers[0]
+                        all_same = True
+                        # Verify that all layer buffers contain identical values
+                        for buffer in hf_buffer_in_layers[1:]:
+                            if not torch.equal(
+                                buffer,
+                                first_buffer.to(
+                                    device=buffer.device, dtype=buffer.dtype
+                                ),
+                            ):
+                                all_same = False
+                                break
+                        # If all buffers in the layers are the same, we can repeat the first layer's
+                        # buffer to the rest of the layers
+                        if all_same:
+                            cosmos_buffer_in_layers = [
+                                buffer
+                                for name, buffer in self.model.named_buffers()
+                                if "layers." in name
+                            ]
+                            hf_first_layer_buffer = first_buffer.to(
+                                device=cosmos_buffer_in_layers[0].device,
+                                dtype=cosmos_buffer_in_layers[0].dtype,
+                            )
+                            for buffer in cosmos_buffer_in_layers:
+                                buffer.data.copy_(hf_first_layer_buffer.data)
+
+                            hf_named_buffers_not_in_layers = {
+                                k: v
+                                for k, v in hf_model.named_buffers()
+                                if "layers." not in k
+                            }
+                            for name, cosmos_hf_buffer in self.model.named_buffers():
+                                if "layers." in name:
+                                    continue
+                                assert (
+                                    name in hf_named_buffers_not_in_layers
+                                ), f"Buffer {name} not found in hf model"
+                                hf_buf = hf_named_buffers_not_in_layers[name].to(
+                                    device=cosmos_hf_buffer.device,
+                                    dtype=cosmos_hf_buffer.dtype,
+                                )
+                                cosmos_hf_buffer.data.copy_(hf_buf.data)
+
+                            return True
+                        else:
+                            logger.warning(
+                                f"Failed to reset named buffers from {model_name_or_path}: buffer names mismatch {self_named_buffers} != {hf_named_buffers}"
+                            )
+                    else:
+                        logger.warning(
+                            f"Failed to reset named buffers from {model_name_or_path}: num of buffers mismatch {len(self_named_buffers)} != {len(hf_named_buffers)}"
+                        )
+                        return False
+
+                reset_success = self.reset_named_buffers(hf_model=hf_model)
+            except Exception as e:
+                logger.error(
+                    f"Failed to reset named buffers from {model_name_or_path}: {e}"
+                )
+                reset_success = False
+
+        return reset_success
+
+    def load_hf_weights_from_safetensors(
         self,
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
         revision: Optional[str] = None,
     ):
-        """
-        Load weights from a HuggingFace model.
-
-        Args:
-            model_path (str): Path to the HuggingFace model.
-            parallel_dims (ParallelDims): Parallel dimensions definition.
-            info_inly (bool): Only collect the tensor infomation without actual data loading.
-        """
         model_type = self.hf_config.model_type
-        dtype = self.hf_config.torch_dtype
-        self.model = self.model.to(dtype=dtype)
-
-        kwargs = {
-            "config": self.hf_config,
-            "revision": revision,
-            "trust_remote_code": True,
-        }
-        if self.need_dequantization:
-            quantization_config = self.hf_config.quantization_config
-            mxfp4_quantization_config = transformers_quantization_config.Mxfp4Config(
-                dequantize=True,
-                modules_to_not_convert=quantization_config["modules_to_not_convert"],
-            )
-            kwargs["quantization_config"] = mxfp4_quantization_config
-
-        hf_model = self.model_class.from_pretrained(
-            model_name_or_path,
-            **kwargs,
-        ).to(device="cpu", dtype=dtype)
-
-        self.reset_named_buffers(hf_model)
-
-        hf_state_dict = hf_model.state_dict()
+        model_path = resolve_model_path(model_name_or_path, revision=revision)
+        safetensors_files = [
+            f for f in os.listdir(model_path) if f.endswith(".safetensors")
+        ]
 
         self_state_dict = self.model.state_dict()
-
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
-        all_tensor_names = self_state_dict.keys()
-        lm_head_weight_key = "lm_head.weight"
-        embed_tokens_weight_key = "model.embed_tokens.weight"
+        lm_head_weight_key = None
+        embed_tokens_weight_key = None
+        # Find the lm_head and embed_tokens weight keys in the state dict
+        for k in self_state_dict.keys():
+            if "embed_tokens" in k:
+                embed_tokens_weight_key = k
+                if lm_head_weight_key is not None:
+                    break
+            if "lm_head" in k:
+                lm_head_weight_key = k
+                if embed_tokens_weight_key is not None:
+                    break
+        assert (
+            lm_head_weight_key is not None and embed_tokens_weight_key is not None
+        ), "lm_head and embed_tokens weight keys not found in the state dict"
+        weights_of_ckpt_names = set()
         reserved = {}
-
-        for name, tensor in hf_state_dict.items():
-            if name == embed_tokens_weight_key:
-                reserved[name] = tensor
-            dest_name, shared_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims
+        hf_checkpoint_conversion_mapping = getattr(
+            self.model, "_checkpoint_conversion_mapping", None
+        )
+        for f in safetensors_files:
+            weights_of_ckpt = {}
+            ckpt = safe_open(
+                os.path.join(model_path, f), framework="pt", device=str(device)
             )
+            keys = ckpt.keys()
+            for name in keys:
+                ckpt_tensor = ckpt.get_tensor(name)
+                if hf_checkpoint_conversion_mapping is not None:
+                    for (
+                        pattern,
+                        replacement,
+                    ) in hf_checkpoint_conversion_mapping.items():
+                        if re.match(pattern, name):
+                            name = re.sub(pattern, replacement, name)
+                            break
+                weights_of_ckpt[name] = ckpt_tensor
+                weights_of_ckpt_names.add(name)
+                if name == embed_tokens_weight_key:
+                    reserved[name] = ckpt_tensor
 
-            target_tensor = self_state_dict[dest_name]
-            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
-            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-            assert (
-                local_view.shape == shared_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
-            with torch.no_grad():
-                local_view.data.copy_(shared_weight.to(device))
+            for name in weights_of_ckpt.keys():
+                tensor = weights_of_ckpt[name]
+                dest_name, shared_weight = convert_weight_from_hf(
+                    tensor, name, model_type, parallel_dims
+                )
+
+                target_tensor = self_state_dict[dest_name]
+                is_dist_tensor = isinstance(
+                    target_tensor, torch.distributed.tensor.DTensor
+                )
+                local_view = (
+                    target_tensor.to_local() if is_dist_tensor else target_tensor
+                )
+                assert (
+                    local_view.shape == shared_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                with torch.no_grad():
+                    local_view.data.copy_(shared_weight)
 
         if (
-            lm_head_weight_key not in all_tensor_names
-            and embed_tokens_weight_key in all_tensor_names
+            lm_head_weight_key not in weights_of_ckpt_names
+            and embed_tokens_weight_key in weights_of_ckpt_names
         ):
-            # tied with embed_tokens.weight
+            # Handle weight tying: lm_head shares weights with embed_tokens
             name = lm_head_weight_key
             assert embed_tokens_weight_key in reserved
             tensor = reserved[embed_tokens_weight_key]
@@ -385,9 +523,86 @@ class HFModel(BaseModel):
                 ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
                 with torch.no_grad():
                     local_view.data.copy_(shared_weight.to(device))
+
+    def load_hf_weights(
+        self,
+        model_name_or_path: str,
+        parallel_dims: ParallelDims,
+        device: torch.device,
+        revision: Optional[str] = None,
+    ):
+        """
+        Load weights from a HuggingFace model.
+
+        Args:
+            model_path (str): Path to the HuggingFace model.
+            parallel_dims (ParallelDims): Parallel dimensions definition.
+        """
+        model_type = self.hf_config.model_type
+        dtype = self.hf_config.torch_dtype
+        self.model = self.model.to(dtype=dtype)
+        kwargs = {
+            "config": self.hf_config,
+            "revision": revision,
+            "trust_remote_code": True,
+        }
+        if self.need_dequantization:
+            quantization_config = self.hf_config.quantization_config
+            mxfp4_quantization_config = transformers_quantization_config.Mxfp4Config(
+                dequantize=True,
+                modules_to_not_convert=quantization_config["modules_to_not_convert"],
+            )
+            kwargs["quantization_config"] = mxfp4_quantization_config
+
+        # Use from_pretrained loading in two scenarios:
+        # 1. Model requires dequantization (e.g., gpt-oss)
+        # 2. Named buffer reinitialization failed
+        load_hf_weights_from_pretrained = (
+            self.need_dequantization
+            or not self.reset_named_buffers(model_name_or_path=model_name_or_path)
+        )
+
+        if not load_hf_weights_from_pretrained:
+            return self.load_hf_weights_from_safetensors(
+                model_name_or_path,
+                parallel_dims,
+                device,
+                revision,
+            )
+
+        logger.warning(
+            "Loading weights via from_pretrained method - this may take considerable time."
+        )
+
+        hf_model = self.model_class.from_pretrained(
+            model_name_or_path,
+            **kwargs,
+        ).to(device="cpu", dtype=dtype)
+
+        self.reset_named_buffers(hf_model=hf_model)
+
+        hf_state_dict = hf_model.state_dict()
+
+        self_state_dict = self.model.state_dict()
+        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
+
+        for name, tensor in hf_state_dict.items():
+            dest_name, shared_weight = convert_weight_from_hf(
+                tensor, name, model_type, parallel_dims
+            )
+
+            target_tensor = self_state_dict[dest_name]
+            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+            assert (
+                local_view.shape == shared_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+            with torch.no_grad():
+                local_view.data.copy_(shared_weight.to(device))
+
         del hf_model
 
-        # Enable gradient checkpointing
+        # Configure gradient checkpointing if enabled
         if self._gradient_checkpointing_enabled:
             self.model.gradient_checkpointing_enable()
             assert (
@@ -405,14 +620,14 @@ class HFModel(BaseModel):
         if self.is_vlm:
             model_parts = [self.language_model, self.vision_model]
             if self.multi_modal_projector is not None:
-                logger.info("Add multi_modal_projector into model parts")
+                logger.info("Adding multi_modal_projector to model parts")
                 model_parts.append(self.multi_modal_projector)
-            # lm_head could be in the model, not in the language_model
+            # Handle cases where lm_head exists at model level rather than language_model level
             if (
                 getattr(self.language_model, "lm_head", None) is None
                 and getattr(self.model, "lm_head", None) is not None
             ):
-                logger.info("Add lm_head into model parts")
+                logger.info("Adding lm_head to model parts")
                 model_parts.append(self.model.lm_head)
             return model_parts
         else:
@@ -528,8 +743,6 @@ class HFModel(BaseModel):
             logger.warning(
                 f"Got error({e}) when loading {hf_config.model_type}, Using AutoModel instead."
             )
-            from transformers import AutoModel
-
             model_class = AutoModel
             model = AutoModel.from_config(hf_config, trust_remote_code=True)
 
@@ -563,10 +776,16 @@ class HFModel(BaseModel):
 
         """
 
-        if max_position_embeddings is None:
-            max_position_embeddings = hf_config.max_position_embeddings
-        else:
+        if max_position_embeddings is not None:
             hf_config.max_position_embeddings = max_position_embeddings
+            if hasattr(hf_config, "text_config") and hasattr(
+                hf_config.text_config, "max_position_embeddings"
+            ):
+                hf_config.text_config.max_position_embeddings = max_position_embeddings
+            elif hasattr(hf_config, "llm_config") and hasattr(
+                hf_config.llm_config, "max_position_embeddings"
+            ):
+                hf_config.llm_config.max_position_embeddings = max_position_embeddings
 
         return cls.from_model_args(hf_config)
 
@@ -590,7 +809,7 @@ class HFModel(BaseModel):
 
     def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
         if "gpt_oss" in self.hf_config.model_type:
-            if "bias" not in name:  # bias is not transposed
+            if "bias" not in name:  # Bias parameters do not require transposition
                 if "gate_up_proj" in name or "down_proj" in name:
 
                     def transform(view):

@@ -242,7 +242,6 @@ def inject_lora_adapters(
 
     replaced_names = []
 
-    # Normalize optional patterns
     alpha_pattern = getattr(config, "alpha_pattern", None) or {}
     r_pattern = getattr(config, "r_pattern", None) or {}
     dropout_pattern = getattr(config, "dropout_pattern", None) or {}
@@ -291,7 +290,6 @@ def inject_lora_adapters(
                     )
                     continue
 
-                # Resolve effective hyperparameters via longest-substring override
                 r_eff = config.r
                 alpha_eff = config.lora_alpha
                 dropout_eff = config.lora_dropout
@@ -319,7 +317,6 @@ def inject_lora_adapters(
                 replaced.append(module_name)
                 replaced_names.append(module_name)
                 if os.environ.get("RANK", "0") == "0":
-                    # Log effective settings for observability
                     scaling = (
                         alpha_eff / math.sqrt(max(1, r_eff))
                         if config.use_rslora
