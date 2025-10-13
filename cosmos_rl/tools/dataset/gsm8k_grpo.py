@@ -121,7 +121,7 @@ class GSM8kValDataset(GSM8kDataset):
                 "Validation is not enabled in the config. Skipping setup for GSM8kValDataset."
             )
             return
-
+        self.apply_chat_template = not config.rollout.multi_turn_config.enable
         self.config = config
         self.tokenizer = tokenizer
 

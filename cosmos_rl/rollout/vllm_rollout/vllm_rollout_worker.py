@@ -19,7 +19,7 @@ from queue import Queue
 import atexit
 import types
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Union
 from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase, State
@@ -28,6 +28,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import (
     COSMOS_ROLLOUT_STEP_INTERVAL,
+    COSMOS_ROLLOUT_REPORT_INTERVAL,
 )
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
@@ -60,7 +61,8 @@ from cosmos_rl.dispatcher.data.schema import (
     ConversationType,
 )
 from cosmos_rl.rollout.schema import RolloutResult
-
+from torch.utils.data import Dataset
+from cosmos_rl.reward.reward_calculator import RewardDispatcher
 from vllm import SamplingParams
 import time
 
@@ -70,7 +72,7 @@ Keep in mind that torch distributed is not thread safe. So try to keep the usage
 
 
 def _patch_vllm_rollout_locked_step(
-    rollout: vLLMRollout, consume_command, enable_validation
+    rollout: vLLMRollout, consume_command, reward_fetch, enable_validation
 ):
     llm_engine = rollout.get_engine().llm_engine
     orig_step = llm_engine.step
@@ -89,6 +91,14 @@ def _patch_vllm_rollout_locked_step(
         if not hasattr(self, "_cosmos_step_counter"):
             self._cosmos_step_counter = 0
         self._cosmos_step_counter += 1
+
+        if (
+            COSMOS_ROLLOUT_REPORT_INTERVAL > 0
+            and self._cosmos_step_counter % COSMOS_ROLLOUT_REPORT_INTERVAL == 0
+        ):
+            _, is_validation, _, _ = reward_fetch()
+            assert not is_validation, "Validation report should be handled in the broadcast command rather than step function."
+
         if (
             COSMOS_ROLLOUT_STEP_INTERVAL > 0
             and self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0
@@ -214,6 +224,31 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.total_temp_tensor_pool = []
         self.misc_params = set()
         self.validation_flag = threading.Event()
+        self.reward_dispatcher = RewardDispatcher()
+
+    def setup(
+        self,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        reward_fns: Optional[List[Callable]] = None,
+        filter_reward_fns: Optional[List[Callable]] = None,
+        val_dataset: Optional[Dataset] = None,
+        val_reward_fns: Optional[List[Callable]] = None,
+        num_workers: int = 8,
+    ):
+        self.reward_dispatcher.setup(
+            config=self.config,
+            dataset=dataset,
+            reward_fns=reward_fns,
+            filter_reward_fns=filter_reward_fns,
+            val_dataset=val_dataset,
+            val_reward_fns=val_reward_fns,
+            data_packer=self.data_packer,
+            val_data_packer=self.val_data_packer,
+            num_workers=num_workers
+            if self.parallel_dims.tp_coord[0] == 0
+            and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
+            else 0,
+        )
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         if self.quantization_type == "fp8":
@@ -764,14 +799,48 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
 
         if should_report:
-            response = ValidationReportRequest(
-                src_replica_name=self.replica_name,
-                validation_step=self.current_step,
-                prompt_idxs=prompt_idxs,
-                payloads=validation_payloads,
-                is_end=True,
+            self.reward_dispatcher.enqueue_rewards_cal(
+                validation_payloads, True, self.current_step, prompt_idxs
             )
-            self.api_client.post_validation_report(response)
+            payloads, is_validation, current_step, empty = self.report_rollouts(
+                block=True
+            )
+            assert (
+                (is_validation and payloads is not None or payloads is None)
+                and (not empty or len(validation_payloads) == 0)
+            ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
+            while not empty:
+                assert (
+                    is_validation or payloads is None
+                ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
+                if payloads is not None:
+                    response = ValidationReportRequest(
+                        src_replica_name=self.replica_name,
+                        validation_step=current_step,
+                        prompt_idxs=[],
+                        payloads=payloads,
+                        is_end=True,
+                    )
+                    self.api_client.post_validation_report(response)
+                payloads, is_validation, current_step, empty = (
+                    self.reward_dispatcher.dequeue_rewards_cal()
+                )
+
+    def lazy_initialize_rollout_engine(self, load_format):
+        # lazy initialization of the vllm engine.
+        if not self.rollout.is_engine_initialized():
+            self.rollout.init_engine(
+                quantization=self.quantization_type,
+                seed=self.config.rollout.seed,
+                load_format=load_format,
+            )
+            _patch_vllm_rollout_locked_step(
+                self.rollout,
+                self.consume_command,
+                self.report_rollouts,
+                self.validation_flag,
+            )
+            self.prepare_shard_infos_for_weight_sync_insts()
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
@@ -782,20 +851,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         a pair of policy and rollout replica.
         """
         # lazy initialization of the vllm engine.
-        if not self.rollout.is_engine_initialized():
-            is_for_weight_resume = command.dst_replica_name == self.replica_name
-            load_format = "auto" if is_for_weight_resume else "dummy"
-            self.rollout.init_engine(
-                quantization=self.quantization_type,
-                seed=self.config.rollout.seed,
-                load_format=load_format,
-            )
-            _patch_vllm_rollout_locked_step(
-                self.rollout,
-                self.consume_command,
-                self.validation_flag,
-            )
-            self.prepare_shard_infos_for_weight_sync_insts()
+        is_for_weight_resume = command.dst_replica_name == self.replica_name
+        load_format = "auto" if is_for_weight_resume else "dummy"
+        self.lazy_initialize_rollout_engine(load_format)
+
         if command.dst_replica_name != self.replica_name:
             return
         # get the nccl_unique_id from the controller
@@ -981,20 +1040,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         dst_replica_names: List[str] = broadcast_command.dst_replica_names
 
         # lazy initialization of the vllm engine.
-        if not self.rollout.is_engine_initialized():
-            if self.replica_name != src_replica_name:
-                # for replicas that needs to be broadcasted, use dummy format.
-                self.rollout.init_engine(
-                    quantization=self.quantization_type,
-                    seed=self.config.rollout.seed,
-                    load_format="dummy",
-                )
-                _patch_vllm_rollout_locked_step(
-                    self.rollout,
-                    self.consume_command,
-                    self.validation_flag,
-                )
-                self.prepare_shard_infos_for_weight_sync_insts()
+        if self.replica_name != src_replica_name:
+            # for replicas that needs to be broadcasted, use dummy format.
+            self.lazy_initialize_rollout_engine(load_format="dummy")
 
         if len(dst_replica_names) > 1:
             self.prepare_trainable_params()
@@ -1185,6 +1233,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         Send end signal to the controller.
         This is used to notify the controller that the rollout worker has finished processing all prompts.
         """
+        payloads, is_validation, _, empty = self.report_rollouts(block=True)
+        assert (
+            not is_validation and payloads is None and empty
+        ), f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
         response = RolloutRequest(
             src_replica_name=self.replica_name,
             prompt_idxs=[],
@@ -1194,6 +1246,25 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
         logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
         self.api_client.post_rollout_completion(response)
+
+    def report_rollouts(self, block=False):
+        while True:
+            payloads, is_validation, step, empty = (
+                self.reward_dispatcher.dequeue_rewards_cal()
+            )
+            if payloads is not None:
+                if is_validation:
+                    break
+                response = RolloutRequest(
+                    src_replica_name=self.replica_name,
+                    prompt_idxs=[],
+                    payloads=payloads,
+                    is_end=False,
+                )
+                self.api_client.post_rollout_completion(response)
+            elif not block or empty:
+                break
+        return payloads, is_validation, step, empty
 
     @torch.no_grad()
     def main_loop(self):
@@ -1222,7 +1293,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         self.state.set_prompt_consume_end()
                         if self.global_rank == 0:
                             self.send_end_signal()
-
+            _, is_validation, _, _ = self.report_rollouts()
+            assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
             if self.state.prompt_consume_end():
                 assert (
                     self._prompt_queue.empty() and self.state.prompt_fetch_end()
@@ -1350,13 +1422,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                             )
                         valid_payloads.append(old_payload)
 
-                    response = RolloutRequest(
-                        src_replica_name=self.replica_name,
-                        prompt_idxs=valid_prompt_idxs,
-                        payloads=valid_payloads,
-                        is_end=False,
+                    self.reward_dispatcher.enqueue_rewards_cal(
+                        valid_payloads,
+                        False,
+                        self.current_weight_version,
+                        valid_prompt_idxs,
                     )
-                    self.api_client.post_rollout_completion(response)
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()

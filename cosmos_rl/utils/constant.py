@@ -50,6 +50,9 @@ COSMOS_ROLLOUT_CMD_WAIT_INTERVAL = float(
 COSMOS_ROLLOUT_CMD_WAIT_TIMES = int(
     os.environ.get("COSMOS_ROLLOUT_CMD_WAIT_TIMES", "0")
 )
+COSMOS_ROLLOUT_REPORT_INTERVAL = int(
+    os.environ.get("COSMOS_ROLLOUT_REPORT_INTERVAL", "100")
+)
 
 # Internal model type for HFModel
 COSMOS_HF_MODEL_TYPES = "hfmodel"

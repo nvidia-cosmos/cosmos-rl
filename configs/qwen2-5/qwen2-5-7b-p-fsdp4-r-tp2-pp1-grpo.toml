@@ -78,3 +78,11 @@ cp_size = 1
 dp_shard_size = 4
 pp_size = 1
 dp_replicate_size = 1
+
+[validation]
+enable = false
+freq = 30
+batch_size = 8
+dataset.name = "openai/gsm8k"
+dataset.subset = "main"
+dataset.split = "test"

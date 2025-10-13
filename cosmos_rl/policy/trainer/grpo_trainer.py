@@ -106,8 +106,47 @@ def compute_loss(
             ref_per_token_logps.shape, current_token_logps.shape
         )
 
-    coef_1 = torch.clamp(current_token_logps - old_per_token_logps, min=-20.0, max=20.0)
-    coef_1 = torch.exp(coef_1)
+    shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
+    bsz = shifted_length.shape[0]
+    negative_approx_kl = current_token_logps - old_per_token_logps
+
+    if config.train.train_policy.variant == "gspo":
+        # For GSPO, we compute sequence-level importance ratios
+        # but we need to maintain gradient flow through the token-level logprobs
+        negative_approx_kl_seq = torch.zeros(
+            bsz, device=negative_approx_kl.device, dtype=negative_approx_kl.dtype
+        )
+
+        # Compute sequence-level average KL divergence
+        for i in range(bsz):
+            seq_tokens = negative_approx_kl[cu_seqlens[i] : cu_seqlens[i + 1]]
+            seq_length = shifted_length[i]
+            assert (
+                len(seq_tokens) == shifted_length[i]
+            ), f"seq_length: {seq_length} != shifted_length: {shifted_length[i]}"
+            if seq_length > 0:
+                negative_approx_kl_seq[i] = seq_tokens.sum() / seq_length
+
+        # Clamp for numerical stability
+        negative_approx_kl_seq = torch.clamp(negative_approx_kl_seq, max=10.0)
+
+        importance_ratio_per_token = torch.zeros_like(current_token_logps)
+        for i in range(bsz):
+            start_idx = cu_seqlens[i]
+            end_idx = cu_seqlens[i + 1]
+            seq_length = end_idx - start_idx
+            if seq_length > 0:
+                # Use expand to maintain gradient connection
+                importance_ratio_per_token[start_idx:end_idx] = negative_approx_kl_seq[
+                    i
+                ].expand(seq_length)
+    else:
+        importance_ratio_per_token = torch.clamp(
+            negative_approx_kl, min=-20.0, max=20.0
+        )
+
+    importance_ratio_per_token = torch.exp(importance_ratio_per_token)
+    importance_ratio = importance_ratio_per_token
 
     if config.train.train_policy.aipo_rho is not None:
         # Due to the asynchronous update of the reference model, the rollout is not necessarily
@@ -116,22 +155,25 @@ def compute_loss(
         # approximate on-policy update to latest policy.
         # A difference from double-sided clipping of PPO, we use one-sided clipping.
         rho = config.train.train_policy.aipo_rho
-        per_token_loss = -torch.clamp(coef_1, max=rho) * current_advantages
+        per_token_loss = -torch.clamp(importance_ratio, max=rho) * current_advantages
     else:
         # the standard grpo loss with dual-clip PPO: https://arxiv.org/pdf/1912.09729
-        coef_2 = torch.clamp(
-            coef_1,
+        importance_ratio_clipped = torch.clamp(
+            importance_ratio,
             1 - config.train.train_policy.epsilon_low,
             1 + config.train.train_policy.epsilon_high,
         )
-        per_token_loss1 = coef_1 * current_advantages
-        per_token_loss2 = coef_2 * current_advantages
-        per_token_loss3 = (
-            -config.train.train_policy.lower_bound_ratio * current_advantages
-        )
-        clip_losses1 = -torch.min(per_token_loss1, per_token_loss2)
-        clip_losses2 = torch.min(per_token_loss3, clip_losses1)
-        per_token_loss = torch.where(current_advantages < 0, clip_losses2, clip_losses1)
+        loss1 = importance_ratio * current_advantages
+        loss2 = importance_ratio_clipped * current_advantages
+        if config.train.train_policy.variant == "gspo":
+            per_token_loss = -torch.min(loss1, loss2)
+        else:
+            loss3 = -config.train.train_policy.lower_bound_ratio * current_advantages
+            clip_losses1 = -torch.min(loss1, loss2)
+            clip_losses2 = torch.min(loss3, clip_losses1)
+            per_token_loss = torch.where(
+                current_advantages < 0, clip_losses2, clip_losses1
+            )
 
     # Compute the KL divergence between the model and the reference model
     if config.train.train_policy.kl_beta != 0.0:
@@ -148,7 +190,7 @@ def compute_loss(
     else:
         kl_loss = torch.zeros_like(per_token_loss)
 
-    bsz, max_len = logprob_masks.shape
+    bsz, _ = logprob_masks.shape
     per_token_loss_seq_sum = torch.zeros(
         bsz, device=per_token_loss.device, dtype=per_token_loss.dtype
     )  # [bsz,]
@@ -280,6 +322,8 @@ class GRPOTrainer(Trainer):
         # - Save the checkpoint/safetensors
         self.is_master_replica = True
         self.prepare_shard_infos_for_weight_sync_insts()
+        if config.train.train_policy.variant == "gspo":
+            logger.info("[Policy] Use GSPO loss in RL.")
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):

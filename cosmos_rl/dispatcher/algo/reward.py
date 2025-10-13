@@ -19,10 +19,11 @@ from math_verify.parser import LatexExtractionConfig, ExprExtractionConfig
 from math_verify.errors import TimeoutException
 from transformers import PreTrainedTokenizer
 from cosmos_rl.policy.config import Config
-from typing import Union, Callable
+from typing import Union, Callable, Tuple
 from cosmos_rl.utils.constant import RewardFn
 from cosmos_rl.utils.logging import logger
 from typing import Dict, Optional, List
+from cosmos_rl.dispatcher.data.packer import DataPacker
 
 math_comparer = math_metric(
     gold_extraction_target=(LatexExtractionConfig(),),
@@ -151,6 +152,7 @@ def overlong_reward_fn(
     reference: Union[str, None],
     config: Config,
     tokenizer: PreTrainedTokenizer,
+    **kwargs,
 ) -> float:
     """
     Reward function that checks if the completion is too long (DAPO).
@@ -290,6 +292,7 @@ class Reward:
         reward_function: Optional[Dict[str, float]] = None,
         explicit_reward_fn: Optional[List[Callable]] = None,
         explicit_filter_reward_fn: Optional[List[Callable]] = None,
+        data_packer: Optional[DataPacker] = None,
     ):
         self.config = config
         self.tokenizer = tokenier
@@ -363,8 +366,15 @@ class Reward:
             f"[Reward] Using filtered reward functions: {self.filter_reward_fns}"
         )
         logger.info(f"[Reward] is_filter: {self.is_filter}")
+        self.data_packer = data_packer
 
-    def compute_reward(self, to_be_evaluated: str, reference: Union[str, None]):
+    def compute_reward(
+        self,
+        to_be_evaluated: str,
+        reference: Union[str, None],
+        prompt: Union[str, List] = "",
+        **kwargs,
+    ) -> Tuple[float, float]:
         total_reward = 0.0
         filter_reward = 0.0
         for x, filter in zip(self.reward_funcs, self.is_filter):
@@ -374,7 +384,12 @@ class Reward:
                 func = x
                 weight = 1.0
             val = func(
-                to_be_evaluated, reference, config=self.config, tokenizer=self.tokenizer
+                to_be_evaluated,
+                reference,
+                prompt=prompt,
+                data_packer=self.data_packer,
+                config=self.config,
+                tokenizer=self.tokenizer,
             )
             total_reward += weight * val
             filter_reward += filter * val
@@ -383,6 +398,8 @@ class Reward:
             val = func(
                 to_be_evaluated,
                 reference,
+                prompt=prompt,
+                data_packer=self.data_packer,
                 config=self.config,
                 tokenizer=self.tokenizer,
             )

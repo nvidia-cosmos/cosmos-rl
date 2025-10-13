@@ -55,7 +55,13 @@ def run_rollout(*args, **kwargs):
             init_distributed()
             parallel_dims.build_mesh(device_type="cuda")
             rollout_worker = vLLMRolloutWorker(cosmos_rollout_config, parallel_dims)
-
+            rollout_worker.setup(
+                dataset=kwargs.get("dataset"),
+                reward_fns=kwargs.get("reward_fns"),
+                filter_reward_fns=kwargs.get("filter_reward_fns"),
+                val_dataset=kwargs.get("val_dataset"),
+                val_reward_fns=kwargs.get("val_reward_fns"),
+            )
         elif rollout_backend == "trtllm":
             try:
                 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (
@@ -66,6 +72,13 @@ def run_rollout(*args, **kwargs):
                 raise e
             # if backend is trtllm, we leave distribution initialization to trtllm executor.
             rollout_worker = TRTLLMRolloutWrapper(cosmos_rollout_config)
+            rollout_worker.setup(
+                dataset=kwargs.get("dataset"),
+                reward_fns=kwargs.get("reward_fns"),
+                filter_reward_fns=kwargs.get("filter_reward_fns"),
+                val_dataset=kwargs.get("val_dataset"),
+                val_reward_fns=kwargs.get("val_reward_fns"),
+            )
         else:
             raise ValueError(f"Invalid rollout backend: {rollout_backend}")
         rollout_worker.work()
@@ -74,6 +87,7 @@ def run_rollout(*args, **kwargs):
 
         traceback.print_exc()
     finally:
+        del rollout_worker
         destroy_distributed()
         logger.info("[Rollout] Destroy context of torch dist.")
 

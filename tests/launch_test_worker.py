@@ -79,16 +79,45 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_masks,
     pack_sequences_for_labels,
 )
-from torch.utils.data import DataLoader, DistributedSampler, Sampler
+from torch.utils.data import DataLoader, DistributedSampler, Sampler, BatchSampler
 from cosmos_rl.policy.trainer.sft_trainer import collate_fn, construct_dataset
 from torch.utils.data import Dataset
 from datasets import concatenate_datasets
 from typing import List
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
+from cosmos_rl.dispatcher.algo.reward import boxed_math_reward_fn
+import multiprocessing as mp
+from cosmos_rl.dispatcher.replica import Rollout
 
 POLICY_WORLD_SIZE = 4
 ROLLOUT_WORLD_SIZE = 4
+
+
+class TestDataset(Dataset):
+    def __init__(self, config: CosmosConfig):
+        pass
+
+    def setup(
+        self,
+        config: CosmosConfig,
+        tokenizer: AutoTokenizer,
+    ):
+        dataset = util.load_data_from_disk_or_hf(
+            config.train.train_policy.dataset.name,
+            config.train.train_policy.dataset.subset,
+            config.train.train_policy.dataset.revision or None,
+        )
+        dataset_list = []
+        for split_name in config.train.train_policy.dataset.split:
+            dataset_list.append(dataset[split_name])
+        self.dataset = concatenate_datasets(dataset_list)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]
+
+    def __len__(self):
+        return len(self.dataset)
 
 
 class TestModel:
@@ -303,6 +332,9 @@ class TestRollout:
 
     def prepare_trainable_params(self):
         self.trainable_params = self.model.get_trainable_params()
+
+    def lazy_initialize_rollout_engine(self, load_format):
+        pass
 
 
 async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank: int):
@@ -1483,10 +1515,7 @@ def run_sft_validation():
     trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
     assert len(trainer.val_data_loader) == 29195
 
-    class TestDataset(Dataset):
-        def __init__(self, config: CosmosConfig):
-            pass
-
+    class TestDatasetSFTVal(TestDataset):
         def setup(
             self,
             config: CosmosConfig,
@@ -1505,17 +1534,446 @@ def run_sft_validation():
         def __len__(self):
             return 1
 
-        def __getitem__(self, idx):
-            return self.dataset[idx]
-
     trainer = SFTTrainer(
         config=config,
         parallel_dims=parallel_dims,
-        val_dataset=TestDataset,
+        val_dataset=TestDatasetSFTVal,
         val_data_packer=DecoderOnlyLLMDataPacker(),
     )
     assert len(trainer.val_data_loader) == 1
     trainer.validate()
+
+
+def run_reward_check():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_grpo.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+
+    config.train.train_policy.dataset.name = os.path.join(
+        cur_dir, config.train.train_policy.dataset.name
+    )
+    logger.info(f"Using model from {config.policy.model_name_or_path}")
+    # config.rollout.n_generation = 2
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.rollout.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        self.val_data_packer = None
+        self.shutdown_signal = threading.Event()
+        self.shutdown_mp_signal = mp.Event()  # Must be a multiprocessing event
+        self.heartbeat_thread = None
+
+    def report_rollouts(self, block=False):
+        while True:
+            payloads, is_validation, step, empty = (
+                self.reward_dispatcher.dequeue_rewards_cal()
+            )
+            if not hasattr(self, "_cnt"):
+                self._cnt = 0
+            if payloads is not None:
+                self._cnt += 1
+                assert len(payloads) == 1
+                assert len(payloads[0].completions) == config.rollout.n_generation
+                assert len(payloads[0].rewards) == config.rollout.n_generation
+                assert len(payloads[0].advantages) == config.rollout.n_generation
+                logger.info(
+                    f"Got {payloads[0].rewards} {payloads[0].advantages} from reward calculation at {self._cnt}"
+                )
+                if is_validation:
+                    break
+            elif not block or empty:
+                break
+        if self._cnt >= 1:
+            self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
+
+        shutdown_signal = dist_util.broadcast_object_cpu(self.shutdown_signal.is_set())
+        if shutdown_signal:
+            self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
+
+        return payloads, is_validation, step, empty
+
+    vLLMRolloutWorker.report_rollouts = report_rollouts
+    vLLMRolloutWorker.send_end_signal = lambda self: None
+
+    def consume_command(
+        self,
+        cmd_pred=None,
+    ):
+        pass
+
+    CommMixin.init_comm = dummy
+    CommMixin.init_redis = lambda self: None
+    vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts = lambda self: None
+    vLLMRolloutWorker.consume_command = consume_command
+    rollout = vLLMRolloutWorker(config, parallel_dims=parallel_dims)
+
+    class TestDatasetReward(TestDataset):
+        def __len__(self):
+            return 1
+
+    def custom_reward_fn(to_be_evaluated, reference, *args, **kwargs) -> float:
+        assert isinstance(reference, str), "Reference answer should be a string"
+        reward = boxed_math_reward_fn(to_be_evaluated, reference, *args, **kwargs)
+        # Add more reward functions here
+        # ...
+        return reward
+
+    rollout.setup(
+        dataset=TestDatasetReward,
+        reward_fns=[custom_reward_fn],
+        num_workers=1,
+    )
+    rollout.lazy_initialize_rollout_engine("auto")
+
+    dataset = TestDatasetReward(config)
+    dataset.setup(tokenizer=rollout.tokenizer, config=config)
+    for idx in range(len(dataset)):
+        prompts = [
+            (
+                idx,
+                RLPayload(
+                    prompt=dataset[idx]["prompt"],
+                    reference_answer=dataset[idx]["result"],
+                ),
+            )
+        ]
+        rollout._prompt_queue.put(prompts)
+
+    rollout.state.set_weight_synced()
+    rollout.state.set_prompt_fetch_end()
+    rollout.main_loop()
+    rollout.handle_shutdown()
+
+
+def run_sft_custom_sampler():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_sft.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.train.train_policy.dataloader_shuffle = False
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
+        hf_config = util.retry(AutoConfig.from_pretrained)(
+            self.config.policy.model_name_or_path, trust_remote_code=True
+        )
+        model_type = hf_config.model_type
+        logger.info(f"model type {model_type}")
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        pass
+
+    CommMixin.init_comm = dummy
+
+    class TestDatasetSampler(TestDataset):
+        def setup(
+            self,
+            config: CosmosConfig,
+            tokenizer: AutoTokenizer,
+        ):
+            dataset = util.load_data_from_disk_or_hf(
+                config.validation.dataset.name,
+                config.validation.dataset.subset,
+                config.validation.dataset.revision or None,
+            )
+            dataset_list = []
+            for split_name in config.validation.dataset.split:
+                dataset_list.append(dataset[split_name])
+            self.dataset = concatenate_datasets(dataset_list)
+
+        def __getitem__(self, idx):
+            return super().__getitem__(idx)["conversation"]
+
+        def __len__(self):
+            return 16
+
+    class TestSampler(Sampler[int]):
+        def __init__(
+            self,
+            dataset: Dataset,
+            num_replicas=None,
+            rank=None,
+            shuffle: bool = True,
+            seed: int = 0,
+            drop_last: bool = False,
+        ):
+            self.base = DistributedSampler(
+                dataset,
+                num_replicas=num_replicas,
+                rank=rank,
+                shuffle=shuffle,
+                drop_last=drop_last,
+            )
+
+        def __iter__(self):
+            it = iter(self.base)
+            dp_rank = dist.get_rank() // 2
+            if not hasattr(self, "checked"):
+                cnt = 0
+                for i in it:
+                    assert (i - dp_rank) % 2 == 0
+                    cnt += 1
+                assert cnt == 8
+                self.checked = True
+            it = iter(self.base)
+            return it
+
+        def __len__(self) -> int:
+            base_len = len(self.base)
+            return base_len
+
+        def set_epoch(self, epoch: int):
+            self.base.set_epoch(epoch)
+
+    dataset = TestDatasetSampler(config)
+    dataset.setup(config=config, tokenizer=None)
+
+    dp_rank, dp_world_size = 0, 1
+    if parallel_dims.dp_enabled:
+        dp_rank = parallel_dims.mesh["dp"].get_local_rank()
+        dp_world_size = parallel_dims.mesh["dp"].size()
+
+    test_sampler = TestSampler(
+        dataset,
+        num_replicas=dp_world_size,
+        rank=dp_rank,
+        shuffle=False,
+        drop_last=False,
+    )
+    trainer = SFTTrainer(
+        config=config,
+        parallel_dims=parallel_dims,
+        dataset=dataset,
+        val_dataset=dataset,
+        val_data_packer=DecoderOnlyLLMDataPacker(),
+        sampler=test_sampler,
+        val_sampler=test_sampler,
+    )
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 1
+        cnt += 1
+    assert cnt == 8
+
+    trainer = SFTTrainer(
+        config=config,
+        parallel_dims=parallel_dims,
+        dataset=dataset,
+        val_dataset=dataset,
+        val_data_packer=DecoderOnlyLLMDataPacker(),
+        sampler=TestSampler,
+        val_sampler=TestSampler,
+    )
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 1
+        cnt += 1
+    assert cnt == 8
+
+    batch_sampler = BatchSampler(
+        test_sampler,
+        batch_size=config.train.train_batch_per_replica,
+        drop_last=False,
+    )
+    trainer = SFTTrainer(
+        config=config,
+        parallel_dims=parallel_dims,
+        dataset=dataset,
+        val_dataset=dataset,
+        val_data_packer=DecoderOnlyLLMDataPacker(),
+        batch_sampler=batch_sampler,
+        val_batch_sampler=batch_sampler,
+    )
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+
+    trainer = SFTTrainer(
+        config=config,
+        parallel_dims=parallel_dims,
+        dataset=dataset,
+        val_dataset=dataset,
+        val_data_packer=DecoderOnlyLLMDataPacker(),
+        sampler=TestSampler,
+        val_sampler=TestSampler,
+        batch_sampler=BatchSampler,
+        val_batch_sampler=BatchSampler,
+    )
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 1
+        cnt += 1
+    assert cnt == 8
+
+    trainer = SFTTrainer(
+        config=config,
+        parallel_dims=parallel_dims,
+        dataset=dataset,
+        val_dataset=dataset,
+        val_data_packer=DecoderOnlyLLMDataPacker(),
+        sampler=test_sampler,
+        val_sampler=test_sampler,
+        batch_sampler=BatchSampler,
+        val_batch_sampler=BatchSampler,
+    )
+    cnt = 0
+    for it in trainer.train_data_loader:
+        assert len(it) == 8
+        cnt += 1
+    assert cnt == 1
+    cnt = 0
+    for it in trainer.val_data_loader:
+        assert len(it) == 1
+        cnt += 1
+    assert cnt == 8
+
+
+def run_gspo_test():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_grpo.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.train.train_policy.variant = "gspo"
+    config.train.train_policy.dataset.name = os.path.join(
+        cur_dir, config.train.train_policy.dataset.name
+    )
+    config.logging.logger = ["console"]
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
+        hf_config = util.retry(AutoConfig.from_pretrained)(
+            self.config.policy.model_name_or_path, trust_remote_code=True
+        )
+        model_type = hf_config.model_type
+        logger.info(f"model type {model_type}")
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        self.shutdown_signal = threading.Event()
+        self.shutdown_mp_signal = mp.Event()  # Must be a multiprocessing event
+        pass
+
+    CommMixin.init_comm = dummy
+    CommMixin.init_redis = lambda self: None
+    GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = lambda self: None
+
+    trainer = GRPOTrainer(config=config, parallel_dims=parallel_dims)
+
+    trainer.replica_batch_for_this_step = 8
+    trainer.inter_policy_nccl.is_single_peer.set()
+    trainer.inter_policy_nccl.is_comm_ready.set()
+    total_steps = 8
+    dataset = TestDataset(config)
+    dataset.setup(config=config, tokenizer=None)
+    length = []
+    for i in range(total_steps * trainer.replica_batch_for_this_step):
+        prompt = dataset[i % len(dataset)][config.train.train_policy.prompt_column_name]
+        completion = dataset[i % len(dataset)][
+            config.train.train_policy.response_column_name
+        ]
+        completion_ids = trainer.tokenizer(
+            completion, add_special_tokens=False
+        ).input_ids
+        if (
+            i % 2 == 0
+            and trainer.global_rank // 2 == 0
+            or i % 2 == 1
+            and trainer.global_rank // 2 == 1
+        ):
+            length.append(len(completion_ids))
+        rollout = Rollout(
+            prompt=prompt, completion=completion, advantage=0.05 * (i % 20)
+        )
+        trainer.data_queue.put(rollout)
+
+    def hooked_execute_all_reduce(self):
+        ret = GRPOTrainer.execute_all_reduce(self)
+        if not hasattr(self, "test_hooked_cnt"):
+            self.test_hooked_cnt = 0
+        for old in self.old_per_token_logps:
+            assert (
+                old.shape[0]
+                == length[self.test_hooked_cnt] + length[self.test_hooked_cnt + 1]
+            )
+            self.test_hooked_cnt += 2
+        return ret
+
+    trainer.execute_all_reduce = types.MethodType(hooked_execute_all_reduce, trainer)
+    for i in range(total_steps):
+        report = trainer.train(
+            current_step=i,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+        if trainer.global_rank == 0:
+            logger.info(f"Step {i} report {report['train/loss_avg']}")
+            assert report["train/loss_avg"] < 0 and report["train/loss_avg"] > -0.5
+    trainer.handle_shutdown()
 
 
 async def main():
@@ -1572,6 +2030,15 @@ async def main():
         exit(0)
     elif mode == "sft_for_validation":
         run_sft_validation()
+        exit(0)
+    elif mode == "sft_for_custom_sampler":
+        run_sft_custom_sampler()
+        exit(0)
+    elif mode == "reward_execution_check":
+        run_reward_check()
+        exit(0)
+    elif mode == "gspo_test":
+        run_gspo_test()
         exit(0)
 
     # Initialize distributed environment

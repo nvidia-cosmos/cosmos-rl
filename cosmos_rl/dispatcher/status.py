@@ -127,6 +127,7 @@ class PolicyStatusManager:
         val_dataloader: Optional[DataLoader] = None,
         max_num_steps: Optional[int] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
+        val_datasize: Optional[int] = None,
     ):
         self.redis_handler = redis_handler
         self.config = config
@@ -140,6 +141,7 @@ class PolicyStatusManager:
         self.custom_logger_fns = (
             custom_logger_fns if custom_logger_fns is not None else []
         )
+        self.val_datasize = val_datasize
 
     def n_atoms_per_replica(self) -> int:
         """
@@ -533,13 +535,13 @@ class PolicyStatusManager:
     def validation_activate_dataloader(self, validation_step: int):
         if validation_step not in self.val_iters:
             logger.info(
-                f"[Controller] Activating validation dataloader for step {validation_step}, with length {len(self.val_dataloader)}"
+                f"[Controller] Activating validation dataloader for step {validation_step}, with length {(self.val_datasize or len(self.val_dataloader))}"
             )
             self.val_iters[validation_step] = iter(self.val_dataloader)
             self.activated_val_iter = self.val_iters[validation_step]
             self.activated_val_tqdm = tqdm(
                 desc="validation",
-                total=len(self.val_dataloader),
+                total=(self.val_datasize or len(self.val_dataloader)),
             )
 
     def validation_get_dataloader(
@@ -564,7 +566,9 @@ class PolicyStatusManager:
             len(x) for x in self.val_report_data[validation_step]
         )
 
-        validation_finished = n_items_of_this_step == len(self.val_dataloader)
+        validation_finished = n_items_of_this_step == (
+            self.val_datasize or len(self.val_dataloader)
+        )
 
         if self.activated_val_tqdm:
             self.activated_val_tqdm.update(n_items_of_this_step)
