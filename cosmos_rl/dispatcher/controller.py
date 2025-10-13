@@ -576,16 +576,24 @@ class Controller:
                 num_of_valid_prompts_consumed // global_batch_size
             )
 
-            # record the number of batches for current weight version
+            # record the number of valid prompts for current weight version
             if weight_version_for_current_batch not in self.weight_version_to_batch_num:
-                self.weight_version_to_batch_num[weight_version_for_current_batch] = 1
+                self.weight_version_to_batch_num[weight_version_for_current_batch] = (
+                    current_fetch_count
+                )
             else:
-                self.weight_version_to_batch_num[weight_version_for_current_batch] += 1
+                self.weight_version_to_batch_num[weight_version_for_current_batch] += (
+                    current_fetch_count
+                )
 
             # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
             if self.config.train.train_policy.max_retry_for_on_policy > 0:
-                if (
+                already_retried_times = (
                     self.weight_version_to_batch_num[weight_version_for_current_batch]
+                    // global_batch_size
+                )
+                if (
+                    already_retried_times
                     > self.config.train.train_policy.max_retry_for_on_policy
                 ):
                     raise RuntimeError(
