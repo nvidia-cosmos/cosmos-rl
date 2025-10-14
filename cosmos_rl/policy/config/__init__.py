@@ -651,6 +651,14 @@ class LoraConfig(BaseModel):
         default=None,
         description="List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint. ",
     )
+    alpha_pattern: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Per-module overrides for lora_alpha. Keys are regex patterns; evaluated in insertion order, first match wins.",
+    )
+    r_pattern: Optional[Dict[str, int]] = Field(
+        default=None,
+        description="Per-module overrides for LoRA rank r. Keys are regex patterns; evaluated in insertion order, first match wins.",
+    )
     init_lora_weights: Union[
         bool,
         Literal["gaussian", "eva", "olora", "pissa", "pissa_niter_[number of iters]"],
