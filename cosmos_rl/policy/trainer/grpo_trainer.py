@@ -1217,6 +1217,32 @@ class GRPOTrainer(Trainer):
         else:
             return False, 0.0
 
+    def reference_reset(self, current_step: int):
+        if (
+            self.config.train.train_policy.kl_beta != 0.0
+            and self.config.train.train_policy.reference_reset_interval is not None
+            and self.config.train.train_policy.reference_reset_interval > 0
+        ):
+            if (
+                current_step % self.config.train.train_policy.reference_reset_interval
+                == 0
+            ):
+                logger.info(
+                    f"[Policy] Resetting reference model at step {current_step} with interval {self.config.train.train_policy.reference_reset_interval}"
+                )
+                # Update the state dict of hf model so that it can be used for KL-divergence calculation
+                state_dict = self.model.state_dict()
+                for key, value in state_dict.items():
+                    assert (
+                        key in self.reference_state_dict
+                    ), f"Key {key} not found in reference state dict"
+                    self.reference_state_dict[key] = value.detach().cpu()
+                if self.config.train.train_policy.reset_optimizer_with_reference:
+                    logger.info("[Policy] Resetting optimizer.")
+                    self.build_optimizers()
+                    for lr in self.lr_schedulers.schedulers:
+                        lr.optimizer = self.optimizers
+
     def train(
         self,
         current_step: int,
@@ -1781,6 +1807,9 @@ class GRPOTrainer(Trainer):
 
         # For profiling
         self.profiler.step()
+
+        self.reference_reset(current_step)
+
         return report_data
 
     @property

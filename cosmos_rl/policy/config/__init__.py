@@ -376,6 +376,16 @@ class GrpoConfig(BaseModel):
         description="Maximum number of retries for on-policy rollout to have enough samples. If non-positive, will retry with no upper limit until enough samples are generated.",
     )
 
+    reference_reset_interval: Optional[int] = Field(
+        default=None,
+        description="Interval to reset the reference model to the current model. If set to None or 0, the reference model will not be reset during training.",
+    )
+
+    reset_optimizer_with_reference: bool = Field(
+        default=True,
+        description="Whether to reset the optimizer state when the reference model is reset.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
