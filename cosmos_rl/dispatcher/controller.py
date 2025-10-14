@@ -140,7 +140,7 @@ class Controller:
         self.user_val_data_packer = val_data_packer
         self.dataset = None
         self.ckpt_extra_info = {}
-        self.weight_version_to_batch_num = {}  # Only for on-policy.
+        self.weight_version_to_prompt_num = {}  # Only for on-policy.
         remain_samples_num = 0
 
         if self.is_rl:
@@ -577,20 +577,23 @@ class Controller:
             )
 
             # record the number of valid prompts for current weight version
-            if weight_version_for_current_batch not in self.weight_version_to_batch_num:
-                self.weight_version_to_batch_num[weight_version_for_current_batch] = (
+            if (
+                weight_version_for_current_batch
+                not in self.weight_version_to_prompt_num
+            ):
+                self.weight_version_to_prompt_num[weight_version_for_current_batch] = (
                     current_fetch_count
                 )
             else:
-                self.weight_version_to_batch_num[weight_version_for_current_batch] += (
+                self.weight_version_to_prompt_num[weight_version_for_current_batch] += (
                     current_fetch_count
                 )
 
             # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
             if self.config.train.train_policy.max_retry_for_on_policy > 0:
-                already_retried_times = (
-                    self.weight_version_to_batch_num[weight_version_for_current_batch]
-                    // global_batch_size
+                already_retried_times = math.ceil(
+                    self.weight_version_to_prompt_num[weight_version_for_current_batch]
+                    / global_batch_size
                 )
                 if (
                     already_retried_times
