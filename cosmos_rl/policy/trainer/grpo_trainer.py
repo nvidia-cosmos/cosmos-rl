@@ -1294,6 +1294,10 @@ class GRPOTrainer(Trainer):
         ), "Batch size should be divided evenly by mini_batch"
         num_mini_batch = batch_size // mini_batch_size
 
+        logger.info(
+            f"[Policy] num_mini_batch: {num_mini_batch}, batch_size: {batch_size}, mini_batch_size: {mini_batch_size}"
+        )
+
         # Initialize placeholder for old per-token logprobs
         self.old_per_token_logps = [None for _ in range(num_mini_batch)]
         self.ref_per_token_logps = [None for _ in range(num_mini_batch)]
@@ -1567,7 +1571,13 @@ class GRPOTrainer(Trainer):
                                     )
                             else:
                                 with self.act_offloading_ctx_manager:
-                                    raw_logits = self.model(**user_mini_batch)
+                                    with torch.autograd.detect_anomaly():
+                                        raw_logits = self.model(**user_mini_batch)
+                                    if torch.isnan(raw_logits).sum() > 0:
+                                        logger.info(
+                                            f"nan rank: {self.global_rank}, type: {type(self.model)}, shape: {raw_logits.shape}, raw_logits: {raw_logits}"
+                                        )
+                                        raise ValueError("nan in raw_logits")
 
                                 if self.parallel_dims.cp_enabled:
                                     # reset the position ids and input ids
@@ -1676,7 +1686,15 @@ class GRPOTrainer(Trainer):
                                     logger.info(
                                         f"[Policy] rank: {self.global_rank}, current_step: {current_step}, loss: {loss.item()}, per_token_loss: {per_token_loss.item()}, kl_loss: {kl_loss.item()}, local_mini_step: {local_mini_step}"
                                     )
-                                    loss.backward()
+                                    with torch.autograd.detect_anomaly():
+                                        loss.backward()
+
+                                    for p_n, p in self.model.named_parameters():
+                                        if torch.isnan(p.grad).sum() > 0:
+                                            logger.info(
+                                                f"nan rank: {self.global_rank}, local_mini_step: {local_mini_step}, param_name: {p_n}, shape: {p.grad.shape}, grad: {p.grad}"
+                                            )
+                                            raise ValueError(f"nan in grad of {p_n}")
                                     loss_sum += per_token_loss.item()
                                     kl_loss_sum += kl_loss.item()
                                     loss_count += 1
@@ -1688,10 +1706,16 @@ class GRPOTrainer(Trainer):
                                 == 0
                             ) and local_mini_step > 1:
                                 all_reduced = True
+                                logger.info(
+                                    f"[Policy] rank: {self.global_rank}, All reduce for local_mini_step: {local_mini_step}"
+                                )
                                 grad_norm_sum += self.execute_all_reduce()
                             else:
                                 all_reduced = False
                         if not is_computing_ref and not all_reduced:
+                            logger.info(
+                                f"[Policy] rank: {self.global_rank}, All reduce for whole batch: grad_norm_sum: {grad_norm_sum}"
+                            )
                             grad_norm_sum += self.execute_all_reduce()
         self.old_per_token_logps = []
         self.ref_per_token_logps = []

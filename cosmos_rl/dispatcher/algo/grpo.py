@@ -14,14 +14,15 @@
 # limitations under the License.
 
 from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo, _register_rule_based_algo
-from typing import Callable, List, Tuple
+from cosmos_rl.dispatcher.algo.reward import Reward
+from typing import List, Tuple
 import numpy as np
 from cosmos_rl.utils.constant import Algo
 
 
 class GRPO(RuleBasedAlgo):
     def __init__(
-        self, reward_fn: Callable, unbiased: bool = False, eps: float = 1e-5, **kwargs
+        self, reward_fn: Reward, unbiased: bool = False, eps: float = 1e-5, **kwargs
     ):
         super().__init__(**kwargs)
         self.reward_fn = reward_fn

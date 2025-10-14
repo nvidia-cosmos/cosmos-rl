@@ -262,6 +262,10 @@ class Attention(nn.Module):
         return self.o_proj(output)
 
 
+class MockLinear(nn.Linear):
+    pass
+
+
 class FeedForward(nn.Module):
     """
     FeedForward module
@@ -284,7 +288,8 @@ class FeedForward(nn.Module):
         model_args: GPTArgs,
     ):
         super().__init__()
-        self.up_proj = nn.Linear(dim, hidden_dim, bias="up_proj" in model_args.biases)
+        # self.up_proj = nn.Linear(dim, hidden_dim, bias="up_proj" in model_args.biases)
+        self.up_proj = MockLinear(dim, hidden_dim, bias="up_proj" in model_args.biases)
         self.down_proj = nn.Linear(
             hidden_dim, dim, bias="down_proj" in model_args.biases
         )
@@ -294,7 +299,12 @@ class FeedForward(nn.Module):
         self.act_mul_func = MLPActMulFunc(nn.SiLU())
 
     def forward(self, x):
-        return self.down_proj(self.act_mul_func(self.gate_proj(x), self.up_proj(x)))
+        a0 = self.gate_proj(x)
+        a1 = self.up_proj(x)
+        a2 = self.act_mul_func(a0, a1)
+        a3 = self.down_proj(a2)
+        return a3
+        # return self.down_proj(self.act_mul_func(self.gate_proj(x), self.up_proj(x)))
 
 
 class GPTBlock(nn.Module):
