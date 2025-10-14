@@ -122,14 +122,16 @@ def resolve_model_path(model_path: str, revision: Optional[str] = None) -> str:
                 ignore_patterns = None
 
             try:
+                cache_dir = os.environ.get("HF_HOME", "")
+                if not cache_dir:
+                    cache_dir = os.path.expanduser("~/.cache/huggingface/transformers/")
+                else:
+                    cache_dir = os.path.join(cache_dir, "hub")
                 model_path = retry(snapshot_download)(
                     model_path,
                     revision=revision,
                     token=os.environ.get("HF_TOKEN"),
-                    cache_dir=os.environ.get(
-                        "HF_HOME",
-                        os.path.expanduser("~/.cache/huggingface/transformers/"),
-                    ),
+                    cache_dir=cache_dir,
                     ignore_patterns=ignore_patterns,
                     allow_patterns=file_path,
                 )
