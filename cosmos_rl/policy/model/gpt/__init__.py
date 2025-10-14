@@ -730,7 +730,7 @@ class GPT(BaseModel):
         position_ids: torch.Tensor = None,
         imgs: torch.Tensor = None,  # [B, C, H, W]
         interested_tokens: Optional[torch.BoolTensor] = None,
-        current_emb: list[torch.Tensor] = None,
+        inference_mode: bool = False,
         *args,
         **kwargs,
     ):
@@ -741,47 +741,51 @@ class GPT(BaseModel):
         SCALE = 2.0
         # TODO: Remove this line
         # input_ids[:, -128:] = image_token_id
-        if current_emb is not None:
-            inputs_embeds = self.embed_tokens(input_ids)
-            # Do not remove this line
-            # This is a trick for TP with torch.compile
-            h = self.identity_layer(inputs_embeds)
-            n_emb = len(current_emb)
-            position_embeddings = self.rotary_emb(h, position_ids.to(dtype=torch.long))
-            if n_emb > 0:
-                assert torch.all(input_ids[:, -n_emb:] == image_token_id)
-                inputs_embeds[input_ids == image_token_id] = self.mm_proj(
-                    torch.stack(current_emb, dim=0)
-                ).squeeze()
-            vision_token_includes_start_end = (
-                (input_ids == vision_start_id)
-                | (input_ids == vision_end_id)
-                | (input_ids == image_token_id)
-            )
-            for layer in self.layers.values():
-                h = torch.utils.checkpoint.checkpoint(
-                    layer,
-                    h,
-                    position_embeddings,
-                    vision_token_includes_start_end,
-                    **kwargs,
-                    use_reentrant=False,
+        # logger.info(f"imgs: {imgs.shape}, range: {imgs.min()}, {imgs.max()}")
+        img_z1 = vae_encode_mode(self.vae, imgs)
+        # [B, L, D]
+        encoded_img = self.encoder(img_z1) * SCALE
+        if inference_mode:
+            with torch.no_grad():
+                vision_token_includes_start_end = (
+                    (input_ids == vision_start_id)
+                    | (input_ids == vision_end_id)
+                    | (input_ids == image_token_id)
                 )
-
-            # return self.mm_head(h[:, -1].reshape(1, self.model_args.dim))
-            last_emb = h[:, -1].reshape(1, self.model_args.dim)
-            noise = torch.randn(
-                1, self.COND_DIM, device=input_ids.device, dtype=inputs_embeds.dtype
-            )
-            for t in torch.linspace(0, 1, 100):
-                t_tensor = torch.tensor([t.item()], device=input_ids.device)
-                mm_h = self.mm_transformer(
-                    noise,
-                    last_emb,
-                    t_tensor,
+                inputs_embeds = self.embed_tokens(input_ids)
+                vision_token_mask = input_ids == image_token_id
+                position_embeddings = self.rotary_emb(
+                    inputs_embeds, position_ids.to(dtype=torch.long)
                 )
-                noise = noise + mm_h * 0.01
-            return noise.view(self.COND_DIM)
+                noise = torch.randn(
+                    [input_ids.shape[0], self.COND_LEN, self.COND_DIM],
+                    device=input_ids.device,
+                )
+                begin_t = 0.3
+                noise = begin_t * encoded_img + (1 - begin_t) * noise
+                torch.save(noise, f"origin_mix_noise_{os.environ['RANK']}.pt")
+                torch.save(
+                    encoded_img, f"origin_mix_encoded_img_{os.environ['RANK']}.pt"
+                )
+                for timestep in torch.linspace(begin_t, 1, 100):
+                    t_tensor = torch.tensor([timestep], device=input_ids.device).view(
+                        input_ids.shape[0], 1, 1
+                    )
+                    inputs_embeds[vision_token_mask] = self.mm_proj(noise).view(
+                        -1, self.model_args.dim
+                    )
+                    h = self.identity_layer(inputs_embeds)
+                    for layer in self.layers.values():
+                        h = layer(
+                            h,
+                            position_embeddings,
+                            vision_token_includes_start_end,
+                            t_tensor.view(-1),
+                        )
+                    velocity = self.mm_head(h[vision_token_mask]).view(noise.shape)
+                    noise = noise + velocity * 0.01
+                # save to localfile
+                torch.save(noise, f"noise_{os.environ['RANK']}.pt")
         else:
             vision_token_includes_start_end = (
                 (input_ids == vision_start_id)
@@ -809,9 +813,6 @@ class GPT(BaseModel):
 
             # Fake data
             # imgs = torch.randn(input_ids.shape[0], 3, 384, 384).to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-            img_z1 = vae_encode_mode(self.vae, imgs)
-            # [B, L, D]
-            encoded_img = self.encoder(img_z1) * SCALE
 
             timestep = torch.rand([input_ids.shape[0], 1, 1], device=input_ids.device)
             noise = torch.randn_like(encoded_img)

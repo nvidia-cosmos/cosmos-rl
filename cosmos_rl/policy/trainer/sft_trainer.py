@@ -718,25 +718,8 @@ class SFTTrainer(Trainer):
                         # #########################################################################################
 
                         logits, loss = self.model(**batch)
-
-                        # with torch.no_grad():
-                        #     # Test mm generation
-                        #     current_emb = []
-                        #     image_token_id = 151655
-                        #     for i in range(2048):
-                        #         next_emb = self.model(**batch, current_emb=current_emb)
-                        #         current_emb.append(next_emb)
-
-                        #         batch["input_ids"] = torch.cat([batch["input_ids"], torch.tensor([image_token_id] * batch["input_ids"].shape[0], device=self.device, dtype=input_ids.dtype).view(batch["input_ids"].shape[0], 1)], dim=-1)
-                        #         print(f"batch['input_ids']: {batch['input_ids']}")
-                        #         position_ids, _, _ = (
-                        #             self.model.get_position_ids(**batch)
-                        #         )
-                        #         batch["position_ids"] = position_ids
-                        #     # save to file [2048, 1536]
-                        #     cond_var = torch.stack(current_emb)
-                        #     torch.save(cond_var, f"cond_var_{os.environ['RANK']}.pt")
-                        #     break
+                        # logits, loss = self.model(**batch, inference_mode=True)
+                        # break
 
                         # recover from ulysses if cp is enabled
                         if self.parallel_dims.cp_enabled:
@@ -884,21 +867,21 @@ class SFTTrainer(Trainer):
                     logger.info(
                         f"Saving cosmos checkpoint at step {self.train_step}..."
                     )
-                    self.ckpt_manager.save_checkpoint(
-                        model=self.model,
-                        optimizer=self.optimizers,
-                        scheduler=self.lr_schedulers,
-                        step=self.train_step,
-                        total_steps=self.total_steps,
-                    )
-                    self.ckpt_manager.save_check(
-                        step=self.train_step,
-                        val_score=val_score,
-                        pp_enabled=self.parallel_dims.pp_enabled,
-                        pp_last_stage=pp_last_stage,
-                        pp_master_rank=self.parallel_dims.world_size
-                        - self.parallel_dims.world_size / self.parallel_dims.pp,
-                    )
+                    # self.ckpt_manager.save_checkpoint(
+                    #     model=self.model,
+                    #     optimizer=self.optimizers,
+                    #     scheduler=self.lr_schedulers,
+                    #     step=self.train_step,
+                    #     total_steps=self.total_steps,
+                    # )
+                    # self.ckpt_manager.save_check(
+                    #     step=self.train_step,
+                    #     val_score=val_score,
+                    #     pp_enabled=self.parallel_dims.pp_enabled,
+                    #     pp_last_stage=pp_last_stage,
+                    #     pp_master_rank=self.parallel_dims.world_size
+                    #     - self.parallel_dims.world_size / self.parallel_dims.pp,
+                    # )
             if (
                 self.config.train.max_num_steps is not None
                 and self.train_step >= self.total_steps

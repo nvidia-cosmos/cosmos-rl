@@ -54,25 +54,28 @@ def convert_weight_from_hf(
         shard = tensor
     elif (
         match := re.search(
-            r"layers\.(\d+)\.self_attn\.(q_norm|k_norm|v_norm)\.(weight|bias)",
+            r"layers\.(\d+)\.self_attn\.(q_norm|k_norm|v_norm|mm_q_norm|mm_k_norm|mm_v_norm)\.(weight|bias)",
             dest_name,
         )
     ) is not None:
         shard = tensor
     elif (
-        match := re.search(r"layers\.(\d+)\.input_layernorm\.(weight|bias)", dest_name)
+        match := re.search(
+            r"layers\.(\d+)\.(input_layernorm|mm_input_layernorm)\.(weight|bias)",
+            dest_name,
+        )
     ) is not None:
         shard = tensor
     elif (
         match := re.search(
-            r"layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj)\.(weight|bias)",
+            r"layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|mm_q_proj|mm_k_proj|mm_v_proj)\.(weight|bias)",
             dest_name,
         )
     ) is not None:
         shard = tensor.tensor_split(tp_size, dim=0)[tp_rank]
     elif (
         match := re.search(
-            r"layers\.(\d+)\.self_attn\.(o_proj)\.(weight|bias)", dest_name
+            r"layers\.(\d+)\.self_attn\.(o_proj|mm_o_proj)\.(weight|bias)", dest_name
         )
     ) is not None:
         if dest_name.endswith(".bias"):
@@ -81,12 +84,15 @@ def convert_weight_from_hf(
             shard = tensor.tensor_split(tp_size, dim=-1)[tp_rank]
     elif (
         match := re.search(  # noqa: F841
-            r"layers\.(\d+)\.mlp\.(up_proj|gate_proj)\.(weight|bias)", dest_name
+            r"layers\.(\d+)\.mlp\.(up_proj|gate_proj|mm_up_proj|mm_gate_proj)\.(weight|bias)",
+            dest_name,
         )
     ) is not None:
         shard = tensor.tensor_split(tp_size, dim=0)[tp_rank]
     elif (
-        match := re.search(r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", dest_name)  # noqa: F841
+        match := re.search(
+            r"layers\.(\d+)\.mlp\.down_proj|mm_down_proj\.(weight|bias)", dest_name
+        )  # noqa: F841
     ) is not None:
         if dest_name.endswith(".bias"):
             shard = tensor
@@ -94,14 +100,17 @@ def convert_weight_from_hf(
             shard = tensor.tensor_split(tp_size, dim=-1)[tp_rank]
     elif (
         match := re.search(  # noqa: F841
-            r"layers\.(\d+)\.post_attention_layernorm\.(weight|bias)", dest_name
+            r"layers\.(\d+)\.(post_attention_layernorm|mm_post_attention_layernorm)\.(weight|bias)",
+            dest_name,
         )
     ) is not None:
         shard = tensor
-    elif not ignore_unknown_weights:
-        raise ValueError(f"Unsupported weight: {dest_name}")
     else:
-        return None, None
+        shard = tensor
+    # elif not ignore_unknown_weights:
+    #     raise ValueError(f"Unsupported weight: {dest_name}")
+    # else:
+    #     return None, None
 
     # Do FSDP sharding
     shard = shard.contiguous()

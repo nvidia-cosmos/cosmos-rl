@@ -82,8 +82,8 @@ def load_latest_if_any(ckpt_dir, modelA, modelB, map_location):
     if not os.path.exists(latest):
         return 0
     ckpt = torch.load(latest, map_location=map_location)
-    modelA.load_state_dict(ckpt["modelA"], strict=True)
-    modelB.load_state_dict(ckpt["modelB"], strict=True)
+    modelA.load_state_dict(ckpt["modelA"], strict=False)
+    modelB.load_state_dict(ckpt["modelB"], strict=False)
     print(f"Loaded checkpoint from {latest}")
     return int(ckpt.get("step", 0))
 
@@ -118,6 +118,10 @@ def reconstruct_from_most_blur(
     vae = AutoencoderKL.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers", subfolder="vae"
     ).to(device).eval().to(torch.float32)
+    # IMG_SIZE = 512
+    # COND_LEN = 2560 
+    # COND_DIM = 1536
+    # N_LAYERS = 40
 
     # Build models
     IMG_SIZE = 384
@@ -133,17 +137,6 @@ def reconstruct_from_most_blur(
     if img is None:
         ds = load_dataset("shivamsark/div2k", split="train", keep_in_memory=False)
         img = ds[div2k_index]["image"].convert("RGB")
-        # import requests
-        # from PIL import Image
-        # from io import BytesIO
-
-        # url = "https://farm6.staticflickr.com/5304/5733134845_38e91df9b9_b.jpg"
-        # response = requests.get(url)
-        # # Open the image from the response content
-        # img = Image.open(BytesIO(response.content))
-
-
-        # crop = _random_crop(img, IMG_SIZE)
         crop = img.resize((IMG_SIZE, IMG_SIZE), Image.LANCZOS)
         # Always return IMG_SIZExIMG_SIZE (exact) without distortion
         if crop.size != (IMG_SIZE, IMG_SIZE):
@@ -152,7 +145,12 @@ def reconstruct_from_most_blur(
         img = TF.to_tensor(crop).unsqueeze(0).to(device)
 
     # Encode to latent at t=0 (sharp/source)
+    # z1 = vae_encode_mode(vae_bfloat16, img.to(torch.bfloat16)).to(torch.float32)
     z1 = vae_encode_mode(vae, img)
+    z1_recover = vae_decode(vae, z1)[0].permute(1, 2, 0) * 255.0
+    z1_recover = Image.fromarray(z1_recover.cpu().numpy().astype(np.uint8))
+    z1_recover.save("z1_recover.png")
+
 
     BEGIN_T = 0.1
     END_T = 1.0
@@ -160,10 +158,6 @@ def reconstruct_from_most_blur(
 
     # zt_s, vel_s = vae_latent_jvp_via_infinite_diff(img, t0, vae)
     zt_s = t0.view(1, 1, 1, 1) * z1 + (1 - t0.view(1, 1, 1, 1)) * torch.randn_like(z1)
-
-    start_img = vae_decode(vae, zt_s)[0].permute(1, 2, 0) * 255.0
-    start_img = Image.fromarray(start_img.cpu().numpy().astype(np.uint8))
-    start_img.save("start_img.png")
 
     # Velocity field callback (x' = f(x,t))
     def vel(x_t, t_scalar, condition, count=None):
@@ -180,8 +174,9 @@ def reconstruct_from_most_blur(
     # Integrate from t=1 -> t=0 (reduce blur)
     with torch.autocast(device_type=device.type, dtype=dtype):
         condition = modelA(z1)
-        # condition[:, :100] = 0.0
-        # condition = torch.load(f"../cond_var_3.pt").to(device).view(1, COND_LEN, COND_DIM) / 2.0
+        # condition = torch.load(f"../origin_mix_encoded_img_1.pt").to(device).view(1, COND_LEN, COND_DIM) / 2.0
+        # condition = torch.load(f"../origin_mix_noise_1.pt").to(device).view(1, COND_LEN, COND_DIM) / 2.0
+        # condition = torch.load(f"../noise_1.pt").to(device).view(1, COND_LEN, COND_DIM) / 2.0
         # print(f"condition: {condition}")
     zT = rk4_integrate(zt_s, t0, torch.tensor([END_T], device=device, dtype=torch.float32), steps, partial(vel), condition=condition)
 
