@@ -26,7 +26,7 @@ from vllm import SamplingParams
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.rollout.schema import RolloutResult
-from cosmos_rl.rollout.vllm_rollout.vllm_rollout_async import vLLMRolloutAsync
+from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.utils.logging import logger
 
 
@@ -40,14 +40,14 @@ class CompletedRollout:
 
 class RolloutTaskScheduler:
     """
-    Schedules and manages asynchronous rollout task execution using vLLM's async engine.
+    Schedules and manages asynchronous rollout task execution using RolloutBase interface.
 
     This scheduler implements a producer-consumer pattern:
     - Internally manages task_queue and complete_queue
     - Accepts payloads via put_rollout() method
     - Runs a background async loop that monitors task_queue
     - Controls concurrent generation based on max_concurrent_requests
-    - Calls vLLM's async_generate for each payload
+    - Calls rollout engine's rollout_generation_async for each payload
     - Provides get() method to retrieve completed results
 
     Two execution modes:
@@ -58,7 +58,7 @@ class RolloutTaskScheduler:
     ```python
     # Initialize the scheduler
     scheduler = RolloutTaskScheduler(
-        rollout_engine=vllm_rollout_engine,
+        rollout_engine=rollout_engine,
         data_packer=data_packer,
         sampling_params=sampling_params,
         max_concurrent_requests=10
@@ -84,7 +84,7 @@ class RolloutTaskScheduler:
     ```python
     # Initialize the scheduler
     scheduler = RolloutTaskScheduler(
-        rollout_engine=vllm_rollout_engine,
+        rollout_engine=rollout_engine,
         data_packer=data_packer,
         sampling_params=sampling_params,
         max_concurrent_requests=10
@@ -117,7 +117,7 @@ class RolloutTaskScheduler:
 
     def __init__(
         self,
-        rollout_engine: vLLMRolloutAsync,
+        rollout_engine: RolloutBase,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
         max_concurrent_requests: int = 10,
@@ -128,7 +128,7 @@ class RolloutTaskScheduler:
         Initialize the RolloutTaskScheduler.
 
         Args:
-            rollout_engine: The vLLM async rollout engine
+            rollout_engine: The rollout engine implementing RolloutBase interface
             data_packer: Data packer for processing payloads
             sampling_params: Sampling parameters for generation
             max_concurrent_requests: Maximum number of concurrent generation requests
@@ -201,7 +201,7 @@ class RolloutTaskScheduler:
             CompletedRollout object containing the payload and result
         """
         try:
-            # Call vLLM's async rollout generation
+            # Call rollout engine's async generation method
             results = await self.rollout_engine.rollout_generation(
                 payloads=[payload],
                 stream=self.stream,
