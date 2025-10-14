@@ -1976,6 +1976,88 @@ def run_gspo_test():
     trainer.handle_shutdown()
 
 
+def run_reference_reset_test():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_grpo.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.train.train_policy.dataset.name = os.path.join(
+        cur_dir, config.train.train_policy.dataset.name
+    )
+    config.logging.logger = ["console"]
+    config.train.train_policy.kl_beta = 100
+    config.train.train_policy.reference_reset_interval = 2
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
+        hf_config = util.retry(AutoConfig.from_pretrained)(
+            self.config.policy.model_name_or_path, trust_remote_code=True
+        )
+        model_type = hf_config.model_type
+        logger.info(f"model type {model_type}")
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        self.shutdown_signal = threading.Event()
+        self.shutdown_mp_signal = mp.Event()  # Must be a multiprocessing event
+        pass
+
+    CommMixin.init_comm = dummy
+    CommMixin.init_redis = lambda self: None
+    GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = lambda self: None
+
+    trainer = GRPOTrainer(config=config, parallel_dims=parallel_dims)
+    trainer.model_load_from_hf()
+    state_dict = trainer.model.state_dict()
+    for key, value in state_dict.items():
+        trainer.reference_state_dict[key] = value.detach().cpu()
+
+    trainer.replica_batch_for_this_step = 8
+    trainer.inter_policy_nccl.is_single_peer.set()
+    trainer.inter_policy_nccl.is_comm_ready.set()
+    total_steps = 8
+    dataset = TestDataset(config)
+    dataset.setup(config=config, tokenizer=None)
+    for i in range(total_steps * trainer.replica_batch_for_this_step):
+        prompt = dataset[i % len(dataset)][config.train.train_policy.prompt_column_name]
+        completion = dataset[i % len(dataset)][
+            config.train.train_policy.response_column_name
+        ]
+        rollout = Rollout(prompt=prompt, completion=completion, advantage=1.0)
+        trainer.data_queue.put(rollout)
+
+    for i in range(total_steps):
+        report = trainer.train(
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+        if trainer.global_rank == 0:
+            logger.info(
+                f"Step {i} report {report['train/kl_loss_avg']} {report['train/kl_loss_max']}"
+            )
+            if i % 2 == 0:
+                assert report["train/kl_loss_avg"] == 0.0
+                assert report["train/kl_loss_max"] == 0.0
+            else:
+                assert report["train/kl_loss_avg"] > 0.0
+                assert report["train/kl_loss_max"] > 0.0
+    trainer.handle_shutdown()
+
+
 async def main():
     # Get shared memory name and size from command line arguments
     import argparse
@@ -2039,6 +2121,9 @@ async def main():
         exit(0)
     elif mode == "gspo_test":
         run_gspo_test()
+        exit(0)
+    elif mode == "reference_reset_test":
+        run_reference_reset_test()
         exit(0)
 
     # Initialize distributed environment
