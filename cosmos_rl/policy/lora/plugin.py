@@ -284,13 +284,30 @@ def inject_lora_adapters(
                 effective_rank = config.r
                 effective_alpha = config.lora_alpha
 
-                rank_match = _pick_first_regex(module_name, r_pattern)
-                if rank_match is not None:
-                    effective_rank = int(rank_match[1])
+                if r_pattern:
+                    rank_match = _pick_first_regex(module_name, r_pattern)
+                    if rank_match is not None:
+                        effective_rank = int(rank_match[1])
+                        logger.info(
+                            f"[LoRA] r_pattern matched for {module_name}: pattern='{rank_match[0]}' -> r={effective_rank}"
+                        )
+                    else:
+                        logger.info(
+                            f"[LoRA] r for {module_name}: not matching any r_pattern{r_pattern}, using default r={effective_rank}"
+                        )
 
-                alpha_match = _pick_first_regex(module_name, alpha_pattern)
-                if alpha_match is not None:
-                    effective_alpha = float(alpha_match[1])
+                if alpha_pattern:
+                    alpha_match = _pick_first_regex(module_name, alpha_pattern)
+                    if alpha_match is not None:
+                        effective_alpha = float(alpha_match[1])
+                        logger.info(
+                            f"[LoRA] alpha override for {module_name}: pattern='{alpha_match[0]}' -> alpha={effective_alpha}"
+                        )
+                    else:
+                        readable_keys = str(", ".join(list(alpha_pattern.keys())))
+                        logger.info(
+                            f"[LoRA] alpha for {module_name}: not matching any alpha_pattern[{readable_keys}], using default alpha={effective_alpha}"
+                        )
 
                 lora_linear = LoraInjectedLinear.from_linear(
                     base=module,
