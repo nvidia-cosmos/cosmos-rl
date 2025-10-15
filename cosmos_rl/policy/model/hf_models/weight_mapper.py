@@ -119,10 +119,13 @@ class HFModelWeightMapper(WeightMapper):
         models_do_not_split_gate_up_proj = ["gpt_oss"]
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
-        for param_name, param in vllm_model.named_parameters():
+        for param_name, param in vllm_model.named_parameters(remove_duplicate=False):
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            if any(rule in compatible_key for rule in ["qkv_proj", "qkv"]):
+            if (
+                any(rule in compatible_key for rule in ["qkv_proj", "qkv"])
+                and not self.is_vlm
+            ):
                 # must be inplace slicing.
                 # split qkv weight
                 rule = "qkv_proj" if "qkv_proj" in compatible_key else "qkv"
@@ -188,6 +191,16 @@ class HFModelWeightMapper(WeightMapper):
             else:
                 # Rollout model is vllm model, so we don't need to reverse the hf checkpoint conversion mapping
                 pass
+
+            # Special case for Qwen3-VL
+            if self.config.model_type == "qwen3_vl":
+                if name.startswith("language_model.model."):
+                    name = name.replace("language_model.model.", "language_model.")
+                if not name.startswith("model.") and "lm_head" not in name:
+                    name = "model." + name
+                if name.startswith("language_model.lm_head."):
+                    # lm_head exists at language_model level, remove the language_model prefix
+                    name = name.replace("language_model.lm_head.", "lm_head.")
         else:
             if not name == "lm_head.weight":
                 if not name.startswith("model."):
