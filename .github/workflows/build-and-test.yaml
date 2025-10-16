@@ -48,6 +48,8 @@ jobs:
 
           ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
 
+          ${DOCKER_RUN} python -c "import transformer_engine; print(transformer_engine.__version__); from transformer_engine.pytorch.attention import DotProductAttention;from transformer_engine.pytorch.module.rmsnorm import RMSNorm as _RMSNorm"
+
           # run tests
           ${DOCKER_RUN} python tests/test_cosmos_hf_precision.py
           ${DOCKER_RUN} /bin/bash -c "CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 tests/test_context_parallel.py"

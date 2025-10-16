@@ -94,7 +94,7 @@ RUN pip install \
     flash_attn==2.8.3 \
     -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly \
     flashinfer-python \
-    transformer_engine[pytorch] \
+    transformer_engine[pytorch]==2.7 \
     -r /workspace/cosmos_rl/requirements.txt
 
 # TODO: (lms) remove nightly version of vllm and triton in later vllm release.
