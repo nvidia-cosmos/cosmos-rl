@@ -292,8 +292,9 @@ def inject_lora_adapters(
                             f"[LoRA] r_pattern matched for {module_name}: pattern='{rank_match[0]}' -> r={effective_rank}"
                         )
                     else:
+                        readable_keys = str(", ".join(list(r_pattern.keys())))
                         logger.info(
-                            f"[LoRA] r for {module_name}: not matching any r_pattern{r_pattern}, using default r={effective_rank}"
+                            f"[LoRA] r for {module_name}: not matching any r_pattern[{readable_keys}], using default r={effective_rank}"
                         )
 
                 if alpha_pattern:
