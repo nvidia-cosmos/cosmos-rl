@@ -761,6 +761,15 @@ class PolicyStatusManager:
                             for data in self.report_data_list
                         ]
                     )
+                    total_entropy = np.mean(
+                        [data.get("train/entropy", 0) for data in self.report_data_list]
+                    )
+                    total_effective_entropy = np.mean(
+                        [
+                            data.get("train/effective_entropy", 0)
+                            for data in self.report_data_list
+                        ]
+                    )
                     train_step = self.report_data_list[0]["train_step"]
                     self.report_data_list = []
 
@@ -772,6 +781,8 @@ class PolicyStatusManager:
                         "train/kl_loss_avg": total_kl_loss_avg,
                         "train/kl_loss_max": total_kl_loss_max,
                         "train/grad_norm": total_grad_norm,
+                        "train/entropy": total_entropy,
+                        "train/effective_entropy": total_effective_entropy,
                     }
 
                     self.train_report_data.setdefault(train_step, {}).update(
@@ -785,7 +796,7 @@ class PolicyStatusManager:
                         )
                     if "console" in self.config.logging.logger:
                         logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
+                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
                     for logger_fn in self.custom_logger_fns:
                         try:
@@ -795,8 +806,10 @@ class PolicyStatusManager:
                                 f"[Controller] Warning reporting customized training results: {e}"
                             )
                 except Exception as e:
+                    import traceback
+
                     logger.warning(
-                        f"[Controller] Warning reporting training results: {e}"
+                        f"[Controller] Warning reporting training results: {e}\n{traceback.format_exc()}"
                     )
 
             # All replicas have been reduced, trigger weight sync
@@ -978,6 +991,7 @@ class PolicyStatusManager:
                     "train/reward_min": np.min(rewards),
                     "train/completion_length_mean": np.mean(completion_lengths),
                     "train/completion_length_max": np.max(completion_lengths),
+                    "train/completion_length_min": np.min(completion_lengths),
                 }
                 self.train_report_data[self.current_step] = report_data
 
