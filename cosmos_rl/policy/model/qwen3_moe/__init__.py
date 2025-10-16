@@ -13,17 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
+from dataclasses import dataclass, field
+
 import os
 import torch
 from torch import nn
 import torch.nn.functional as F
-import torch.distributed as dist
+
 from safetensors import safe_open
-from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Callable
+
 from transformers import AutoConfig
-import torch.distributed._symmetric_memory as symm_mem
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
 from cosmos_rl.utils.util import (
     resolve_model_path,
     IdentityLayer,
@@ -36,25 +38,19 @@ from cosmos_rl.policy.model.qwen3_moe.weight_converter import (
     convert_weight_from_hf,
 )
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.kernel.moe.moe import (
+    GroupedExpertsDeepEP,
+    GroupedExpertsSymmMem,
+    setup_symm_mem,
+)
 from cosmos_rl.policy.model.qwen3_moe.weight_mapper import Qwen3MoeWeightMapper
-from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
-from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
-from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
 import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
-
-
-def build_norm(
-    norm_type: str, dim: int, eps: float, casting_mode: Optional[str] = None
-):
-    assert norm_type == "rmsnorm", f"Unknown norm_type: '{norm_type}'"
-    return RMSNorm(dim, eps, casting_mode=casting_mode)
 
 
 @dataclass
@@ -68,13 +64,21 @@ class Qwen3MoeArgs:
     head_dim: int
     vocab_size: int
     max_seq_len: int
-    biases: List[str] = field(default_factory=lambda: [])
+    biases: list[str] = field(default_factory=lambda: [])
     q_k_norm_enabled: bool = False
     norm_eps: float = 1e-6
     rope_theta: float = 10000
     norm_type: str = "rmsnorm"
     rope_type: str = "default"
+    ep_method: str = "symm_mem"  # Choices are "deep_ep" or "symm_mem"
     hf_config: AutoConfig = None
+
+
+def build_norm(
+    norm_type: str, dim: int, eps: float, casting_mode: Optional[str] = None
+):
+    assert norm_type == "rmsnorm", f"Unknown norm_type: '{norm_type}'"
+    return RMSNorm(dim, eps, casting_mode=casting_mode)
 
 
 class RotaryEmbedding(nn.Module):
@@ -283,15 +287,12 @@ class MoEGate(nn.Module):
         self.num_routed_experts = num_routed_experts
         self.weight = nn.Parameter(torch.empty((self.num_routed_experts, dim)))
 
-    def forward(self, hidden_states):
-        bsz, seq_len, h = hidden_states.shape
-        # compute gating score
-        hidden_states = hidden_states.view(-1, h)
+    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Compute gating score
         logits = F.linear(
             hidden_states.type(torch.float32), self.weight.type(torch.float32), None
         )
         scores = logits.softmax(dim=-1, dtype=torch.float32)
-
         topk_weight, topk_idx = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
 
         # norm gate to sum 1
@@ -300,12 +301,6 @@ class MoEGate(nn.Module):
             topk_weight = topk_weight / denominator
 
         return topk_idx, topk_weight
-
-
-class FakeLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, num_experts: int):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(num_experts, out_features, in_features))
 
 
 class FeedForward(nn.Module):
@@ -321,9 +316,6 @@ class FeedForward(nn.Module):
         model_args (Qwen3MoeArgs): Model configuration arguments.
     """
 
-    token_send_buf: Optional[torch.Tensor] = None
-    token_gather_buf: Optional[torch.Tensor] = None
-
     def __init__(
         self,
         dim: int,
@@ -334,22 +326,28 @@ class FeedForward(nn.Module):
         super().__init__()
         self.layer_id = layer_id
         self.total_experts = model_args.n_experts
-        self.local_experts = model_args.n_experts
-        self.intermediate_dim = intermediate_dim
-        self.dim = dim
-        self.up_proj = FakeLinear(dim, intermediate_dim, self.local_experts)
-        self.gate_proj = FakeLinear(dim, intermediate_dim, self.local_experts)
-        self.down_proj = FakeLinear(intermediate_dim, dim, self.local_experts)
-        self.act_fn = F.silu
+
+        if model_args.ep_method == "deep_ep":
+            self.experts = GroupedExpertsDeepEP(
+                dim=dim,
+                inter_dim=intermediate_dim,
+                n_routed_experts=model_args.n_experts,
+                n_activated_experts=model_args.hf_config.num_experts_per_tok,
+            )
+        elif model_args.ep_method == "symm_mem":
+            self.experts = GroupedExpertsSymmMem(
+                dim=dim,
+                inter_dim=intermediate_dim,
+                n_routed_experts=model_args.n_experts,
+            )
+
         self.gate = MoEGate(
             num_routed_experts=self.total_experts,
             num_experts_per_tok=model_args.hf_config.num_experts_per_tok,
             norm_topk_prob=model_args.hf_config.norm_topk_prob,
             dim=dim,
         )
-        self.local_to_dtensor = IdentityLayer()
         self.reshard_helper_layer = IdentityLayer()
-        self.group_gemm_imp = group_gemm_imp()
 
         assert not any(
             [
@@ -359,166 +357,30 @@ class FeedForward(nn.Module):
             ]
         ), "up_proj, gate_proj, and down_proj cannot be in biases for Qwen3Moe"
 
-    def sort_tokens(self, x, topk_ids, topk_weights):
-        # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
-        # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
-        # Since this is an "aritificial" index creation (final outcome being
-        # `idxs`), we don't need gradients here.
-
-        with torch.no_grad():
-            # [seq_len, n_routed_experts]
-            expert_counts = topk_ids.new_zeros((topk_ids.shape[0], self.total_experts))
-            # Fill 1 to the selected experts
-            expert_counts.scatter_(1, topk_ids, 1)
-            tokens_per_expert = expert_counts.sum(dim=0)
-            # Token indices for each expert
-            token_indices = topk_ids.view(-1).argsort()
-
-        sorted_tokens = x[token_indices // topk_ids.shape[1]]
-        # assert sorted_tokens.shape == sorted_tokens_shape
-
-        return (sorted_tokens, token_indices, tokens_per_expert)
-
-    def get_send_buf(self):
-        # [Why detach?] During a first forward-backward step, the buffer would
-        # be included in a computational graph. In a second step, autograd will
-        # return an error saying "Trying to backward through the graph a second
-        # time (or directly access saved tensors more than once)". This is
-        # because the buffer is still in the graph, and autograd is trying to
-        # backward through the graph a second time. To avoid this, we detach the
-        # buffer from the graph. `detach()` returns a new tensor, which shares
-        # the same storage with the original one.
-        self.token_send_buf.grad = None
-        return self.token_send_buf.detach()
-
-    def get_gather_buf(self):
-        # See [Why detach?] in `get_send_buf`
-        self.token_gather_buf.grad = None
-        return self.token_gather_buf.detach()
-
-    def moe_on_device(self, x, topk_ids, topk_weight):
-        """
-        x: [batch * local_seq_len, dim]
-        topk_ids: [batch * local_seq_len, topk]
-        topk_weight: [batch * local_seq_len, topk]
-
-        sorted_tokens: [batch * local_seq_len * topk, dim]
-        token_indices: [batch * local_seq_len * topk]
-        tokens_per_expert: [n_experts]
-        """
-        (
-            sorted_tokens,
-            token_indices,
-            tokens_per_expert,
-        ) = self.sort_tokens(x, topk_ids, topk_weight)
-        # keep the seqlen dimension for later use without holding onto the sorted tokens
-        seqlen_sorted_tokens = sorted_tokens.shape[0]
-
-        # Sum the tokens over local experts, then we get tokens per EP rank,
-        # which is the input splits
-        with torch.no_grad():
-            # tokens_per_expert: [n_experts, 1]
-            # tokens_per_expert_group: [n_experts, 1]
-            tokens_per_expert_group = tokens_per_expert.new_empty(
-                tokens_per_expert.shape[0]
-            )
-            # For TP/EP mode, the input is sequencely parallelized
-            # So each EP group will have distinct, but the same number of tokens
-            # After this collective, tokens_per_expert_group is still of shape [n_experts, 1]
-
-            # Let's say we are on EP rank 0:
-            # recv: [(e0, e1, e2 ...), (e0, e1, e2 ...), ...], totally `n_experts` elements
-            #        ----------------: tokens from EP group 0 to EP group 0
-            #                          ----------------: tokens from EP group 1 to EP group 0
-            #                          ...
-            # So we can just concat
-            dist.all_to_all_single(
-                tokens_per_expert_group,
-                tokens_per_expert,
-                group=self.ep_group,
-                async_op=False,
-            )
-            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
-        # Move input to the `token_send_buf` symm mem
-        token_send_buf = self.get_send_buf()
-        token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
-        # Note: `out=` avoids copy, but it is not differentiable
-        # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=token_send_buf[: idxs.shape[0]])
-
-        # Reference:
-        #   1. [TorchTitan](https://github.com/pytorch/torchtitan/blob/main/torchtitan/experiments/deepseek_v3/symm_mem_recipes/triton_on_device_all_to_all_v.py)
-        #   2. [Symm-mem-recipes](https://github.com/yifuwang/symm-mem-recipes)
-        token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
-            token_send_buf,
-            input_splits,
-            self.ep_group,
-        )
-
-        # We need to permute the received tokens so that tokens for the same expert are contiguous.
-        # This part prepares a 1D tensor `permuted_indices` for such permutation.
-        # This part doesn't need gradient.
-        with torch.no_grad():
-            ALIGN_SIZE_M = 128
-            permuted_indices, m_sizes, m_offsets = generate_permute_indices(
-                tokens_per_expert_group,
-                self.local_experts,
-                self.ep_size,
-                ALIGN_SIZE_M,
-            )
-        # Permute the received tokens so that tokens for the same expert are contiguous.
-        contig_tokens = token_gather_buf[permuted_indices]
-        # group gemm - handle all three group gemms (up, gate, down for all experts)
-        # print(f"m_sizes: {m_sizes}, m_offsets: {m_offsets}")
-        hidden_outputs = self.group_gemm_imp(
-            contig_tokens,
-            m_sizes,
-            m_offsets,
-            self.gate_proj.weight.to_local(),
-            self.up_proj.weight.to_local(),
-            self.down_proj.weight.to_local(),
-            self.act_fn,
-        )
-
-        # Prepare buffer for tokens processed by experts
-        processed_tokens = self.get_gather_buf()
-
-        # Move into Symmetric Memory for the return shuffle
-        processed_tokens[permuted_indices] = hidden_outputs
-
-        # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
-        # The input/output splits are just a reverse of the previous shuffle.
-        token_return_buf, _ = OnDeviceAllToAllV.apply(
-            processed_tokens,
-            output_splits,
-            self.ep_group,
-        )
-
-        returned_tokens = token_return_buf[:seqlen_sorted_tokens]
-        output_tokens = torch.empty_like(returned_tokens)
-        output_tokens[token_indices] = returned_tokens
-
-        final_out = (
-            output_tokens.view(*topk_ids.shape, -1)
-            .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1))
-            .sum(dim=1)
-            .type(returned_tokens.dtype)
-        )
-
-        return final_out
-
     def forward(self, hidden_states: torch.Tensor):
         """
         hidden_states: [bsz, seqlen // ep_size, dim]
         """
-        assert self.ep_group is not None, "EP group is not set"
         orig_shape = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+
         # topk_idx: [batch * local_seq_len, topk]
         # topk_weight: [batch * local_seq_len, topk]
         topk_idx, topk_weight = self.gate(hidden_states)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
-        y = self.moe_on_device(hidden_states, topk_idx, topk_weight)
+        token_mask = torch.ones(
+            hidden_states.size(0),
+            dtype=torch.bool,
+            device=hidden_states.device,
+        )
+
+        y = self.experts(
+            x=hidden_states,
+            token_mask=token_mask,
+            weights=topk_weight,
+            indices=topk_idx,
+        )
+
         y = y.view(*orig_shape)
         return self.reshard_helper_layer(y)
 
@@ -744,37 +606,21 @@ class Qwen3MoE(BaseModel):
         # so we need to delete it manually
         self.rotary_emb.to(torch.cuda.current_device())
         self.rotary_emb.reset_inv_freq()
-        # Basically, max_seq_len * 2 is enough for all-to-all-v communication.
-        overflow = 2
 
         # TODO(cjx): max_seq_len * mini_batch is a better choice
-        MAX_BATCH_MUL_SEQ_LEN = (
+        _MAX_BATCH_MUL_SEQ_LEN = (
             self.model_args.max_seq_len
             * cosmos_config.train.train_policy.mini_batch
             * self.model_args.hf_config.num_experts_per_tok
         )
 
-        OnDeviceAllToAllV.max_output_len = MAX_BATCH_MUL_SEQ_LEN * overflow
-        # Init MoE kernel related buffers
-        if FeedForward.token_send_buf is None:
-            dtype = self.model_args.hf_config.torch_dtype
-
-            # Input buffer for DP-to-EP shuffle
-            FeedForward.token_send_buf = symm_mem.empty(
-                MAX_BATCH_MUL_SEQ_LEN,
-                self.model_args.dim,  # hidden dim
-                dtype=dtype,
-                device=self.current_device(),
+        if self.model_args.ep_method == "symm_mem":
+            setup_symm_mem(
+                max_batch_tokens=_MAX_BATCH_MUL_SEQ_LEN,
+                model_dim=self.model_args.dim,
+                dtype=self.model_args.hf_config.torch_dtype,
+                device=torch.cuda.current_device(),
             )
-            FeedForward.token_send_buf.zero_()
-            # Input buffer for EP-to-DP shuffle
-            FeedForward.token_gather_buf = symm_mem.empty(
-                MAX_BATCH_MUL_SEQ_LEN * overflow,
-                self.model_args.dim,  # hidden dim
-                dtype=dtype,
-                device=self.current_device(),
-            )
-            FeedForward.token_gather_buf.zero_()
 
     @property
     def parallelize_fn(self):
@@ -827,6 +673,48 @@ class Qwen3MoE(BaseModel):
             parallel_dims (ParallelDims): Parallel dimensions definition.
             info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
+        self_state_dict = self.state_dict()
+        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
+
+        def _get_target_tensor_view(
+            dest_name: str,
+            expert_id: Optional[int],
+        ) -> Optional[torch.Tensor]:
+            slice_range = None
+            if self.model_args.ep_method == "deep_ep":
+                if "gate_projs" in dest_name:
+                    dest_name = dest_name.replace("gate_projs", "gate_and_up_projs")
+                    slice_range = slice(0, self.model_args.ffn_dim)
+                elif "up_projs" in dest_name:
+                    dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
+                    slice_range = slice(self.model_args.ffn_dim, None)
+
+            if dest_name not in self_state_dict:
+                return None
+
+            target_tensor = self_state_dict[dest_name]
+            if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                target_tensor = target_tensor.to_local()
+
+            if expert_id is not None:
+                # Convert expert_id to local_expert_id
+                n_local_experts = (
+                    self.model_args.n_experts
+                    // parallel_dims.tp
+                    // parallel_dims.dp_shard
+                )
+                expert_id = expert_id % n_local_experts
+                target_tensor = target_tensor[expert_id]
+
+            if slice_range is not None:
+                assert target_tensor.shape[0] == 2 * self.model_args.ffn_dim, (
+                    f"Expect shape[0] of `{dest_name}` to be "
+                    f"{2 * self.model_args.ffn_dim}, but got {target_tensor.shape[0]}"
+                )
+                target_tensor = target_tensor[slice_range]
+
+            return target_tensor
+
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
@@ -834,12 +722,11 @@ class Qwen3MoE(BaseModel):
             f for f in os.listdir(model_path) if f.endswith(".safetensors")
         ]
 
-        self_state_dict = self.state_dict()
-        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
         lm_head_weight_key = "lm_head.weight"
         embed_tokens_weight_key = "model.embed_tokens.weight"
         weights_of_ckpt_names = set()
         reserved = {}
+
         for f in safetensors_files:
             weights_of_ckpt = {}
             ckpt = safe_open(
@@ -855,7 +742,7 @@ class Qwen3MoE(BaseModel):
 
             for name in weights_of_ckpt.keys():
                 tensor = weights_of_ckpt[name]
-                dest_name, shared_weight = convert_weight_from_hf(
+                dest_name, shared_weight, expert_id = convert_weight_from_hf(
                     tensor,
                     name,
                     model_type,
@@ -867,35 +754,13 @@ class Qwen3MoE(BaseModel):
                     # This is due to the expert parallelism grouping
                     continue
 
-                expert_id = None
-                if match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
-                    dest_name,
-                ):
-                    # remove `experts.$ID.` from dest_name
-                    expert_id = int(match.group(2))
-                    dest_name = dest_name.replace(f"experts.{expert_id}.", "")
-                    # Convert expert_id to local_expert_id
-                    n_local_experts = (
-                        self.model_args.n_experts
-                        // parallel_dims.tp
-                        // parallel_dims.dp_shard
-                    )
-
-                    expert_id = expert_id % n_local_experts
-
-                if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                    logger.info(
-                        f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
+                target_tensor = _get_target_tensor_view(dest_name, expert_id)
+                if target_tensor is None:
+                    assert parallel_dims.pp_enabled, (
+                        f"Weight `{dest_name}` is not found in the model. "
+                        "Pipeline parallelism is disabled, this is not allowed."
                     )
                     continue
-
-                target_tensor = self_state_dict[dest_name]
-                if isinstance(target_tensor, torch.distributed.tensor.DTensor):
-                    target_tensor = target_tensor.to_local()
-                # Write to the correct expert of the target tensor
-                if expert_id is not None:
-                    target_tensor = target_tensor[expert_id]
 
                 assert (
                     target_tensor.shape == shared_weight.shape
