@@ -68,6 +68,7 @@ class HFModel(BaseModel):
         super().__init__(hf_config)
         self.hf_config = hf_config
         self.model = model
+        self.model = self.model.to(dtype=hf_config.torch_dtype)
         self.model_class = model_class
         self.is_vlm = is_vlm
         self.need_dequantization = need_dequantization
@@ -540,7 +541,6 @@ class HFModel(BaseModel):
         """
         model_type = self.hf_config.model_type
         dtype = self.hf_config.torch_dtype
-        self.model = self.model.to(dtype=dtype)
         kwargs = {
             "config": self.hf_config,
             "revision": revision,
