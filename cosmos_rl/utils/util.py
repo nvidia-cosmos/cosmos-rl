@@ -957,6 +957,26 @@ def create_async_task(coro):
     return task
 
 
+def entropy_from_logits(logits: torch.Tensor):
+    """Calculate entropy from logits."""
+    pd = torch.nn.functional.softmax(logits, dim=-1)
+    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
+    return entropy
+
+
+def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 2048):
+    """Memory-efficient entropy calculation with chunking."""
+    entropy = torch.zeros(logits.shape[0], device=logits.device)
+    for i in range(0, logits.shape[0], chunk_size):
+        logits_chunk = logits[i : i + chunk_size].float()
+        pd_chunk = torch.nn.functional.softmax(logits_chunk, dim=-1)
+        entropy_chunk = torch.logsumexp(logits_chunk, dim=-1) - torch.sum(
+            pd_chunk * logits_chunk, dim=-1
+        )
+        entropy[i : i + chunk_size] = entropy_chunk
+    return entropy
+
+
 def compute_logprobs(
     input_ids_batch: torch.Tensor,  # [batch_size, max_len]
     logprob_masks: torch.Tensor,  # [batch_size, max_len],
@@ -964,7 +984,7 @@ def compute_logprobs(
     is_full_logits: bool = False,
     label_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
     input_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
     """
     Compute the per-token log probabilities and advantages
 
@@ -973,10 +993,13 @@ def compute_logprobs(
         logprob_masks: the logprob_masks of the model [batch_size, max_len]
         logits: the logits of the model [batch_size, max_len, vocab_size] or [n_logprob_tokens, vocab_size]
         is_full_logits: whether the logits are full logits or have been index-selected for memory efficiency
+        label_packing_mask: the packing mask for the labels, if using packed sequences
+        input_packing_mask: the packing mask for the inputs, if using packed sequences
 
     Returns:
         logps: the per-token log probabilities
         cu_seqlens: the cumulative sequence lengths of the logps
+        metrics_dict: a dict of collected metrics, including entropy
     """
     # Shift token_ids
     if label_packing_mask is not None:
@@ -1008,6 +1031,19 @@ def compute_logprobs(
     # )
     # print(f"[Policy] SFT loss: {sft_loss}, shape: {effective_input_ids.shape, effective_logits.shape}")
 
+    metrics_dict = {}
+    with torch.no_grad():
+        # Compute entropy for logging with chunking to save memory
+        entropy = entropy_from_logits_with_chunking(
+            logits.view(-1, logits.size(-1))
+        ).detach()
+        metrics_dict["entropy"] = entropy.mean()
+        metrics_dict["effective_entropy"] = (
+            entropy[logprob_masks.view(-1)].mean()
+            if is_full_logits
+            else metrics_dict["entropy"]
+        )
+
     masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
     cu_seqlens = torch.zeros(
         bsz + 1, dtype=torch.int32, device=logits.device
@@ -1016,7 +1052,7 @@ def compute_logprobs(
     logps = selective_log_softmax(
         effective_logits, effective_input_ids
     )  # [n_logprob_tokens,]
-    return logps, cu_seqlens
+    return logps, cu_seqlens, metrics_dict
 
 
 def dynamic_import_module(path: str, attr: Optional[str] = None) -> Dict[str, Any]:

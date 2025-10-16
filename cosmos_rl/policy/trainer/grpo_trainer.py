@@ -1173,7 +1173,7 @@ class GRPOTrainer(Trainer):
         minibatch: Dict[str, Any],
         logits: torch.Tensor,
         is_full_logits: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Compute the per-token log probabilities and advantages
 
@@ -1185,6 +1185,7 @@ class GRPOTrainer(Trainer):
         Returns:
             logps: the per-token log probabilities
             logprob_masks: the logprob_masks
+            metrics: a dict of collected metrics, e.g. entropy
         """
         assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
         assert (
@@ -1310,6 +1311,7 @@ class GRPOTrainer(Trainer):
             for i in range(len(samples))
         ]
 
+        self.metrics = {}
         # user_info_keys = list(kwargs.keys())
         advantages_t = torch.tensor(advantages_list).to(self.device)
         batch_size = len(rollouts)
@@ -1623,15 +1625,18 @@ class GRPOTrainer(Trainer):
                                     )
                                     user_mini_batch["input_ids"] = packed_args["inputs"]
 
-                                current_per_token_logprobs, cu_seqlens = (
-                                    self.compute_logprobs(
-                                        user_mini_batch,
-                                        logits=raw_logits,
-                                        is_full_logits=True
-                                        if raw_logits.ndim == 3
-                                        else False,
-                                    )
+                                (
+                                    current_per_token_logprobs,
+                                    cu_seqlens,
+                                    metrics,
+                                ) = self.compute_logprobs(
+                                    user_mini_batch,
+                                    logits=raw_logits,
+                                    is_full_logits=True
+                                    if raw_logits.ndim == 3
+                                    else False,
                                 )
+                                self.metrics.update(metrics)
                                 logprob_masks = user_mini_batch["logprob_masks"]
                                 current_advantages = (
                                     logprob_masks * minibatched_advantages
@@ -1762,6 +1767,11 @@ class GRPOTrainer(Trainer):
                     report_data["train/kl_loss_avg"] = global_avg_kl_loss
                     report_data["train/kl_loss_max"] = global_max_kl_loss
                 report_data["train/grad_norm"] = grad_norm_sum.item()
+                if len(self.metrics) > 0:
+                    for k, v in self.metrics.items():
+                        report_data[f"train/{k}"] = (
+                            v.item() if isinstance(v, torch.Tensor) else v
+                        )
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.
@@ -1879,13 +1889,14 @@ def _swizzle_pp_grpo_forward(
     if config.train.train_policy.temperature > 1e-6:
         raw_logits = raw_logits / config.train.train_policy.temperature
     # [n_tokens, n_vocab]
-    current_per_token_logprobs, cu_seqlens = trainer.compute_logprobs(
+    current_per_token_logprobs, cu_seqlens, metrics = trainer.compute_logprobs(
         minibatch={
             **user_input,
         },
         logits=raw_logits,
         is_full_logits=True if raw_logits.ndim == 3 else False,
     )
+    trainer.metrics.update(metrics)
     logprob_masks = user_input["logprob_masks"]
     current_advantages = logprob_masks * advantages
 
