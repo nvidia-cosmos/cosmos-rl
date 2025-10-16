@@ -1203,16 +1203,16 @@ cosmos-rl --config config.toml"""
     # Create a temporary file and write to it
     # To avoid escaping backslashes in regex keys (e.g., alpha_pattern/r_pattern),
     # remove them before dump and append as dedicated sections with literal keys.
-    cfg_for_dump = copy.deepcopy(cosmos_config)
-    lora_cfg = (cfg_for_dump.get("policy") or {}).get("lora") or {}
-    alpha_pattern_tbl = None
-    r_pattern_tbl = None
-    if isinstance(lora_cfg, dict):
-        alpha_pattern_tbl = lora_cfg.pop("alpha_pattern", None)
-        r_pattern_tbl = lora_cfg.pop("r_pattern", None)
     with tempfile.NamedTemporaryFile(
         mode="w+", suffix=".toml", delete=False
     ) as tmpfile:
+        cfg_for_dump = copy.deepcopy(cosmos_config)
+        lora_cfg = (cfg_for_dump.get("policy") or {}).get("lora") or {}
+        alpha_pattern_tbl = None
+        r_pattern_tbl = None
+        if isinstance(lora_cfg, dict):
+            alpha_pattern_tbl = lora_cfg.pop("alpha_pattern", None)
+            r_pattern_tbl = lora_cfg.pop("r_pattern", None)
         toml.dump(cfg_for_dump, tmpfile)
         if isinstance(alpha_pattern_tbl, dict) and alpha_pattern_tbl:
             tmpfile.write("\n[policy.lora.alpha_pattern]\n")

@@ -27,6 +27,7 @@ import subprocess
 import json
 import toml
 from argparse import REMAINDER
+import copy
 
 
 logging.basicConfig(level=logging.INFO)
@@ -211,7 +212,22 @@ def main():
     with tempfile.NamedTemporaryFile(
         dir=cache_dir, mode="w+", suffix=".toml", delete=False
     ) as tmpfile:
-        toml.dump(config, tmpfile)
+        cfg_for_dump = copy.deepcopy(config)
+        lora_cfg = (cfg_for_dump.get("policy") or {}).get("lora") or {}
+        alpha_pattern_tbl = None
+        r_pattern_tbl = None
+        if isinstance(lora_cfg, dict):
+            alpha_pattern_tbl = lora_cfg.pop("alpha_pattern", None)
+            r_pattern_tbl = lora_cfg.pop("r_pattern", None)
+        toml.dump(cfg_for_dump, tmpfile)
+        if isinstance(alpha_pattern_tbl, dict) and alpha_pattern_tbl:
+            tmpfile.write("\n[policy.lora.alpha_pattern]\n")
+            for k, v in alpha_pattern_tbl.items():
+                tmpfile.write(f"'{k}' = {v}\n")
+        if isinstance(r_pattern_tbl, dict) and r_pattern_tbl:
+            tmpfile.write("\n[policy.lora.r_pattern]\n")
+            for k, v in r_pattern_tbl.items():
+                tmpfile.write(f"'{k}' = {v}\n")
         config_tmpfile = tmpfile.name
         logging.info(f"Config written to {config_tmpfile}")
 
