@@ -51,7 +51,7 @@ def encode_image_to_base64(image_inputs: List[str]) -> List[str]:
     return new_image_inputs
 
 
-class Qwen3_5_VL_DataPacker(DataPacker):
+class Qwen3_VL_DataPacker(DataPacker):
     """
     Data protocol & processing logic for the Qwen3.5 VLMs for SFT and RL training.
     """
@@ -375,7 +375,7 @@ class Qwen3_5_VL_DataPacker(DataPacker):
 
     def _process_single_sample(
         self,
-        conversation: "Qwen3_5_VL_DataPacker.Payload",
+        conversation: "Qwen3_VL_DataPacker.Payload",
         add_generation_prompt: bool,
     ) -> Dict[str, Any]:
         try:
@@ -637,7 +637,7 @@ class Qwen3_5_VL_DataPacker(DataPacker):
 
     def get_policy_input(
         self,
-        sample: "Qwen3_5_VL_DataPacker.Payload",
+        sample: "Qwen3_VL_DataPacker.Payload",
         rollout_output: Optional[str] = None,
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
@@ -714,7 +714,7 @@ class Qwen3_5_VL_DataPacker(DataPacker):
         return self._collate_fn(processed_samples, computed_max_len)
 
     def sft_process_sample(
-        self, sample: "Qwen3_5_VL_DataPacker.Payload"
+        self, sample: "Qwen3_VL_DataPacker.Payload"
     ) -> Dict[str, Any]:
         """
         Accepts either raw text or conversation format.

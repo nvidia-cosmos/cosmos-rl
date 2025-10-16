@@ -36,8 +36,8 @@ from safetensors import safe_open
 from cosmos_rl.policy.model.qwen3_vl_moe.weight_converter import (
     convert_weight_from_hf,
 )
-from cosmos_rl.dispatcher.data.packer.qwen3_5_vl_data_packer import (
-    Qwen3_5_VL_DataPacker,
+from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import (
+    Qwen3_VL_DataPacker,
 )
 from cosmos_rl.policy.model.qwen3_vl_moe.weight_mapper import Qwen3VLMoeWeightMapper
 from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
@@ -341,7 +341,7 @@ class Qwen3MoE(nn.Module):
 
 
 @ModelRegistry.register(
-    Qwen3VLMoeWeightMapper, default_data_packer_cls=Qwen3_5_VL_DataPacker
+    Qwen3VLMoeWeightMapper, default_data_packer_cls=Qwen3_VL_DataPacker
 )
 class Qwen3VLMoeModel(BaseModel):
     def __init__(self, config: Qwen3VLMoe_Args):
