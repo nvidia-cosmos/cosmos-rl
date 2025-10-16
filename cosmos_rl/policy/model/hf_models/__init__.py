@@ -554,6 +554,14 @@ class HFModel(BaseModel):
             )
             kwargs["quantization_config"] = mxfp4_quantization_config
 
+        # Configure gradient checkpointing if enabled
+        if self._gradient_checkpointing_enabled:
+            self.model.gradient_checkpointing_enable()
+            assert (
+                self.model.is_gradient_checkpointing
+            ), "Gradient checkpointing is not enabled"
+            logger.info("Enabled gradient checkpointing for HFModel")
+
         # Use from_pretrained loading in two scenarios:
         # 1. Model requires dequantization (e.g., gpt-oss)
         # 2. Named buffer reinitialization failed
@@ -601,14 +609,6 @@ class HFModel(BaseModel):
                 local_view.data.copy_(shared_weight.to(device))
 
         del hf_model
-
-        # Configure gradient checkpointing if enabled
-        if self._gradient_checkpointing_enabled:
-            self.model.gradient_checkpointing_enable()
-            assert (
-                self.model.is_gradient_checkpointing
-            ), "Gradient checkpointing is not enabled"
-            logger.info("Enabled gradient checkpointing for HFModel")
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         position_ids = None
