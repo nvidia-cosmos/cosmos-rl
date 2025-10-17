@@ -22,7 +22,7 @@ train_batch_per_replica = 16
 sync_weight_interval = 1
 
 [policy]
-model_name_or_path = "/lustre/fsw/portfolios/sw/users/yufhuang/cache/deepseek-v3/dcp_hf"
+model_name_or_path = "deepseek-ai/DeepSeek-V3"
 model_max_length = 1024
 model_gradient_checkpointing = true
 
@@ -56,3 +56,15 @@ pp_micro_batch_size = 4
 pp_schedule = "GPipe"
 dp_replicate_size = 1
 cp_rotate_method = "allgather"
+
+[profiler]
+enable_profiler = true
+
+[profiler.sub_profiler_config]
+wait_steps = 6
+active_steps = 6
+rank_filter = [1]
+record_shape = true
+profile_memory = false
+with_stack = true
+with_modules = true
