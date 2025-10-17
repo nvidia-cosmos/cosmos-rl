@@ -899,8 +899,8 @@ class PolicyStatusManager:
         else:
             items_count = self.config.train.train_batch_per_replica
             required_rollouts = items_count * len(arrived_replicas)
-            all_ready_or_reduced = (
-                self.all_ready_or_reduced() and self.rollouts_enough_for_one_step()
+            all_ready_or_reduced = self.all_ready_or_reduced() and (
+                self.rollout_buffer.qsize() >= required_rollouts
             )
 
         # If the last command is fake, we need to trigger data fetch and training no matter
