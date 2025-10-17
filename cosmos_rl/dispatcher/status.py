@@ -680,14 +680,11 @@ class PolicyStatusManager:
         else:
             rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
 
-        if self.config.train.train_policy.on_policy:
-            # record the samples that will be consumed by policy
-            self.consumed_samples_num += len(rollouts_to_put)
-
         for rollout in rollouts_to_put:
             completion_tokens_count += len(self.tokenizer.encode(rollout.completion))
             n_samples += 1
             if self.config.train.train_policy.on_policy:
+                self.consumed_samples_num += 1
                 if self.rollouts_enough_for_one_step():
                     break
             self.put_rollout(rollout)
