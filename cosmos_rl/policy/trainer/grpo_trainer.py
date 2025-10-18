@@ -1381,6 +1381,8 @@ class GRPOTrainer(Trainer):
                             if (
                                 self.config.train.train_policy.max_token_len_per_mini_batch
                                 is not None
+                                and self.config.train.train_policy.max_token_len_per_mini_batch
+                                > 0
                             ):
                                 # split batch into mini_batches with sequence parallelism
                                 if self.parallel_dims.cp_enabled:

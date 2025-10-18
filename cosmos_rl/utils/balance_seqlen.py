@@ -20,7 +20,8 @@ import cosmos_rl.utils.distributed as dist_util
 
 
 def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
-    # see: https://en.wikipedia.org/wiki/Largest_differencing_method
+    # Karmarkar-Karp differencing method for k-partition problem: https://en.wikipedia.org/wiki/Largest_differencing_method
+    # Implementation Reference: https://github.com/volcengine/verl/blob/main/verl/utils/seqlen_balancing.py#L27
     class Set:
         def __init__(self) -> None:
             self.sum = 0
@@ -125,6 +126,7 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     return partitions
 
 
+# Refer to: https://github.com/volcengine/verl/blob/main/verl/utils/seqlen_balancing.py#L151
 def get_seqlen_balanced_partitions(
     seqlen_list: list[int], k_partitions: int, equal_size: bool
 ):
@@ -179,6 +181,7 @@ def ceildiv(a, b):
     return -(a // -b)
 
 
+# Modified based on: https://github.com/volcengine/verl/blob/main/verl/utils/seqlen_balancing.py#L251
 def rearrange_mini_batches(
     batch,
     seq_len_effective: list[int],
@@ -200,8 +203,8 @@ def rearrange_mini_batches(
         min_num_mini_batch (int, optional): force at least this many splits (pads empty ones).
         use_dynamic_bsz_balance (bool, optional): balance the computational workload between mini-batches
     Returns:
-        List[List[Any]]: the micro-batches.
-        List[List[int]]: index lists mapping each micro-batch back to original positions.
+        List[List[Any]]: the mini-batches after rearrangement.
+        List[List[int]]: index lists mapping each mini-batch back to original positions.
     """
     # this is per local mini_bsz
     max_seq_len = max(seq_len_effective)
