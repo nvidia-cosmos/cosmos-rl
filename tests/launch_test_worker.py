@@ -1974,6 +1974,7 @@ def run_gspo_test():
             logger.info(f"Step {i} report {report['train/loss_avg']}")
             assert report["train/loss_avg"] < 0 and report["train/loss_avg"] > -0.5
     trainer.handle_shutdown()
+    destroy_distributed()
 
 
 def run_reference_reset_test():
@@ -2056,6 +2057,145 @@ def run_reference_reset_test():
                 assert report["train/kl_loss_avg"] > 0.0
                 assert report["train/kl_loss_max"] > 0.0
     trainer.handle_shutdown()
+    destroy_distributed()
+
+
+def run_dynamic_batchsize_test(
+    max_token_len_per_mini_batch: int = 2048, batch_size_per_optimize: int = 2
+):
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_grpo.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.train.train_policy.dataset.name = os.path.join(
+        cur_dir, config.train.train_policy.dataset.name
+    )
+    config.logging.logger = ["console"]
+    config.train.train_policy.batch_size_per_optimize = 16
+    config.train.train_policy.mini_batch = 4
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        self.shutdown_signal = threading.Event()
+        self.shutdown_mp_signal = mp.Event()  # Must be a multiprocessing event
+        pass
+
+    CommMixin.init_comm = dummy
+    CommMixin.init_redis = lambda self: None
+    GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = lambda self: None
+
+    trainer = GRPOTrainer(config=config, parallel_dims=parallel_dims)
+    trainer.model_load_from_hf()
+    state_dict = trainer.model.state_dict()
+    for key, value in state_dict.items():
+        trainer.reference_state_dict[key] = value.detach().cpu()
+
+    trainer.replica_batch_for_this_step = 8
+    trainer.inter_policy_nccl.is_single_peer.set()
+    trainer.inter_policy_nccl.is_comm_ready.set()
+    total_steps = 8
+    dataset = TestDataset(config)
+    dataset.setup(config=config, tokenizer=None)
+    for i in range(total_steps * trainer.replica_batch_for_this_step):
+        prompt = dataset[i % len(dataset)][config.train.train_policy.prompt_column_name]
+        completion = dataset[i % len(dataset)][
+            config.train.train_policy.response_column_name
+        ]
+        rollout = Rollout(prompt=prompt, completion=completion, advantage=1.0)
+        trainer.data_queue.put(rollout)
+
+    def hooked_execute_all_reduce(self):
+        ret = GRPOTrainer.execute_all_reduce(self)
+        self.test_hooked_all_reduce_cnt += 1
+        return ret
+
+    def hooked_compute_logprobs(self, minibatch, logits, is_full_logits):
+        ret = GRPOTrainer.compute_logprobs(self, minibatch, logits, is_full_logits)
+        self.test_hooked_compute_logprobs_cnt += 1
+        return ret
+
+    trainer.execute_all_reduce = types.MethodType(hooked_execute_all_reduce, trainer)
+    trainer.compute_logprobs = types.MethodType(hooked_compute_logprobs, trainer)
+    trainer.test_hooked_compute_logprobs_cnt = 0
+    trainer.test_hooked_all_reduce_cnt = 0
+    for i in range(total_steps // 4):
+        trainer.train(
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+    assert trainer.test_hooked_compute_logprobs_cnt == 2
+    assert trainer.test_hooked_all_reduce_cnt == 2
+    trainer.batch_size_per_optimize = 4
+    trainer.mini_batch = 1
+    trainer.test_hooked_compute_logprobs_cnt = 0
+    trainer.test_hooked_all_reduce_cnt = 0
+    for i in range(total_steps // 4, total_steps // 2):
+        trainer.train(
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+    assert trainer.test_hooked_compute_logprobs_cnt == 8
+    assert trainer.test_hooked_all_reduce_cnt == 2
+    trainer.batch_size_per_optimize = 2
+    trainer.test_hooked_compute_logprobs_cnt = 0
+    trainer.test_hooked_all_reduce_cnt = 0
+    for i in range(total_steps // 2, total_steps * 3 // 4):
+        trainer.train(
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+    assert trainer.test_hooked_compute_logprobs_cnt == 8
+    assert trainer.test_hooked_all_reduce_cnt == 4
+    trainer.batch_size_per_optimize = 4
+    trainer.config.train.train_policy.max_token_len_per_mini_batch = 4096
+    trainer.test_hooked_compute_logprobs_cnt = 0
+    trainer.test_hooked_all_reduce_cnt = 0
+    for i in range(total_steps * 3 // 4, total_steps * 7 // 8):
+        trainer.train(
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+    assert trainer.test_hooked_all_reduce_cnt == 1
+    assert trainer.test_hooked_compute_logprobs_cnt == 1
+    trainer.batch_size_per_optimize = 4
+    trainer.config.train.train_policy.max_token_len_per_mini_batch = 2048
+    trainer.test_hooked_compute_logprobs_cnt = 0
+    trainer.test_hooked_all_reduce_cnt = 0
+    for i in range(total_steps * 7 // 8, total_steps):
+        trainer.train(
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+    assert trainer.test_hooked_all_reduce_cnt == 1
+    assert trainer.test_hooked_compute_logprobs_cnt == 2
+
+    trainer.handle_shutdown()
+    destroy_distributed()
 
 
 async def main():
@@ -2124,6 +2264,9 @@ async def main():
         exit(0)
     elif mode == "reference_reset_test":
         run_reference_reset_test()
+        exit(0)
+    elif mode == "dynamic_batchsize_test":
+        run_dynamic_batchsize_test()
         exit(0)
 
     # Initialize distributed environment
