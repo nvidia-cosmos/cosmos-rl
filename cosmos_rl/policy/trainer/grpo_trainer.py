@@ -1355,6 +1355,7 @@ class GRPOTrainer(Trainer):
         grad_norm_sum = torch.tensor(0.0, device=self.device)
         loss_count = 0
         is_computing_refs = [True, False] if need_compute_ref else [False]
+        cached_minibatch_arrangements = []
         for is_computing_ref in is_computing_refs:
             # Set model to eval mode if reference model is being used
             if is_computing_ref:
@@ -1369,65 +1370,79 @@ class GRPOTrainer(Trainer):
             with torch.set_grad_enabled(not is_computing_ref):
                 for i_mu in range(1 if is_computing_ref else self.mu_iterations):
                     local_mini_step = 0
+                    local_optimize_step = 0
                     with torch.cuda.stream(self.train_stream):
                         for i in range(0, batch_size, per_optimize_batch_size):
                             end = min(i + per_optimize_batch_size, batch_size)
                             # Convert advantages from [batch_size] -> [batch_size, max_len] via expanding
                             processed_samples_for_optimize = processed_samples[i:end]
-                            minibatch_seq_len = [
-                                self.data_packer.policy_compute_max_len([sample])
-                                for sample in processed_samples_for_optimize
-                            ]
-                            if (
-                                self.config.train.train_policy.max_token_len_per_mini_batch
-                                is not None
-                                and self.config.train.train_policy.max_token_len_per_mini_batch
-                                > 0
-                            ):
-                                # split batch into mini_batches with sequence parallelism
-                                if self.parallel_dims.cp_enabled:
-                                    cp_size = self.parallel_dims.mesh["cp"].size()
-                                else:
-                                    cp_size = 1
-                                max_token_len = (
-                                    self.config.train.train_policy.max_token_len_per_mini_batch
-                                    * cp_size
-                                )
-                                # dynamic rearrange mini batches
-                                mini_batches, mini_batch_index = rearrange_mini_batches(
-                                    batch=processed_samples_for_optimize,
-                                    seq_len_effective=minibatch_seq_len,
-                                    max_token_len=max_token_len,
-                                )
+                            if len(cached_minibatch_arrangements) > local_optimize_step:
+                                (
+                                    mini_batches,
+                                    mini_batch_index,
+                                ) = cached_minibatch_arrangements[local_optimize_step]
                             else:
-                                # split batch into mini_batches
-                                mini_batches = [
-                                    processed_samples_for_optimize[
-                                        i : i + self.mini_batch
+                                if (
+                                    self.config.train.train_policy.max_token_len_per_mini_batch
+                                    is not None
+                                    and self.config.train.train_policy.max_token_len_per_mini_batch
+                                    > 0
+                                ):
+                                    minibatch_seq_len = [
+                                        self.data_packer.policy_compute_max_len(
+                                            [sample]
+                                        )
+                                        for sample in processed_samples_for_optimize
                                     ]
-                                    for i in range(
-                                        0,
-                                        len(processed_samples_for_optimize),
-                                        self.mini_batch,
+                                    # split batch into mini_batches with sequence parallelism
+                                    if self.parallel_dims.cp_enabled:
+                                        cp_size = self.parallel_dims.mesh["cp"].size()
+                                    else:
+                                        cp_size = 1
+                                    max_token_len = (
+                                        self.config.train.train_policy.max_token_len_per_mini_batch
+                                        * cp_size
                                     )
-                                ]
-                                mini_batch_index = [
-                                    list(
-                                        range(
-                                            i,
-                                            min(
-                                                i + self.mini_batch,
-                                                len(processed_samples_for_optimize),
-                                            ),
+                                    # dynamic rearrange mini batches
+                                    mini_batches, mini_batch_index = (
+                                        rearrange_mini_batches(
+                                            batch=processed_samples_for_optimize,
+                                            seq_len_effective=minibatch_seq_len,
+                                            max_token_len=max_token_len,
+                                            ddp_comm=self.inter_policy_nccl,
                                         )
                                     )
-                                    for i in range(
-                                        0,
-                                        len(processed_samples_for_optimize),
-                                        self.mini_batch,
-                                    )
-                                ]
-
+                                else:
+                                    # split batch into mini_batches
+                                    mini_batches = [
+                                        processed_samples_for_optimize[
+                                            i : i + self.mini_batch
+                                        ]
+                                        for i in range(
+                                            0,
+                                            len(processed_samples_for_optimize),
+                                            self.mini_batch,
+                                        )
+                                    ]
+                                    mini_batch_index = [
+                                        list(
+                                            range(
+                                                i,
+                                                min(
+                                                    i + self.mini_batch,
+                                                    len(processed_samples_for_optimize),
+                                                ),
+                                            )
+                                        )
+                                        for i in range(
+                                            0,
+                                            len(processed_samples_for_optimize),
+                                            self.mini_batch,
+                                        )
+                                    ]
+                                cached_minibatch_arrangements.append(
+                                    (mini_batches, mini_batch_index)
+                                )
                             for (
                                 minibatched_processed_samples,
                                 mini_batch_indices,
@@ -1829,6 +1844,7 @@ class GRPOTrainer(Trainer):
 
                             if not is_computing_ref and not all_reduced:
                                 grad_norm_sum += self.execute_all_reduce()
+                            local_optimize_step += 1
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()

@@ -17,6 +17,8 @@
 import heapq
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.distributed as dist_util
+from cosmos_rl.utils.distributed import HighAvailabilitylNccl
+import torch
 
 
 def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
@@ -190,6 +192,7 @@ def rearrange_mini_batches(
     same_mini_num_in_dp=True,
     min_num_mini_batch=None,
     use_dynamic_bsz_balance=True,
+    ddp_comm: HighAvailabilitylNccl = None,
 ):
     """
     Split a batch into mini-batches by total token count, with optional DP sync and padding.
@@ -201,7 +204,8 @@ def rearrange_mini_batches(
         dp_group (optional): torch.distributed group for data-parallel sync.
         same_mini_num_in_dp (bool): if True and dp_group set, pad all ranks to the same count.
         min_num_mini_batch (int, optional): force at least this many splits (pads empty ones).
-        use_dynamic_bsz_balance (bool, optional): balance the computational workload between mini-batches
+        use_dynamic_bsz_balance (bool, optional): balance the computational workload between mini-batches.
+        ddp_comm: HighAvailabilitylNccl = None, optional DDP communicator for distributed operations.
     Returns:
         List[List[Any]]: the mini-batches after rearrangement.
         List[List[int]]: index lists mapping each mini-batch back to original positions.
@@ -222,6 +226,15 @@ def rearrange_mini_batches(
         num_mini_batches = max(
             dist_util.all_gather_object_cpu(num_mini_batches, group=dp_group)
         )
+
+    if ddp_comm is not None:
+        num_mini_batches_tensor = torch.tensor(num_mini_batches, device="cuda")
+        ddp_comm.allreduce(
+            num_mini_batches_tensor,
+            num_mini_batches_tensor,
+            op=torch.distributed.ReduceOp.MAX,
+        )
+        num_mini_batches = num_mini_batches_tensor.item()
 
     assert num_mini_batches <= len(seq_len_effective)
     mini_bsz_idx = get_seqlen_balanced_partitions(
