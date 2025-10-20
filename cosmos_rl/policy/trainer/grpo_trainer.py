@@ -108,6 +108,34 @@ def compute_loss(
 
     shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
     bsz = shifted_length.shape[0]
+    # Check the shapes of the inputs
+    assert (
+        bsz == logprob_masks.shape[0]
+    ), f"[ERROR][compute_loss] bsz={bsz} != logprob_masks.shape[0]={logprob_masks.shape[0]}"
+    assert (
+        cu_seqlens.shape[0] == bsz + 1
+    ), f"[ERROR][compute_loss] cu_seqlens.shape[0]={cu_seqlens.shape[0]} != bsz+1={bsz+1}"
+    assert (
+        shifted_length >= 0
+    ).all(), "[ERROR][compute_loss] negative shifted_length detected"
+    masked_seqlens = logprob_masks.sum(dim=1).to(shifted_length.dtype)
+    assert torch.equal(
+        shifted_length, masked_seqlens
+    ), f"[ERROR][compute_loss] shifted_length and masked_seqlens mismatch: {shifted_length.tolist()} vs {masked_seqlens.tolist()}"
+    assert (
+        cu_seqlens[-1].item() == int(masked_seqlens.sum().item())
+    ), f"[ERROR][compute_loss] total tokens mismatch: cu_seqlens[-1]={cu_seqlens[-1].item()} vs masked_sum={int(masked_seqlens.sum().item())}"
+    assert torch.isfinite(
+        current_token_logps
+    ).all(), "[ERROR][compute_loss] current_token_logps has NaN/Inf"
+    assert torch.isfinite(
+        old_per_token_logps
+    ).all(), "[ERROR][compute_loss] old_per_token_logps has NaN/Inf"
+    assert torch.isfinite(
+        current_advantages
+    ).all(), "[ERROR][compute_loss] current_advantages has NaN/Inf"
+    # End of checking the shapes of the inputs^
+
     negative_approx_kl = current_token_logps - old_per_token_logps
 
     if config.train.train_policy.variant == "gspo":
@@ -146,6 +174,9 @@ def compute_loss(
         )
 
     importance_ratio_per_token = torch.exp(importance_ratio_per_token)
+    assert torch.isfinite(
+        importance_ratio_per_token
+    ).all(), "[ERROR][compute_loss] importance_ratio_per_token has NaN/Inf"
     importance_ratio = importance_ratio_per_token
 
     if config.train.train_policy.aipo_rho is not None:
@@ -165,6 +196,8 @@ def compute_loss(
         )
         loss1 = importance_ratio * current_advantages
         loss2 = importance_ratio_clipped * current_advantages
+        assert torch.isfinite(loss1).all(), "[ERROR][compute_loss] loss1 has NaN/Inf"
+        assert torch.isfinite(loss2).all(), "[ERROR][compute_loss] loss2 has NaN/Inf"
         if config.train.train_policy.variant == "gspo":
             per_token_loss = -torch.min(loss1, loss2)
         else:
@@ -174,9 +207,24 @@ def compute_loss(
             per_token_loss = torch.where(
                 current_advantages < 0, clip_losses2, clip_losses1
             )
+        assert torch.isfinite(
+            per_token_loss
+        ).all(), "[ERROR][compute_loss] per_token_loss has NaN/Inf"
+
+        # Check the ref_per_token_logps
+        if config.train.train_policy.kl_beta != 0.0:
+            assert (
+                ref_per_token_logps is not None
+            ), "[ERROR][compute_loss] ref_per_token_logps is None when kl_beta!=0.0"
+            assert (
+                ref_per_token_logps.shape == current_token_logps.shape
+            ), f"[ERROR][compute_loss] ref_per_token_logps.shape={ref_per_token_logps.shape} != current_token_logps.shape={current_token_logps.shape}"
+            assert torch.isfinite(
+                ref_per_token_logps
+            ).all(), "[ERROR][compute_loss] ref_per_token_logps has NaN/Inf"
 
     # Compute the KL divergence between the model and the reference model
-    if config.train.train_policy.kl_beta != 0.0:
+    if config.train.train_policy.kl_beta != 0.0 and ref_per_token_logps is not None:
         assert (
             not ref_per_token_logps.requires_grad
         ), "ref_per_token_logps should not require gradient"
@@ -186,7 +234,13 @@ def compute_loss(
         kl_ratio = ref_per_token_logps - current_token_logps
         # For numerical stability
         kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
+        assert torch.isfinite(
+            kl_ratio
+        ).all(), "[ERROR][compute_loss] kl_ratio has NaN/Inf"
         kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
+        assert torch.isfinite(
+            kl_loss
+        ).all(), "[ERROR][compute_loss] kl_loss has NaN/Inf"
     else:
         kl_loss = torch.zeros_like(per_token_loss)
 
@@ -202,6 +256,12 @@ def compute_loss(
             cu_seqlens[i] : cu_seqlens[i + 1]
         ].sum()
         kl_loss_seq_sum[i] = kl_loss[cu_seqlens[i] : cu_seqlens[i + 1]].sum()
+    assert torch.isfinite(
+        per_token_loss_seq_sum
+    ).all(), "[ERROR][compute_loss] per_token_loss_seq_sum has NaN/Inf"
+    assert torch.isfinite(
+        kl_loss_seq_sum
+    ).all(), "[ERROR][compute_loss] kl_loss_seq_sum has NaN/Inf"
     shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
 
     if config.train.train_policy.loss_type == "seq-mean-token-mean":
@@ -241,10 +301,20 @@ def compute_loss(
             )
             # dps.append((num_dp_workers, length_sum.item()))
         # print(f"dps: {dps}")
+        assert length_sum >= 0, "[ERROR][compute_loss] length_sum < 0"
+        assert torch.isfinite(
+            length_sum
+        ), "[ERROR][compute_loss] length_sum has NaN/Inf"
         per_token_loss = (
             per_token_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
         )
         kl_loss = kl_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
+        assert torch.isfinite(
+            per_token_loss
+        ), "[ERROR][compute_loss] per_token_loss (token-mean) has NaN/Inf"
+        assert torch.isfinite(
+            kl_loss
+        ), "[ERROR][compute_loss] kl_loss (token-mean) has NaN/Inf"
     else:
         raise ValueError(f"Invalid loss type: {config.train.train_policy.loss_type}")
     return (
