@@ -13,11 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+from msgspec import ValidationError
 import torch
 import threading
 import asyncio
 from queue import Queue
 import atexit
+from asyncio import timeout as asyncio_timeout
+
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Optional, Callable, Union
 from transformers import AutoConfig
@@ -26,25 +30,29 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout_async import vLLMRolloutAsync
-from cosmos_rl.rollout.rollout_task_scheduler import RolloutTaskScheduler
-from cosmos_rl.dispatcher.protocol import RolloutRequest
-from cosmos_rl.dispatcher.command import (
-    PolicyToRolloutUnicastCommand,
-    Command,
+from cosmos_rl.rollout.rollout_task_scheduler import (
+    RolloutTaskScheduler,
+    CompletedRollout,
 )
-from cosmos_rl.utils.pynccl import (
-    create_nccl_comm,
+from cosmos_rl.dispatcher.protocol import ValidationReportRequest
+from cosmos_rl.dispatcher.command import (
+    Command,
+    PolicyToRolloutUnicastCommand,
 )
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
+import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
     ConversationType,
+    IdxAndRLPayload,
 )
-from cosmos_rl.rollout.schema import RolloutResult
 from torch.utils.data import Dataset
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
 from vllm import SamplingParams
+
+from .vllm_rollout_worker import vLLMRolloutWorker
+
 
 """
 Async version of vLLMRolloutWorker using RolloutTaskScheduler.
@@ -53,6 +61,64 @@ Key differences from sync version:
 - Pauses scheduler during weight synchronization
 - Uses vLLMRolloutAsync instead of vLLMRollout
 """
+
+
+def filter_valid_single_turn_rollout_results(
+    rollout_results: list[CompletedRollout], eos_token: str
+) -> list[CompletedRollout]:
+    valid_results: list[CompletedRollout] = []
+
+    # Remove empty completions
+    for cr in rollout_results:
+        completions = cr.result.completions
+        skip_output = False
+        total_generation_count = len(completions)
+        empty_generation_count = 0
+        output_texts: List[str] = []
+        for j in range(total_generation_count):
+            output_text = completions[j]
+            # if output_text == "":
+            #     logger.warning(
+            #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+            #     )
+            #     empty_generation_count += 1
+            # else:
+            #     output_texts.append(output_text)
+
+            # Note: (jiaxinc)
+            # We still need to upload the output text, even if it is empty. (replace empty with eos_token)
+            # Because if fully synchronized mode is enabled, we need to make sure the expected
+            # number of global_batch_size is reached at exact time.
+            output_texts.append(output_text if output_text != "" else eos_token)
+        # Skip the output if there is one or zero non-empty completions
+        skip_output = (total_generation_count - empty_generation_count) <= 1
+        if not skip_output:
+            cr.result.completions = output_texts
+            valid_results.append(cr)
+
+        return valid_results
+
+
+def filter_valid_multi_turn_rollout_results(
+    rollout_results: list[CompletedRollout],
+) -> list[CompletedRollout]:
+    valid_results: list[CompletedRollout] = []
+    for cr in rollout_results:
+        valid_conversations: List[ConversationType] = []
+        # remove those result without valid assistant message
+        flag = False
+        for conversation in cr.result.completed_conversations:
+            for msg in conversation:
+                if msg.role == "assistant" and msg.content != "":
+                    flag = True
+                    break
+            if flag:
+                valid_conversations.append(conversation)
+        cr.result.completed_conversations = valid_conversations
+        if len(cr.result.completed_conversations) > 0:
+            valid_results.append(cr)
+
+    return valid_results
 
 
 class vLLMRolloutWorkerAsync(RolloutWorkerBase):
@@ -71,6 +137,28 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
         super(vLLMRolloutWorkerAsync, self).__init__(config, parallel_dims)
 
+        # TODO(zjx): refactor those methods to common methods in RolloutWorkerBase
+        # reuse some of the vLLMRolloutWorker methods
+        self.lazy_initialize_rollout_engine = (
+            vLLMRolloutWorker.lazy_initialize_rollout_engine
+        )
+        self.prepare_trainable_params = vLLMRolloutWorker.prepare_trainable_params
+        self.prepare_shard_infos_for_weight_sync_insts = (
+            vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts
+        )
+        self.build_global_mesh = vLLMRolloutWorker.build_global_mesh
+        self.recv_weight_shard = vLLMRolloutWorker.recv_weight_shard
+        self.broadcast_to_all_rollout_replica = (
+            vLLMRolloutWorker.broadcast_to_all_rollout_replica
+        )
+        self.query_nccl_unique_id_from_controller = (
+            vLLMRolloutWorker.query_nccl_unique_id_from_controller
+        )
+        self.consume_one_command = vLLMRolloutWorker.consume_one_command
+        self.send_end_signal = vLLMRolloutWorker.send_end_signal
+        self.report_rollouts = vLLMRolloutWorker.report_rollouts
+
+        # real init variables
         self.state = State()
 
         if self.config.rollout.parallelism.dp_shard_size == -1:
@@ -228,113 +316,220 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             "[RolloutWorkerAsync] RolloutTaskScheduler initialized (will run in async mode)"
         )
 
+    def handle_shutdown(self):
+        """Handle shutdown and cleanup."""
+        # Only call once
+        if not hasattr(self, "_shutdown_handled"):
+            self._shutdown_handled = True
+
+            # Scheduler is stopped in main_loop_async's finally block
+            logger.info("[RolloutWorkerAsync] Handling shutdown")
+
+            if not self.shutdown_signal.is_set():
+                logger.info(
+                    f"[Rollout] shutdown instruction of {self.replica_name}, setting shutdown signal"
+                )
+                self.shutdown_signal.set()
+            if not self.shutdown_mp_signal.is_set():
+                self.shutdown_mp_signal.set()
+            if self.background_thread is not None:
+                self.background_thread.join()
+                self.background_thread = None
+
+            if self.heartbeat_thread is not None:
+                self.heartbeat_thread.join()
+                self.heartbeat_thread = None
+            self.unregister_from_controller()
+
     def get_underlying_model(self):
         """
         Get the underlying parallelized model in vLLM internal.
         """
         return self.rollout.get_underlying_model()
 
-    @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
-    @torch.no_grad()
-    def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
+    def request_new_prompts(self, batch_size: int, **kwargs):
         """
-        Sync the weight from policy to rollout.
-        IMPORTANT: Pauses the scheduler during weight synchronization using context manager.
+        Request new prompts from the controller for both training and validation.
         """
-        # lazy initialization of the vllm engine.
-        is_for_weight_resume = command.dst_replica_name == self.replica_name
-        load_format = "auto" if is_for_weight_resume else "dummy"
-        self.lazy_initialize_rollout_engine(load_format)
-
-        if command.dst_replica_name != self.replica_name:
-            return
-
-        # Use context manager to pause scheduler - auto-resumes even on exception
-        if self.scheduler is not None and self.scheduler.is_running():
-            context = self.scheduler.paused(wait_for_active_tasks=True)
-        else:
-            # No-op context manager if scheduler is not running
-            from contextlib import nullcontext
-
-            context = nullcontext()
-
-        with context:
-            # get the nccl_unique_id from the controller
-            communicator_index = {}
-            nccl_unique_id_key = (
-                command.src_replica_name + "_" + command.dst_replica_name
-            )
-            if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
-                logger.debug(
-                    f"[Rollout] Reusing cached communicator for {nccl_unique_id_key}"
-                )
-                communicator_index = self.policy_to_rollout_nccl_communicators[
-                    nccl_unique_id_key
-                ]
-            else:
-                logger.debug(
-                    f"[Rollout] Querying nccl group id for {nccl_unique_id_key}"
-                )
-                # query the nccl group id from controller
-                nccl_group_id = self.query_nccl_unique_id_from_controller(
-                    nccl_unique_id_key
-                )
-                if nccl_group_id is None:
-                    raise RuntimeError(
-                        "[Rollout] Failed to query nccl group_id from controller!"
-                    )
-                # create the communicator index
-                communicator_index = create_nccl_comm(
-                    nccl_group_id,
-                    self.global_rank + command.src_replica_size,
-                    self.world_size + command.src_replica_size,
-                )
-                # cache the communicator index
-                self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = (
-                    communicator_index
+        prompts_and_is_end = (None, False)
+        if self.global_rank == 0:
+            if self.scheduler.task_queue.empty():
+                # blocking request
+                payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
+                prompts_and_is_end = (
+                    payloads if len(payloads) > 0 else None,
+                    is_end,
                 )
 
-            # Perform weight synchronization (reuse logic from sync version)
-            self._do_weight_sync(command, communicator_index)
+        # Broadcast the prompts and is_end to all ranks
+        prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
+        prompts, is_end = prompts_and_is_end
+        if prompts is not None:
+            prompts: List[IdxAndRLPayload] = [
+                (prompt[0], RLPayload.model_validate(prompt[1])) for prompt in prompts
+            ]
+            self.scheduler.put_rollout_batch(prompts)
+        return is_end
 
-            logger.info(
-                f"[RolloutWorkerAsync] Weight sync completed, version: {self.current_weight_version}"
-            )
-
-    def _do_weight_sync(
-        self, command: PolicyToRolloutUnicastCommand, communicator_index
+    async def consume_command(
+        self,
+        cmd_pred: Optional[Callable[[Command], bool]] = None,
+        timeout=constant.COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT,
     ):
-        """Execute weight synchronization (extracted from original implementation)."""
-        # This method contains the core weight sync logic from vLLMRolloutWorker
-        # For brevity, the full implementation would be copied from the original worker
-        # Here's the structure:
+        """
+        Consume all pending commands for weight sync using asyncio.timeout.
+        To ensure the weight update is using the up-to-date commands.
+        """
+        try:
+            async with asyncio_timeout(float(timeout)):
+                last_cmd = None
+                none_cnt = 0
+                while True:
+                    cmd = self.consume_one_command(cmd_pred=cmd_pred)
+                    if cmd is not None:
+                        last_cmd = cmd
+                        none_cnt = 0
+                    else:
+                        none_cnt += 1
 
-        if not hasattr(self, "policy_to_rollout_recv_insts"):
+                    if none_cnt >= constant.COSMOS_ROLLOUT_CMD_WAIT_TIMES and (
+                        (
+                            last_cmd is not None
+                            and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
+                        )
+                        or last_cmd is None
+                    ):
+                        # If continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times, and the last command is not P2R command, we break.
+                        # Since P2R must be followed by another R2R broadcast command, we need wait.
+                        # Continuously get None for COSMOS_ROLLOUT_CMD_WAIT_TIMES times to make sure the command queue is empty at that time.
+                        break
+
+                    await asyncio.sleep(
+                        float(constant.COSMOS_ROLLOUT_CMD_WAIT_INTERVAL)
+                    )
+        except asyncio.TimeoutError:
+            # Timeout reached, return normally
+            pass
+
+    @torch.no_grad()
+    def do_validation(self):
+        # submit payloads to scheduler
+        prompt_idxs: List[int] = []
+        validation_payloads: List[RLPayload] = []
+        # Do validation here
+        is_end = False
+        while True:
+            if not is_end:
+                is_end = self.request_new_prompts(
+                    self.val_batch_size,
+                    validation_step=self.current_step,
+                )
+
+            # wait all tasks are completed
+            while self.scheduler.completed_results() != self.val_batch_size:
+                time.sleep(0.1)
+
+            rollout_results = self.scheduler.get_all()
+            prompt_idxs.extend([p.idx for p in rollout_results])
+            validation_payloads.extend([p.payload for p in rollout_results])
+
+            if is_end and self.scheduler.is_idle():
+                break
+
+        # Clear the flag to indicate validation is done.
+        self.validation_flag.clear()
+        should_report = self.parallel_dims.tp_coord[0] == 0 and (
+            self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+        )
+
+        if should_report:
+            self.reward_dispatcher.enqueue_rewards_cal(
+                validation_payloads, True, self.current_step, prompt_idxs
+            )
+            payloads, is_validation, current_step, empty = self.report_rollouts(
+                block=True
+            )
             assert (
-                not command.trainable_only
-            ), "all params must be transferred at the first time P2R"
-            logger.info(
-                "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
-            )
-            self.policy_to_rollout_recv_insts = (
-                self.api_client.post_rollout_shard_recv_insts(self.global_rank)
-            )
-            logger.info(
-                "[Rollout] Finished policy_to_rollout_recv_insts from controller."
-            )
+                (is_validation and payloads is not None or payloads is None)
+                and (not empty or len(validation_payloads) == 0)
+            ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
+            while not empty:
+                assert (
+                    is_validation or payloads is None
+                ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
+                if payloads is not None:
+                    response = ValidationReportRequest(
+                        src_replica_name=self.replica_name,
+                        validation_step=current_step,
+                        prompt_idxs=[],
+                        payloads=payloads,
+                        is_end=True,
+                    )
+                    self.api_client.post_validation_report(response)
+                payloads, is_validation, current_step, empty = (
+                    self.reward_dispatcher.dequeue_rewards_cal()
+                )
+
+    @torch.no_grad()
+    async def do_generate(self):
+        logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
+
+        rollout_results: List[CompletedRollout] = []
+        while not self.scheduler.is_idle():
+            res = self.scheduler.get_all()
+            if len(res) > 0:
+                rollout_results.extend(res)
+            else:
+                await asyncio.sleep(0.1)
+
+        assert (
+            len(rollout_results) == self.batch_size
+        ), f"Error: VLLM returned {len(rollout_results)} for {self.batch_size}"
+
+        # we need filter the result with valid completions or valid completed_conversations
+        valid_results: list[CompletedRollout] = []
+        if self.rollout.rollout_config.multi_turn_config.enable:
+            valid_results = filter_valid_multi_turn_rollout_results(rollout_results)
         else:
-            assert (
-                command.trainable_only
-            ), "only trainable params should be transferred at the not first time P2R"
+            valid_results = filter_valid_single_turn_rollout_results(
+                rollout_results, self.tokenizer.eos_token
+            )
 
-        self.prepare_trainable_params()
+        logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
-        with torch.cuda.stream(self.inference_stream):
-            logger.info("[Rollout] Starting weight sync...")
-            # Weight sync implementation (reuse from original)
-            # ...
-            self.current_weight_version = command.weight_version
-            self.state.set_weight_synced()
+        should_report = (
+            self.parallel_dims.tp_coord[0] == 0
+            and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
+            and len(valid_results) > 0
+        )
+
+        if should_report:
+            # only the first tp rank in the rollout replica will post the completion to the controller.
+            valid_payloads: List[RLPayload] = []
+            valid_prompt_idxs: List[int] = []
+
+            for cr in valid_results:
+                valid_prompt_idxs.append(cr.idx)
+
+                # update payload
+                cr.payload.completions = cr.result.completions
+                if self.rollout.rollout_config.multi_turn_config.enable:
+                    cr.payload.completed_conversations = (
+                        cr.result.completed_conversations
+                    )
+                valid_payloads.append(cr.payload)
+
+            self.reward_dispatcher.enqueue_rewards_cal(
+                valid_payloads,
+                False,
+                self.current_weight_version,
+                valid_prompt_idxs,
+            )
+
+        if self.state.prompt_fetch_end() and self.scheduler.task_queue.empty():
+            self.state.set_prompt_consume_end()
+            if self.global_rank == 0:
+                self.send_end_signal()
 
     async def main_loop_async(self):
         """Main loop with async scheduler integration (coroutine version)."""
@@ -343,58 +538,35 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             scheduler_task = asyncio.create_task(self.scheduler.run_async())
             logger.info("[RolloutWorkerAsync] Scheduler task started")
         else:
-            scheduler_task = None
+            raise ValidationError("need init_scheduler first before running main loop")
 
         try:
             while not self.shutdown_signal.is_set():
-                # Sync operations wrapped in executor
-                await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self.consume_command,
-                    None,  # cmd_pred
-                )
+                # Sync consume command
+                await self.consume_command(cmd_pred=None)
 
                 if self.validation_flag.is_set():
-                    # Pause scheduler during validation using context manager
-                    if self.scheduler is not None and self.scheduler.is_running():
-                        with self.scheduler.paused():
-                            await asyncio.get_event_loop().run_in_executor(
-                                None, self.do_validation
-                            )
-                    else:
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, self.do_validation
-                        )
+                    # If encounter validation flag during last rollout generation or this command fetch, do validation first.
+                    await self.do_validation()
 
                 # If weight is not ready, nothing else to do.
                 if not self.state.weight_synced():
-                    await asyncio.sleep(0.1)
                     continue
 
-                # try fetching new prompts and submitting to scheduler
+                # try fetching new prompts if no ending signal is set
                 if not self.state.prompt_fetch_end():
-                    no_more_prompts = await asyncio.get_event_loop().run_in_executor(
-                        None, self.request_new_prompts, self.batch_size, self.scheduler
-                    )
+                    self.scheduler.pause()  # for those prmpts, we don't want to generate them immediately.
+                    no_more_prompts = self.request_new_prompts(self.batch_size)
                     if no_more_prompts:
                         logger.info(
                             f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
                         )
                         self.state.set_prompt_fetch_end()
                         # Check if scheduler has pending or active tasks
-                        if self.scheduler is not None:
-                            stats = self.scheduler.get_stats()
-                            if (
-                                stats["pending_tasks"] == 0
-                                and stats["active_tasks"] == 0
-                            ):
-                                self.state.set_prompt_consume_end()
-                                if self.global_rank == 0:
-                                    self.send_end_signal()
-
-                # Collect and process completed results from scheduler
-                if self.scheduler is not None and self.scheduler.has_results():
-                    self._process_completed_rollouts()
+                        if self.scheduler.task_queue.empty():
+                            self.state.set_prompt_consume_end()
+                            if self.global_rank == 0:
+                                self.send_end_signal()
 
                 # Report rollouts (dequeue from reward_dispatcher)
                 _, is_validation, _, _ = self.report_rollouts()
@@ -402,11 +574,29 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
                 # Check if all prompts are consumed
                 if self.state.prompt_consume_end():
-                    await asyncio.sleep(0.1)
+                    assert (
+                        self.scheduler.task_queue.empty()
+                        and self.state.prompt_fetch_end()
+                    ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
                     continue
+                elif self.scheduler.task_queue.empty():
+                    continue
+                else:
+                    # Check if the weight version is valid for current prompts
+                    has_front_prompt, front_prompt_weight_version = (
+                        self.scheduler.get_front_prompt_weight_version()
+                    )
+                    if not has_front_prompt:
+                        continue
+                    is_valid_prompt_for_current_weight_version = (
+                        front_prompt_weight_version <= self.current_weight_version
+                    )
+                    if not is_valid_prompt_for_current_weight_version:
+                        # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
+                        continue
 
-                # Small sleep to yield control
-                await asyncio.sleep(0.01)
+                    self.scheduler.resume()  # resume the scheduler to generate the prompts
+                    self.do_generate()
 
             logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
@@ -418,204 +608,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                 if scheduler_task is not None:
                     await scheduler_task
                     logger.info("[RolloutWorkerAsync] Scheduler task completed")
-
-    def _process_completed_rollouts(self):
-        """
-        Process completed rollouts from the scheduler.
-
-        This method:
-        1. Gets all completed rollouts from scheduler
-        2. Filters valid results (removes empty completions)
-        3. Enqueues to reward_dispatcher for reward calculation
-        """
-        completed_rollouts = self.scheduler.get_all()
-
-        if len(completed_rollouts) == 0:
-            return
-
-        logger.debug(
-            f"[RolloutWorkerAsync] Processing {len(completed_rollouts)} completed rollouts"
-        )
-
-        # Filter and validate results
-        valid_payloads: List[RLPayload] = []
-        valid_prompt_idxs: List[int] = []
-        valid_results: List[RolloutResult] = []
-
-        for completed in completed_rollouts:
-            payload = completed.payload
-            result = completed.result
-
-            # Get prompt index from payload
-            prompt_idx = getattr(payload, "idx", 0)
-
-            # Filter based on multi-turn or single-turn mode
-            is_valid = False
-
-            if self.rollout.rollout_config.multi_turn_config.enable:
-                # Multi-turn: filter conversations without valid assistant messages
-                valid_conversations: List[ConversationType] = []
-                for conversation in result.completed_conversations:
-                    has_valid_message = False
-                    for msg in conversation:
-                        if msg.role == "assistant" and msg.content != "":
-                            has_valid_message = True
-                            break
-                    if has_valid_message:
-                        valid_conversations.append(conversation)
-
-                result.completed_conversations = valid_conversations
-                if len(result.completed_conversations) > 0:
-                    is_valid = True
-                    payload.completed_conversations = result.completed_conversations
-            else:
-                # Single-turn: handle empty completions
-                completions = result.completions
-                total_generation_count = len(completions)
-                empty_generation_count = 0
-                output_texts: List[str] = []
-
-                for output_text in completions:
-                    # Replace empty completions with eos_token to maintain batch size
-                    output_texts.append(
-                        output_text if output_text != "" else self.tokenizer.eos_token
-                    )
-                    if output_text == "":
-                        empty_generation_count += 1
-
-                # Skip if there are one or zero non-empty completions
-                skip_output = (total_generation_count - empty_generation_count) <= 1
-
-                if not skip_output:
-                    is_valid = True
-                    result.completions = output_texts
-                    payload.completions = output_texts
-
-            if is_valid:
-                valid_payloads.append(payload)
-                valid_prompt_idxs.append(prompt_idx)
-                valid_results.append(result)
-
-        # Enqueue for reward calculation
-        should_report = (
-            self.parallel_dims.tp_coord[0] == 0
-            and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
-            and len(valid_payloads) > 0
-        )
-
-        if should_report:
-            logger.debug(
-                f"[RolloutWorkerAsync] Enqueuing {len(valid_payloads)} valid payloads for reward calculation"
-            )
-            self.reward_dispatcher.enqueue_rewards_cal(
-                valid_payloads,
-                False,  # is_validation
-                self.current_weight_version,
-                valid_prompt_idxs,
-            )
-
-        # Update state if all prompts are consumed
-        if self.state.prompt_fetch_end():
-            stats = self.scheduler.get_stats()
-            if (
-                stats["pending_tasks"] == 0
-                and stats["active_tasks"] == 0
-                and stats["completed_results"] == 0
-            ):
-                self.state.set_prompt_consume_end()
-                if self.global_rank == 0:
-                    self.send_end_signal()
-
-    def request_new_prompts(
-        self, batch_size: int, scheduler: RolloutTaskScheduler
-    ) -> bool:
-        """
-        Request new prompts from the controller and submit to scheduler.
-
-        Args:
-            batch_size: Number of prompts to request
-            scheduler: RolloutTaskScheduler to submit payloads to
-
-        Returns:
-            True if no more prompts available, False otherwise
-        """
-        # Request prompts from controller via reward_dispatcher
-        prompt_id_and_payload_list = self.reward_dispatcher.get_prompts(batch_size)
-
-        if prompt_id_and_payload_list is None or len(prompt_id_and_payload_list) == 0:
-            return True  # No more prompts
-
-        # Check weight version compatibility
-        first_payload: RLPayload = prompt_id_and_payload_list[0][1]
-        is_valid_prompt_for_current_weight_version = (
-            first_payload.weight_version <= self.current_weight_version
-        )
-
-        if not is_valid_prompt_for_current_weight_version:
-            # Put back and wait for weight sync
-            logger.debug(
-                f"[RolloutWorkerAsync] Prompt weight version {first_payload.weight_version} > current {self.current_weight_version}, waiting for weight sync"
-            )
-            # Put the prompts back (implementation depends on reward_dispatcher API)
-            return False
-
-        # Submit payloads to scheduler
-        for prompt_idx, payload in prompt_id_and_payload_list:
-            # Attach prompt index to payload for later retrieval
-            payload.idx = prompt_idx
-            scheduler.put_rollout(payload)
-
-        logger.debug(
-            f"[RolloutWorkerAsync] Submitted {len(prompt_id_and_payload_list)} prompts to scheduler"
-        )
-
-        return False  # More prompts may be available
-
-    def report_rollouts(self, block=False):
-        """
-        Report completed rollouts with calculated rewards to controller.
-
-        This method dequeues results from reward_dispatcher and posts to controller.
-        """
-        while True:
-            payloads, is_validation, step, empty = (
-                self.reward_dispatcher.dequeue_rewards_cal()
-            )
-            if payloads is not None:
-                if is_validation:
-                    break
-                response = RolloutRequest(
-                    src_replica_name=self.replica_name,
-                    prompt_idxs=[],
-                    payloads=payloads,
-                    is_end=False,
-                )
-                self.api_client.post_rollout_completion(response)
-                logger.debug(
-                    f"[RolloutWorkerAsync] Reported {len(payloads)} rollouts to controller"
-                )
-            elif not block or empty:
-                break
-        return payloads, is_validation, step, empty
-
-    def send_end_signal(self):
-        """
-        Send end signal to the controller.
-        This is used to notify the controller that the rollout worker has finished processing all prompts.
-        """
-        payloads, is_validation, _, empty = self.report_rollouts(block=True)
-        assert (
-            not is_validation and payloads is None and empty
-        ), f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
-        response = RolloutRequest(
-            src_replica_name=self.replica_name,
-            prompt_idxs=[],
-            payloads=[],
-            completions=[],
-            is_end=True,
-        )
-        logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
-        self.api_client.post_rollout_completion(response)
 
     def work(self):
         """Main work method - runs the async event loop."""
@@ -642,28 +634,3 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
         self.inference_stream.synchronize()
         self.handle_shutdown()
-
-    def handle_shutdown(self):
-        """Handle shutdown and cleanup."""
-        # Only call once
-        if not hasattr(self, "_shutdown_handled"):
-            self._shutdown_handled = True
-
-            # Scheduler is stopped in main_loop_async's finally block
-            logger.info("[RolloutWorkerAsync] Handling shutdown")
-
-            if not self.shutdown_signal.is_set():
-                logger.info(
-                    f"[Rollout] shutdown instruction of {self.replica_name}, setting shutdown signal"
-                )
-                self.shutdown_signal.set()
-            if not self.shutdown_mp_signal.is_set():
-                self.shutdown_mp_signal.set()
-            if self.background_thread is not None:
-                self.background_thread.join()
-                self.background_thread = None
-
-            if self.heartbeat_thread is not None:
-                self.heartbeat_thread.join()
-                self.heartbeat_thread = None
-            self.unregister_from_controller()
