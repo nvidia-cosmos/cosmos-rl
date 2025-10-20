@@ -21,7 +21,10 @@ from util import _build_inv_freq, RMSNorm, apply_rope_2d, apply_rope_1d, build_h
 from torch.utils.checkpoint import checkpoint
 
 
-import torch, math
+import torch, math, os
+
+DEFAULT_WINDOW_WIDTH = float(os.environ.get("DEFAULT_WINDOW_WIDTH", 0.05))
+GRAD_TIME_SCHEDULE = float(os.environ.get("GRAD_TIME_SCHEDULE", "1.0"))
 
 def _make_window_BL(L, t_B, w=0.05, kind='hann'):
     """
@@ -442,7 +445,8 @@ class DualStreamMMDiT(nn.Module):
         # --- Prepare context tokens
         Bz, Lz, Dz = z_tok.shape
         assert Bz == B
-        ctx = apply_grad_window(z_tok, t, w=0.05, kind='hann')
+
+        ctx = apply_grad_window(z_tok, t ** GRAD_TIME_SCHEDULE, w=DEFAULT_WINDOW_WIDTH, kind='hann')
 
         # min_lengths = torch.clamp((t * Lz).floor().long(), 0, Lz)       # [B]
         # z_tok_temp = z_tok.detach().clone()

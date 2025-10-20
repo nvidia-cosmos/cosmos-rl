@@ -62,7 +62,7 @@ def get_hf_latest_ckpt(repo_id="Jiaxincc/naruto-beta", filename="latest.pt"):
     path = None
     if (not dist.is_initialized()) or dist.get_rank() == 0:
         # If you want faster transfer, you can set HF_HUB_ENABLE_HF_TRANSFER=1 and install hf_transfer.
-        path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
+        path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model", revision="ff67e8509d5e94b87d6c1e08dcacd5b9e5fe555f") #10489cf9848d87667455c6fcb46303a11a2c4e1d")
     return path
 
 def load_checkpoint(
@@ -73,10 +73,10 @@ def load_checkpoint(
     map_location: str | torch.device,
 ):
     ckpt = torch.load(path, map_location=map_location)
-    modelA.module.load_state_dict(ckpt["modelA"], strict=True)
-    modelB.module.load_state_dict(ckpt["modelB"], strict=True)
-    if "optimizer" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer"])
+    modelA.module.load_state_dict(ckpt["modelA"], strict=False)
+    modelB.module.load_state_dict(ckpt["modelB"], strict=False)
+    # if "optimizer" in ckpt:
+    #     optimizer.load_state_dict(ckpt["optimizer"])
     step = int(ckpt.get("step", 0))
     extra = ckpt.get("extra", {})
     return step, extra
@@ -109,7 +109,6 @@ def init_wandb(rank, args, cfg, param_counts):
             "ENCODER_TIME_ADALN": cfg["ENCODER_TIME_ADALN"],
             "N": cfg["N"],
             "VAE_SCALE_IN_SPATIAL": cfg["VAE_SCALE_IN_SPATIAL"],
-            "N_LEVELS": cfg["N_LEVELS"],
             "lr": args.lr,
             "batch_size": args.batch_size,
             "num_workers": args.num_workers,
@@ -127,7 +126,11 @@ def init_wandb(rank, args, cfg, param_counts):
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument("--img_size", type=int, default=480)
+    p.add_argument("--patch_size", type=int, default=2)
     p.add_argument("--batch_size", type=int, default=8)
+    p.add_argument("--encoder_image_stream_hidden_size", type=int, default=1536)
+    p.add_argument("--freeze_decoder_steps", type=int, default=0)
     p.add_argument("--N", type=int, default=4)
     p.add_argument("--cond_len", type=int, default=1024)
     p.add_argument("--cond_dim", type=int, default=1024)
@@ -137,7 +140,6 @@ def parse_args():
     p.add_argument("--ckpt_dir", type=str, default="checkpoints")
     p.add_argument("--save_every", type=int, default=500, help="Save every this many optimizer steps (global).")
     p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint if available.")
-    p.add_argument("--p_loss", action="store_true", help="Use perceptual loss.")
     # W&B
     p.add_argument("--wandb_project", type=str, default="div2k-mmdt")
     p.add_argument("--wandb_entity", type=str, default=None)
@@ -158,21 +160,20 @@ if __name__ == "__main__":
 
     vae = AutoencoderKL.from_pretrained("stabilityai/stable-diffusion-3-medium-diffusers", subfolder="vae").to(device).eval().to(torch.float32)
 
-    IMG_SIZE = 512
+    IMG_SIZE = args.img_size
     COND_LEN = args.cond_len
     COND_DIM = args.cond_dim
-    ENCODER_IMAGE_STREAM_HIDDEN_SIZE = args.cond_dim 
-    ENCODER_PATCH_SIZE = 2
+    ENCODER_IMAGE_STREAM_HIDDEN_SIZE = args.encoder_image_stream_hidden_size
+    ENCODER_PATCH_SIZE = args.patch_size
     ENCODER_TIME_ADALN = True
     N = args.N
     VAE_SCALE_IN_SPATIAL = 8
-    N_LEVELS = (IMG_SIZE // VAE_SCALE_IN_SPATIAL) ** 2 // (ENCODER_PATCH_SIZE ** 2)
 
     # cfgA = ModelACfg(factor=2, embed_dim=1024, depth=6, heads=16, qkv_bias=True)
     # modelA = ModelA_ViT(vae.config.latent_channels, cfgA).to(device).to(dtype)
 
     modelA = QformerEncoder(
-        patch_size=2,
+        patch_size=ENCODER_PATCH_SIZE,
         hidden_size=ENCODER_IMAGE_STREAM_HIDDEN_SIZE,
         num_heads=4,
         depth=args.layers,
@@ -214,15 +215,13 @@ if __name__ == "__main__":
     # optimizer
     optimizer = torch.optim.AdamW(list(modelA.parameters()) + list(modelB.parameters()), lr=args.lr)
     optimizer.zero_grad()
-    if is_main_process():
-        print(f"N_LEVELS: {N_LEVELS}")
 
     # W&B init
     cfg_for_wandb = dict(
         IMG_SIZE=IMG_SIZE, COND_LEN=COND_LEN, COND_DIM=COND_DIM,
         ENCODER_IMAGE_STREAM_HIDDEN_SIZE=ENCODER_IMAGE_STREAM_HIDDEN_SIZE,
         ENCODER_PATCH_SIZE=ENCODER_PATCH_SIZE, ENCODER_TIME_ADALN=ENCODER_TIME_ADALN,
-        N=N, VAE_SCALE_IN_SPATIAL=VAE_SCALE_IN_SPATIAL, N_LEVELS=N_LEVELS
+        N=N, VAE_SCALE_IN_SPATIAL=VAE_SCALE_IN_SPATIAL
     )
     run, run_id = init_wandb(rank, args, cfg_for_wandb, param_counts)
 
@@ -232,7 +231,7 @@ if __name__ == "__main__":
     if args.resume:
         if is_main_process():
             if not os.path.exists(latest_path):
-                latest_path = get_hf_latest_ckpt("Jiaxincc/naruto-beta", "latest_xl.pt")
+                latest_path = get_hf_latest_ckpt("Jiaxincc/fml", "latest.pt")
             # map checkpoints saved on cuda:0 to this rank's device
             map_loc = {"cuda:%d" % 0: "cuda:%d" % device_id}
             global_step, extra = load_checkpoint(latest_path, modelA, modelB, optimizer, map_location=map_loc)
@@ -261,13 +260,18 @@ if __name__ == "__main__":
     # --- Training ---
     modelA.train()
     modelB.train()
-    if args.p_loss:
-        import lpips
-        lpips = lpips.LPIPS(net='vgg').to(device)
-    else:
-        lpips = None
+
+    global_step = 0
+    if args.freeze_decoder_steps > 0:
+        for param in modelB.parameters():
+            param.requires_grad = False
+
     with torch.autocast(device_type=device.type, dtype=dtype):
         while True:
+            if global_step > args.freeze_decoder_steps and args.freeze_decoder_steps > 0:
+                for param in modelB.parameters():
+                    param.requires_grad = True
+            global_step += 1
             for img in train_loader:
                 B, C, H, W = img.shape
                 img = img.to(device, non_blocking=True)
@@ -278,24 +282,9 @@ if __name__ == "__main__":
                 t = torch.rand(B, device=device)
                 input_xt = t.view(B, 1, 1, 1) * z1_s + (1 - t.view(B, 1, 1, 1)) * noise
                 condition = modelA(z1_s)
-                # 5% chance to zero out condition while keeping gradient
-                if random.random() < 0.05:
-                    condition = condition * 0.0
-
                 output = modelB(x_t=input_xt, z_tok=condition, t=t)
                 loss = torch.nn.functional.mse_loss(output, (z1_s - noise))
-
-                if args.p_loss:
-                    decoded_img_hat = vae_decode(vae, input_xt + (1 - t.view(B, 1, 1, 1)) * output)
-                    # Perceptual loss
-                    with torch.autocast(device_type=device.type, dtype=dtype):
-                        p_loss = lpips(decoded_img_hat * 2.0 - 1.0, img * 2.0 - 1.0)
-                        p_loss = (p_loss * t.view(p_loss.shape)).view(B).mean()
-                    total_loss = loss + p_loss * 0.1
-                    p_loss = p_loss.detach()
-                else:
-                    total_loss = loss
-                    p_loss = torch.tensor(0.0, device=device)
+                total_loss = loss
                 total_loss.backward()
                 loss = loss.detach()
 
@@ -312,9 +301,6 @@ if __name__ == "__main__":
                 loss_for_log = loss.clone().detach()
                 dist.all_reduce(loss_for_log, op=dist.ReduceOp.AVG)
                 loss_item = loss_for_log.item()
-                p_loss_for_log = p_loss.clone().detach()
-                dist.all_reduce(p_loss_for_log, op=dist.ReduceOp.AVG)
-                p_loss_item = p_loss_for_log.item()
                 total_norm_for_log = total_norm.clone().detach()
                 dist.all_reduce(total_norm_for_log, op=dist.ReduceOp.AVG)
                 total_norm_item = total_norm_for_log.item()
@@ -323,12 +309,12 @@ if __name__ == "__main__":
                 if is_main_process():
                     if wandb and run is not None:
                         wandb.log(
-                            {"loss": loss_item, "p_loss": p_loss_item, "lr": optimizer.param_groups[0]["lr"], "global_step": global_step, "total_norm": total_norm_item},
+                            {"loss": loss_item, "lr": optimizer.param_groups[0]["lr"], "global_step": global_step, "total_norm": total_norm_item},
                             step=global_step,
                         )
                     # also keep stdout
                     if global_step % 10 == 0:
-                        print(f"[step {global_step}] Loss: {loss_item:.6f}, P Loss: {p_loss_item:.6f}, Total Norm: {total_norm_item:.6f}")
+                        print(f"[step {global_step}] Loss: {loss_item:.6f}, Total Norm: {total_norm_item:.6f}")
 
                     # Checkpointing
                     if global_step % args.save_every == 0:

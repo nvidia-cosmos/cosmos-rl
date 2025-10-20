@@ -60,6 +60,7 @@ def random_resize_min(img: Image.Image, min_size: int) -> Image.Image:
         scale = min_scale
     else:
         scale = random.uniform(min_scale, 1.0)
+        # scale = 1.0
     new_w = int(round(w * scale))
     new_h = int(round(h * scale))
     return img.resize((new_w, new_h), Image.LANCZOS)
@@ -123,18 +124,20 @@ class R2ImageDataset(Dataset):
 
         keys = self._try_load_manifest(manifest_key)
         assert manifest_key is not None
-        try:
-            for i in range(1000):
+        for i in range(0, 70):
+            try:
                 manifest_key = self.prefix + f"manifest-{i}.json"
                 keys.extend(self._try_load_manifest(manifest_key))
-        except Exception:
-            pass
+            except Exception:
+                pass
         if keys is None:
             keys = self._list_image_keys()
 
         if not keys:
             raise RuntimeError("No images found in R2 at the specified location.")
         print(f"Found {len(keys)} images in R2 at the specified location.")
+        # Shuffle keys
+        random.shuffle(keys)
         self.keys = keys
 
     def _try_load_manifest(self, key: str):
@@ -214,7 +217,7 @@ def make_loader(bucket: str, prefix: str = "", cache_size: int = 128, image_size
 if __name__ == "__main__":
     # Expect the same env vars as the uploader
     bucket = os.getenv("R2_BUCKET")
-    prefix = os.getenv("R2_PREFIX", "datasets/")  # where you uploaded
+    prefix = os.getenv("R2_PREFIX", "laion-ath-manifest//")  # where you uploaded
     manifest_key = prefix + "manifest.json"       # created by uploader
 
     ds = make_loader(bucket=bucket, prefix=prefix, cache_size=256, image_size=512, batch_size=64, num_workers=0)

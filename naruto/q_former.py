@@ -427,10 +427,10 @@ class Encoder(nn.Module):
         else:
             num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
-        if num_patches is not None:
-            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
-        else:
-            self.pos_embed = None
+        # if num_patches is not None:
+        #     self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        # else:
+        #     self.pos_embed = None
         self.blocks = nn.ModuleList([
             ViTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
         ])
@@ -448,12 +448,12 @@ class Encoder(nn.Module):
         self.apply(_basic_init)
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
-        if self.pos_embed is not None:
-            pos_embed = get_2d_sincos_pos_embed(
-                self.pos_embed.shape[-1],
-                int(self.x_embedder.num_patches ** 0.5)
-            )
-            self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        # if self.pos_embed is not None:
+        # pos_embed = get_2d_sincos_pos_embed(
+        #     self.pos_embed.shape[-1],
+        #     int(self.x_embedder.num_patches ** 0.5)
+        # )
+        # pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0)
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
         w = self.x_embedder.proj.weight.data
@@ -495,7 +495,13 @@ class Encoder(nn.Module):
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         d: N, the depth for each sample
         """
-        x = self.x_embedder(x) + self.pos_embed
+        pos_embed = get_2d_sincos_pos_embed(
+            self.hidden_size,
+            int(self.x_embedder.num_patches ** 0.5)
+        )
+        pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0).to(x.device)
+
+        x = self.x_embedder(x) + pos_embed
         outs = self.get_encoder_outs(x, kwargs=kwargs) #torch.Size([4, 512, 512])
         # if self.post_norm:
         #     outs = self.final_layer_norm(outs)

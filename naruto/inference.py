@@ -45,10 +45,10 @@ def rk4_integrate(x0, t0, t1, steps, f, condition=None):
 
 def build_models(device, dtype, vae_latent_channels, IMG_SIZE=512, VAE_SCALE_IN_SPATIAL=8,
                  COND_LEN=2048, COND_DIM=1536,
-                 ENCODER_PATCH_SIZE=2, ENCODER_TIME_ADALN=True, N_LAYERS=32):
+                 ENCODER_PATCH_SIZE=2, ENCODER_TIME_ADALN=True, N_LAYERS=32, ENCODER_IMAGE_STREAM_HIDDEN_SIZE=1536):
     modelA = QformerEncoder(
         patch_size=ENCODER_PATCH_SIZE,
-        hidden_size=COND_DIM,
+        hidden_size=ENCODER_IMAGE_STREAM_HIDDEN_SIZE,
         num_heads=4,
         depth=N_LAYERS,
         K=COND_LEN,
@@ -77,8 +77,8 @@ def build_models(device, dtype, vae_latent_channels, IMG_SIZE=512, VAE_SCALE_IN_
     modelB.use_checkpoint = False
     return modelA, modelB
 
-def load_latest_if_any(ckpt_dir, modelA, modelB, map_location):
-    latest = os.path.join(ckpt_dir, "latest_xl.pt")
+def load_latest_if_any(ckpt_dir, modelA, modelB, map_location, filename='latest_512.pt'):
+    latest = os.path.join(ckpt_dir, filename)
     if not os.path.exists(latest):
         return 0
     ckpt = torch.load(latest, map_location=map_location)
@@ -118,20 +118,17 @@ def reconstruct_from_most_blur(
     vae = AutoencoderKL.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers", subfolder="vae"
     ).to(device).eval().to(torch.float32)
-    # IMG_SIZE = 512
-    # COND_LEN = 2560 
-    # COND_DIM = 1536
-    # N_LAYERS = 40
+    ENCODER_IMAGE_STREAM_HIDDEN_SIZE = 1536
 
     # Build models
-    IMG_SIZE = 384
-    COND_LEN = 2048
-    COND_DIM = 1536
-    N_LAYERS = 32
+    IMG_SIZE = 480
+    COND_LEN = 1024
+    COND_DIM = 2304#1920
+    N_LAYERS = 40
     modelA, modelB = build_models(
-        device=device, dtype=dtype, vae_latent_channels=vae.config.latent_channels, IMG_SIZE=IMG_SIZE, COND_LEN=COND_LEN, COND_DIM=COND_DIM, N_LAYERS=N_LAYERS
+        device=device, dtype=dtype, vae_latent_channels=vae.config.latent_channels, IMG_SIZE=IMG_SIZE, COND_LEN=COND_LEN, COND_DIM=COND_DIM, N_LAYERS=N_LAYERS, ENCODER_IMAGE_STREAM_HIDDEN_SIZE=ENCODER_IMAGE_STREAM_HIDDEN_SIZE
     )
-    _ = load_latest_if_any(ckpt_dir, modelA, modelB, map_location='cpu')
+    _ = load_latest_if_any(ckpt_dir, modelA, modelB, map_location='cpu')#, filename='latest_lite.pt')
 
     # Load a sample image if not provided
     if img is None:
@@ -151,7 +148,10 @@ def reconstruct_from_most_blur(
     z1_recover = Image.fromarray(z1_recover.cpu().numpy().astype(np.uint8))
     z1_recover.save("z1_recover.png")
 
+    with torch.autocast(device_type=device.type, dtype=dtype):
+        condition = modelA(z1)
 
+    images = []
     BEGIN_T = 0.1
     END_T = 1.0
     t0 = torch.tensor([BEGIN_T], device=device, dtype=torch.float32)
@@ -166,25 +166,19 @@ def reconstruct_from_most_blur(
         # else:
         # Prepare conditioning from modelA at (x, t_cond = t)
         # NOTE: modelA expects bfloat16, but "t" stays float32 (like your training)
-        print(f"t_scalar: {t_scalar}")
+        # print(f"t_scalar: {t_scalar}")
         with torch.autocast(device_type=device.type, dtype=dtype):
             v = modelB(x_t=x_t, z_tok=condition, t=t_scalar)  # float32 output in your training
         return v.to(torch.float32)
 
-    # Integrate from t=1 -> t=0 (reduce blur)
-    with torch.autocast(device_type=device.type, dtype=dtype):
-        condition = modelA(z1)
-        # condition = torch.load(f"../origin_mix_encoded_img_1.pt").to(device).view(1, COND_LEN, COND_DIM) / 2.0
-        # condition = torch.load(f"../origin_mix_noise_1.pt").to(device).view(1, COND_LEN, COND_DIM) / 2.0
-        # condition = torch.load(f"../noise_1.pt").to(device).view(1, COND_LEN, COND_DIM) / 2.0
-        # print(f"condition: {condition}")
-    zT = rk4_integrate(zt_s, t0, torch.tensor([END_T], device=device, dtype=torch.float32), steps, partial(vel), condition=condition)
-
-    # Decode to image: [3, H, W]
-    out = vae_decode(vae, zT)[0].permute(1, 2, 0) * 255.0
-    # To PIL Image
-    print(f"out: {out.min()}, {out.max()}, {out.shape}")
-    out = Image.fromarray(out.clamp(0, 255).round().cpu().numpy().astype(np.uint8))
+    for visible_prefix in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
+        condition_visible = condition.clone()
+        condition_visible[:, int(visible_prefix * COND_LEN) :] = 0.0
+        zT = rk4_integrate(zt_s, t0, torch.tensor([END_T], device=device, dtype=torch.float32), steps, partial(vel), condition=condition_visible)
+        images.append(vae_decode(vae, zT)[0].permute(1, 2, 0) * 255.0)
+    
+    images = torch.cat(images, dim=1)
+    out = Image.fromarray(images.clamp(0, 255).round().cpu().numpy().astype(np.uint8))
     out = out.convert("RGB")
 
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
