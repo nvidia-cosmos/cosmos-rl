@@ -23,7 +23,7 @@ from contextlib import contextmanager
 import time
 
 from vllm import SamplingParams
-from cosmos_rl.dispatcher.data import RLPayload
+from cosmos_rl.dispatcher.data import RLPayload, IdxAndRLPayload
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.rollout.rollout_base import RolloutBase
@@ -34,6 +34,8 @@ from cosmos_rl.utils.logging import logger
 class CompletedRollout:
     """Represents a completed rollout generation."""
 
+    # the index of the payload in the dataset
+    idx: int
     payload: RLPayload
     result: RolloutResult
 
@@ -161,7 +163,7 @@ class RolloutTaskScheduler:
             f"[RolloutTaskScheduler] Initialized with max_concurrent_requests={max_concurrent_requests}"
         )
 
-    def put_rollout(self, payload: RLPayload):
+    def put_rollout(self, payload: IdxAndRLPayload):
         """
         Put a single payload into the task queue for processing.
 
@@ -175,7 +177,7 @@ class RolloutTaskScheduler:
             f"(total submitted: {self.total_submitted})"
         )
 
-    def put_rollout_batch(self, payloads: List[RLPayload]):
+    def put_rollout_batch(self, payloads: List[IdxAndRLPayload]):
         """
         Put multiple payloads into the task queue for processing.
 
@@ -190,7 +192,9 @@ class RolloutTaskScheduler:
             f"(total submitted: {self.total_submitted})"
         )
 
-    async def _generate_single(self, payload: RLPayload) -> Optional[CompletedRollout]:
+    async def _generate_single(
+        self, payload: IdxAndRLPayload
+    ) -> Optional[CompletedRollout]:
         """
         Generate completion for a single payload asynchronously.
 
@@ -201,9 +205,10 @@ class RolloutTaskScheduler:
             CompletedRollout object containing the payload and result
         """
         try:
+            idx, rawPayload = payload
             # Call rollout engine's async generation method
             results = await self.rollout_engine.rollout_generation(
-                payloads=[payload],
+                payloads=[rawPayload],
                 stream=self.stream,
                 data_packer=self.data_packer,
                 sampling_params=self.sampling_params,
@@ -211,7 +216,7 @@ class RolloutTaskScheduler:
 
             if results and len(results) > 0:
                 result = results[0]
-                completed = CompletedRollout(payload=payload, result=result)
+                completed = CompletedRollout(idx=idx, payload=rawPayload, result=result)
 
                 # Put the completed result into the queue
                 self.complete_queue.put(completed)
@@ -537,6 +542,17 @@ class RolloutTaskScheduler:
                 break
         return results
 
+    def is_idle(self) -> bool:
+        """
+        Check if the scheduler is idle.
+        """
+        return (
+            self.is_running()
+            and len(self.active_tasks) == 0
+            and self.task_queue.empty()
+            and self.complete_queue.empty()
+        )
+
     def has_results(self) -> bool:
         """
         Check if there are any completed results available.
@@ -590,3 +606,15 @@ class RolloutTaskScheduler:
             "completed_results": self.complete_queue.qsize(),
             "max_concurrent_requests": self.max_concurrent_requests,
         }
+
+    # TODO(zjx): below are some HACKs in this class, be careful when calling them.
+    def get_front_prompt_weight_version(self) -> (bool, int):
+        """
+        Get the weight version of the front prompt in the task queue.
+        """
+
+        if self.task_queue.empty():
+            return (False, 0)
+
+        payload: RLPayload = self.task_queue.queue[0][1]
+        return (True, payload.weight_version)
