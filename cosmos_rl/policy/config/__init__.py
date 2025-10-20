@@ -968,8 +968,8 @@ class RolloutConfig(BaseModel):
 
     backend: str = Field(
         default="vllm",
-        description="Backend for rollout. Currently support `vllm` and `trtllm`.",
-        choices=["vllm", "trtllm"],
+        description="Backend for rollout. Currently support `vllm`, `vllm_async` and `trtllm`.",
+        choices=["vllm", "vllm_async", "trtllm"],
     )
 
     multi_turn_config: MultiTurnRolloutConfig = Field(
