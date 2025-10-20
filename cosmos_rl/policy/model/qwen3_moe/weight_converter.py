@@ -20,7 +20,8 @@ from typing import Tuple, Dict, Any
 from cosmos_rl.utils.parallelism_registry import register_parallelism_strategy
 
 
-def map_key_from_hf(name: str, src_model_type: str) -> str:
+def map_key_from_hf(name: str) -> str:
+    # The policy weights do not have the "model." prefix, but the hf weights do.
     return name.replace("model.", "")
 
 
@@ -31,7 +32,9 @@ def convert_weight_from_hf(
     parallel_dims: ParallelDims,
     n_experts: int,
     ignore_unknown_weights: bool = False,
-) -> Tuple[str, torch.Tensor]:
+) -> Tuple[str, torch.Tensor, int]:
+    del src_model_type
+
     tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
     assert n_experts % tp_ep_size == 0, "n_experts must be divisible by tp_ep_size"
 
@@ -42,12 +45,7 @@ def convert_weight_from_hf(
         dp_shard_rank = 0
         dp_shard_size = 1
 
-    # Expert weight are aggregated into (n_experts, in_features, out_features)
-    # Weight are loaded in (out_features, in_features) shape
-    # So we do not do FSDP sharding on expert weights, instead we filter by expert id
-    should_do_fsdp_sharding = True
-
-    dest_name = map_key_from_hf(name, src_model_type)
+    dest_name = map_key_from_hf(name)
 
     if "lm_head.weight" == dest_name:
         shard = tensor.tensor_split(tp_ep_size, dim=0)[tp_ep_rank]
@@ -86,7 +84,7 @@ def convert_weight_from_hf(
             shard = tensor.tensor_split(tp_ep_size, dim=-1)[tp_ep_rank]
     elif (
         match := re.search(  # noqa: F841
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj)\.(weight|bias)",
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.weight",
             dest_name,
         )
     ) is not None:
@@ -98,41 +96,28 @@ def convert_weight_from_hf(
         #  EP=2: 16, 17, 18, 19, 20, 21, 22, 23
         #  EP=3: 24, 25, 26, 27, 28, 29, 30, 31
         n_expert_per_ep = n_experts // tp_ep_size
-        belongs_to_current_ep = (
-            tp_ep_rank * n_expert_per_ep
-            <= int(match.group(2))  # Expert index
-            < (tp_ep_rank + 1) * n_expert_per_ep
-        )
+        n_expert_per_dp = n_expert_per_ep // dp_shard_size
+
+        expert_id = int(match.group(2))
+        belongs_to_current_ep = (expert_id // n_expert_per_ep) == tp_ep_rank
+
+        expert_idx_within_ep = expert_id % n_expert_per_ep
         belongs_to_current_dp_shard = (
-            int(match.group(2)) - tp_ep_rank * n_expert_per_ep
-        ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
+            expert_idx_within_ep // n_expert_per_dp
+        ) == dp_shard_rank
+
         if belongs_to_current_ep and belongs_to_current_dp_shard:
-            should_do_fsdp_sharding = False
+            # remove `experts.$ID.` from dest_name
+            dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
+            # change `proj.weight` to `projs`.
+            dest_name = dest_name.replace("proj.weight", "projs")
+
             shard = tensor
+            return dest_name, shard.contiguous(), expert_id
         else:
-            # If the expert does not belong to the current process, return None to skip this weight
-            return None, None
-    elif (
-        match := re.search(
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)", dest_name
-        )  # noqa: F841
-    ) is not None:
-        # The same logic as the up_proj/gate_proj
-        n_expert_per_ep = n_experts // tp_ep_size
-        belongs_to_current_ep = (
-            tp_ep_rank * n_expert_per_ep
-            <= int(match.group(2))
-            < (tp_ep_rank + 1) * n_expert_per_ep
-        )
-        belongs_to_current_dp_shard = (
-            int(match.group(2)) - tp_ep_rank * n_expert_per_ep
-        ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
-        if belongs_to_current_ep and belongs_to_current_dp_shard:
-            should_do_fsdp_sharding = False
-            shard = tensor
-        else:
-            # If the expert does not belong to the current process, return None to skip this weight
-            return None, None
+            # If the expert does not belong to the current rank, return None
+            # to skip this weight.
+            return None, None, None
     elif (
         match := re.search(  # noqa: F841
             r"layers\.(\d+)\.post_attention_layernorm\.(weight|bias)", dest_name
@@ -149,13 +134,17 @@ def convert_weight_from_hf(
     elif not ignore_unknown_weights:
         raise ValueError(f"Unsupported weight: {dest_name}")
     else:
-        return None, None
+        return None, None, None
+
+    # Expert weight are aggregated into (n_experts, in_features, out_features)
+    # Weight are loaded in (out_features, in_features) shape
+    # So we do not do FSDP sharding on expert weights, instead we filter by
+    # expert id in the above code block.
 
     # Do FSDP sharding
     shard = shard.contiguous()
-    if should_do_fsdp_sharding:
-        shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
-    return dest_name, shard.contiguous()
+    shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
+    return dest_name, shard.contiguous(), None
 
 
 @register_parallelism_strategy("qwen3_moe")
@@ -215,7 +204,8 @@ def map_weight_parallel_dims(
                 dims_map[dim] = n_dim - 1
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.(up_proj|gate_proj)\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj)\.(weight|bias)",
+                    dest_name,
                 )
             ) is not None:
                 dims_map[dim] = (
@@ -223,7 +213,7 @@ def map_weight_parallel_dims(
                 )
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.experts\.down_proj\.(weight|bias)", dest_name
                 )
             ) is not None:
                 dims_map[dim] = (
@@ -254,7 +244,7 @@ def map_weight_parallel_dims(
     else:
         dims_map = {}
 
-    # Do FSDP sharding
+    # Do FSDP sharding. Why is FSDP sharding only done on dim0?
     dim = "dp_shard_cp"
     if dp_shard_size > 1:
         dims_map[dim] = 0
