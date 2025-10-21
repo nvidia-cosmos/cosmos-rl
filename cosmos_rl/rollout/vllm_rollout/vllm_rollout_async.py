@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-
+import uuid
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
 
 import vllm
@@ -22,7 +22,7 @@ import copy
 from typing import List, Optional, Dict
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.v1.engine.async_llm import AsyncLLM as AsyncLLMEngine, AsyncEngineArgs
 from vllm import SamplingParams
 from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
@@ -153,11 +153,13 @@ class vLLMRolloutAsync(RolloutBase):
                 % (tp_size, pp_size, rollout_parallelism.world_size)
             )
 
+            if quantization == "none":
+                quantization = None
             self.quantization = quantization
 
             policy_config = self.config.policy
 
-            self.rollout_engine = AsyncLLMEngine(
+            engine_args = AsyncEngineArgs(
                 model=model_path,
                 enable_sleep_mode=False,  # enable sleep could corrupt the cuda allocator.
                 tensor_parallel_size=tp_size,
@@ -185,6 +187,8 @@ class vLLMRolloutAsync(RolloutBase):
                 seed=seed or 42,
                 load_format=load_format,
             )
+
+            self.rollout_engine = AsyncLLMEngine.from_engine_args(engine_args)
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")
             # initialization done.
@@ -210,6 +214,9 @@ class vLLMRolloutAsync(RolloutBase):
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
 
+        # TODO(zjx): should remove if vllm support putting multiple prompts in one call
+        assert len(payloads) == 1, "vLLM async rollout only support one prompt at a time."
+
         # Pack the payloads into prompts for vllm.
         prompts = []
         for pl in payloads:
@@ -228,21 +235,20 @@ class vLLMRolloutAsync(RolloutBase):
         stream = torch.cuda.current_stream() if stream is None else stream
         try:
             with torch.cuda.stream(stream):
-                results_generator = await self.rollout_engine.generate(
-                    new_prompts,
-                    sampling_params=sampling_params,
-                    use_tqdm=False,
-                )
-
-            async for i, output in enumerate(results_generator):
-                response.append(
-                    RolloutResult(
-                        prompt=payloads[i].prompt,
-                        completions=[
-                            output.outputs[i].text for i in range(len(output.outputs))
-                        ],
-                    )
-                )
+                async for result in self.rollout_engine.generate(
+                        prompt=new_prompts[0],
+                        sampling_params=sampling_params,
+                        # there is no request tracking now.
+                        request_id=str(uuid.uuid4()),
+                    ):
+                    if result.finished:
+                        response.append(
+                            RolloutResult(
+                                prompt=payloads[0].prompt,
+                                completions=[result.outputs[0].text],
+                            )
+                        )
+                        break
         except Exception as e:
             logger.error(f"[Rollout] Failed in rollout generation: {str(e)}")
             import traceback
@@ -265,7 +271,9 @@ class vLLMRolloutAsync(RolloutBase):
             )
         stream = torch.cuda.current_stream() if stream is None else stream
 
-        def generation_multi_turn_for_one_payload(
+        request_id = str(uuid.uuid4())
+
+        async def generation_multi_turn_for_one_payload(
             current_conversation: ConversationType,
         ):
             assistant_turn_count = 0
@@ -281,15 +289,17 @@ class vLLMRolloutAsync(RolloutBase):
                 prompts = data_packer.rollout_collate_fn(prompts)
 
                 with torch.cuda.stream(stream):
-                    results = self.rollout_engine.generate(
-                        prompts=prompts,
-                        sampling_params=sampling_params,
-                        use_tqdm=False,
-                    )
+                    async for result in self.rollout_engine.generate(
+                            prompt=prompts[0],
+                            sampling_params=sampling_params,
+                            request_id=request_id,
+                        ):
+                        if result.finished:
+                            responses = [result.outputs[0].text]
+                            break
 
                 # TODO(zjx): support multi-path conversations search for multi-turn rollout generation
                 # extend the conversation with the rollout result
-                responses = [output.text for output in results[0].outputs]
                 current_conversation = data_packer.extend_conversation(
                     current_conversation,
                     responses,
@@ -298,8 +308,8 @@ class vLLMRolloutAsync(RolloutBase):
 
                 # check if the sequence length is reached the max_sequence_length
                 if (
-                    len(results[0].prompt_token_ids)
-                    + len(results[0].outputs[0].token_ids)
+                    len(result.prompt_token_ids)
+                    + len(result.outputs[0].token_ids)
                     > self.rollout_config.max_response_length
                 ):
                     logger.warning(
@@ -321,7 +331,7 @@ class vLLMRolloutAsync(RolloutBase):
             conversations = []
             completions = []
             for _ in range(n_generation):
-                new_conversation, completion = generation_multi_turn_for_one_payload(
+                new_conversation, completion = await generation_multi_turn_for_one_payload(
                     copy.deepcopy(payload.conversation)
                 )
                 conversations.append(new_conversation)
