@@ -34,6 +34,7 @@ from cosmos_rl.utils.wandb_logger import (
 from transformers import AutoTokenizer
 import numpy as np
 from tqdm import tqdm
+import itertools
 
 
 class ReplicaScalingEnum(StrEnum):
@@ -103,12 +104,21 @@ class PolicyStatusManager:
 
     def __init__(self):
         self.policy_replicas = {}
+        # number of steps that needed to interate over all the samples across all the epochs.
         self.total_steps = 0
+        # current step of the policy training, this step could won't reach to total_steps because of dynmaic sampling.
+        # Some samples could be filtered out due to dynamic sampling and they won't be used for policy training.
+        # This step is the actual weight update step, it is also binded to the weight version.
         self.current_step = 0
+
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
+        self.consumed_samples_num = 0
+
         self.status = {}
+
         self.train_report_data = RollingDict(maxlen=20)
+
         self.replica_scaling_log = []
 
         # Validation
@@ -653,6 +663,34 @@ class PolicyStatusManager:
         self.rollout_buffer.put(rollout)
         self.try_trigger_data_fetch_and_training()
 
+    def put_rollouts(
+        self, valid_rollouts: List[Rollout], invalid_rollouts: List[Rollout]
+    ):
+        """
+        Put the rollouts to the rollout buffer.
+        """
+        completion_tokens_count = 0
+        n_samples = 0
+        rollouts_to_put = None
+
+        if self.config.train.train_policy.variant == "dapo":
+            rollouts_to_put = valid_rollouts
+            # In single-thread: invalid rollouts should also be decreased from the total number of samples
+            self.remain_samples_num -= len(invalid_rollouts)
+        else:
+            rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
+
+        for rollout in rollouts_to_put:
+            completion_tokens_count += len(self.tokenizer.encode(rollout.completion))
+            n_samples += 1
+            if self.config.train.train_policy.on_policy:
+                self.consumed_samples_num += 1
+                if self.rollouts_enough_for_one_step():
+                    break
+            self.put_rollout(rollout)
+
+        return completion_tokens_count, n_samples
+
     def train_ack(
         self,
         replica_name: str,
@@ -720,6 +758,15 @@ class PolicyStatusManager:
                             for data in self.report_data_list
                         ]
                     )
+                    total_entropy = np.mean(
+                        [data.get("train/entropy", 0) for data in self.report_data_list]
+                    )
+                    total_effective_entropy = np.mean(
+                        [
+                            data.get("train/effective_entropy", 0)
+                            for data in self.report_data_list
+                        ]
+                    )
                     train_step = self.report_data_list[0]["train_step"]
                     self.report_data_list = []
 
@@ -731,6 +778,8 @@ class PolicyStatusManager:
                         "train/kl_loss_avg": total_kl_loss_avg,
                         "train/kl_loss_max": total_kl_loss_max,
                         "train/grad_norm": total_grad_norm,
+                        "train/entropy": total_entropy,
+                        "train/effective_entropy": total_effective_entropy,
                     }
 
                     self.train_report_data.setdefault(train_step, {}).update(
@@ -744,7 +793,7 @@ class PolicyStatusManager:
                         )
                     if "console" in self.config.logging.logger:
                         logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Iteration time: {total_iter_time_avg:.2f}s."
+                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
                     for logger_fn in self.custom_logger_fns:
                         try:
@@ -754,8 +803,10 @@ class PolicyStatusManager:
                                 f"[Controller] Warning reporting customized training results: {e}"
                             )
                 except Exception as e:
+                    import traceback
+
                     logger.warning(
-                        f"[Controller] Warning reporting training results: {e}"
+                        f"[Controller] Warning reporting training results: {e}\n{traceback.format_exc()}"
                     )
 
             # All replicas have been reduced, trigger weight sync
@@ -813,6 +864,15 @@ class PolicyStatusManager:
             redis_handler=self.redis_handler,
         )
 
+    def rollouts_enough_for_one_step(self) -> bool:
+        """
+        Check if the rollouts are enough.
+        """
+        return self.total_pending_rollouts() >= (
+            self.config.train.train_batch_per_replica
+            * len(self.get_all_atoms_arrived_replicas())
+        )
+
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
         # If the validation dataloader is activated, do not trigger data fetch and training
         if self.activated_val_iter is not None:
@@ -836,14 +896,15 @@ class PolicyStatusManager:
         else:
             items_count = self.config.train.train_batch_per_replica
             required_rollouts = items_count * len(arrived_replicas)
-            all_ready_or_reduced = self.all_ready_or_reduced() and (
-                self.rollout_buffer.qsize() >= required_rollouts
+            all_ready_or_reduced = (
+                self.all_ready_or_reduced() and self.rollouts_enough_for_one_step()
             )
 
         # If the last command is fake, we need to trigger data fetch and training no matter
         # whether there are enough rollouts or whether replicas are `ready` or `reduced`.
         if all_ready_or_reduced:
             rollouts_of_this_step: List[Rollout] = []
+            # Decrease the consumed rollouts number.
             self.remain_samples_num -= required_rollouts
 
             # From controller's perspective, the training step is already increased
@@ -855,12 +916,15 @@ class PolicyStatusManager:
             ):
                 self.validation_activate_dataloader(self.current_step)
 
+            # FIXME: (lms) will this dipatch style cause non-alignment with VeRL?
+            # This dispatch style will cause rollouts from same prompt may be dispatched to different replicas.
             # Interleave-style data dispatch
             for _ in range(items_count):
                 for replica in arrived_replicas:
                     rollout = self.rollout_buffer.get()
                     replica.put_rollout(rollout, self.redis_handler)
                     rollouts_of_this_step.append(rollout)
+
             # Decide whether to save checkpoint
             # First check if we need to save checkpoint based on epoch
             do_save = False
@@ -924,6 +988,7 @@ class PolicyStatusManager:
                     "train/reward_min": np.min(rewards),
                     "train/completion_length_mean": np.mean(completion_lengths),
                     "train/completion_length_max": np.max(completion_lengths),
+                    "train/completion_length_min": np.min(completion_lengths),
                 }
                 self.train_report_data[self.current_step] = report_data
 

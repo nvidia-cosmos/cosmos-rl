@@ -77,6 +77,24 @@ class HFModelWeightMapper(WeightMapper):
                 return rollout_weight_name.replace("w2_bias", "down_proj_bias")
             else:
                 pass
+        elif model_type == "qwen3_vl":
+            # Special case for Qwen3-VL
+            if rollout_weight_name.startswith("language_model.model."):
+                rollout_weight_name = rollout_weight_name.replace(
+                    "language_model.model.", "language_model."
+                )
+            if (
+                not rollout_weight_name.startswith("model.")
+                and "lm_head" not in rollout_weight_name
+            ):
+                rollout_weight_name = "model." + rollout_weight_name
+            if rollout_weight_name.startswith("language_model.lm_head."):
+                # lm_head exists at language_model level, remove the language_model prefix
+                rollout_weight_name = rollout_weight_name.replace(
+                    "language_model.lm_head.", "lm_head."
+                )
+
+            return rollout_weight_name
 
         return self.policy_map_local_key_to_hf_key(rollout_weight_name)
 
@@ -119,10 +137,15 @@ class HFModelWeightMapper(WeightMapper):
         models_do_not_split_gate_up_proj = ["gpt_oss"]
         recv_key_n_shape_list = []
         vllm_weight_inplace_view_map = {}
-        for param_name, param in vllm_model.named_parameters():
+        # For some models like Qwen3-VL, vLLM just soft link lm_head with embed_tokens
+        # Like: `self.lm_head = self.model.embed_tokens`
+        # If we don't set `remove_duplicate` to False, the `lm_head` will not be included in the named_parameters.
+        for param_name, param in vllm_model.named_parameters(remove_duplicate=False):
             group_keys = []
             compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            if any(rule in compatible_key for rule in ["qkv_proj", "qkv"]):
+            if ("qkv_proj" in compatible_key) or (
+                "qkv" in compatible_key and not self.is_vlm
+            ):
                 # must be inplace slicing.
                 # split qkv weight
                 rule = "qkv_proj" if "qkv_proj" in compatible_key else "qkv"

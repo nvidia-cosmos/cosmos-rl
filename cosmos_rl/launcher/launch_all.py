@@ -28,9 +28,39 @@ from argparse import REMAINDER
 from typing import List, Dict, Optional, Any, Callable
 import toml
 import tempfile
+import copy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")
+
+
+def dump_config_with_literal_patterns_to_tmpfile(config: Dict[str, Any]) -> str:
+    """
+    Write config to TOML, while emitting legacy dict-based
+    policy.lora.{alpha_pattern,r_pattern} as literal sections to avoid
+    backslash-escaping of regex keys.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".toml", delete=False
+    ) as tmp_file:
+        config_for_dump = copy.deepcopy(config)
+        lora_config = (config_for_dump.get("policy", {})).get("lora", {})
+        alpha_pattern_table = lora_config.pop("alpha_pattern", None)
+        r_pattern_table = lora_config.pop("r_pattern", None)
+
+        toml.dump(config_for_dump, tmp_file)
+
+        if isinstance(alpha_pattern_table, dict) and alpha_pattern_table:
+            tmp_file.write("\n[policy.lora.alpha_pattern]\n")
+            for key, value in alpha_pattern_table.items():
+                tmp_file.write(f"'{key}' = {value}\n")
+
+        if isinstance(r_pattern_table, dict) and r_pattern_table:
+            tmp_file.write("\n[policy.lora.r_pattern]\n")
+            for key, value in r_pattern_table.items():
+                tmp_file.write(f"'{key}' = {value}\n")
+
+        return tmp_file.name
 
 
 # ---------------------------------------------------------------------------
@@ -1200,11 +1230,7 @@ cosmos-rl --config config.toml"""
             # Only available for RL.
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
     # Create a temporary file and write to it
-    with tempfile.NamedTemporaryFile(
-        mode="w+", suffix=".toml", delete=False
-    ) as tmpfile:
-        toml.dump(cosmos_config, tmpfile)
-        tmpfile_toml = tmpfile.name
+    tmpfile_toml = dump_config_with_literal_patterns_to_tmpfile(cosmos_config)
 
     if control_url is None:
         logger.info(f"Temporary configuration file created at {tmpfile_toml}")

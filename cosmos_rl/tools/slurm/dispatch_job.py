@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import logging
-from typing import List, Literal
+from typing import List, Literal, Dict, Any
 import os
 import sys
 
@@ -27,9 +27,45 @@ import subprocess
 import json
 import toml
 from argparse import REMAINDER
+import copy
 
 
 logging.basicConfig(level=logging.INFO)
+
+
+def dump_config_with_literal_patterns_to_tmpfile(config: Dict[str, Any]) -> str:
+    """
+    Create a temp TOML file for config. If legacy dict-based
+    policy.lora.{alpha_pattern,r_pattern} exist, append them as literal
+    sections to avoid regex key backslash escaping. Returns the temp file path.
+
+    This function does not mutate the input config.
+    """
+    cache_dir = os.path.join(os.path.expanduser("~"), ".cache/cosmos_rl/tmp_config")
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp_kwargs = {"dir": cache_dir}
+
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".toml", delete=False, **tmp_kwargs
+    ) as tmp_file:
+        config_for_dump = copy.deepcopy(config)
+        lora_config = (config_for_dump.get("policy", {})).get("lora", {})
+        alpha_pattern_table = lora_config.pop("alpha_pattern", None)
+        r_pattern_table = lora_config.pop("r_pattern", None)
+
+        toml.dump(config_for_dump, tmp_file)
+
+        if isinstance(alpha_pattern_table, dict) and alpha_pattern_table:
+            tmp_file.write("\n[policy.lora.alpha_pattern]\n")
+            for key, value in alpha_pattern_table.items():
+                tmp_file.write(f"'{key}' = {value}\n")
+
+        if isinstance(r_pattern_table, dict) and r_pattern_table:
+            tmp_file.write("\n[policy.lora.r_pattern]\n")
+            for key, value in r_pattern_table.items():
+                tmp_file.write(f"'{key}' = {value}\n")
+
+        return tmp_file.name
 
 
 def compute_nodes(
@@ -206,14 +242,8 @@ def main():
         # Only available for RL.
         config["rollout"]["parallelism"]["n_init_replicas"] = args.n_rollout_replicas
     # Create a temporary file and write to it
-    cache_dir = os.path.join(os.path.expanduser("~"), ".cache/cosmos_rl/tmp_config")
-    os.makedirs(cache_dir, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=cache_dir, mode="w+", suffix=".toml", delete=False
-    ) as tmpfile:
-        toml.dump(config, tmpfile)
-        config_tmpfile = tmpfile.name
-        logging.info(f"Config written to {config_tmpfile}")
+    config_tmpfile = dump_config_with_literal_patterns_to_tmpfile(config)
+    logging.info(f"Config written to {config_tmpfile}")
 
     policy_node_launch_metadata: List[NodeLaunchMetadata] = compute_nodes(
         args.ngpu_per_node, min_n_gpus_policy, args.n_policy_replicas, "policy"

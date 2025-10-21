@@ -477,7 +477,7 @@ async def put_rollout_group(rollout: RolloutRequest):
         valid_rollouts = [
             rollout
             for rollouts_group in valid_rollouts_list
-            for rollout in rollouts_group
+            for rollout in rollouts_group  # rollouts_group: all rollouts of the same prompt.
         ]
         invalid_rollouts = [
             rollout

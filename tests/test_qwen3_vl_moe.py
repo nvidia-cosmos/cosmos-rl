@@ -25,8 +25,8 @@ from functools import partial
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.trainer.sft_trainer import async_safe_ce
-from cosmos_rl.dispatcher.data.packer.qwen3_5_vl_data_packer import (
-    Qwen3_5_VL_DataPacker,
+from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import (
+    Qwen3_VL_DataPacker,
 )
 from transformers import (
     AutoProcessor,
@@ -266,7 +266,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
         # ================================
         # create data packer
         # ================================
-        data_packer = Qwen3_5_VL_DataPacker()
+        data_packer = Qwen3_VL_DataPacker()
         data_packer.setup(
             config=config, tokenizer=AutoTokenizer.from_pretrained(model_name)
         )

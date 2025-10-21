@@ -68,6 +68,7 @@ class HFModel(BaseModel):
         super().__init__(hf_config)
         self.hf_config = hf_config
         self.model = model
+        self.model = self.model.to(dtype=hf_config.torch_dtype)
         self.model_class = model_class
         self.is_vlm = is_vlm
         self.need_dequantization = need_dequantization
@@ -540,7 +541,6 @@ class HFModel(BaseModel):
         """
         model_type = self.hf_config.model_type
         dtype = self.hf_config.torch_dtype
-        self.model = self.model.to(dtype=dtype)
         kwargs = {
             "config": self.hf_config,
             "revision": revision,
@@ -553,6 +553,14 @@ class HFModel(BaseModel):
                 modules_to_not_convert=quantization_config["modules_to_not_convert"],
             )
             kwargs["quantization_config"] = mxfp4_quantization_config
+
+        # Configure gradient checkpointing if enabled
+        if self._gradient_checkpointing_enabled:
+            self.model.gradient_checkpointing_enable()
+            assert (
+                self.model.is_gradient_checkpointing
+            ), "Gradient checkpointing is not enabled"
+            logger.info("Enabled gradient checkpointing for HFModel")
 
         # Use from_pretrained loading in two scenarios:
         # 1. Model requires dequantization (e.g., gpt-oss)
@@ -601,14 +609,6 @@ class HFModel(BaseModel):
                 local_view.data.copy_(shared_weight.to(device))
 
         del hf_model
-
-        # Configure gradient checkpointing if enabled
-        if self._gradient_checkpointing_enabled:
-            self.model.gradient_checkpointing_enable()
-            assert (
-                self.model.is_gradient_checkpointing
-            ), "Gradient checkpointing is not enabled"
-            logger.info("Enabled gradient checkpointing for HFModel")
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         position_ids = None

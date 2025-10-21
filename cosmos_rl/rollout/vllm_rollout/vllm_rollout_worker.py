@@ -65,6 +65,8 @@ from torch.utils.data import Dataset
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
 from vllm import SamplingParams
 import time
+from cosmos_rl.utils.constant import COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+
 
 """
 Keep in mind that torch distributed is not thread safe. So try to keep the usage in the same thread.
@@ -224,7 +226,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.total_temp_tensor_pool = []
         self.misc_params = set()
         self.validation_flag = threading.Event()
-        self.reward_dispatcher = RewardDispatcher()
+        self.reward_dispatcher = RewardDispatcher(
+            payload_per_task=COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+        )
 
     def setup(
         self,
@@ -1310,6 +1314,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 is_valid_prompt_for_current_weight_version = (
                     first_payload.weight_version <= self.current_weight_version
                 )
+
                 if not is_valid_prompt_for_current_weight_version:
                     # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
                     continue

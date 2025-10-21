@@ -69,6 +69,10 @@ class CosmosHttpRetryConfig:
 COSMOS_HTTP_RETRY_CONFIG = CosmosHttpRetryConfig()
 COSMOS_HTTP_LONG_WAIT_MAX_RETRY = 100
 
+COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK = int(
+    os.environ.get("COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK", "64")
+)
+
 
 class Algo:
     GRPO = "grpo"
