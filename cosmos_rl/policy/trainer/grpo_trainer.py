@@ -226,15 +226,17 @@ def compute_loss(
         loss_num = per_token_loss_seq_sum.sum()
         kl_num = kl_loss_seq_sum.sum()
         if dp_group is not None:
-            torch.distributed.all_reduce(
-                length_sum, group=dp_group, op=torch.distributed.ReduceOp.SUM
+            vec = torch.stack(
+                [
+                    length_sum.to(torch.float32),
+                    loss_num.to(torch.float32),
+                    kl_num.to(torch.float32),
+                ]
             )
             torch.distributed.all_reduce(
-                loss_num, group=dp_group, op=torch.distributed.ReduceOp.SUM
+                vec, group=dp_group, op=torch.distributed.ReduceOp.SUM
             )
-            torch.distributed.all_reduce(
-                kl_num, group=dp_group, op=torch.distributed.ReduceOp.SUM
-            )
+            length_sum, loss_num, kl_num = vec[0], vec[1], vec[2]
         per_token_loss = loss_num / (length_sum + 1e-8)
         kl_loss = kl_num / (length_sum + 1e-8)
     else:
