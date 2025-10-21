@@ -345,7 +345,22 @@ class GrpoConfig(BaseModel):
 
     mini_batch: int = Field(
         default=2,
-        description="mini-batch size for GRPO training.",
+        description="mini-batch size for GRPO training. Mini-batch is used to split the batch per optimization into smaller batches to fit into GPU memory.",
+    )
+
+    batch_size_per_optimize: Optional[int] = Field(
+        default=None,
+        description="batch size for each optimization in GRPO training. The batch in each training step is split into smaller batches which each performs one step optimization. If not set, it will be the same as the whole batch size per GPU for each training step.",
+    )
+
+    max_token_len_per_mini_batch: Optional[int] = Field(
+        default=None,
+        description="Maximum token length per mini batch. If set, dynamic mini-batch sizing will be applied based on this limit.",
+    )
+
+    entropy_coeff: float = Field(
+        default=0.0,
+        description="Coefficient for entropy regularization.",
     )
 
     allowed_outdated_steps: int = Field(
