@@ -222,28 +222,20 @@ def compute_loss(
         kl_loss = kl_loss_seq_sum.mean()
     elif config.train.train_policy.loss_type == "token-mean":
         length_sum = shifted_length.sum()
-        num_dp_workers = 1
-        # dps = [(num_dp_workers, length_sum.item())]
+        loss_num = per_token_loss_seq_sum.sum()
+        kl_num = kl_loss_seq_sum.sum()
         if dp_group is not None:
-            # # token-mean
-            # per_token_loss = per_token_loss_seq_sum.sum() / length_sum
-            # kl_loss = kl_loss_seq_sum.sum() / length_sum
-            # Take DP tokens into account
-            num_dp_workers *= torch.distributed.get_world_size(group=dp_group)
-            torch.distributed.all_reduce(length_sum, group=dp_group)
-            # dps.append((num_dp_workers, length_sum.item()))
-
-        if ddp_comm is not None:
-            num_dp_workers *= ddp_comm.world_size()
-            ddp_comm.allreduce(
-                length_sum, length_sum, op=torch.distributed.ReduceOp.SUM
+            torch.distributed.all_reduce(
+                length_sum, group=dp_group, op=torch.distributed.ReduceOp.SUM
             )
-            # dps.append((num_dp_workers, length_sum.item()))
-        # print(f"dps: {dps}")
-        per_token_loss = (
-            per_token_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
-        )
-        kl_loss = kl_loss_seq_sum.sum() / (length_sum + 1e-8) * (num_dp_workers)
+            torch.distributed.all_reduce(
+                loss_num, group=dp_group, op=torch.distributed.ReduceOp.SUM
+            )
+            torch.distributed.all_reduce(
+                kl_num, group=dp_group, op=torch.distributed.ReduceOp.SUM
+            )
+        per_token_loss = loss_num / (length_sum + 1e-8)
+        kl_loss = kl_num / (length_sum + 1e-8)
     else:
         raise ValueError(f"Invalid loss type: {config.train.train_policy.loss_type}")
     return (
