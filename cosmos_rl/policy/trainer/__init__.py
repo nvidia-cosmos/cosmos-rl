@@ -146,6 +146,7 @@ class Trainer(CommMixin):
         self.ckpt_manager = CheckpointMananger(
             config, self.parallel_dims, self.global_rank
         )
+        # FIXME: (lms) use_streams=True could cause NaN in backward. Fix this later.
         self.act_offloading_ctx_manager = get_act_offloading_ctx_manager(
             self.model, config.train.activation_offload
         )
