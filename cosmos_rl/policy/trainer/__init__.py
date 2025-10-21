@@ -148,7 +148,7 @@ class Trainer(CommMixin):
         )
         # FIXME: (lms) use_streams=True could cause NaN in backward. Fix this later.
         self.act_offloading_ctx_manager = get_act_offloading_ctx_manager(
-            self.model, config.train.activation_offload
+            self.model, config.train.activation_offload, use_streams=False
         )
 
         # profiler is initialized after the init_comm()
