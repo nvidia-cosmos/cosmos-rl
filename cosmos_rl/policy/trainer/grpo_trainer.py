@@ -183,9 +183,10 @@ def compute_loss(
         """
             With reference model used for KL. The logic should be further reviewed to verify.
         """
-        delta = current_token_logps - ref_per_token_logps
-        delta = torch.clamp(delta, min=-20.0, max=20.0)
-        kl_loss = torch.exp(delta) - delta - 1.0
+        kl_ratio = ref_per_token_logps - current_token_logps
+        # For numerical stability
+        kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
+        kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
     else:
         kl_loss = torch.zeros_like(per_token_loss)
 
