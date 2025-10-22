@@ -51,6 +51,7 @@ from cosmos_rl.utils.parallelism_map import (
 )
 from functools import cached_property
 from typing import List, Callable, Dict, Any, Tuple, Optional
+import random
 import types
 from functools import partial
 import msgpack
@@ -1141,7 +1142,14 @@ class GRPOTrainer(Trainer):
             dp_id = 0
             for _ in range(batch_for_this_step):
                 try:
-                    rollout = self.data_queue.get(block=True, timeout=None)
+                    rollout = None
+                    while rollout is None:
+                        temp_rollout = self.data_queue.get(block=True, timeout=None)
+                        if random.random() > 0.7 or len(self.data_queue.queue) == 0:
+                            rollout = temp_rollout
+                        else:
+                            self.data_queue.put(temp_rollout)
+
                 except Empty:
                     raise Empty(
                         "[Policy] Rollouts queue is empty, please check the dispatcher."
@@ -1306,6 +1314,17 @@ class GRPOTrainer(Trainer):
         ]
 
         self.metrics = {}
+
+        if len(rollouts) > 0:
+            versions = [getattr(r, "weight_version", 0) for r in rollouts]
+            unique_versions = set(versions)
+            counts = np.array(
+                [versions.count(v) for v in unique_versions], dtype=np.float32
+            )
+            probs = counts / counts.sum()
+            entropy = float(-(probs * np.log(probs + 1e-12)).sum())
+            self.metrics["weight_version_unique"] = float(len(unique_versions))
+            self.metrics["weight_version_entropy"] = entropy
         # user_info_keys = list(kwargs.keys())
         advantages_t = torch.tensor(advantages_list).to(self.device)
         batch_size = len(rollouts)
