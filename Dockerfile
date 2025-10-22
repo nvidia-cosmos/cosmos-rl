@@ -92,22 +92,11 @@ COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 RUN pip install \
     torchao==0.13.0 \
     flash_attn==2.8.3 \
-    -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly \
+    vllm==0.11.0 \
     flashinfer-python \
     transformer_engine[pytorch] --no-build-isolation \
     -r /workspace/cosmos_rl/requirements.txt
 
-# TODO: (lms) remove nightly version of vllm and triton in later vllm release.
-# Here we install nightly version of triton in pytorch nightly index.
-# and install triton_kernels from vllm gpt-oss index, because vllm gpt-oss needs 
-# some triton kernels. Install triton and triton_kernels after vllm installation
-# to avoid version error.
-
-# Install triton and triton_kernels
-RUN pip uninstall -y triton triton_kernels && \
-    pip install -U triton --pre --extra-index-url https://download.pytorch.org/whl/nightly --no-deps && \
-    pip install -U triton_kernels --extra-index-url https://wheels.vllm.ai/gpt-oss/ --no-deps
-    
 ###################################################
 FROM no-efa-base AS efa-base
 
