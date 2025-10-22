@@ -26,6 +26,7 @@ from transformers import AutoTokenizer
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 import msgpack
 import threading
+from queue import Queue
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.trainer import Trainer
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
@@ -320,7 +321,7 @@ class TestRollout:
 
         self.rollout = vLLMRollout(self.config, tokenizer)
 
-        self.total_temp_tensor_pool = []
+        self.temp_recv_tensor_queue = Queue()
         self.prepare_trainable_params()
         self.validation_flag = threading.Event()
 

@@ -223,7 +223,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
 
         # Holding temp tensors created in `recv_tensor_creator`. Do not remove this, or
-        self.total_temp_tensor_pool = []
+        self.temp_recv_tensor_queue = Queue()
         self.misc_params = set()
         self.validation_flag = threading.Event()
         self.reward_dispatcher = RewardDispatcher(
@@ -500,6 +500,33 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             recv_tensor = None
             inplace = True
 
+            # clean up completed temp recv tensor in queue if the recv tensor queue is not empty.
+            while (
+                not self.temp_recv_tensor_queue.empty()
+                and self.temp_recv_tensor_queue.queue[0][1].query()
+            ):
+                # pop the completed recv tensor if its event is finished.
+                self.temp_recv_tensor_queue.get()
+
+            # In case cpu part keeps inserting too many temp tensors without sync.
+            # We synchronize and clear the queue to prevent memory issues.
+            if (
+                not vllm_tensor_view.is_contiguous()
+                or vllm_tensor_view.dtype != target_dtype
+            ):
+                if (
+                    self.temp_recv_tensor_queue.qsize()
+                    >= constant.COSMOS_RECV_TENSOR_QUEUE_SIZE
+                ):
+                    num_to_clear = (
+                        self.temp_recv_tensor_queue.qsize()
+                        - constant.COSMOS_RECV_TENSOR_QUEUE_SIZE
+                        + 1
+                    )
+                    for _ in range(num_to_clear):
+                        _, event = self.temp_recv_tensor_queue.get()
+                    event.synchronize()
+
             if vllm_tensor_view.is_contiguous():
                 recv_tensor = vllm_tensor_view
             else:
@@ -510,10 +537,14 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             if vllm_tensor_view.dtype != target_dtype:
                 recv_tensor = recv_tensor.to(target_dtype)
                 inplace = False
+            # Event for recv related operations completion tracking
             # Hold these recv_tensor, in case of buffer reusing by torch
-            self.total_temp_tensor_pool.append(recv_tensor)
-
-            return recv_tensor, inplace
+            if not inplace:
+                recv_complete_event = torch.cuda.Event()
+                self.temp_recv_tensor_queue.put((recv_tensor, recv_complete_event))
+            else:
+                recv_complete_event = None
+            return recv_tensor, recv_complete_event, inplace
 
         skipped_params_cnt = 0
 
@@ -533,7 +564,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             target_tensor = self.vllm_weight_inplace_view_map[inst_dest_name]
 
             if check_inside_group:
-                cloned_target_tensor = target_tensor.clone()
+                cloned_target_tensor = target_tensor.clone().cpu()
                 # clear the current view
                 target_tensor.zero_()
 
@@ -544,7 +575,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 tensor_split_strategys = inst.slice_strategy
                 assert r_rank == global_rank_of_rollout
                 vllm_tensor_view = target_tensor.cosmos_slice(tensor_split_strategys)
-                recv_tensor, inplace = recv_tensor_creator(vllm_tensor_view)
+                recv_tensor, recv_complete_event, inplace = recv_tensor_creator(
+                    vllm_tensor_view
+                )
                 logger.debug(
                     f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape} with dtype {vllm_tensor_view.dtype}."
                 )
@@ -553,7 +586,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 # inplace copy
                 if not inplace:
                     all_tensor_views_to_copy.append(
-                        (vllm_tensor_view, recv_tensor, inst_dest_name)
+                        (
+                            vllm_tensor_view,
+                            recv_tensor,
+                            recv_complete_event,
+                            inst_dest_name,
+                        )
                     )
 
                 total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
@@ -571,11 +609,17 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         def completion_lambda(
             all_tensor_views_to_copy, tensors_to_check, post_process_list_for_lowp
         ):
-            for view, recv_tensor, inst_dest_name in all_tensor_views_to_copy:
+            for (
+                view,
+                recv_tensor,
+                recv_complete_event,
+                inst_dest_name,
+            ) in all_tensor_views_to_copy:
                 self.weight_mapper.update_tensor_view(
                     view, recv_tensor, inst_dest_name, parallel_dims=self.parallel_dims
                 )
-
+                if recv_complete_event is not None:
+                    recv_complete_event.record()
             for (
                 cloned_target_tensor,
                 target_tensor,
@@ -585,7 +629,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 cloned_target_tensor = cloned_target_tensor.to(target_dtype).to(
                     cloned_target_tensor.dtype
                 )
-                if not torch.allclose(cloned_target_tensor, target_tensor):
+                if not torch.allclose(cloned_target_tensor, target_tensor.cpu()):
                     raise ValueError(
                         f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
                     )
@@ -941,8 +985,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             def flush_completions(pending_bytes, pending_completions):
                 recv_ready = torch.cuda.Event()
                 recv_ready.record()
+                copy_stream.wait_event(recv_ready)
                 with torch.cuda.stream(copy_stream):
-                    recv_ready.wait()
                     logger.debug(
                         f"Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024}"
                     )
@@ -1011,10 +1055,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 copy_finished = torch.cuda.Event()
                 copy_finished.record()
 
-            copy_finished.wait()
-
-            torch.cuda.synchronize()
-            self.total_temp_tensor_pool.clear()
+            self.inference_stream.wait_event(copy_finished)
+            self.temp_recv_tensor_queue.queue.clear()
 
             time_eclapsed = time.time() - st
             logger.info(
