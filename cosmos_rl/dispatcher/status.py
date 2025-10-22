@@ -770,6 +770,17 @@ class PolicyStatusManager:
                     train_step = self.report_data_list[0]["train_step"]
                     self.report_data_list = []
 
+                    wv_unique_list = [
+                        d.get("train/weight_version_unique")
+                        for d in self.report_data_list
+                        if "train/weight_version_unique" in d
+                    ]
+                    wv_entropy_list = [
+                        d.get("train/weight_version_entropy")
+                        for d in self.report_data_list
+                        if "train/weight_version_entropy" in d
+                    ]
+
                     policy_report_data = {
                         "train/loss_avg": total_loss_avg,
                         "train/loss_max": total_loss_max,
@@ -781,6 +792,15 @@ class PolicyStatusManager:
                         "train/entropy": total_entropy,
                         "train/effective_entropy": total_effective_entropy,
                     }
+
+                    if len(wv_unique_list) > 0:
+                        policy_report_data["train/weight_version_unique"] = float(
+                            np.mean(wv_unique_list)
+                        )
+                    if len(wv_entropy_list) > 0:
+                        policy_report_data["train/weight_version_entropy"] = float(
+                            np.mean(wv_entropy_list)
+                        )
 
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
@@ -975,12 +995,17 @@ class PolicyStatusManager:
             # These properties are already ready to be reported before being trained
             if self.config.logging.logger and rollouts_of_this_step:
                 rewards = []
+                advantages = []
                 completion_lengths = []
                 for rollout in rollouts_of_this_step:
                     rewards.append(rollout.reward)
+                    advantages.append(rollout.advantage)
                     completion_lengths.append(
                         len(self.tokenizer.encode(rollout.completion))
                     )
+                max_len_idx = int(np.argmax(completion_lengths))
+                min_len_idx = int(np.argmin(completion_lengths))
+
                 report_data = {
                     "train/reward_mean": np.mean(rewards),
                     "train/reward_std": np.std(rewards),
@@ -989,6 +1014,10 @@ class PolicyStatusManager:
                     "train/completion_length_mean": np.mean(completion_lengths),
                     "train/completion_length_max": np.max(completion_lengths),
                     "train/completion_length_min": np.min(completion_lengths),
+                    "train/completion_length_max_reward": rewards[max_len_idx],
+                    "train/completion_length_max_advantage": advantages[max_len_idx],
+                    "train/completion_length_min_reward": rewards[min_len_idx],
+                    "train/completion_length_min_advantage": advantages[min_len_idx],
                 }
                 self.train_report_data[self.current_step] = report_data
 
