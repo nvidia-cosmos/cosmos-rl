@@ -556,7 +556,9 @@ class SFTTrainer(Trainer):
 
         self.loss_fn = partial(
             async_safe_ce,
-            dp_group=dp_group,
+            dp_group=dp_group
+            if self.config.train.train_policy.balance_dp_token
+            else None,
             cp_group=cp_group,
         )
 
@@ -1096,7 +1098,9 @@ class SFTTrainer(Trainer):
             partial(
                 async_safe_ce,
                 loss_scaling_factor=loss_scaling_factor,
-                dp_group=dp_group,
+                dp_group=dp_group
+                if self.config.train.train_policy.balance_dp_token
+                else None,
                 cp_group=cp_group,
             )
         )

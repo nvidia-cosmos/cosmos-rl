@@ -136,6 +136,11 @@ class SFTDataConfig(BaseModel):
         description="System prompt for the model, which will be prepended to the prompt",
     )
 
+    balance_dp_token: bool = Field(
+        default=True,
+        description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.dataloader_num_workers <= 0:
@@ -399,6 +404,11 @@ class GrpoConfig(BaseModel):
     reset_optimizer_with_reference: bool = Field(
         default=True,
         description="Whether to reset the optimizer state when the reference model is reset.",
+    )
+
+    balance_dp_token: bool = Field(
+        default=False,
+        description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
     @model_validator(mode="after")
