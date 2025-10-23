@@ -20,6 +20,9 @@ from transformers import AutoConfig
 from typing import Dict, List, Tuple
 from functools import cached_property
 from cosmos_rl.policy.model.base import WeightMapper
+from cosmos_rl.utils.parallelism_registry import (
+    get_rollout_parallelism_strategy,
+)
 
 
 class Qwen3VLMoeWeightMapper(WeightMapper):
@@ -93,9 +96,9 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
     def _split_gate_proj_weight(self, name, weight: torch.Tensor):
         # gate_proj and up_proj in vllm is already split.
         # weight has shape [2 * x, hidden_dim]
-        dim_0 = weight.shape[0]
-        gate_proj_weight = weight[: dim_0 // 2]
-        up_proj_weight = weight[dim_0 // 2 :]
+        dim_0 = weight.shape[1]
+        gate_proj_weight = weight[:, : dim_0 // 2, :]
+        up_proj_weight = weight[:, dim_0 // 2 :, :]
         return gate_proj_weight, up_proj_weight
 
     def rollout_prepare_recv(
@@ -227,6 +230,12 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             ],
         }
         return mapping_dict
+
+    # def get_policy_parallelism_strategy(self):
+    #     return [get_policy_parallelism_strategy("qwen3_vl_moe")]
+
+    def get_rollout_parallelism_strategy(self):
+        return [get_rollout_parallelism_strategy("qwen3_vl_moe")]
 
     def get_unsplited_weight_name(self, weight_key: str) -> str:
         for key in ["q_proj", "k_proj", "v_proj"]:
