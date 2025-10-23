@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.policy.model.base import WeightMapper
+import re
 import torch
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 from typing import Dict, List, Tuple
-import re
+from functools import cached_property
+from cosmos_rl.policy.model.base import WeightMapper
 
 
 class Qwen3VLMoeWeightMapper(WeightMapper):
@@ -35,21 +36,31 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
         )
 
     def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
-        if self.backend == "vllm":
-            # Happen to be the same as policy name mapping.
-            return self.policy_map_local_key_to_hf_key(rollout_weight_name)
-        elif self.backend == "trtllm":
-            if rollout_weight_name.startswith("llm.model."):
-                hf_name = rollout_weight_name.replace("llm.model.", "model.")
-            elif rollout_weight_name.startswith("llm.lm_head."):
-                hf_name = rollout_weight_name.replace("llm.lm_head.", "lm_head.")
-            elif rollout_weight_name.startswith("mm_encoder."):
-                hf_name = rollout_weight_name.replace(".", "visual.")
-            else:
-                hf_name = rollout_weight_name
-            return hf_name
-        else:
-            raise ValueError(f"Unsupported backend: {self.backend}")
+        rollout_weight_name = self.policy_map_local_key_to_hf_key(rollout_weight_name)
+        if not rollout_weight_name == "lm_head.weight":
+            if "experts.w13_weight" in rollout_weight_name:
+                return rollout_weight_name.replace(
+                    "experts.w13_weight", "gate_up_proj.weight"
+                )
+            elif "experts.w2_weight" in rollout_weight_name:
+                return rollout_weight_name.replace(
+                    "experts.w2_weight", "down_proj.weight"
+                )
+            # below are for trtllm weight for gate_up_proj and input_layernorm.
+            elif "experts.w3_w1_weight" in rollout_weight_name:
+                return rollout_weight_name.replace(
+                    "experts.w3_w1_weight", "gate_up_proj.weight"
+                )
+            elif "next_layer_layernorm" in rollout_weight_name:
+                # For trtllm, next_layer_layernorm is:
+                #   `model.norm` when layer_id == self.config.num_hidden_layers - 1
+                #   `model.layers.${layer_id + 1}.input_layernorm` when layer_id < self.config.num_hidden_layers - 1
+                layer_id = int(rollout_weight_name.split(".")[2])
+                if layer_id == self.config.num_hidden_layers - 1:
+                    return "model.norm.weight"
+                else:
+                    return f"model.layers.{layer_id + 1}.input_layernorm.weight"
+        return rollout_weight_name
 
     def __rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         # visual
@@ -196,6 +207,26 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             )
             return split_strategy
         return []
+
+    @cached_property
+    def packed_modules_mapping(self):
+        mapping_dict = {
+            "qkv": [
+                "q",
+                "k",
+                "v",
+            ],
+            "gate_up_proj": [
+                "gate_proj",
+                "up_proj",
+            ],
+            "qkv_proj": [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+            ],
+        }
+        return mapping_dict
 
     def get_unsplited_weight_name(self, weight_key: str) -> str:
         for key in ["q_proj", "k_proj", "v_proj"]:

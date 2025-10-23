@@ -617,9 +617,10 @@ class ParallelTopoMapper:
             assert (
                 dims_rank_info is None
             ), f"Packed modules mapping {packed_modules_mapping} should not be used with dims_rank_info {dims_rank_info}."
-            if k in param_name:
+            hf_name = name_to_hf(param_name)
+            if k in hf_name:
                 for rename in v:
-                    name = name_to_hf(param_name).replace(k, rename)
+                    name = hf_name.replace(k, rename)
                     self.parallelism_info_for_params[name] = (
                         dims_map,
                         tensor_dim_to_parallel_map,
