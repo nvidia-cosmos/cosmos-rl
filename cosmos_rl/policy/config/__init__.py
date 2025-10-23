@@ -597,6 +597,11 @@ class TrainingConfig(BaseModel):
         default=False,
         description="Whether to use activation offload",
     )
+    fa_version: Optional[int] = Field(
+        default=None,
+        description="FlashAttention version to use. If None, will use the default version.",
+        choices=[2, 3],
+    )
 
     seed: Optional[int] = Field(
         default=None,
