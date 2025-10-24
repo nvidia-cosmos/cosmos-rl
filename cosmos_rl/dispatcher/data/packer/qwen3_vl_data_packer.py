@@ -450,7 +450,7 @@ class Qwen3_VL_DataPacker(DataPacker):
                 ), f"{image_inputs=}"
                 assert (
                     len(video_inputs) == 0
-                ), "Currently video input is not supported for HF VLM"
+                ), "Currently video input is not supported for Qwen3_VL_DataPacker"
                 image_inputs = encode_image_to_base64(image_inputs)
 
             kwarg = {
@@ -642,9 +642,12 @@ class Qwen3_VL_DataPacker(DataPacker):
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
-        # assert all(
-        #     isinstance(x, dict) and "role" in x and "content" in x for x in sample
-        # ), "All samples should be in conversation format, but got: {}".format(sample)
+        if rollout_output is not None:
+            sample = [x.model_dump() if isinstance(x, ChatMessage) else x for x in sample]
+            assert all(
+                isinstance(x, dict) and "role" in x and "content" in x for x in sample
+            ), "All samples should be in conversation format, but got: {}".format(sample)
+
         x = self._process_single_sample(
             sample,
             add_generation_prompt=add_generation_prompt,
