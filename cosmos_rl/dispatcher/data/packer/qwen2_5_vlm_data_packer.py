@@ -403,12 +403,15 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
             )
-            image_inputs, video_inputs = process_vision_info(conversation)
+            image_inputs, video_inputs, video_kwargs = process_vision_info(
+                conversation, return_video_kwargs=True
+            )
             inputs = self.hf_processor(
                 text=[prompt],
                 images=image_inputs,
                 videos=video_inputs,
                 return_tensors="pt",
+                **video_kwargs,
             )
 
             input_ids = inputs["input_ids"][0].tolist()
