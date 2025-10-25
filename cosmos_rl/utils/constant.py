@@ -54,6 +54,10 @@ COSMOS_ROLLOUT_REPORT_INTERVAL = int(
     os.environ.get("COSMOS_ROLLOUT_REPORT_INTERVAL", "100")
 )
 
+COSMOS_RECV_TENSOR_QUEUE_SIZE = int(
+    os.environ.get("COSMOS_RECV_TENSOR_QUEUE_SIZE", "8")
+)
+
 # Internal model type for HFModel
 COSMOS_HF_MODEL_TYPES = "hfmodel"
 
@@ -68,6 +72,10 @@ class CosmosHttpRetryConfig:
 
 COSMOS_HTTP_RETRY_CONFIG = CosmosHttpRetryConfig()
 COSMOS_HTTP_LONG_WAIT_MAX_RETRY = 100
+
+COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK = int(
+    os.environ.get("COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK", "64")
+)
 
 
 class Algo:

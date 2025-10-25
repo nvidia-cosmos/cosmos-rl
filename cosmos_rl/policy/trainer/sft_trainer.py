@@ -577,7 +577,9 @@ class SFTTrainer(Trainer):
 
         self.loss_fn = partial(
             async_safe_ce,
-            dp_group=dp_group,
+            dp_group=dp_group
+            if self.config.train.train_policy.balance_dp_token
+            else None,
             cp_group=cp_group,
         )
 
@@ -594,6 +596,33 @@ class SFTTrainer(Trainer):
         else:
             self._save_freq = self.config.train.ckpt.save_freq
 
+    def _send_validation_status_callback(self, data: dict, current_epoch: int = None):
+        """Send validation status via TAO status logger to prevent timeout.
+        
+        Args:
+            data: Status data dictionary to log
+            current_epoch: Current epoch number (optional)
+        """
+        if self.config.logging.logger and "tao" in self.config.logging.logger:
+            if util.is_master_rank(self.parallel_dims, self.global_rank):
+                try:
+                    if current_epoch is not None:
+                        log_tao_status(
+                            data=data,
+                            current_epoch=current_epoch,
+                            max_epochs=self.epoch,
+                            component_name=f"{self.config.logging.experiment_name} Validation"
+                        )
+                    else:
+                        log_tao_status(
+                            data=data,
+                            step=int(self.train_step),
+                            max_steps=int(self.total_steps),
+                            component_name=f"{self.config.logging.experiment_name} Validation"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to send validation status: {e}")
+
     def validate(self, current_epoch: int = None):
         if not self.config.validation.enable:
             return
@@ -601,6 +630,13 @@ class SFTTrainer(Trainer):
             return
 
         logger.info(f"Starting validation at step {self.train_step}/{self.total_steps}...")
+        self._send_validation_status_callback(
+            data={
+                "validation_phase": "starting",
+                "dataset_size": len(self.val_data_loader.dataset),
+            },
+            current_epoch=current_epoch
+        )
         logger.info(f"Validation dataset size: {len(self.val_data_loader.dataset)}")
 
         # Get actual batch size from dataloader
@@ -615,7 +651,19 @@ class SFTTrainer(Trainer):
         self.model.eval()
         with torch.no_grad():
             val_total_loss = 0.0
+            total_batches = len(self.val_data_loader)
+            batch_count = 0
+            
+            self._send_validation_status_callback(
+                data={
+                    "validation_phase": "processing",
+                    "total_batches": total_batches,
+                },
+                current_epoch=current_epoch
+            )
+
             for val_global_batch in tqdm(self.val_data_loader, desc="Validation"):
+                batch_count += 1
                 fixed_length = (
                     self.config.policy.model_max_length
                     if self.parallel_dims.pp_enabled
@@ -701,6 +749,18 @@ class SFTTrainer(Trainer):
 
                     val_loss = self.loss_fn(val_logits, val_labels)
                 val_total_loss += val_loss.item() * val_inputs.size(0)
+                
+                # Send status callback after each batch to prevent timeout
+                progress_pct = (batch_count / total_batches) * 100
+                self._send_validation_status_callback(
+                    data={
+                        "validation_phase": "in_progress",
+                        "batches_processed": batch_count,
+                        "total_batches": total_batches,
+                        "progress_percent": float(progress_pct),
+                    },
+                    current_epoch=current_epoch
+                )
 
             # Aggregate validation loss across all ranks if using distributed training
             if self.parallel_dims.dp_enabled or self.parallel_dims.cp_enabled:
@@ -716,6 +776,15 @@ class SFTTrainer(Trainer):
             else:
                 val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
 
+            self._send_validation_status_callback(
+                data={
+                    "validation_phase": "completed",
+                    "batches_processed": batch_count,
+                    "total_batches": total_batches,
+                    "val/loss": float(val_avg_loss),
+                },
+                current_epoch=current_epoch
+            )
             logger.info(f"Validation complete: loss = {val_avg_loss:.4f}")
 
             # TAO status logging for validation (only from master rank)
@@ -1239,8 +1308,9 @@ class SFTTrainer(Trainer):
             partial(
                 async_safe_ce,
                 loss_scaling_factor=loss_scaling_factor,
-                dp_group=dp_group,
+                dp_group=dp_group
+                if self.config.train.train_policy.balance_dp_token
+                else None,
                 cp_group=cp_group,
             )
         )
-

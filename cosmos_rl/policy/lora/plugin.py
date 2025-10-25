@@ -15,7 +15,8 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
+import re
 import math
 import torch
 import torch.nn as nn
@@ -241,6 +242,17 @@ def inject_lora_adapters(
         ][0]
 
     replaced_names = []
+    alpha_pattern = config.alpha_pattern or {}
+    r_pattern = config.r_pattern or {}
+
+    def _pick_first_regex(name: str, table: dict) -> Optional[Tuple[str, Any]]:
+        for key, val in table.items():
+            if not key:
+                continue
+            if re.match(rf"(.*\.)?({key})$", name):
+                return key, val
+        return None
+
     for module_name, module in list(model.named_modules()):
         parent: Optional[nn.Module] = _get_parent_by_qualified_name(model, module_name)
         if parent is None:
@@ -269,11 +281,39 @@ def inject_lora_adapters(
                         f"Skipping {module_name} because it is the output layer"
                     )
                     continue
+                effective_rank = config.r
+                effective_alpha = config.lora_alpha
+
+                if r_pattern:
+                    rank_match = _pick_first_regex(module_name, r_pattern)
+                    if rank_match is not None:
+                        effective_rank = int(rank_match[1])
+                        logger.info(
+                            f"[LoRA] r_pattern matched for {module_name}: pattern='{rank_match[0]}' -> r={effective_rank}"
+                        )
+                    else:
+                        readable_keys = str(", ".join(list(r_pattern.keys())))
+                        logger.info(
+                            f"[LoRA] r for {module_name}: not matching any r_pattern[{readable_keys}], using default r={effective_rank}"
+                        )
+
+                if alpha_pattern:
+                    alpha_match = _pick_first_regex(module_name, alpha_pattern)
+                    if alpha_match is not None:
+                        effective_alpha = float(alpha_match[1])
+                        logger.info(
+                            f"[LoRA] alpha override for {module_name}: pattern='{alpha_match[0]}' -> alpha={effective_alpha}"
+                        )
+                    else:
+                        readable_keys = str(", ".join(list(alpha_pattern.keys())))
+                        logger.info(
+                            f"[LoRA] alpha for {module_name}: not matching any alpha_pattern[{readable_keys}], using default alpha={effective_alpha}"
+                        )
 
                 lora_linear = LoraInjectedLinear.from_linear(
                     base=module,
-                    r=config.r,
-                    lora_alpha=config.lora_alpha,
+                    r=effective_rank,
+                    lora_alpha=effective_alpha,
                     lora_dropout=config.lora_dropout,
                     use_rslora=config.use_rslora,
                 )

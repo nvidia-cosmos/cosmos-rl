@@ -103,9 +103,9 @@ RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.
 # Install flash-attn after PyTorch to ensure compatibility
 RUN pip install --no-cache-dir \
     torchao==0.13.0 \
-    vllm==0.10.1.1 \
+    vllm==0.11.0 \
     flashinfer-python \
-    transformer_engine[pytorch]==2.7.0 && \
+    transformer_engine[pytorch] --no-build-isolation && \
     pip cache purge
 
 # Install flash-attn from source to ensure compatibility with PyTorch 2.8.0
