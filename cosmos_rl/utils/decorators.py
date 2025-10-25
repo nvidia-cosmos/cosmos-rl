@@ -109,7 +109,7 @@ def monitor_status(name: str = 'Cosmos-RL',
 
                 # Log successful completion
                 s_logger.write(
-                    status_level=Status.SUCCESS,
+                    status_level=Status.RUNNING,
                     message=f"{name} {mode} completed successfully"
                 )
                 logger.info(f"{name} {mode} completed successfully")
@@ -170,7 +170,7 @@ def log_step_progress(step_name: str = "step"):
 
                 s_logger.kpi = {'step_name': step_name, 'status': 'completed'}
                 s_logger.write(
-                    status_level=Status.SUCCESS,
+                    status_level=Status.RUNNING,
                     message=f"{step_name} completed"
                 )
 
