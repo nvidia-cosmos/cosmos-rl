@@ -280,6 +280,14 @@ def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
     return _dist_reduce(x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh)
 
 
+def dist_sum(x: torch.Tensor, mesh: DeviceMesh) -> torch.Tensor:
+    """Sum tensor across all ranks in the mesh."""
+    if isinstance(x, DTensor):
+        # functional collectives do not support DTensor inputs
+        x = x.full_tensor()
+    return funcol.all_reduce(x, reduceOp=c10d.ReduceOp.SUM.name, group=mesh)
+
+
 class ReplicateParallel(ParallelStyle):
     def __init__(
         self, *, use_local_output: bool = True, input_layout: Optional[Placement] = None

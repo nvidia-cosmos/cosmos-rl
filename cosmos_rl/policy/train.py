@@ -61,15 +61,20 @@ def main(*args, **kwargs):
                 custom_sft_dataset = kwargs.get("dataset")
                 custom_sft_data_packer = kwargs.get("data_packer")
                 logger.info("Starting SFT training...")
+                # Check if we have a custom validation dataset
+                val_dataset = kwargs.get("val_dataset", None)
+                using_custom_val = val_dataset is not None
+
                 trainer = SFTTrainer(
                     config=cosmos_config,
                     parallel_dims=parallel_dims,
                     dataset=custom_sft_dataset,
                     data_packer=custom_sft_data_packer,
-                    val_dataset=kwargs.get("val_dataset", None),
+                    val_dataset=val_dataset,
                     val_data_packer=kwargs.get("val_data_packer", None),
                     sampler=kwargs.get("sampler", None),
                     batch_sampler=kwargs.get("batch_sampler", None),
+                    using_custom_val_dataset=using_custom_val,
                     val_sampler=kwargs.get("val_sampler", None),
                     val_batch_sampler=kwargs.get("val_batch_sampler", None),
                 )
