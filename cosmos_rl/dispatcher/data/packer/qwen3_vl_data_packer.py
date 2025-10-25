@@ -41,7 +41,7 @@ def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
     return image_inputs, video_inputs
 
 
-def encode_image_to_base64(image_inputs: List[str]) -> List[str]:
+def decode_base64_to_image(image_inputs: List[str]) -> List[str]:
     new_image_inputs = []
     for image_input in image_inputs:
         img_bytes = base64.b64decode(image_input)
@@ -451,7 +451,7 @@ class Qwen3_VL_DataPacker(DataPacker):
                 assert (
                     len(video_inputs) == 0
                 ), "Currently video input is not supported for Qwen3_VL_DataPacker"
-                image_inputs = encode_image_to_base64(image_inputs)
+                image_inputs = decode_base64_to_image(image_inputs)
 
             kwarg = {
                 "return_tensors": "pt",
