@@ -23,15 +23,10 @@ into a single, integrated pipeline that works with the cosmos-rl CLI structure.
 import json
 import logging as log
 import os
-import time
 import glob
 import re
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from functools import partial
-import concurrent.futures
-from tqdm import tqdm
 
 import attrs
 import numpy as np
@@ -274,9 +269,11 @@ class ITSEvaluator(BaseEvaluator):
         This is the scoring logic from the original score.py.
         """
         log.info("Computing directionality metrics...")
+        self._send_status_callback("Computing directionality metrics from evaluation results...")
 
         results = glob.glob(str(result_path / "eval_set_name" / "**" / "*.json"), recursive=True)
         log.info(f"Found {len(results)} result files.")
+        self._send_status_callback(f"Processing {len(results)} result files for metrics computation...")
 
         correct_count = 0
         total_count = 0
@@ -351,11 +348,13 @@ class ITSEvaluator(BaseEvaluator):
         }
 
         # Save results
+        self._send_status_callback("Saving directionality metrics to JSON...")
         results_file = result_path / "directionality_score.json"
         with open(results_file, "w") as f:
             json.dump(result_dict, f, indent=2)
 
         # Create and save confusion matrix
+        self._send_status_callback("Generating confusion matrix visualization...")
         plt.figure(figsize=(6, 5))
         sns.heatmap(confusion_matrix, annot=True, fmt="d", cmap="Blues",
                    xticklabels=word_classes, yticklabels=word_classes)
