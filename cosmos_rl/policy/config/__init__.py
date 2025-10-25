@@ -136,6 +136,11 @@ class SFTDataConfig(BaseModel):
         description="System prompt for the model, which will be prepended to the prompt",
     )
 
+    balance_dp_token: bool = Field(
+        default=True,
+        description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if self.dataloader_num_workers <= 0:
@@ -234,8 +239,8 @@ class GrpoConfig(BaseModel):
     type: Literal["grpo"]
     variant: str = Field(
         default="grpo",
-        description="Variant of the GRPO, currently support `grpo`, and `dapo`",
-        choices=["grpo", "dapo"],
+        description="Variant of the GRPO, currently support `grpo`, `gspo`, `dapo`",
+        choices=["grpo", "gspo", "dapo"],
     )
 
     dataset: DatasetConfig = Field(
@@ -345,7 +350,22 @@ class GrpoConfig(BaseModel):
 
     mini_batch: int = Field(
         default=2,
-        description="mini-batch size for GRPO training.",
+        description="mini-batch size for GRPO training. Mini-batch is used to split the batch per optimization into smaller batches to fit into GPU memory.",
+    )
+
+    batch_size_per_optimize: Optional[int] = Field(
+        default=None,
+        description="batch size for each optimization in GRPO training. The batch in each training step is split into smaller batches which each performs one step optimization. If not set, it will be the same as the whole batch size per GPU for each training step.",
+    )
+
+    max_token_len_per_mini_batch: Optional[int] = Field(
+        default=None,
+        description="Maximum token length per mini batch. If set, dynamic mini-batch sizing will be applied based on this limit.",
+    )
+
+    entropy_coeff: float = Field(
+        default=0.0,
+        description="Coefficient for entropy regularization.",
     )
 
     allowed_outdated_steps: int = Field(
@@ -371,12 +391,33 @@ class GrpoConfig(BaseModel):
         "If the number of tokens is larger than the `min_filter_prefix_tokens`, the rollouts with the same prefix but different rewards will be filtered out in loss calculation.",
     )
 
+    max_retry_for_on_policy: int = Field(
+        default=10,
+        description="Maximum number of retries for on-policy rollout to have enough samples. If non-positive, will retry with no upper limit until enough samples are generated.",
+    )
+
+    reference_reset_interval: Optional[int] = Field(
+        default=None,
+        description="Interval to reset the reference model to the current model. If set to None or 0, the reference model will not be reset during training.",
+    )
+
+    reset_optimizer_with_reference: bool = Field(
+        default=True,
+        description="Whether to reset the optimizer state when the reference model is reset.",
+    )
+
+    balance_dp_token: bool = Field(
+        default=False,
+        description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
             "grpo",
             "dapo",
-        ], "variant must be one of ['grpo', 'dapo']"
+            "gspo",
+        ], "variant must be one of ['grpo', 'dapo', 'gspo']"
         if self.dataloader_num_workers <= 0:
             self.dataloader_prefetch_factor = None
             self.dataloader_num_workers = 0
@@ -667,6 +708,14 @@ class LoraConfig(BaseModel):
     modules_to_save: Optional[List[str]] = Field(
         default=None,
         description="List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint. ",
+    )
+    alpha_pattern: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Per-module overrides for lora_alpha. Keys are regex patterns; evaluated in insertion order, first match wins.",
+    )
+    r_pattern: Optional[Dict[str, int]] = Field(
+        default=None,
+        description="Per-module overrides for LoRA rank r. Keys are regex patterns; evaluated in insertion order, first match wins.",
     )
     init_lora_weights: Union[
         bool,

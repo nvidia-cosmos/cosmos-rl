@@ -146,8 +146,9 @@ class Trainer(CommMixin):
         self.ckpt_manager = CheckpointMananger(
             config, self.parallel_dims, self.global_rank
         )
+        # FIXME: (lms) use_streams=True could cause NaN in backward. Fix this later.
         self.act_offloading_ctx_manager = get_act_offloading_ctx_manager(
-            self.model, config.train.activation_offload
+            self.model, config.train.activation_offload, use_streams=False
         )
 
         # profiler is initialized after the init_comm()
@@ -159,15 +160,8 @@ class Trainer(CommMixin):
         )
 
         self.report_data = {}
-        # TODO(cjx): add `CompiledAutograd` support
-        self.optimizers = build_optimizers(self.model_parts, self.config)
 
-        if self.config.train.fp8.enable_fp8:
-            self.optimizers.register_step_post_hook(
-                lambda *args, **kwargs: self.model_converter.post_optimizer_hook(
-                    self.model_parts
-                )
-            )
+        self.build_optimizers()
 
         self.seq_len_multiple = parallel_dims.cp * parallel_dims.tp
         self.lr_schedulers = None
@@ -210,6 +204,16 @@ class Trainer(CommMixin):
     @property
     def pp_loss_fn(self):
         raise NotImplementedError("pp_loss_fn must be provided by subclass")
+
+    def build_optimizers(self):
+        # TODO(cjx): add `CompiledAutograd` support
+        self.optimizers = build_optimizers(self.model_parts, self.config)
+        if self.config.train.fp8.enable_fp8:
+            self.optimizers.register_step_post_hook(
+                lambda *args, **kwargs: self.model_converter.post_optimizer_hook(
+                    self.model_parts
+                )
+            )
 
     def export_safetensors(
         self,

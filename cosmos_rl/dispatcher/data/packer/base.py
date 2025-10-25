@@ -24,6 +24,33 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 )
 from cosmos_rl.utils.logging import logger
 
+import argparse
+
+
+def worker_entry_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the replica entrypoint.")
+    parser.add_argument(
+        "--port", type=int, default=8000, help="Port to run the web panel on."
+    )
+    parser.add_argument(
+        "--redis-port", type=int, default=12800, help="Port to run the web panel on."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        required=True,
+        help="Path to TOML configuration file to load.",
+    )
+
+    parser.add_argument(
+        "--redis-logfile-path",
+        type=str,
+        default="/tmp/redis.log",
+        help="The redis server log file path.",
+    )
+    return parser
+
 
 class DataPacker(ABC):
     _MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY: Dict[str, Type["DataPacker"]] = {}

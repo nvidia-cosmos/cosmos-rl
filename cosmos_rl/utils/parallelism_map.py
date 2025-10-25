@@ -649,7 +649,9 @@ class ParallelTopoMapper:
         if hasattr(self, "parallelism_info_for_params"):
             return self.parallelism_info_for_params
         self.parallelism_info_for_params = {}
-        for name, param in self.underlying_model.named_parameters():
+        for name, param in self.underlying_model.named_parameters(
+            remove_duplicate=False
+        ):
             is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
             dims_rank_info = {}
             if not is_dist_tensor:
@@ -868,7 +870,9 @@ class ParallelTopoMapper:
             return self.parallelism_info_for_params
         self.parallelism_info_for_params = {}
 
-        for param_name, param in self.underlying_model.named_parameters():
+        for param_name, param in self.underlying_model.named_parameters(
+            remove_duplicate=False
+        ):
             name_parts = param_name.split(".")
             part = self.underlying_model
             is_bias = False

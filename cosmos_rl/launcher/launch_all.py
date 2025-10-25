@@ -24,14 +24,45 @@ import os
 import shutil
 import re
 import argparse
+from argparse import REMAINDER
 from typing import List, Dict, Optional, Any, Callable
 import toml
 import tempfile
+import copy
 
 from cosmos_rl.utils.decorators import monitor_status
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")
+
+
+def dump_config_with_literal_patterns_to_tmpfile(config: Dict[str, Any]) -> str:
+    """
+    Write config to TOML, while emitting legacy dict-based
+    policy.lora.{alpha_pattern,r_pattern} as literal sections to avoid
+    backslash-escaping of regex keys.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".toml", delete=False
+    ) as tmp_file:
+        config_for_dump = copy.deepcopy(config)
+        lora_config = (config_for_dump.get("policy", {})).get("lora", {})
+        alpha_pattern_table = lora_config.pop("alpha_pattern", None)
+        r_pattern_table = lora_config.pop("r_pattern", None)
+
+        toml.dump(config_for_dump, tmp_file)
+
+        if isinstance(alpha_pattern_table, dict) and alpha_pattern_table:
+            tmp_file.write("\n[policy.lora.alpha_pattern]\n")
+            for key, value in alpha_pattern_table.items():
+                tmp_file.write(f"'{key}' = {value}\n")
+
+        if isinstance(r_pattern_table, dict) and r_pattern_table:
+            tmp_file.write("\n[policy.lora.r_pattern]\n")
+            for key, value in r_pattern_table.items():
+                tmp_file.write(f"'{key}' = {value}\n")
+
+        return tmp_file.name
 
 
 # ---------------------------------------------------------------------------
@@ -283,13 +314,6 @@ def parse_args():
     )
 
     parser.add_argument(
-        "script",
-        nargs="?",  # “?” means 0 or 1 occurrences
-        default=None,
-        help="A user script which can be provided for custom dataset, reward functions, and model registration.",
-    )
-
-    parser.add_argument(
         "--lepton-mode",
         action="store_true",
         default=False,
@@ -432,7 +456,18 @@ def parse_args():
         help="Reservation ID for dedicated node groups",
     )
 
-    args, _ = parser.parse_known_args()
+    # Positional arguments
+
+    parser.add_argument(
+        "script",
+        nargs="?",  # “?” means 0 or 1 occurrences
+        default=None,
+        help="A user script which can be provided for custom dataset, reward functions, and model registration.",
+    )
+
+    parser.add_argument("script_args", nargs=REMAINDER)
+
+    args = parser.parse_args()
 
     # Validate Lepton mode arguments
     if args.lepton_mode:
@@ -477,6 +512,7 @@ def replica_placement(
     script: Optional[str] = None,
     backend: str = "vllm",
     config_path: Optional[str] = None,
+    script_args: Optional[List[Any]] = None,
 ) -> List[List[str]]:
     commands = []
     gpu_devices = []
@@ -514,13 +550,14 @@ def replica_placement(
                 if script is not None:
                     commands[-1] += f" --script {script}"
                 if node_in_replica == 0:
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
                         rdzv_ip = get_worker_ip(global_worker_idx)
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                 else:
-                    if "MASTER_ADDR" in os.environ:
-                        rdzv_ip = os.environ["MASTER_ADDR"]
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+
+                if script_args is not None:
+                    commands[-1] += f" {' '.join(script_args)}"
 
                 control_urls.append(control_url)
                 output_files.append(
@@ -567,6 +604,8 @@ def replica_placement(
             )
             if script is not None:
                 commands[-1] += f" --script {script}"
+            if script_args is not None:
+                commands[-1] += f" {' '.join(script_args)}"
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"policy_{i}.log")
@@ -608,13 +647,14 @@ def replica_placement(
                 if script is not None:
                     commands[-1] += f" --script {script}"
                 if node_in_replica == 0:
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                     if get_worker_ip is not None:
                         rdzv_ip = get_worker_ip(global_worker_idx)
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
                 else:
-                    if "MASTER_ADDR" in os.environ:
-                        rdzv_ip = os.environ["MASTER_ADDR"]
                     commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+
+                if script_args is not None:
+                    commands[-1] += f" {' '.join(script_args)}"
 
                 control_urls.append(control_url)
                 output_files.append(
@@ -659,6 +699,10 @@ def replica_placement(
             )
             if script is not None:
                 commands[-1] += f" --script {script}"
+
+            if script_args is not None:
+                commands[-1] += f" {' '.join(script_args)}"
+
             control_urls.append(control_url)
             output_files.append(
                 os.path.join(output_dir, f"rollout_{i}.log")
@@ -1139,21 +1183,6 @@ cosmos-rl --config config.toml"""
         cur_work_idx = int(os.environ.get("LEPTON_JOB_WORKER_INDEX"))
     else:
         cur_work_idx = args.worker_idx
-    
-    if "LEPTON_JOB_WORKER_INDEX" in os.environ:
-        prefix = os.environ.get(
-            "LEPTON_JOB_SERVICE_PREFIX", os.environ.get("LEPTON_JOB_NAME")
-        )
-        subdomain = os.environ.get("LEPTON_SUBDOMAIN", "")
-        hostname = f"{prefix}-{cur_work_idx}.{subdomain}"
-        import cosmos_rl.utils.network_util as network_util
-
-        ips = network_util.get_eth_ips()
-        assert len(ips) > 0, "No IPs found for the current machine"
-        logger.info(
-            f"Setting hostname to {hostname} {ips[0]} for worker index {cur_work_idx}"
-        )
-        os.system(f"hostname {ips[0]}")
 
     control_url = None
     if args.url is not None:
@@ -1165,10 +1194,6 @@ cosmos-rl --config config.toml"""
         else:
             control_url = args.url
     else:
-        if "MASTER_ADDR" in os.environ and "NODE_RANK" in os.environ and int(os.environ.get("NODE_RANK")) != 0:
-            primary_hostname = os.environ.get("MASTER_ADDR")
-            primary_hostname = resolve_host_blocking(primary_hostname)
-            control_url = f"{primary_hostname}:{args.port}"
         if (
             "LEPTON_JOB_WORKER_INDEX" in os.environ
             and int(os.environ.get("LEPTON_JOB_WORKER_INDEX")) != 0
@@ -1207,18 +1232,16 @@ cosmos-rl --config config.toml"""
             # Only available for RL.
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
     # Create a temporary file and write to it
-    with tempfile.NamedTemporaryFile(
-        mode="w+", suffix=".toml", delete=False
-    ) as tmpfile:
-        toml.dump(cosmos_config, tmpfile)
-        tmpfile_toml = tmpfile.name
+    tmpfile_toml = dump_config_with_literal_patterns_to_tmpfile(cosmos_config)
 
     if control_url is None:
         logger.info(f"Temporary configuration file created at {tmpfile_toml}")
         controller_cmd = f"{controller_script} --config {tmpfile_toml}"
         controller_cmd += f" --port {port}"
         if script:
-            controller_cmd += f" {script}"
+            controller_cmd += f" --script {script}"
+        if args.script_args is not None:
+            controller_cmd += f" {' '.join(args.script_args)}"
         control_url = f"localhost:{port}"
 
     def get_lepton_ip(worker_idx: int) -> str:
@@ -1249,21 +1272,8 @@ cosmos-rl --config config.toml"""
                 )
         else:
             raise RuntimeError("Node IP list not provided")
-    
-    def get_k8s_ip(worker_idx: int) -> str:
-        if "JOB_SERVICE_PREFIX" in os.environ and "JOB_SERVICE_NAME" in os.environ and "NAMESPACE" in os.environ:
-            prefix = os.environ.get("JOB_SERVICE_PREFIX")
-            service_name = os.environ.get("JOB_SERVICE_NAME")
-            namespace = os.environ.get("NAMESPACE")
-            hostname = f"{prefix}-{worker_idx}.{service_name}.{namespace}.svc.cluster.local"
-            hostname = resolve_host_blocking(hostname)
-            return hostname
-        else:
-            raise RuntimeError("Job service prefix, name, and namespace not found in environment variables")
 
     def get_worker_ip(worker_idx: int) -> str:
-        if "JOB_SERVICE_PREFIX" in os.environ and "JOB_SERVICE_NAME" in os.environ and "NAMESPACE" in os.environ:
-            return get_k8s_ip(worker_idx)
         if "LEPTON_JOB_WORKER_INDEX" in os.environ:
             return get_lepton_ip(worker_idx)
         elif args.node_ip_list is not None:
@@ -1287,6 +1297,7 @@ cosmos-rl --config config.toml"""
         script=script,
         backend=backend,
         config_path=tmpfile_toml,
+        script_args=args.script_args,
     )
 
     num_workers = len(global_launch_settings)
