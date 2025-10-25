@@ -15,7 +15,10 @@
 
 redis = "12800"
 
-[custom.dataset]
+[custom]
+system_prompt = ""
+
+[custom.train_dataset]
 annotation_path = "data/sft/annotations.json"
 media_path = "data/sft/train2017"
 

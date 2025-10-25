@@ -824,6 +824,13 @@ class ValidationConfig(BaseModel):
         default_factory=DatasetConfig,
         description="Dataset configuration for validation. It includes dataset name, subset, revision and test split.",
     )
+    dataloader_num_workers: int = Field(
+        default=0, description="Number of subprocess to use for data loading"
+    )
+    dataloader_prefetch_factor: Optional[int] = Field(
+        default=None,
+        description="Number of batches loaded in advance by each worker.",
+    )
 
     temperature: float = Field(
         default=0.0, description="Temperature for sampling during validation."

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SFT adapter for llava-format datasets."""
+"""SFT adapter for llava-format datasets with support for separate training and validation datasets."""
 
 import argparse
 import json
@@ -38,13 +38,17 @@ class CustomDatasetConfig(pydantic.BaseModel):
     """Dataset annotation path."""
     media_path: str = pydantic.Field(default="")
     """Dataset media path."""
-    system_prompt: str = pydantic.Field(default="")
-    """System prompt."""
 
 
 class CustomConfig(pydantic.BaseModel):
-    dataset: CustomDatasetConfig = pydantic.Field()
-    """Dataset config."""
+    train_dataset: CustomDatasetConfig = pydantic.Field()
+    """Training dataset config."""
+
+    val_dataset: CustomDatasetConfig = pydantic.Field(default=None)
+    """Validation dataset config (optional)."""
+
+    system_prompt: str = pydantic.Field(default="")
+    """System prompt."""
 
     vision: VisionConfig = pydantic.Field(
         default=VisionConfig(
@@ -60,13 +64,21 @@ class CustomDataset(torch.utils.data.Dataset):
         self,
         config: cosmos_rl.policy.config.Config,
         custom_config: CustomConfig,
+        annotation_path: str,
+        media_path: str,
     ):
-        self.annotation = json.load(open(custom_config.dataset.annotation_path))
-        self.media_path = custom_config.dataset.media_path
-        self.system_prompt = custom_config.dataset.system_prompt
+        self.annotation = json.load(open(annotation_path))
+        self.media_path = media_path
+        self.system_prompt = custom_config.system_prompt
         self.config = config
         self.custom_config = custom_config
         self.vision_kwargs = custom_config.vision.model_dump(exclude_none=True)
+
+    def setup(self, config, tokenizer):
+        """Setup method required by the SFT trainer."""
+        # This method is called by the trainer to initialize the dataset
+        # For our custom dataset, we don't need additional setup beyond __init__
+        pass
 
     def __len__(self):
         return len(self.annotation)
@@ -104,7 +116,7 @@ class CustomDataset(torch.utils.data.Dataset):
         return conversations
 
 
-@monitor_status(name="Cosmos-RL Custom SFT", mode="sft")
+@monitor_status(name="Cosmos-RL Custom SFT with Separate Datasets", mode="sft")
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -131,17 +143,43 @@ def main():
         config_path.write_text(toml.dumps(config_kwargs))
         logger.info(f"Saved config to {config_path}")
 
-    # Load dataset
-    dataset = CustomDataset(
-        config=config,
-        custom_config=custom_config,
-    )
-    # Check dataset
-    print(dataset[0])
+    # Factory function for training dataset
+    def get_train_dataset(config: cosmos_rl.policy.config.Config) -> torch.utils.data.Dataset:
+        """Factory function to create training dataset."""
+        custom_config = CustomConfig.model_validate(config.model_dump().get("custom", {}))
 
-    # Launch worker
+        logger.info(f"Creating training dataset from: {custom_config.train_dataset.annotation_path}")
+        return CustomDataset(
+            config=config,
+            custom_config=custom_config,
+            annotation_path=custom_config.train_dataset.annotation_path,
+            media_path=custom_config.train_dataset.media_path,
+        )
+
+    # Factory function for validation dataset (optional)
+    def get_val_dataset(config: cosmos_rl.policy.config.Config) -> torch.utils.data.Dataset:
+        """Factory function to create validation dataset."""
+        custom_config = CustomConfig.model_validate(config.model_dump().get("custom", {}))
+
+        # Only create validation dataset if validation dataset config is specified
+        if not custom_config.val_dataset:
+            logger.info("No validation dataset specified, skipping validation dataset")
+            return None
+
+        logger.info(f"Creating validation dataset from: {custom_config.val_dataset.annotation_path}")
+        return CustomDataset(
+            config=config,
+            custom_config=custom_config,
+            annotation_path=custom_config.val_dataset.annotation_path,
+            media_path=custom_config.val_dataset.media_path,
+        )
+
+    # Launch worker with factory functions
+    val_dataset_factory = get_val_dataset if custom_config.val_dataset else None
+
     cosmos_rl.launcher.worker_entry.main(
-        dataset=dataset,
+        dataset=get_train_dataset,
+        val_dataset=val_dataset_factory,
     )
 
 
