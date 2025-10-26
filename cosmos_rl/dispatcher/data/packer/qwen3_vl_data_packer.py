@@ -24,21 +24,9 @@ from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from PIL import Image
 import base64
 import io
-
+from qwen_vl_utils import process_vision_info
+from cosmos_rl.utils.logging import logger
 IGNORE_LABEL_ID = -100
-
-
-def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
-    image_inputs = []
-    video_inputs = []
-    for x in sample:
-        if x["role"] == "user":
-            for item in x["content"]:
-                if item["type"] == "image":
-                    image_inputs.append(item["image"])
-                if item["type"] == "video":
-                    video_inputs.append(item["video"])
-    return image_inputs, video_inputs
 
 
 def encode_image_to_base64(image_inputs: List[str]) -> List[str]:
@@ -387,20 +375,20 @@ class Qwen3_VL_DataPacker(DataPacker):
             assistant_contents = []
             messages = None
             # SFT
-            if "messages" in conversation:
-                messages = conversation["messages"]
+            if "messages" in conversation[0]:
+                messages = conversation[0]["messages"]
                 for message in messages:
                     if message["role"] == "assistant":
                         content = message["content"]
-                        new_content = content.copy()
-                        if isinstance(new_content, str):
-                            assistant_contents.append(new_content)
+                        if isinstance(content, str):
+                            assistant_contents.append(content)
                             new_content = pad_token * pad_run_length
-                        elif isinstance(new_content, dict):
+                        elif isinstance(content, dict):
                             assert (
                                 "text" in new_content
                             ), f"text not in content: {content}"
-                            assistant_contents.append(new_content["text"])
+                            assistant_contents.append(content["text"])
+                            new_content = content.copy()
                             new_content["text"] = pad_token * pad_run_length
                         elif isinstance(content, list):
                             for i, item in enumerate(content):
@@ -409,6 +397,7 @@ class Qwen3_VL_DataPacker(DataPacker):
                                         "text" in item
                                     ), f"text not in content: {item}"
                                     assistant_contents.append(item["text"])
+                                    new_content = content.copy()
                                     new_content[i]["text"] = pad_token * pad_run_length
                                 else:
                                     raise ValueError(
@@ -441,21 +430,25 @@ class Qwen3_VL_DataPacker(DataPacker):
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
             )
+            logger.info(f"binz messages: {messages}")
             if "images" in conversation:
                 image_inputs = conversation["images"]
             else:
-                image_inputs, video_inputs = process_vision_info(conversation)
-                assert all(
-                    (isinstance(x, str) for x in image_inputs)
-                ), f"{image_inputs=}"
-                assert (
-                    len(video_inputs) == 0
-                ), "Currently video input is not supported for HF VLM"
-                image_inputs = encode_image_to_base64(image_inputs)
+                image_inputs, video_inputs, video_kwargs = process_vision_info(messages, image_patch_size=16, return_video_kwargs=True, return_video_metadata=True)
+                if video_inputs is not None:
+                    video_inputs, video_metadatas = zip(*video_inputs)
+                    video_inputs, video_metadatas = list(video_inputs), list(video_metadatas)
+                else:
+                    video_metadatas = None
+
 
             kwarg = {
                 "return_tensors": "pt",
                 "images": image_inputs,
+                "videos": video_inputs,
+                "video_metadata": video_metadatas,
+                "do_resize": False,
+                **video_kwargs,
             }
             inputs = self.hf_processor(
                 text=[text],
@@ -484,7 +477,7 @@ class Qwen3_VL_DataPacker(DataPacker):
                         f"input_ids and label_ids should have the same length, but got {len(input_ids)} and {len(label_ids)}"
                     )
         except Exception as e:
-            print(f"Error processing sample: {e}, please fix to ensure SFT works")
+            logger.error(f"Error processing sample: {e}, please fix to ensure SFT works")
             raise e
 
         result_dict = {
