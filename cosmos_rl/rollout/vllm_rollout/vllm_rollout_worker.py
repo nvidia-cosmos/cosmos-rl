@@ -125,6 +125,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
         super(vLLMRolloutWorker, self).__init__(config, parallel_dims)
 
+        import pdb; pdb.set_trace()
+
         self.state = State()
 
         if self.config.rollout.parallelism.dp_shard_size == -1:
@@ -164,7 +166,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             self.val_batch_size = None
         self.background_thread: threading.Thread | None = None
 
-        # For Polocy to Rollout weight mapping
+        # For Policy to Rollout weight mapping
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path,
             trust_remote_code=True,

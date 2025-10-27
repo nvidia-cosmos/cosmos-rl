@@ -1026,6 +1026,8 @@ class Config(BaseModel):
                 data["train"]["train_policy"]["type"] = "grpo"
             else:
                 data["train"]["train_policy"]["type"] = "sft"
+        
+        print(data)
         return data
 
     @model_validator(mode="after")
