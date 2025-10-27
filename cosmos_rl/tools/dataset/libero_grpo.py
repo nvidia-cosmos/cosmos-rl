@@ -55,7 +55,7 @@ class LIBERODataset(Dataset):
             for task_id in range(num_tasks_in_suite):
                 if self.train_val == "train":
                     trials_range = list(range(0, int(self.num_trials_per_task)))
-                elif self.train_val == "valid":
+                elif self.train_val == "val":
                     trials_range = list(range(0, int(self.num_trials_per_task)))  
                 else:
                     raise ValueError
@@ -86,6 +86,8 @@ if __name__ == "__main__":
     
     def get_val_dataset(config: CosmosConfig) -> Dataset:
         return LIBERODataset(50, "val")
+
+    print("do we enter here????????????????????????")
 
     launch_worker(
         dataset=get_dataset,

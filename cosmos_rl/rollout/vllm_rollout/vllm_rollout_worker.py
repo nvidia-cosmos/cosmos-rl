@@ -125,8 +125,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
         super(vLLMRolloutWorker, self).__init__(config, parallel_dims)
 
-        import pdb; pdb.set_trace()
-
         self.state = State()
 
         if self.config.rollout.parallelism.dp_shard_size == -1:

@@ -23,7 +23,7 @@ print_help() {
   echo "  --rdzv-endpoint <host:port>        Rendezvous endpoint for distributed training. Default: localhost:0"
   echo "  --script <script>                  The user script to run before launch."
   echo "  --config <path>                    The path to the config file."
-  echo "  --backend <vllm|trtllm>            The backend to use for the job. Default: vllm"
+  echo "  --backend <vllm|trtllm|vla>            The backend to use for the job. Default: vllm"
   echo "  --help                             Show this help message"
   echo "Examples:"
   echo "  ./launch_replica.sh --type rollout --ngpus 4 --log-rank 0,1"
@@ -142,7 +142,7 @@ if [ "$TYPE" == "policy" ]; then
     LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
   fi
 elif [ "$TYPE" == "rollout" ]; then
-  if [ "$BACKEND" == "vllm" ]; then
+  if [ "$BACKEND" == "vllm" ] || [ "$BACKEND" == "vla" ]; then
     LAUNCH_CMD+=(
       --nproc-per-node="$NGPU"
       --nnodes="$NNODES"
@@ -173,7 +173,7 @@ elif [ "$TYPE" == "rollout" ]; then
     echo "Launching trtllm as the backend, ignoring:
             --log-rank flags."
   else
-    echo "Error: Invalid --backend value '$BACKEND'. Must be 'vllm' or 'trtllm'."
+    echo "Error: Invalid --backend value '$BACKEND'. Must be 'vllm' or 'trtllm' or 'vla'."
     print_help
     exit 1
   fi

@@ -62,6 +62,26 @@ def run_rollout(*args, **kwargs):
                 val_dataset=kwargs.get("val_dataset"),
                 val_reward_fns=kwargs.get("val_reward_fns"),
             )
+        elif rollout_backend == "vla":
+            # VLA rollout backend for embodied AI tasks
+            try:
+                from cosmos_rl.rollout.vla_rollout.vla_rollout_worker import VLARolloutWorker
+            except ImportError as e:
+                logger.error(f"[Rollout] VLARolloutWorker importing failed! {e}")
+                raise e
+            parallel_dims = ParallelDims.from_config(
+                parallesim_config=cosmos_rollout_config.rollout.parallelism
+            )
+            init_distributed()
+            parallel_dims.build_mesh(device_type="cuda")
+            rollout_worker = VLARolloutWorker(cosmos_rollout_config, parallel_dims)
+            rollout_worker.setup(
+                dataset=kwargs.get("dataset"),
+                reward_fns=kwargs.get("reward_fns"),
+                filter_reward_fns=kwargs.get("filter_reward_fns"),
+                val_dataset=kwargs.get("val_dataset"),
+                val_reward_fns=kwargs.get("val_reward_fns"),
+            )
         elif rollout_backend == "trtllm":
             try:
                 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (

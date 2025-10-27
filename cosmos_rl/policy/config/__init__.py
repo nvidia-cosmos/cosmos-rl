@@ -968,6 +968,80 @@ class LoggingConfig(BaseModel):
         return self
 
 
+class VLAConfig(BaseModel):
+    """Configuration for Vision-Language-Action (VLA) training"""
+    
+    task_suite: str = Field(
+        default="libero_10",
+        description="Task suite name (e.g., 'libero_10', 'libero_90', 'robotwin2')",
+    )
+    
+    num_parallel_envs: int = Field(
+        default=4,
+        description="Number of parallel environments per rollout worker",
+    )
+    
+    action_dim: int = Field(
+        default=7,
+        description="Action dimension for the robot (typically 7 for 6-DOF arm + gripper)",
+    )
+    
+    max_episode_length: int = Field(
+        default=600,
+        description="Maximum number of steps per episode",
+    )
+    
+    image_size: int = Field(
+        default=256,
+        description="Image resolution for environment observations",
+    )
+    
+    use_multi_view: bool = Field(
+        default=False,
+        description="Whether to use multiple camera views",
+    )
+    
+    use_wrist_camera: bool = Field(
+        default=False,
+        description="Whether to include wrist camera observations",
+    )
+    
+    action_normalization: str = Field(
+        default="minmax",
+        description="Action normalization method",
+        choices=["minmax", "zscore", "none"],
+    )
+    
+    reward_type: str = Field(
+        default="binary",
+        description="Type of reward calculation",
+        choices=["binary", "dense", "sparse"],
+    )
+    
+    vla_type: str = Field(
+        default="openvla",
+        description="Type of VLA model architecture",
+        choices=["openvla", "rt1", "rt2"],
+    )
+    
+    env_config: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional environment-specific configuration",
+    )
+    
+    @model_validator(mode="after")
+    def check_params_value(self):
+        if self.num_parallel_envs <= 0:
+            raise ValueError("num_parallel_envs must be greater than 0")
+        if self.action_dim <= 0:
+            raise ValueError("action_dim must be greater than 0")
+        if self.max_episode_length <= 0:
+            raise ValueError("max_episode_length must be greater than 0")
+        if self.image_size <= 0:
+            raise ValueError("image_size must be greater than 0")
+        return self
+
+
 class Config(BaseModel):
     custom: Dict[str, Any] = Field(
         default_factory=dict, description="Custom script configuration."
@@ -978,6 +1052,7 @@ class Config(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     profiler: ProfilerConfig = Field(default_factory=ProfilerConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    vla: VLAConfig = Field(default_factory=VLAConfig, description="VLA-specific configuration")
     redis: str = Field(
         default="",
         description="Redis server address port, format: port",
