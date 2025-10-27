@@ -1348,6 +1348,7 @@ class GRPOTrainer(Trainer):
         kl_loss_sum = torch.tensor(0.0, device=self.device)
         grad_norm_sum = torch.tensor(0.0, device=self.device)
         loss_count = 0
+        grad_norm_count = 0
         is_computing_refs = [True, False] if need_compute_ref else [False]
         cached_minibatch_arrangements = []
         for is_computing_ref in is_computing_refs:
@@ -1818,8 +1819,12 @@ class GRPOTrainer(Trainer):
                                         kl_loss = kl_loss * loss_scaling_factor
 
                                         loss.backward()
-                                        loss_sum += per_token_loss.item()
-                                        kl_loss_sum += kl_loss.item()
+                                        loss_sum += (
+                                            per_token_loss.item() / loss_scaling_factor
+                                        )
+                                        kl_loss_sum += (
+                                            kl_loss.item() / loss_scaling_factor
+                                        )
                                         loss_count += 1
                                 self.mini_step += 1
                                 local_mini_step += 1
@@ -1833,18 +1838,17 @@ class GRPOTrainer(Trainer):
                                 ) and local_mini_step > 1:
                                     all_reduced = True
                                     grad_norm_sum += self.execute_all_reduce()
+                                    grad_norm_count += 1
                                 else:
                                     all_reduced = False
 
                             if not is_computing_ref and not all_reduced:
                                 grad_norm_sum += self.execute_all_reduce()
+                                grad_norm_count += 1
                             local_optimize_step += 1
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()
-
-        # Only step lr scheduler when all the mini-batches are processed
-        self.lr_schedulers.step()
 
         loss = (loss_sum / loss_count) if loss_count > 0 else loss_sum
         kl_loss = (kl_loss_sum / loss_count) if loss_count > 0 else kl_loss_sum
@@ -1881,7 +1885,11 @@ class GRPOTrainer(Trainer):
                 if self.config.train.train_policy.kl_beta != 0.0:
                     report_data["train/kl_loss_avg"] = global_avg_kl_loss
                     report_data["train/kl_loss_max"] = global_max_kl_loss
-                report_data["train/grad_norm"] = grad_norm_sum.item()
+                report_data["train/grad_norm"] = (
+                    grad_norm_sum.item() / grad_norm_count
+                    if grad_norm_count > 0
+                    else 0.0
+                )
                 if len(self.metrics) > 0:
                     for k, v in self.metrics.items():
                         report_data[f"train/{k}"] = (
@@ -1900,6 +1908,10 @@ class GRPOTrainer(Trainer):
                     )
                     for k, v in mfu.items():
                         report_data[f"train/{k}"] = v
+
+        # Only step lr scheduler when all the mini-batches are processed
+        self.lr_schedulers.step()
+
         # checkpointing
         if self.is_master_replica and (do_save_checkpoint):
             if self.config.train.ckpt.export_safetensors:
