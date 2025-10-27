@@ -49,20 +49,6 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 return rollout_weight_name.replace(
                     "experts.w2_weight", "down_proj.weight"
                 )
-            # below are for trtllm weight for gate_up_proj and input_layernorm.
-            elif "experts.w3_w1_weight" in rollout_weight_name:
-                return rollout_weight_name.replace(
-                    "experts.w3_w1_weight", "gate_up_proj.weight"
-                )
-            elif "next_layer_layernorm" in rollout_weight_name:
-                # For trtllm, next_layer_layernorm is:
-                #   `model.norm` when layer_id == self.config.num_hidden_layers - 1
-                #   `model.layers.${layer_id + 1}.input_layernorm` when layer_id < self.config.num_hidden_layers - 1
-                layer_id = int(rollout_weight_name.split(".")[2])
-                if layer_id == self.config.num_hidden_layers - 1:
-                    return "model.norm.weight"
-                else:
-                    return f"model.layers.{layer_id + 1}.input_layernorm.weight"
         return rollout_weight_name
 
     def __rollout_split_qkv_weight(self, name, weight: torch.Tensor):
