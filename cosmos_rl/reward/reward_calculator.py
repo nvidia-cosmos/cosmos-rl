@@ -373,33 +373,37 @@ class RewardCalculator:
                 #   - if the shared prefix hold different rewards, the prefix may lead to bias
                 #   - else: do nothing
                 # (shared_prefix) -> index of rollouts
-                shared_prefix_groups: Dict[Tuple[int, ...], List[int]] = (
-                    util.find_maximal_prefix_groups(
-                        [
-                            self.tokenizer(
-                                rollout.completion, add_special_tokens=False
-                            ).input_ids
-                            for rollout in rollouts_group
-                        ],
-                        N=self.config.train.train_policy.min_filter_prefix_tokens,
+                if self.config.train.train_policy.process_shared_prefix:
+                    shared_prefix_groups: Dict[Tuple[int, ...], List[int]] = (
+                        util.find_maximal_prefix_groups(
+                            [
+                                self.tokenizer(
+                                    rollout.completion, add_special_tokens=False
+                                ).input_ids
+                                for rollout in rollouts_group
+                            ],
+                            N=self.config.train.train_policy.min_filter_prefix_tokens,
+                        )
                     )
-                )
-                for shared_prefix, rollout_indices in shared_prefix_groups.items():
-                    assert (
-                        len(rollout_indices) > 1
-                    ), "Shared prefix group should not be empty"
-                    # Check if the shared prefix holds different rewards
-                    rewards = [rollouts_group[i].reward for i in rollout_indices]
-                    if len(set(rewards)) > 1:
-                        n_ignore_prefix_tokens = len(shared_prefix)
-                        prefix_str = self.tokenizer.decode(shared_prefix)
-                        for rollout_index in rollout_indices:
-                            # Only do this if shared_prefix != rollout.completion
-                            # Else the whole sample will be ignored, which cause training issues.
-                            if prefix_str != rollouts_group[rollout_index].completion:
-                                rollouts_group[
-                                    rollout_index
-                                ].n_ignore_prefix_tokens = n_ignore_prefix_tokens
+                    for shared_prefix, rollout_indices in shared_prefix_groups.items():
+                        assert (
+                            len(rollout_indices) > 1
+                        ), "Shared prefix group should not be empty"
+                        # Check if the shared prefix holds different rewards
+                        rewards = [rollouts_group[i].reward for i in rollout_indices]
+                        if len(set(rewards)) > 1:
+                            n_ignore_prefix_tokens = len(shared_prefix)
+                            prefix_str = self.tokenizer.decode(shared_prefix)
+                            for rollout_index in rollout_indices:
+                                # Only do this if shared_prefix != rollout.completion
+                                # Else the whole sample will be ignored, which cause training issues.
+                                if (
+                                    prefix_str
+                                    != rollouts_group[rollout_index].completion
+                                ):
+                                    rollouts_group[
+                                        rollout_index
+                                    ].n_ignore_prefix_tokens = n_ignore_prefix_tokens
 
                 payload_list.append(
                     RLPayload(

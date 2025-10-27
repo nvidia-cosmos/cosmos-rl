@@ -126,6 +126,9 @@ class PolicyStatusManager:
         self.activated_val_iter: Optional[Iterator] = None
         self.val_report_data: Dict[int, List[Any]] = {}
 
+        # Indicate whether on-policy rollout collection has completed for the current policy step
+        self.on_policy_rollout_completed: bool = False
+
     def setup(
         self,
         config: Config,
@@ -672,6 +675,12 @@ class PolicyStatusManager:
         completion_tokens_count = 0
         n_samples = 0
         rollouts_to_put = None
+        if (
+            self.config.train.train_policy.on_policy
+            and self.on_policy_rollout_completed
+        ):
+            # On-policy training has already completed the required samples for this policy step
+            return completion_tokens_count, n_samples
 
         if self.config.train.train_policy.variant == "dapo":
             rollouts_to_put = valid_rollouts
@@ -683,11 +692,12 @@ class PolicyStatusManager:
         for rollout in rollouts_to_put:
             completion_tokens_count += len(self.tokenizer.encode(rollout.completion))
             n_samples += 1
+            self.put_rollout(rollout)
             if self.config.train.train_policy.on_policy:
                 self.consumed_samples_num += 1
-                if self.rollouts_enough_for_one_step():
+                if self.total_pending_rollouts() == 0:
+                    self.on_policy_rollout_completed = True
                     break
-            self.put_rollout(rollout)
 
         return completion_tokens_count, n_samples
 
@@ -826,6 +836,9 @@ class PolicyStatusManager:
                 )
             # Trigger next step training if data is available
             self.try_trigger_data_fetch_and_training()
+            if self.config.train.train_policy.on_policy:
+                # Reset on-policy rollout completed flag for next step
+                self.on_policy_rollout_completed = False
 
     def trigger_weight_sync(
         self,
