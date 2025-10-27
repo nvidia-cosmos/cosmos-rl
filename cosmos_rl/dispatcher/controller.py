@@ -21,7 +21,6 @@ import sys
 import uuid
 import asyncio
 import time
-import itertools
 import os
 import math
 import threading
@@ -114,7 +113,6 @@ class Controller:
             )
 
         self.config = config
-        self.prompt_fetch_count = 0
         task_type = config.train.train_policy.type
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
             config.policy.model_name_or_path,
@@ -142,6 +140,7 @@ class Controller:
         self.user_val_data_packer = val_data_packer
         self.dataset = None
         self.ckpt_extra_info = {}
+        self.weight_version_to_prompt_num = {}  # Only for on-policy.
         remain_samples_num = 0
 
         if self.is_rl:
@@ -168,7 +167,7 @@ class Controller:
                 )
                 if self.dataset is not None
                 else 0
-            )
+            )  # Total number of samples of policy training will consume.
 
             if sampler is not None:
                 logger.info("[Controller] Using provided sampler for training")
@@ -568,13 +567,49 @@ class Controller:
                 self.config.train.train_batch_per_replica
                 * len(self.policy_status_manager)
                 // self.config.rollout.n_generation
+            )  # global_batch_size: number of prompts needed for single policy step.
+            num_of_valid_prompts_consumed = (
+                self.policy_status_manager.consumed_samples_num
+                // self.config.rollout.n_generation
             )
+            weight_version_for_current_batch = (
+                num_of_valid_prompts_consumed // global_batch_size
+            )
+
+            # record the number of valid prompts for current weight version
+            if (
+                weight_version_for_current_batch
+                not in self.weight_version_to_prompt_num
+            ):
+                self.weight_version_to_prompt_num[weight_version_for_current_batch] = (
+                    current_fetch_count
+                )
+            else:
+                self.weight_version_to_prompt_num[weight_version_for_current_batch] += (
+                    current_fetch_count
+                )
+
+            # check if for current weight version, we have reached the upper limit of retries to generate enough samples.
+            if self.config.train.train_policy.max_retry_for_on_policy > 0:
+                already_retried_times = math.ceil(
+                    self.weight_version_to_prompt_num[weight_version_for_current_batch]
+                    / global_batch_size
+                )
+                if (
+                    already_retried_times
+                    > self.config.train.train_policy.max_retry_for_on_policy
+                ):
+                    raise RuntimeError(
+                        f"[Controller] After {self.config.train.train_policy.max_retry_for_on_policy} retries, samples for weight version {weight_version_for_current_batch} are still not enough. May be the dataset is too difficult for current model? Or you could also set the `max_retry_for_on_policy` to 0 or negative to always retry."
+                    )
+
             for i in range(current_fetch_count):
-                prompt_id_and_payload_list[i][1].weight_version = (
-                    self.prompt_fetch_count + i
-                ) // global_batch_size
-            # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}, prompt_fetch_count: {self.prompt_fetch_count}")
-            self.prompt_fetch_count += current_fetch_count
+                # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
+                # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
+                prompt_id_and_payload_list[i][
+                    1
+                ].weight_version = weight_version_for_current_batch
+            # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
             for i in range(current_fetch_count):
                 prompt_id_and_payload_list[i][1].weight_version = 0
@@ -638,23 +673,16 @@ class Controller:
         valid_rollouts: List[Rollout]: The rollouts that have valid rewards
         invalid_rollouts: List[Rollout]: The rollouts that have invalid rewards (all rewards are the same)
         """
-        rollouts_to_put = None
-        if self.config.train.train_policy.variant == "dapo":
-            rollouts_to_put = valid_rollouts
-        else:
-            rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
+        completion_tokens_count, n_samples = self.policy_status_manager.put_rollouts(
+            valid_rollouts, invalid_rollouts
+        )
 
-        for rollout in rollouts_to_put:
-            self.policy_status_manager.put_rollout(rollout)
+        self.stat_completion_tokens_count += completion_tokens_count
+        self.stat_n_samples += n_samples
 
         # Statistic
         if self.begin_time is None:
             self.begin_time = time.time()
-        for rollout in rollouts_to_put:
-            self.stat_completion_tokens_count += len(
-                self.tokenizer.encode(rollout.completion)
-            )
-            self.stat_n_samples += 1
 
         # Print pending rollouts inside all policy replicas
         pending_count = self.policy_status_manager.total_pending_rollouts()

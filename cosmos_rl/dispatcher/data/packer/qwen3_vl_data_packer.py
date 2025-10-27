@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from typing import List, Any, Dict, Optional, Tuple
 import torch
@@ -36,9 +51,9 @@ def encode_image_to_base64(image_inputs: List[str]) -> List[str]:
     return new_image_inputs
 
 
-class HFVLMDataPacker(DataPacker):
+class Qwen3_VL_DataPacker(DataPacker):
     """
-    Data protocol & processing logic for the HF VLMs for SFT and RL training.
+    Data protocol & processing logic for the Qwen3.5 VLMs for SFT and RL training.
     """
 
     Payload = List[Dict[str, Any]]
@@ -64,21 +79,16 @@ class HFVLMDataPacker(DataPacker):
         image_token_id = getattr(hf_config, "image_token_id", None) or getattr(
             hf_config.vision_config, "image_token_id", None
         )
-        if image_token_id is None:
-            image_token_id = getattr(hf_config, "image_token_index", None) or getattr(
-                hf_config.vision_config, "image_token_index", None
-            )
         assert image_token_id is not None, f"Cannot find image token id in {hf_config=}"
         self.image_token_id = image_token_id
         self.image_token = getattr(self.hf_processor, "image_token", None)
 
+        if self.image_token is None:
+            self.image_token = self.tokenizer.decode([image_token_id])
+
         video_token_id = getattr(hf_config, "video_token_id", None) or getattr(
             hf_config.vision_config, "video_token_id", None
         )
-        if video_token_id is None:
-            video_token_id = getattr(hf_config, "video_token_index", None) or getattr(
-                hf_config.vision_config, "video_token_index", None
-            )
         if video_token_id is None:
             self.video_token = None
             self.video_token_id = None
@@ -197,9 +207,175 @@ class HFVLMDataPacker(DataPacker):
         # no match found
         return False, token_ids, label_ids
 
+    def _get_rope_index(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Different from the original implementation, Qwen3VLMoe use timestamps rather than absolute time position ids."""
+
+        # Since we use timestamps to seperate videos, like <t1> <vision_start> <frame1> <vision_end> <t2> <vision_start> <frame2> <vision_end>, the video_grid_thw should also be split
+        if video_grid_thw is not None:
+            video_grid_thw = torch.repeat_interleave(
+                video_grid_thw, video_grid_thw[:, 0], dim=0
+            )
+            video_grid_thw[:, 0] = 1
+
+        spatial_merge_size = self.hf_config.vision_config.spatial_merge_size
+        image_token_id = self.hf_config.image_token_id
+        video_token_id = self.hf_config.video_token_id
+        vision_start_token_id = self.hf_config.vision_start_token_id
+        mrope_position_deltas = []
+        if input_ids is not None and (
+            image_grid_thw is not None or video_grid_thw is not None
+        ):
+            total_input_ids = input_ids
+            if attention_mask is None:
+                attention_mask = torch.ones_like(total_input_ids)
+            position_ids = torch.ones(
+                3,
+                input_ids.shape[0],
+                input_ids.shape[1],
+                dtype=input_ids.dtype,
+                device=input_ids.device,
+            )
+            image_index, video_index = 0, 0
+            attention_mask = attention_mask.to(total_input_ids.device)
+            for i, input_ids in enumerate(total_input_ids):
+                input_ids = input_ids[attention_mask[i] == 1]
+                image_nums, video_nums = 0, 0
+                vision_start_indices = torch.argwhere(
+                    input_ids == vision_start_token_id
+                ).squeeze(1)
+                vision_tokens = input_ids[vision_start_indices + 1]
+                image_nums = (vision_tokens == image_token_id).sum()
+                video_nums = (vision_tokens == video_token_id).sum()
+                input_tokens = input_ids.tolist()
+                llm_pos_ids_list: list = []
+                st = 0
+                remain_images, remain_videos = image_nums, video_nums
+                for _ in range(image_nums + video_nums):
+                    if image_token_id in input_tokens and remain_images > 0:
+                        ed_image = input_tokens.index(image_token_id, st)
+                    else:
+                        ed_image = len(input_tokens) + 1
+                    if video_token_id in input_tokens and remain_videos > 0:
+                        ed_video = input_tokens.index(video_token_id, st)
+                    else:
+                        ed_video = len(input_tokens) + 1
+                    if ed_image < ed_video:
+                        t, h, w = (
+                            image_grid_thw[image_index][0],
+                            image_grid_thw[image_index][1],
+                            image_grid_thw[image_index][2],
+                        )
+                        image_index += 1
+                        remain_images -= 1
+                        ed = ed_image
+
+                    else:
+                        t, h, w = (
+                            video_grid_thw[video_index][0],
+                            video_grid_thw[video_index][1],
+                            video_grid_thw[video_index][2],
+                        )
+                        video_index += 1
+                        remain_videos -= 1
+                        ed = ed_video
+                    llm_grid_t, llm_grid_h, llm_grid_w = (
+                        t.item(),
+                        h.item() // spatial_merge_size,
+                        w.item() // spatial_merge_size,
+                    )
+                    text_len = ed - st
+
+                    st_idx = (
+                        llm_pos_ids_list[-1].max() + 1
+                        if len(llm_pos_ids_list) > 0
+                        else 0
+                    )
+                    llm_pos_ids_list.append(
+                        torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                    )
+
+                    # t_index is always 0 because llm_grid_t is always 1 (we use timestamps to encode the temporal information for videos)
+                    t_index = (
+                        torch.arange(llm_grid_t)
+                        .view(-1, 1)
+                        .expand(-1, llm_grid_h * llm_grid_w)
+                        .flatten()
+                    )
+                    h_index = (
+                        torch.arange(llm_grid_h)
+                        .view(1, -1, 1)
+                        .expand(llm_grid_t, -1, llm_grid_w)
+                        .flatten()
+                    )
+                    w_index = (
+                        torch.arange(llm_grid_w)
+                        .view(1, 1, -1)
+                        .expand(llm_grid_t, llm_grid_h, -1)
+                        .flatten()
+                    )
+                    llm_pos_ids_list.append(
+                        torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+                    )
+                    st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+
+                if st < len(input_tokens):
+                    st_idx = (
+                        llm_pos_ids_list[-1].max() + 1
+                        if len(llm_pos_ids_list) > 0
+                        else 0
+                    )
+                    text_len = len(input_tokens) - st
+                    llm_pos_ids_list.append(
+                        torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                    )
+
+                llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+                position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(
+                    position_ids.device
+                )
+                mrope_position_deltas.append(
+                    llm_positions.max() + 1 - len(total_input_ids[i])
+                )
+            mrope_position_deltas = torch.tensor(
+                mrope_position_deltas, device=input_ids.device
+            ).unsqueeze(1)
+            return position_ids, mrope_position_deltas
+        else:
+            if attention_mask is not None:
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 1)
+                position_ids = (
+                    position_ids.unsqueeze(0)
+                    .expand(3, -1, -1)
+                    .to(attention_mask.device)
+                )
+                max_position_ids = position_ids.max(0, keepdim=False)[0].max(
+                    -1, keepdim=True
+                )[0]
+                mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
+            else:
+                position_ids = (
+                    torch.arange(input_ids.shape[1], device=input_ids.device)
+                    .view(1, 1, -1)
+                    .expand(3, input_ids.shape[0], -1)
+                )
+                mrope_position_deltas = torch.zeros(
+                    [input_ids.shape[0], 1],
+                    device=input_ids.device,
+                    dtype=input_ids.dtype,
+                )
+
+            return position_ids, mrope_position_deltas
+
     def _process_single_sample(
         self,
-        conversation: "HFVLMDataPacker.Payload",
+        conversation: "Qwen3_VL_DataPacker.Payload",
         add_generation_prompt: bool,
     ) -> Dict[str, Any]:
         try:
@@ -317,60 +493,31 @@ class HFVLMDataPacker(DataPacker):
         }
         if "pixel_values_videos" in inputs:
             result_dict["pixel_values_videos"] = inputs["pixel_values_videos"]
-
             if "video_grid_thw" in inputs:
                 result_dict["video_grid_thw"] = inputs["video_grid_thw"]
             else:
                 result_dict["video_grid_thw"] = None
 
-            if "second_per_grid_ts" in inputs:
-                result_dict["second_per_grid_ts"] = torch.tensor(
-                    inputs["second_per_grid_ts"], dtype=torch.float
-                )
-            else:
-                result_dict["second_per_grid_ts"] = None
-
-            if "pixel_values_videos_lengths_per_sample" in inputs:
-                result_dict["pixel_values_videos_lengths_per_sample"] = inputs[
-                    "pixel_values_videos"
-                ].shape[0]
-            else:
-                result_dict["pixel_values_videos_lengths_per_sample"] = None
-
         if "pixel_values" in inputs:
             result_dict["pixel_values"] = inputs["pixel_values"]
-
             if "image_grid_thw" in inputs:
                 result_dict["image_grid_thw"] = inputs["image_grid_thw"]
             else:
                 result_dict["image_grid_thw"] = None
 
-            if "pixel_values_lengths_per_sample" in inputs:
-                result_dict["pixel_values_lengths_per_sample"] = inputs[
-                    "pixel_values"
-                ].shape[0]
-            else:
-                result_dict["pixel_values_lengths_per_sample"] = None
-
-        if "aspect_ratio_ids" in inputs:
-            result_dict["aspect_ratio_ids"] = inputs["aspect_ratio_ids"]
-        else:
-            result_dict["aspect_ratio_ids"] = None
-
-        if "aspect_ratio_mask" in inputs:
-            result_dict["aspect_ratio_mask"] = inputs["aspect_ratio_mask"]
-        else:
-            result_dict["aspect_ratio_mask"] = None
-
-        if "image_sizes" in inputs:
-            result_dict["image_sizes"] = inputs["image_sizes"]
-        else:
-            result_dict["image_sizes"] = None
-
-        if "batch_num_images" in inputs:
-            result_dict["batch_num_images"] = inputs["batch_num_images"]
-        else:
-            result_dict["batch_num_images"] = None
+        # position_ids: (3, 1, seq_len)
+        # Only for Qwen3VLMOE
+        position_ids, _ = self._get_rope_index(
+            input_ids=torch.tensor(input_ids).unsqueeze(0).clone(),
+            image_grid_thw=torch.tensor(result_dict.get("image_grid_thw"))
+            if "image_grid_thw" in result_dict
+            else None,
+            video_grid_thw=torch.tensor(result_dict.get("video_grid_thw"))
+            if "video_grid_thw" in result_dict
+            else None,
+            attention_mask=None,
+        )
+        result_dict["position_ids"] = position_ids.clone()
 
         return result_dict
 
@@ -379,19 +526,8 @@ class HFVLMDataPacker(DataPacker):
     ) -> Dict[str, Any]:
         pixel_values_videos = [x["pixel_values_videos"] for x in processed_samples]
         video_grid_thw = [x["video_grid_thw"] for x in processed_samples]
-        second_per_grid_ts = [x["second_per_grid_ts"] for x in processed_samples]
         pixel_values = [x["pixel_values"] for x in processed_samples]
         image_grid_thw = [x["image_grid_thw"] for x in processed_samples]
-        pixel_values_videos_lengths_per_sample = [
-            x["pixel_values_videos_lengths_per_sample"] for x in processed_samples
-        ]
-        pixel_values_lengths_per_sample = [
-            x["pixel_values_lengths_per_sample"] for x in processed_samples
-        ]
-        aspect_ratio_ids = [x["aspect_ratio_ids"] for x in processed_samples]
-        aspect_ratio_mask = [x["aspect_ratio_mask"] for x in processed_samples]
-        image_sizes = [x["image_sizes"] for x in processed_samples]
-        batch_num_images = [x["batch_num_images"] for x in processed_samples]
 
         if all([x is not None for x in pixel_values_videos]):
             assert all(
@@ -422,25 +558,6 @@ class HFVLMDataPacker(DataPacker):
             ), "video_grid_thw should be None"
             video_grid_thw = None
 
-        if all([x is not None for x in second_per_grid_ts]):
-            assert all(
-                [x is not None for x in second_per_grid_ts]
-            ), "second_per_grid_ts should not be None"
-            second_per_grid_ts = torch.cat(second_per_grid_ts, dim=0)
-        else:
-            assert all(
-                [x is None for x in second_per_grid_ts]
-            ), "second_per_grid_ts should be None"
-            second_per_grid_ts = None
-
-        if all([x is not None for x in pixel_values_videos_lengths_per_sample]):
-            pass
-        else:
-            assert all(
-                [x is None for x in pixel_values_videos_lengths_per_sample]
-            ), "pixel_values_videos_lengths_per_sample should be None"
-            pixel_values_videos_lengths_per_sample = None
-
         if all([x is not None for x in pixel_values]):
             pixel_values = torch.cat(pixel_values, dim=0)
         else:
@@ -455,44 +572,6 @@ class HFVLMDataPacker(DataPacker):
             ), "image_grid_thw should be None"
             image_grid_thw = None
 
-        if all([x is not None for x in pixel_values_lengths_per_sample]):
-            pass
-        else:
-            assert all(
-                [x is None for x in pixel_values_lengths_per_sample]
-            ), "pixel_values_lengths_per_sample should be None"
-            pixel_values_lengths_per_sample = None
-
-        if all([x is not None for x in aspect_ratio_ids]):
-            aspect_ratio_ids = torch.cat(aspect_ratio_ids, dim=0)
-        else:
-            assert all(
-                [x is None for x in aspect_ratio_ids]
-            ), "aspect_ratio_ids should be None"
-            aspect_ratio_ids = None
-
-        if all([x is not None for x in aspect_ratio_mask]):
-            aspect_ratio_mask = torch.cat(aspect_ratio_mask, dim=0)
-        else:
-            assert all(
-                [x is None for x in aspect_ratio_mask]
-            ), "aspect_ratio_mask should be None"
-            aspect_ratio_mask = None
-
-        if all([x is not None for x in image_sizes]):
-            image_sizes = torch.cat(image_sizes, dim=0)
-        else:
-            assert all([x is None for x in image_sizes]), "image_sizes should be None"
-            image_sizes = None
-
-        if all([x is not None for x in batch_num_images]):
-            batch_num_images = torch.cat(batch_num_images, dim=0)
-        else:
-            assert all(
-                [x is None for x in batch_num_images]
-            ), "batch_num_images should be None"
-            batch_num_images = None
-
         # Shape description:
         #
         # pixel_values_[videos/images]: (BATCH_SIZE, N_PATCH, HIDDEN_SIZE)
@@ -506,36 +585,11 @@ class HFVLMDataPacker(DataPacker):
         if video_grid_thw is not None:
             batch["video_grid_thw"] = video_grid_thw
 
-        if second_per_grid_ts is not None:
-            batch["second_per_grid_ts"] = second_per_grid_ts
-
-        if pixel_values_videos_lengths_per_sample is not None:
-            batch["pixel_values_videos_lengths_per_sample"] = torch.tensor(
-                pixel_values_videos_lengths_per_sample, dtype=torch.long
-            ).view(-1, 1)
-
         if pixel_values is not None:
             batch["pixel_values"] = pixel_values
 
         if image_grid_thw is not None:
             batch["image_grid_thw"] = image_grid_thw
-
-        if pixel_values_lengths_per_sample is not None:
-            batch["pixel_values_lengths_per_sample"] = torch.tensor(
-                pixel_values_lengths_per_sample, dtype=torch.long
-            ).view(-1, 1)
-
-        if aspect_ratio_ids is not None:
-            batch["aspect_ratio_ids"] = aspect_ratio_ids
-
-        if aspect_ratio_mask is not None:
-            batch["aspect_ratio_mask"] = aspect_ratio_mask
-
-        if image_sizes is not None:
-            batch["image_sizes"] = image_sizes
-
-        if batch_num_images is not None:
-            batch["batch_num_images"] = batch_num_images
 
         # Pad the input_ids, logprob_masks
         batch["input_ids"] = torch.tensor(
@@ -570,18 +624,24 @@ class HFVLMDataPacker(DataPacker):
             batch["logprob_masks"]
         ), "The length of input_ids, logprob_masks should be the same"
 
+        padded_tensors = []
+        for sample in processed_samples:
+            pad_length = computed_max_len - sample["position_ids"].shape[2]
+            padded_tensor = torch.nn.functional.pad(
+                sample["position_ids"], (0, pad_length), "constant", 1
+            )
+            padded_tensors.append(padded_tensor)
+        batch["position_ids"] = torch.cat(padded_tensors, dim=1)
+
         return batch
 
     def get_policy_input(
         self,
-        sample: "HFVLMDataPacker.Payload",
+        sample: "Qwen3_VL_DataPacker.Payload",
         rollout_output: Optional[str] = None,
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
-        # FIXME: (huik) handling the Image in `ChatMessage`.
-        sample = [x.model_dump() if isinstance(x, ChatMessage) else x for x in sample]
-
         # assert all(
         #     isinstance(x, dict) and "role" in x and "content" in x for x in sample
         # ), "All samples should be in conversation format, but got: {}".format(sample)
@@ -590,7 +650,9 @@ class HFVLMDataPacker(DataPacker):
             add_generation_prompt=add_generation_prompt,
         )
 
-        return_dict = {}
+        return_dict = {
+            "position_ids": x["position_ids"],
+        }
         if "pixel_values_videos" in x:
             return_dict["pixel_values_videos"] = x["pixel_values_videos"]
         else:
@@ -600,18 +662,6 @@ class HFVLMDataPacker(DataPacker):
             return_dict["video_grid_thw"] = x["video_grid_thw"]
         else:
             return_dict["video_grid_thw"] = None
-
-        if "second_per_grid_ts" in x:
-            return_dict["second_per_grid_ts"] = x["second_per_grid_ts"]
-        else:
-            return_dict["second_per_grid_ts"] = None
-
-        if "pixel_values_videos_lengths_per_sample" in x:
-            return_dict["pixel_values_videos_lengths_per_sample"] = x[
-                "pixel_values_videos_lengths_per_sample"
-            ]
-        else:
-            return_dict["pixel_values_videos_lengths_per_sample"] = None
 
         if "pixel_values" in x:
             return_dict["pixel_values"] = x["pixel_values"]
@@ -623,38 +673,24 @@ class HFVLMDataPacker(DataPacker):
         else:
             return_dict["image_grid_thw"] = None
 
-        if "pixel_values_lengths_per_sample" in x:
-            return_dict["pixel_values_lengths_per_sample"] = x[
-                "pixel_values_lengths_per_sample"
-            ]
-        else:
-            return_dict["pixel_values_lengths_per_sample"] = None
-
-        if "aspect_ratio_ids" in x:
-            return_dict["aspect_ratio_ids"] = x["aspect_ratio_ids"]
-        else:
-            return_dict["aspect_ratio_ids"] = None
-
-        if "aspect_ratio_mask" in x:
-            return_dict["aspect_ratio_mask"] = x["aspect_ratio_mask"]
-        else:
-            return_dict["aspect_ratio_mask"] = None
-
-        if "image_sizes" in x:
-            return_dict["image_sizes"] = x["image_sizes"]
-        else:
-            return_dict["image_sizes"] = None
-
-        if "batch_num_images" in x:
-            return_dict["batch_num_images"] = x["batch_num_images"]
-        else:
-            return_dict["batch_num_images"] = None
-
         # Common fields
         input_ids = x["input_ids"]
         completion_ids = []
         if rollout_output:
             completion_ids = self.tokenizer(rollout_output).input_ids  # Don't pad yet
+            # recompute position_ids
+            # position_ids: (3, 1, seq_len)
+            position_ids, _ = self._get_rope_index(
+                input_ids=torch.tensor(input_ids + completion_ids).unsqueeze(0).clone(),
+                image_grid_thw=torch.tensor(x.get("image_grid_thw"))
+                if "image_grid_thw" in x
+                else None,
+                video_grid_thw=torch.tensor(x.get("video_grid_thw"))
+                if "video_grid_thw" in x
+                else None,
+                attention_mask=None,
+            )
+            return_dict["position_ids"] = position_ids.clone()
         return_dict["input_ids"] = input_ids + completion_ids
 
         return_dict["logprob_masks"] = (
@@ -677,7 +713,9 @@ class HFVLMDataPacker(DataPacker):
                 del x["label_ids"]
         return self._collate_fn(processed_samples, computed_max_len)
 
-    def sft_process_sample(self, sample: "HFVLMDataPacker.Payload") -> Dict[str, Any]:
+    def sft_process_sample(
+        self, sample: "Qwen3_VL_DataPacker.Payload"
+    ) -> Dict[str, Any]:
         """
         Accepts either raw text or conversation format.
         """

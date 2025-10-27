@@ -204,6 +204,53 @@ class LoRATest(unittest.TestCase):
             y2 = model2(x)
         assert torch.allclose(y1, y2, atol=1e-6, rtol=1e-6)
 
+    def test_alpha_pattern_with_backslash_regex(self):
+        class _Attn(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.qkv = nn.Linear(8, 8)
+                self.proj = nn.Linear(8, 8)
+
+        class _MLP(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate_proj = nn.Linear(8, 8)
+                self.up_proj = nn.Linear(8, 8)
+                self.down_proj = nn.Linear(8, 8)
+
+        class _Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn = _Attn()
+                self.mlp = _MLP()
+
+        class _Dummy(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.visual = nn.Module()
+                self.visual.blocks = nn.ModuleList([_Block()])
+                self.model = nn.Module()
+                self.model.blocks = nn.ModuleList([_Block()])
+
+        model = _Dummy()
+        cfg = LoraConfig(
+            r=8,
+            lora_alpha=16.0,
+            lora_dropout=0.0,
+            use_rslora=True,
+            target_modules="all-linear",
+            alpha_pattern={"visual\\..*": 32.0},
+        )
+
+        new_model, replaced = inject_lora_adapters(model, cfg)
+
+        for name, mod in new_model.named_modules():
+            if isinstance(mod, LoraInjectedLinear):
+                if name.startswith("visual."):
+                    assert mod.lora_alpha == 32.0, f"{name} alpha={mod.lora_alpha}"
+                if name.startswith("model."):
+                    assert mod.lora_alpha == 16.0, f"{name} alpha={mod.lora_alpha}"
+
 
 if __name__ == "__main__":
     unittest.main()

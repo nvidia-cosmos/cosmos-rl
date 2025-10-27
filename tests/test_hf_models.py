@@ -64,6 +64,7 @@ class TestHFModel(unittest.TestCase):
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "llava-hf/llava-1.5-7b-hf",
+            "Qwen/Qwen3-VL-4B-Instruct",
             # "google/gemma-3-12b-it", # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",
@@ -127,6 +128,7 @@ class TestHFModel(unittest.TestCase):
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "llava-hf/llava-1.5-7b-hf",
+            "Qwen/Qwen3-VL-4B-Instruct",
             # "google/gemma-3-12b-it", # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",

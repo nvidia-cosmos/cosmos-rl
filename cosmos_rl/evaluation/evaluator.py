@@ -40,12 +40,13 @@ class Evaluator(BaseEvaluator):
         """
         super().__init__(config, enable_lora=enable_lora)
         metrics_cfg = config.get("metrics", {})
-        
-        # Handle comma-separated metric names
-        metric_names = metrics_cfg.get("names", "bleu,rouge")
+
+        # Get metric names as list
+        metric_names = metrics_cfg.get("names", ["bleu", "rouge"])
+        # Handle legacy comma-separated strings for backward compatibility
         if isinstance(metric_names, str):
             metric_names = [name.strip() for name in metric_names.split(",")]
-        
+
         self.metrics = TextMetrics(
             metrics=metric_names,
             bertscore_model=metrics_cfg.get("bertscore_model", "microsoft/deberta-xlarge-mnli"),
@@ -178,10 +179,12 @@ class Evaluator(BaseEvaluator):
         """
         Compute the metrics for the Evaluator.
         """
+        self._send_status_callback("Computing text similarity metrics (BLEU/ROUGE/BERTScore)...")
         references: List[List[str]] = [o["references"] for o in outputs]
 
         # Compute similarity metrics (BLEU/ROUGE/BERTScore)
         metrics = self.metrics.compute(predictions=predictions, references=references)
+        self._send_status_callback("Text similarity metrics computed")
 
         # Compute normalized exact-match accuracy
         correct = 0
@@ -243,5 +246,3 @@ class Evaluator(BaseEvaluator):
         }
         result.update(metrics)
         return result
-
-

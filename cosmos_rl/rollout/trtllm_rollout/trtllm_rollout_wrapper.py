@@ -21,6 +21,8 @@ from typing import List, Tuple, Optional, Any, Callable, Union
 from torch.utils.data import Dataset
 import multiprocessing as mp
 
+from cosmos_rl.utils.constant import COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+
 
 from cosmos_rl.utils.logging import logger
 
@@ -130,7 +132,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         self.life_control_thread: Optional[threading.Thread] = None
 
-        self.reward_dispatcher = RewardDispatcher()
+        self.reward_dispatcher = RewardDispatcher(
+            payload_per_task=COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+        )
 
         atexit.register(self.handle_shutdown)
 

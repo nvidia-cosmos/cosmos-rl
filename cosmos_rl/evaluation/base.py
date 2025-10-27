@@ -34,6 +34,14 @@ from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
 Processor = AutoProcessor
 
+# Import status callback utility for progress updates
+try:
+    from nvidia_tao_core.microservices.handlers.cloud_handlers.progress_tracker_utils import send_progress_status_callback
+    STATUS_CALLBACK_AVAILABLE = True
+except ImportError:
+    STATUS_CALLBACK_AVAILABLE = False
+    log.warning("Status callback not available - progress updates will not be sent")
+
 COMPONENT_NAME = "Cosmos-RL Evaluation"
 class BaseEvaluator(ABC):
     """Base evaluator for Cosmos-RL."""
@@ -48,6 +56,19 @@ class BaseEvaluator(ABC):
         self.gen_config = config.get("generation", {})
         self.vision_config = config.get("vision", {})
         self.dataset_cfg = config.get("dataset", {})
+
+    def _send_status_callback(self, message: str) -> None:
+        """Send status callback to prevent timeout.
+
+        Args:
+            message: Status message to send
+        """
+        if STATUS_CALLBACK_AVAILABLE:
+            try:
+                send_progress_status_callback(message)
+                log.debug(f"Status callback sent: {message}")
+            except Exception as e:
+                log.warning(f"Failed to send status callback: {e}")
 
     def load_model(self) -> Tuple[Any, Any]:
         """Load the model and processor with common logic."""
@@ -69,7 +90,9 @@ class BaseEvaluator(ABC):
             tokenizer_model_name, model_name, dtype, tp_size, max_length
         )
 
-        log.info(f"Model loaded in {time.time() - start_time:.2f} seconds")
+        elapsed_time = time.time() - start_time
+        log.info(f"Model loaded in {elapsed_time:.2f} seconds")
+        self._send_status_callback(f"Model loaded successfully in {elapsed_time:.1f} seconds")
         return model, processor
 
     def _define_model(
@@ -91,8 +114,10 @@ class BaseEvaluator(ABC):
             os.makedirs(checkpoint_output_dir, exist_ok=True)
 
         # Download checkpoint and tokenizer if needed
+        self._send_status_callback("Downloading model checkpoint and tokenizer...")
         download_checkpoint(model_name, checkpoint_output_dir)
         download_tokenizer(tokenizer_model_name, checkpoint_output_dir)
+        self._send_status_callback("Model files downloaded, initializing VLLM...")
 
         log.info("Using VLLM backend.")
         os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
@@ -107,6 +132,7 @@ class BaseEvaluator(ABC):
             max_model_len=max_length,
         )
 
+        self._send_status_callback("Loading tokenizer processor...")
         processor = AutoProcessor.from_pretrained(
             checkpoint_output_dir, max_length=max_length
         )
@@ -126,6 +152,7 @@ class BaseEvaluator(ABC):
         num_workers = min(num_processes, len(input_tasks))
         log.info(f"Preparing model inputs in parallel for {len(input_tasks)} tasks "
                 f"using {num_workers} threads.")
+        self._send_status_callback(f"Starting input preparation for {len(input_tasks)} tasks with {num_workers} workers...")
 
         worker_fn = partial(
             self._prepare_single_model_input,
@@ -134,6 +161,9 @@ class BaseEvaluator(ABC):
         )
 
         processed_inputs_with_index = []
+        completed_count = 0
+        last_callback_time = time.time()
+        callback_interval = 20  # Send status update every 20 seconds
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
             future_to_idx = {
@@ -153,12 +183,23 @@ class BaseEvaluator(ABC):
                 except Exception as e:
                     log.error(f"Error preparing model input for task {idx}: {e}. Skipping task.")
 
+                completed_count += 1
+                # Send periodic status updates to prevent timeout
+                current_time = time.time()
+                if current_time - last_callback_time >= callback_interval:
+                    progress_pct = (completed_count / len(input_tasks)) * 100
+                    self._send_status_callback(
+                        f"Preparing model inputs: {completed_count}/{len(input_tasks)} tasks completed ({progress_pct:.1f}%)"
+                    )
+                    last_callback_time = current_time
+
         processed_inputs_with_index.sort(key=lambda x: x[0])
         inputs = [inp for idx, inp in processed_inputs_with_index]
 
         if len(inputs) < len(input_tasks):
             log.warning(f"Successfully prepared inputs for {len(inputs)} out of {len(input_tasks)} tasks.")
 
+        self._send_status_callback(f"Input preparation completed: {len(inputs)} tasks ready for inference")
         return inputs
 
     def _prepare_single_model_input(
@@ -265,15 +306,58 @@ class BaseEvaluator(ABC):
             )
 
         log.info(f"Generating outputs for {len(inputs)} tasks using VLLM...")
-        list_of_requestoutput = self.model.generate(inputs, sampling_params)
-        log.info(f"Finished VLLM generation. Received {len(list_of_requestoutput)} outputs.")
+        self._send_status_callback(f"Starting model inference for {len(inputs)} tasks...")
+
+        inference_start = time.time()
+
+        # Process in batches to send status callbacks during long generation
+        # This prevents timeout for large datasets where generation can take >15 minutes
+        batch_size = 50  # Process 50 requests at a time
+        all_outputs = []
+
+        for batch_idx in range(0, len(inputs), batch_size):
+            batch_end = min(batch_idx + batch_size, len(inputs))
+            batch_inputs = inputs[batch_idx:batch_end]
+            batch_num = (batch_idx // batch_size) + 1
+            total_batches = (len(inputs) + batch_size - 1) // batch_size
+
+            log.info(f"Processing batch {batch_num}/{total_batches} ({len(batch_inputs)} requests)...")
+            self._send_status_callback(
+                f"Model inference: Processing batch {batch_num}/{total_batches} "
+                f"(requests {batch_idx+1}-{batch_end}/{len(inputs)})"
+            )
+
+            batch_start_time = time.time()
+            batch_outputs = self.model.generate(batch_inputs, sampling_params)
+            batch_time = time.time() - batch_start_time
+
+            all_outputs.extend(batch_outputs)
+
+            completed = len(all_outputs)
+            progress_pct = (completed / len(inputs)) * 100
+            elapsed_total = time.time() - inference_start
+
+            log.info(f"Batch {batch_num}/{total_batches} completed in {batch_time:.1f}s. "
+                    f"Total progress: {completed}/{len(inputs)} ({progress_pct:.1f}%)")
+            self._send_status_callback(
+                f"Model inference progress: {completed}/{len(inputs)} requests completed "
+                f"({progress_pct:.1f}%), elapsed time: {elapsed_total:.1f}s"
+            )
+
+        inference_time = time.time() - inference_start
+        log.info(f"Finished VLLM generation. Received {len(all_outputs)} outputs in {inference_time:.1f}s.")
+        self._send_status_callback(
+            f"Model inference completed: {len(all_outputs)} outputs generated in {inference_time:.1f} seconds"
+        )
 
         # Extract predictions
+        self._send_status_callback("Extracting predictions from model outputs...")
         predictions = []
-        for requestoutput in list_of_requestoutput:
+        for requestoutput in all_outputs:
             output_text = requestoutput.outputs[0].text
             predictions.append(output_text)
 
+        self._send_status_callback(f"Successfully extracted {len(predictions)} predictions")
         return predictions
 
     def run_evaluation(
@@ -300,6 +384,7 @@ class BaseEvaluator(ABC):
         start_time = time.time()
 
         # Load model
+        self._send_status_callback("Initializing evaluation pipeline...")
         self.model, self.processor = self.load_model()
 
         # Get evaluation parameters
@@ -318,8 +403,10 @@ class BaseEvaluator(ABC):
 
         # Step 1: Gather tasks
         log.info("Gathering evaluation tasks...")
+        self._send_status_callback(f"Gathering evaluation tasks from dataset (shard {shard_id}/{total_shard})...")
         inputs, outputs = self.make_tasks(results_output_dir, total_shard, shard_id)
         log.info(f"Gathered {len(inputs)} tasks")
+        self._send_status_callback(f"Gathered {len(inputs)} evaluation tasks")
 
         # Log progress to TAO
         log_tao_status(
@@ -336,6 +423,7 @@ class BaseEvaluator(ABC):
         # Step 2: Skip saved results if requested
         if skip_saved:
             log.info("Checking for saved results...")
+            self._send_status_callback("Checking for previously saved results...")
             filtered_inputs = []
             filtered_outputs = []
             for i, o in zip(inputs, outputs):
@@ -344,6 +432,7 @@ class BaseEvaluator(ABC):
                     filtered_outputs.append(o)
             inputs, outputs = filtered_inputs, filtered_outputs
             log.info(f"Tasks remaining after skipping saved: {len(inputs)}")
+            self._send_status_callback(f"Tasks remaining after skipping saved: {len(inputs)}")
 
         # Apply limit if specified
         if limit > 0 and len(inputs) > limit:
@@ -353,6 +442,7 @@ class BaseEvaluator(ABC):
 
         if not inputs:
             log.info("No tasks to evaluate. Exiting.")
+            self._send_status_callback("No tasks to evaluate - all results already exist")
             return {"overall": {"accuracy": 0.0, "total": 0, "correct": 0}}
 
         # Step 3: Prepare model inputs
@@ -388,14 +478,18 @@ class BaseEvaluator(ABC):
 
         # Step 5: Save results
         log.info("Saving results...")
+        self._send_status_callback(f"Saving evaluation results for {len(predictions)} tasks...")
         self.save(outputs, predictions)
+        self._send_status_callback("Results saved successfully")
 
         # Step 6: Compute metrics
         log.info("Computing evaluation metrics...")
+        self._send_status_callback("Computing evaluation metrics...")
         metrics = self.compute_metrics(results_output_dir, outputs, predictions)
 
         total_time = time.time() - start_time
         log.info(f"Complete evaluation pipeline finished in {total_time:.2f} seconds")
+        self._send_status_callback(f"Evaluation completed successfully in {total_time:.1f} seconds")
 
         return metrics
 

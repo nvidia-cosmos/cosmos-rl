@@ -60,6 +60,18 @@ ROOT = Path(__file__).parents[1]
 SEPARATOR = "-" * 20
 
 
+def str_to_bool(value):
+    """Convert string to boolean for argparse."""
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif value.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError(f'Boolean value expected, got: {value}')
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Cosmos-Reason1 inference script")
@@ -127,7 +139,7 @@ def parse_args():
     )
     parser.add_argument(
         "--enable_lora",
-        type=bool,
+        type=str_to_bool,
         default=False,
         help="Enable LoRA model merging"
     )
