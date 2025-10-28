@@ -7,7 +7,7 @@
 ARG COSMOS_RL_BUILD_MODE=efa
 
 ARG CUDA_VERSION=12.8.1
-ARG FLASH_ATTN_VERSION=2.8.3
+
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS no-efa-base
 
 ARG GDRCOPY_VERSION=v2.4.4
@@ -15,6 +15,7 @@ ARG EFA_INSTALLER_VERSION=1.42.0
 ARG AWS_OFI_NCCL_VERSION=v1.16.0
 # NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
 ARG NCCL_VERSION=2.26.2-1+cuda12.8
+ARG FLASH_ATTN_VERSION=2.8.3
 ARG PYTHON_VERSION=3.12
 
 ENV TZ=Etc/UTC
