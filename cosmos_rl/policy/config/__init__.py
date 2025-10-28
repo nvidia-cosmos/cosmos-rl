@@ -992,6 +992,13 @@ class MultiTurnRolloutConfig(BaseModel):
         return self
 
 
+class RolloutAsyncConfig(BaseModel):
+    max_concurrent_requests: int = Field(
+        default=10,
+        description="Maximum number of concurrent requests for rollout engine.",
+    )
+
+
 class ValidationConfig(BaseModel):
     enable: bool = Field(
         default=False,
@@ -1104,6 +1111,11 @@ class RolloutConfig(BaseModel):
     multi_turn_config: MultiTurnRolloutConfig = Field(
         default_factory=MultiTurnRolloutConfig,
         description="Configuration for multi-turn rollout.",
+    )
+
+    async_config: RolloutAsyncConfig = Field(
+        default_factory=RolloutAsyncConfig,
+        description="Configuration for async rollout.",
     )
 
     @model_validator(mode="after")

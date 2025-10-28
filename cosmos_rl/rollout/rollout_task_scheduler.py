@@ -199,7 +199,7 @@ class RolloutTaskScheduler:
         for payload in payloads:
             self.task_queue.put(payload)
         self.total_submitted += len(payloads)
-        logger.info(
+        logger.debug(
             f"[RolloutTaskScheduler] Added {len(payloads)} payloads to task queue "
             f"(total submitted: {self.total_submitted})"
         )
@@ -400,7 +400,7 @@ class RolloutTaskScheduler:
             return
 
         self._paused.set()
-        logger.info(
+        logger.debug(
             "[RolloutTaskScheduler] Scheduler paused (active tasks will continue)"
         )
 
@@ -419,7 +419,7 @@ class RolloutTaskScheduler:
             return
 
         self._paused.clear()
-        logger.info("[RolloutTaskScheduler] Scheduler resumed")
+        logger.debug("[RolloutTaskScheduler] Scheduler resumed")
 
     def is_paused(self) -> bool:
         """
