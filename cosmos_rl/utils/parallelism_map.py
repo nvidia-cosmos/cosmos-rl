@@ -1644,6 +1644,21 @@ class ParallelizedShardMapper:
         )
         return recv_insts
 
+    def cleanup(self):
+        """
+        Cleanup the multiprocessing pool.
+        This method is called to cleanup the multiprocessing pool when it is no longer needed.
+        """
+        if all([s is not None for s in self.send_insts_for_policy]) and all(
+            [r is not None for r in self.recv_insts_for_rollout]
+        ):
+            if self.multiprocessing_pool is not None:
+                logger.info(
+                    "[ParallelizedShardMapper] Shutting down multiprocessing pool."
+                )
+                self.multiprocessing_pool.shutdown()
+            self.multiprocessing_pool = None
+
     async def get_send_insts_for_policy(
         self, rank: int
     ) -> List[WeightSyncInstructionsGroup]:
@@ -1654,6 +1669,7 @@ class ParallelizedShardMapper:
         """
         if self.send_insts_for_policy[rank] is None:
             self.send_insts_for_policy[rank] = await self.policy_results[rank]
+        self.cleanup()
         return self.send_insts_for_policy[rank]
 
     async def get_recv_insts_for_rollout(
@@ -1666,4 +1682,5 @@ class ParallelizedShardMapper:
         """
         if self.recv_insts_for_rollout[rank] is None:
             self.recv_insts_for_rollout[rank] = await self.rollout_results[rank]
+        self.cleanup()
         return self.recv_insts_for_rollout[rank]
