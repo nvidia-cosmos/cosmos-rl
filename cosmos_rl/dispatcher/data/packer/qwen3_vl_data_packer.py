@@ -41,7 +41,7 @@ def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
     return image_inputs, video_inputs
 
 
-def encode_image_to_base64(image_inputs: List[str]) -> List[str]:
+def decode_base64_to_image(image_inputs: List[str]) -> List[str]:
     new_image_inputs = []
     for image_input in image_inputs:
         img_bytes = base64.b64decode(image_input)
@@ -120,10 +120,15 @@ class Qwen3_VL_DataPacker(DataPacker):
         It is user's responsibility to ensure the conversation format is correct
           and multi-media files involved in conversation are accessible.
         """
-        sample = [x.model_dump() if isinstance(x, ChatMessage) else x for x in sample]
-        assert all(
-            isinstance(x, dict) and "role" in x and "content" in x for x in sample
-        ), "All samples should be in conversation format, but got: {}".format(sample)
+        if isinstance(sample, list):
+            sample = [
+                x.model_dump() if isinstance(x, ChatMessage) else x for x in sample
+            ]
+            assert all(
+                isinstance(x, dict) and "role" in x and "content" in x for x in sample
+            ), "All samples should be in conversation format, but got: {}".format(
+                sample
+            )
 
         if self.image_token is not None:
             for x in sample:
@@ -450,8 +455,8 @@ class Qwen3_VL_DataPacker(DataPacker):
                 ), f"{image_inputs=}"
                 assert (
                     len(video_inputs) == 0
-                ), "Currently video input is not supported for HF VLM"
-                image_inputs = encode_image_to_base64(image_inputs)
+                ), "Currently video input is not supported for Qwen3_VL_DataPacker"
+                image_inputs = decode_base64_to_image(image_inputs)
 
             kwarg = {
                 "return_tensors": "pt",
@@ -642,9 +647,16 @@ class Qwen3_VL_DataPacker(DataPacker):
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
-        # assert all(
-        #     isinstance(x, dict) and "role" in x and "content" in x for x in sample
-        # ), "All samples should be in conversation format, but got: {}".format(sample)
+        if isinstance(sample, list):
+            sample = [
+                x.model_dump() if isinstance(x, ChatMessage) else x for x in sample
+            ]
+            assert all(
+                isinstance(x, dict) and "role" in x and "content" in x for x in sample
+            ), "All samples should be in conversation format, but got: {}".format(
+                sample
+            )
+
         x = self._process_single_sample(
             sample,
             add_generation_prompt=add_generation_prompt,
