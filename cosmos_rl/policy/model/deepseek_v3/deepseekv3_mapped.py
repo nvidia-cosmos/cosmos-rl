@@ -54,8 +54,7 @@ with importlib_metadata_version_context():
         # So we manually let TE think FA3 is not installed. Remove this context manager after the PR is released.
         from transformer_engine.pytorch.attention import DotProductAttention
         from transformer_engine.pytorch.module.rmsnorm import RMSNorm as _RMSNorm
-    except ImportError as e:
-        raise e
+    except ImportError:
         logger.warning(
             "transformer_engine.pytorch is not available. DeepSeek model will not work."
         )
