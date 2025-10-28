@@ -108,8 +108,6 @@ def create_table_for_all_replicas(replicas: List[Dict]):
     table.add_column("Role")
     table.add_column("Arrived")
     table.add_column("Atom Number")
-    table.add_column("Weight Step")
-    table.add_column("Pending Rollouts")
 
     for replica in replicas:
         if replica["arrived"]:
@@ -117,16 +115,10 @@ def create_table_for_all_replicas(replicas: List[Dict]):
         else:
             arrived_string = "[red]No[/red]"
         atom_number = len(replica["atoms"])
-        if replica["role"] == "POLICY":
-            pending_rollouts = replica["pending_rollouts"]
-        else:
-            pending_rollouts = "N/A"
         table.add_row(
             replica["name"],
             replica["role"],
             arrived_string,
             str(atom_number),
-            str(replica["weight_step"]),
-            str(pending_rollouts),
         )
     return table
