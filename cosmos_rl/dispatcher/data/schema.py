@@ -95,6 +95,10 @@ class RLPayload(BaseModel):
         default=True, description="Whether the rollout is valid."
     )
 
+    filter_rewards: Optional[List[float]] = Field(
+        default=None, description="The filter reward for each completion."
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.prompt or self.conversation, "Must set prompt or conversation"

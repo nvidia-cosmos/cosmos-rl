@@ -418,6 +418,9 @@ class RewardCalculator:
                             rollout.n_ignore_prefix_tokens for rollout in rollouts_group
                         ],
                         rewards=[rollout.reward for rollout in rollouts_group],
+                        filter_rewards=[
+                            rollout.filter_reward for rollout in rollouts_group
+                        ],
                         advantages=[rollout.advantage for rollout in rollouts_group],
                         valid=True,
                     )
@@ -437,6 +440,9 @@ class RewardCalculator:
                             rollout.n_ignore_prefix_tokens for rollout in rollouts_group
                         ],
                         rewards=[rollout.reward for rollout in rollouts_group],
+                        filter_rewards=[
+                            rollout.filter_reward for rollout in rollouts_group
+                        ],
                         advantages=[rollout.advantage for rollout in rollouts_group],
                         valid=False,
                     )

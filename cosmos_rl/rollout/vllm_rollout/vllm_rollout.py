@@ -210,6 +210,7 @@ class vLLMRollout(RolloutBase):
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
+        payloads = [p for p in payloads for _ in range(n_repeats)]
 
         # Pack the payloads into prompts for vllm.
         prompts = []

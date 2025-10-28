@@ -1368,9 +1368,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     payload for _, payload in prompt_id_and_payload_list
                 ]
 
-                payloads = [
-                    p for p in payloads for _ in range(self.config.rollout.n_generation)
-                ]
                 rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
                     payloads=payloads,
                     stream=self.inference_stream,
