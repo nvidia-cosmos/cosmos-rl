@@ -1923,7 +1923,7 @@ def run_gspo_test():
     GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = lambda self: None
 
     trainer = GRPOTrainer(config=config, parallel_dims=parallel_dims)
-
+    trainer.model_load_from_hf()
     trainer.replica_batch_for_this_step = 8
     trainer.inter_policy_nccl.is_single_peer.set()
     trainer.inter_policy_nccl.is_comm_ready.set()
@@ -1973,7 +1973,7 @@ def run_gspo_test():
         )
         if trainer.global_rank == 0:
             logger.info(f"Step {i} report {report['train/loss_avg']}")
-            assert report["train/loss_avg"] < 0 and report["train/loss_avg"] > -0.5
+            assert report["train/loss_avg"] < -0.1 and report["train/loss_avg"] > -0.8
     trainer.handle_shutdown()
     destroy_distributed()
 
