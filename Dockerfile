@@ -7,6 +7,7 @@
 ARG COSMOS_RL_BUILD_MODE=efa
 
 ARG CUDA_VERSION=12.8.1
+ARG FLASH_ATTN_VERSION=2.8.3
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS no-efa-base
 
 ARG GDRCOPY_VERSION=v2.4.4
@@ -77,7 +78,7 @@ RUN apt-get update -qq && \
 RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
-RUN pip install -U pip setuptools wheel packaging
+RUN pip install -U pip setuptools wheel packaging psutil
 
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
@@ -91,7 +92,7 @@ COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
 RUN pip install \
     torchao==0.13.0 \
-    flash_attn==2.8.3 \
+    flash_attn==${FLASH_ATTN_VERSION} \
     vllm==0.11.0 \
     flashinfer-python \
     transformer_engine[pytorch] --no-build-isolation \
@@ -108,7 +109,7 @@ RUN apt-get update -y && apt-get install -y git
 
 WORKDIR /workspace
 
-RUN git clone --branch v2.8.3 --single-branch https://github.com/Dao-AILab/flash-attention.git
+RUN git clone --branch v${FLASH_ATTN_VERSION} --single-branch https://github.com/Dao-AILab/flash-attention.git
 
 WORKDIR /workspace/flash-attention/hopper
 
