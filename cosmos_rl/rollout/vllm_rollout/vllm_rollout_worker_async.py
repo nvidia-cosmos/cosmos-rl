@@ -14,12 +14,14 @@
 # limitations under the License.
 
 import time
-from msgspec import ValidationError
 import torch
 import threading
 import asyncio
+import functools
 from queue import Queue
 import atexit
+import types
+from functools import partial
 from asyncio import timeout as asyncio_timeout
 
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
@@ -34,10 +36,11 @@ from cosmos_rl.rollout.rollout_task_scheduler import (
     RolloutTaskScheduler,
     CompletedRollout,
 )
-from cosmos_rl.dispatcher.protocol import ValidationReportRequest
+from cosmos_rl.dispatcher.protocol import ValidationReportRequest, RolloutRequest
 from cosmos_rl.dispatcher.command import (
     Command,
     PolicyToRolloutUnicastCommand,
+    RolloutToRolloutBroadcastCommand,
 )
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -139,24 +142,17 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
         # TODO(zjx): refactor those methods to common methods in RolloutWorkerBase
         # reuse some of the vLLMRolloutWorker methods
-        self.lazy_initialize_rollout_engine = (
-            vLLMRolloutWorker.lazy_initialize_rollout_engine
-        )
-        self.prepare_trainable_params = vLLMRolloutWorker.prepare_trainable_params
-        self.prepare_shard_infos_for_weight_sync_insts = (
-            vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts
-        )
-        self.build_global_mesh = vLLMRolloutWorker.build_global_mesh
-        self.recv_weight_shard = vLLMRolloutWorker.recv_weight_shard
-        self.broadcast_to_all_rollout_replica = (
-            vLLMRolloutWorker.broadcast_to_all_rollout_replica
-        )
-        self.query_nccl_unique_id_from_controller = (
-            vLLMRolloutWorker.query_nccl_unique_id_from_controller
-        )
-        self.consume_one_command = vLLMRolloutWorker.consume_one_command
-        self.send_end_signal = vLLMRolloutWorker.send_end_signal
-        self.report_rollouts = vLLMRolloutWorker.report_rollouts
+        self.prepare_trainable_params = types.MethodType(vLLMRolloutWorker.prepare_trainable_params, self)
+        self.prepare_shard_infos_for_weight_sync_insts = types.MethodType(vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts, self)
+        self.build_global_mesh = types.MethodType(vLLMRolloutWorker.build_global_mesh, self)
+        self.recv_weight_shard = types.MethodType(vLLMRolloutWorker.recv_weight_shard, self)
+        self.broadcast_to_all_rollout_replica = types.MethodType(vLLMRolloutWorker.broadcast_to_all_rollout_replica, self)
+
+        self.report_rollouts = types.MethodType(vLLMRolloutWorker.report_rollouts, self)
+        self.query_command_from_controller = types.MethodType(vLLMRolloutWorker.query_command_from_controller, self)
+        self.query_nccl_unique_id_from_controller = types.MethodType(vLLMRolloutWorker.query_nccl_unique_id_from_controller, self)
+        self.consume_one_command = types.MethodType(vLLMRolloutWorker.consume_one_command, self)
+        self.send_end_signal = types.MethodType(vLLMRolloutWorker.send_end_signal, self)
 
         # real init variables
         self.state = State()
@@ -299,9 +295,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         logger.info("[RolloutWorkerAsync] Initializing RolloutTaskScheduler")
 
         # Get max concurrent requests from config or use default
-        max_concurrent_requests = getattr(
-            self.config.rollout, "max_concurrent_requests", 10
-        )
+        max_concurrent_requests = self.config.rollout.async_config.max_concurrent_requests
 
         self.scheduler = RolloutTaskScheduler(
             rollout_engine=self.rollout,
@@ -346,6 +340,17 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         Get the underlying parallelized model in vLLM internal.
         """
         return self.rollout.get_underlying_model()
+
+    def f(self, load_format):
+        # lazy initialization of the vllm engine.
+        if not self.rollout.is_engine_initialized():
+            self.rollout.init_engine(
+                quantization=self.quantization_type,
+                seed=self.config.rollout.seed,
+                load_format=load_format,
+            )
+            # TODO(zjx): make sure pause generation while weight synchronizating.
+            self.prepare_shard_infos_for_weight_sync_insts()
 
     def request_new_prompts(self, batch_size: int, **kwargs):
         """
@@ -412,7 +417,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             pass
 
     @torch.no_grad()
-    def do_validation(self):
+    async def do_validation(self):
         # submit payloads to scheduler
         prompt_idxs: List[int] = []
         validation_payloads: List[RLPayload] = []
@@ -427,7 +432,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
             # wait all tasks are completed
             while self.scheduler.completed_results() != self.val_batch_size:
-                time.sleep(0.1)
+                await asyncio.sleep(0.1)
 
             rollout_results = self.scheduler.get_all()
             prompt_idxs.extend([p.idx for p in rollout_results])
@@ -503,6 +508,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             and len(valid_results) > 0
         )
 
+        # wait for all tasks to complete
+        await self.scheduler.wait_for_all_tasks_to_complete()
+
         if should_report:
             # only the first tp rank in the rollout replica will post the completion to the controller.
             valid_payloads: List[RLPayload] = []
@@ -533,86 +541,73 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
     async def main_loop_async(self):
         """Main loop with async scheduler integration (coroutine version)."""
-        # Start scheduler as a background task
-        if self.scheduler is not None:
-            scheduler_task = asyncio.create_task(self.scheduler.run_async())
-            logger.info("[RolloutWorkerAsync] Scheduler task started")
-        else:
-            raise ValidationError("need init_scheduler first before running main loop")
 
-        try:
-            while not self.shutdown_signal.is_set():
-                # Sync consume command
-                await self.consume_command(cmd_pred=None)
+        while not self.shutdown_signal.is_set():
+            # Sync consume command
+            self.consume_command(cmd_pred=None)
 
-                if self.validation_flag.is_set():
-                    # If encounter validation flag during last rollout generation or this command fetch, do validation first.
-                    await self.do_validation()
+            if self.validation_flag.is_set():
+                # If encounter validation flag during last rollout generation or this command fetch, do validation first.
+                self.do_validation()
 
-                # If weight is not ready, nothing else to do.
-                if not self.state.weight_synced():
-                    continue
+            # If weight is not ready, nothing else to do.
+            if not self.state.weight_synced():
+                continue
 
-                # try fetching new prompts if no ending signal is set
-                if not self.state.prompt_fetch_end():
-                    self.scheduler.pause()  # for those prmpts, we don't want to generate them immediately.
-                    no_more_prompts = self.request_new_prompts(self.batch_size)
-                    if no_more_prompts:
-                        logger.info(
-                            f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
-                        )
-                        self.state.set_prompt_fetch_end()
-                        # Check if scheduler has pending or active tasks
-                        if self.scheduler.task_queue.empty():
-                            self.state.set_prompt_consume_end()
-                            if self.global_rank == 0:
-                                self.send_end_signal()
-
-                # Report rollouts (dequeue from reward_dispatcher)
-                _, is_validation, _, _ = self.report_rollouts()
-                assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
-
-                # Check if all prompts are consumed
-                if self.state.prompt_consume_end():
-                    assert (
-                        self.scheduler.task_queue.empty()
-                        and self.state.prompt_fetch_end()
-                    ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
-                    continue
-                elif self.scheduler.task_queue.empty():
-                    continue
-                else:
-                    # Check if the weight version is valid for current prompts
-                    has_front_prompt, front_prompt_weight_version = (
-                        self.scheduler.get_front_prompt_weight_version()
+            # try fetching new prompts if no ending signal is set
+            if not self.state.prompt_fetch_end():
+                self.scheduler.pause()  # for those prmpts, we don't want to generate them immediately.
+                no_more_prompts = self.request_new_prompts(self.batch_size)
+                if no_more_prompts:
+                    logger.info(
+                        f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
                     )
-                    if not has_front_prompt:
-                        continue
-                    is_valid_prompt_for_current_weight_version = (
-                        front_prompt_weight_version <= self.current_weight_version
-                    )
-                    if not is_valid_prompt_for_current_weight_version:
-                        # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
-                        continue
+                    self.state.set_prompt_fetch_end()
+                    # Check if scheduler has pending or active tasks
+                    if self.scheduler.task_queue.empty():
+                        self.state.set_prompt_consume_end()
+                        if self.global_rank == 0:
+                            self.send_end_signal()
 
-                    self.scheduler.resume()  # resume the scheduler to generate the prompts
-                    self.do_generate()
+            # Report rollouts (dequeue from reward_dispatcher)
+            _, is_validation, _, _ = self.report_rollouts()
+            assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
 
-            logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
+            # Check if all prompts are consumed
+            if self.state.prompt_consume_end():
+                assert (
+                    self.scheduler.task_queue.empty()
+                    and self.state.prompt_fetch_end()
+                ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
+                continue
+            elif self.scheduler.task_queue.empty():
+                continue
+            else:
+                # Check if the weight version is valid for current prompts
+                has_front_prompt, front_prompt_weight_version = (
+                    self.scheduler.get_front_prompt_weight_version()
+                )
+                if not has_front_prompt:
+                    continue
+                is_valid_prompt_for_current_weight_version = (
+                    front_prompt_weight_version <= self.current_weight_version
+                )
+                if not is_valid_prompt_for_current_weight_version:
+                    # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
+                    continue
 
-        finally:
-            # Stop scheduler gracefully
-            if self.scheduler is not None:
-                logger.info("[RolloutWorkerAsync] Stopping scheduler")
-                self.scheduler.stop_async()
-                if scheduler_task is not None:
-                    await scheduler_task
-                    logger.info("[RolloutWorkerAsync] Scheduler task completed")
+                self.scheduler.resume()  # resume the scheduler to generate the prompts
+                self.do_generate()
+
+        logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
+
 
     def work(self):
         """Main work method - runs the async event loop."""
         # Initialize scheduler after engine is ready
         self.init_scheduler()
+        # we need all rank run the scheduler in the same time. 
+        self.scheduler.start()
 
         # Start the thread with daemon=True
         if self.global_rank == 0:
@@ -631,6 +626,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             import traceback
 
             traceback.print_exc()
+        finally:
+            logger.info("[RolloutWorkerAsync] Stopping scheduler")
+            self.scheduler.stop(wait=True)
 
         self.inference_stream.synchronize()
         self.handle_shutdown()
