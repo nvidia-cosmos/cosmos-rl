@@ -47,16 +47,24 @@ class RolloutTaskScheduler:
     This scheduler implements a producer-consumer pattern:
     - Internally manages task_queue and complete_queue
     - Accepts payloads via put_rollout() method
-    - Runs a background async loop that monitors task_queue
+    - Runs a background async loop that monitors task_queue in a separate thread
     - Controls concurrent generation based on max_concurrent_requests
-    - Calls rollout engine's rollout_generation_async for each payload
+    - Calls rollout engine's rollout_generation() for each payload
     - Provides get() method to retrieve completed results
 
-    Two execution modes:
-    1. Thread-based: Uses start()/stop() - runs in separate thread
-    2. Coroutine-based: Uses run_async()/stop_async() - runs in same event loop
+    Thread Safety:
+    - Uses threading.Event() for _running and _paused flags to ensure thread-safe state management
+    - Prevents memory visibility issues across threads
+    - All state changes are atomic and immediately visible to worker thread
 
-    Usage Example (Thread-based):
+    Key Features:
+    - Producer-consumer pattern with Queue for thread-safe communication
+    - Automatic task concurrency control (max_concurrent_requests)
+    - Support for pause/resume during critical operations (e.g., weight sync)
+    - Context manager for temporary pause (with scheduler.paused())
+    - Graceful shutdown with active task completion
+
+    Usage Example:
     ```python
     # Initialize the scheduler
     scheduler = RolloutTaskScheduler(
@@ -77,43 +85,47 @@ class RolloutTaskScheduler:
     completed = scheduler.get(block=False)
     if completed:
         print(f"Prompt: {completed.result.prompt}")
+        print(f"Completions: {completed.result.completions}")
+
+    # Pause during critical operations (e.g., weight synchronization)
+    with scheduler.paused(wait_for_active_tasks=True):
+        # All active tasks completed, safe to update weights
+        sync_weights()
+        # Scheduler automatically resumes after this block
+
+    # Or manually control pause/resume
+    scheduler.pause()
+    sync_weights()
+    scheduler.resume()
+
+    # Check scheduler status
+    stats = scheduler.get_stats()
+    print(f"Active tasks: {stats['active_tasks']}")
+    print(f"Pending tasks: {stats['pending_tasks']}")
+    print(f"Completed results: {stats['completed_results']}")
 
     # Stop the scheduler when done
     scheduler.stop()
     ```
 
-    Usage Example (Coroutine-based - recommended):
-    ```python
-    # Initialize the scheduler
-    scheduler = RolloutTaskScheduler(
-        rollout_engine=rollout_engine,
-        data_packer=data_packer,
-        sampling_params=sampling_params,
-        max_concurrent_requests=10
-    )
-
-    # Run scheduler as async task
-    async def main():
-        scheduler_task = asyncio.create_task(scheduler.run_async())
-
-        # Put payloads into scheduler
-        scheduler.put_rollout(payload1)
-        scheduler.put_rollout(payload2)
-
-        # Pause during critical operations
-        with scheduler.paused():
-            await sync_weights()
-
-        # Get completed results
-        completed = scheduler.get(block=False)
-        if completed:
-            print(f"Prompt: {completed.result.prompt}")
-
-        # Stop scheduler
-        scheduler.stop_async()
-        await scheduler_task
-
-    asyncio.run(main())
+    Architecture:
+    ```
+    Main Thread                    Worker Thread (separate event loop)
+    ┌─────────────┐               ┌──────────────────────────────┐
+    │             │               │  asyncio event loop          │
+    │ put_rollout │──► task_queue │  ┌─────────────────────┐    │
+    │             │               │  │ _worker_loop()      │    │
+    │             │               │  │  ├─ create_task()   │    │
+    │ get()       │◄── complete_  │  │  ├─ max_concurrent  │    │
+    │             │    queue      │  │  └─ _generate_...() │    │
+    │             │               │  └─────────────────────┘    │
+    │ pause()     │──► _paused    │                              │
+    │ resume()    │    (Event)    │  ┌─────────┐  ┌─────────┐  │
+    │             │               │  │ Task 1  │  │ Task 2  │  │
+    │ stop()      │──► _running   │  └─────────┘  └─────────┘  │
+    │             │    (Event)    │       ↓            ↓        │
+    └─────────────┘               │   rollout_generation()      │
+                                  └──────────────────────────────┘
     ```
     """
 
@@ -149,8 +161,8 @@ class RolloutTaskScheduler:
         self.complete_queue = Queue()
 
         # Track running state
-        self._running = False
-        self._paused = False
+        self._running = threading.Event()
+        self._paused = threading.Event()
         self._worker_thread = None
         self._loop = None
 
@@ -252,7 +264,7 @@ class RolloutTaskScheduler:
         """
         logger.info("[RolloutTaskScheduler] Worker loop started")
 
-        while self._running:
+        while self._running.is_set():
             # Check and clean up completed tasks
             completed_tasks = {task for task in self.active_tasks if task.done()}
             for task in completed_tasks:
@@ -266,7 +278,7 @@ class RolloutTaskScheduler:
                     )
 
             # Try to start new tasks if we have capacity and not paused
-            if not self._paused:
+            if not self._paused.is_set():
                 while (
                     len(self.active_tasks) < self.max_concurrent_requests
                     and not self.task_queue.empty()
@@ -303,6 +315,14 @@ class RolloutTaskScheduler:
     def _run_event_loop(self):
         """
         Run the asyncio event loop in a separate thread.
+
+        This method is called by the worker thread and:
+        1. Creates a new event loop for the worker thread
+        2. Sets it as the thread's current event loop
+        3. Runs the _worker_loop() coroutine to completion
+        4. Properly closes the event loop on exit
+
+        Note: Each thread must have its own event loop.
         """
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
@@ -314,74 +334,48 @@ class RolloutTaskScheduler:
 
     def start(self):
         """
-        Start the background worker thread.
+        Start the background worker thread with its own event loop.
 
-        Note: For coroutine-based usage, use run_async() instead.
+        This creates a new thread that runs an independent asyncio event loop.
+        The worker thread monitors the task_queue and manages concurrent task execution.
+
+        Thread Safety:
+            Uses threading.Event() for _running flag to ensure thread-safe state management.
         """
-        if self._running:
+        if self._running.is_set():
             logger.warning("[RolloutTaskScheduler] Scheduler is already running")
             return
 
-        self._running = True
+        self._running.set()
         self._worker_thread = threading.Thread(target=self._run_event_loop, daemon=True)
         self._worker_thread.start()
 
         logger.info("[RolloutTaskScheduler] Background worker started")
 
-    async def run_async(self):
-        """
-        Run the scheduler in coroutine mode (async/await).
-
-        This is an alternative to start() that runs in the same event loop
-        as the caller, providing better integration and performance.
-
-        Usage:
-            ```python
-            scheduler = RolloutTaskScheduler(...)
-
-            # Run in background as a task
-            scheduler_task = asyncio.create_task(scheduler.run_async())
-
-            # Your main async loop
-            async for item in process_items():
-                scheduler.put_rollout(item)
-
-            # Stop scheduler
-            scheduler.stop_async()
-            await scheduler_task
-            ```
-        """
-        self._running = True
-        logger.info("[RolloutTaskScheduler] Running in async mode")
-
-        try:
-            await self._worker_loop()
-        finally:
-            self._running = False
-            logger.info("[RolloutTaskScheduler] Async mode stopped")
-
-    def stop_async(self):
-        """
-        Stop the scheduler when running in async mode.
-
-        Call this before awaiting the run_async() task to ensure clean shutdown.
-        """
-        logger.info("[RolloutTaskScheduler] Stopping async mode...")
-        self._running = False
-
     def stop(self, wait: bool = True):
         """
-        Stop the background worker thread.
+        Stop the background worker thread gracefully.
+
+        This method:
+        1. Clears the _running event flag (thread-safe)
+        2. Signals the worker thread to stop
+        3. Optionally waits for the thread to complete (default: True)
+        4. The worker thread will finish processing active tasks before exiting
 
         Args:
-            wait: Whether to wait for the worker thread to finish
+            wait: Whether to wait for the worker thread to finish (default: True).
+                  If True, blocks until thread completes (with 10s timeout).
+                  If False, returns immediately without waiting.
+
+        Thread Safety:
+            Uses threading.Event.clear() for atomic state change visible to worker thread.
         """
-        if not self._running:
+        if not self._running.is_set():
             logger.warning("[RolloutTaskScheduler] Scheduler is not running")
             return
 
         logger.info("[RolloutTaskScheduler] Stopping background worker...")
-        self._running = False
+        self._running.clear()
 
         if wait and self._worker_thread:
             self._worker_thread.join(timeout=10)
@@ -395,17 +389,17 @@ class RolloutTaskScheduler:
         Currently running tasks will continue to completion, but no new tasks
         will be started until resume() is called.
         """
-        if not self._running:
+        if not self._running.is_set():
             logger.warning(
                 "[RolloutTaskScheduler] Cannot pause: scheduler is not running"
             )
             return
 
-        if self._paused:
+        if self._paused.is_set():
             logger.warning("[RolloutTaskScheduler] Scheduler is already paused")
             return
 
-        self._paused = True
+        self._paused.set()
         logger.info(
             "[RolloutTaskScheduler] Scheduler paused (active tasks will continue)"
         )
@@ -414,17 +408,17 @@ class RolloutTaskScheduler:
         """
         Resume the scheduler to continue processing tasks from task_queue.
         """
-        if not self._running:
+        if not self._running.is_set():
             logger.warning(
                 "[RolloutTaskScheduler] Cannot resume: scheduler is not running"
             )
             return
 
-        if not self._paused:
+        if not self._paused.is_set():
             logger.warning("[RolloutTaskScheduler] Scheduler is not paused")
             return
 
-        self._paused = False
+        self._paused.clear()
         logger.info("[RolloutTaskScheduler] Scheduler resumed")
 
     def is_paused(self) -> bool:
@@ -434,7 +428,7 @@ class RolloutTaskScheduler:
         Returns:
             True if paused, False otherwise
         """
-        return self._paused
+        return self._paused.is_set()
 
     @contextmanager
     def paused(
@@ -463,17 +457,17 @@ class RolloutTaskScheduler:
             RuntimeError: If scheduler is not running
             TimeoutError: If waiting for active tasks times out
         """
-        if not self._running:
+        if not self._running.is_set():
             raise RuntimeError(
                 "[RolloutTaskScheduler] Cannot pause: scheduler is not running"
             )
 
-        was_already_paused = self._paused
+        was_already_paused = self._paused.is_set()
 
         try:
             # Pause if not already paused
             if not was_already_paused:
-                self._paused = True
+                self._paused.set()
                 logger.info("[RolloutTaskScheduler] Scheduler paused (context manager)")
 
                 # Wait for active tasks to complete if requested
@@ -495,8 +489,8 @@ class RolloutTaskScheduler:
 
         finally:
             # Resume only if we paused it (not if it was already paused)
-            if not was_already_paused and self._paused:
-                self._paused = False
+            if not was_already_paused and self._paused.is_set():
+                self._paused.clear()
                 logger.info(
                     "[RolloutTaskScheduler] Scheduler resumed (context manager)"
                 )
@@ -541,6 +535,14 @@ class RolloutTaskScheduler:
             except Exception:
                 break
         return results
+
+
+    async def wait_for_all_tasks_to_complete(self):
+        """
+        Wait for all tasks to complete.
+        """
+        while len(self.active_tasks) > 0:
+            await asyncio.sleep(0.1)
 
     def is_idle(self) -> bool:
         """
@@ -587,7 +589,7 @@ class RolloutTaskScheduler:
         Returns:
             True if running, False otherwise
         """
-        return self._running
+        return self._running.is_set()
 
     def get_stats(self) -> dict:
         """
@@ -597,8 +599,8 @@ class RolloutTaskScheduler:
             Dictionary with statistics
         """
         return {
-            "running": self._running,
-            "paused": self._paused,
+            "running": self._running.is_set(),
+            "paused": self._paused.is_set(),
             "total_submitted": self.total_submitted,
             "total_processed": self.total_processed,
             "active_tasks": len(self.active_tasks),
