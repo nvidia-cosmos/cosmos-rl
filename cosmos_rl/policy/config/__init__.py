@@ -411,6 +411,11 @@ class GrpoConfig(BaseModel):
         description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
+    process_shared_prefix: bool = Field(
+        default=True,
+        description="Whether to process shared prefix tokens in the completion.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
