@@ -210,7 +210,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             detokenize=True,
         )
         self.sampling_params = SamplingParams(
-            n=self.config.rollout.n_generation,
+            n=1,
             logprobs=0,
             top_p=self.config.rollout.sampling_config.top_p,
             top_k=self.config.rollout.sampling_config.top_k,
@@ -1368,11 +1368,15 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     payload for _, payload in prompt_id_and_payload_list
                 ]
 
+                payloads = [
+                    p for p in payloads for _ in range(self.config.rollout.n_generation)
+                ]
                 rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
                     payloads=payloads,
                     stream=self.inference_stream,
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
+                    n_repeats=self.config.rollout.n_generation,
                 )
 
                 if len(rollout_results) == 0:

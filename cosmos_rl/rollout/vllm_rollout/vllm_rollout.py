@@ -204,6 +204,7 @@ class vLLMRollout(RolloutBase):
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
+        n_repeats: int = 1,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
             raise RuntimeError(
@@ -233,13 +234,19 @@ class vLLMRollout(RolloutBase):
                     sampling_params=sampling_params,
                     use_tqdm=False,
                 )
-
-            for i, output in enumerate(results):
+            assert len(results) % n_repeats == 0, (
+                "[Rollout] The number of results %d is not divisible by n_repeats %d"
+                % (len(results), n_repeats)
+            )
+            for i in range(0, len(results), n_repeats):
+                outputs = results[i : i + n_repeats]
                 response.append(
                     RolloutResult(
                         prompt=payloads[i].prompt,
                         completions=[
-                            output.outputs[i].text for i in range(len(output.outputs))
+                            output.outputs[j].text
+                            for output in outputs
+                            for j in range(len(output.outputs))
                         ],
                     )
                 )
@@ -258,6 +265,7 @@ class vLLMRollout(RolloutBase):
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
+        n_repeats: int = 1,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
             raise RuntimeError(
@@ -343,14 +351,23 @@ class vLLMRollout(RolloutBase):
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
+        n_repeats: int = 1,
     ) -> List[RolloutResult]:
         if self.rollout_config.multi_turn_config.enable:
             return self.rollout_generation_multi_turn(
-                payloads, stream, data_packer, sampling_params
+                payloads,
+                stream,
+                data_packer,
+                sampling_params,
+                n_repeats,
             )
         else:
             return self.rollout_generation_single_turn(
-                payloads, stream, data_packer, sampling_params
+                payloads,
+                stream,
+                data_packer,
+                sampling_params,
+                n_repeats,
             )
 
     def get_underlying_model(self):
