@@ -579,7 +579,6 @@ class HFVLMDataPacker(DataPacker):
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
-        # FIXME: (huik) handling the Image in `ChatMessage`.
         if isinstance(sample, list):
             sample = [
                 x.model_dump() if isinstance(x, ChatMessage) else x for x in sample
