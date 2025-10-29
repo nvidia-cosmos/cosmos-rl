@@ -28,6 +28,8 @@ from transformers.models.gemma3.modeling_gemma3 import (
 )
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers.models.phi3.modeling_phi3 import Phi3ForCausalLM
+from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
 from cosmos_rl.utils.logging import logger
 
@@ -59,6 +61,8 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
         LlamaForCausalLM,
         Gemma3ForCausalLM,
         Gemma3ForConditionalGeneration,
+        Qwen2ForCausalLM,
+        Qwen3ForCausalLM,
     ]:
         if model_class is Gemma3ForConditionalGeneration:
             model_prefix = "model.language_model"
@@ -77,7 +81,7 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
             ),
         }
 
-        tp_slice_dim_map: dict[str, (int, bool)] = {
+        slice_dim_map: dict[str, (int, bool)] = {
             f"{model_prefix}.embed_tokens": (0, False),
             f"{model_prefix}.layers.*.self_attn.q_proj": (0, True),
             f"{model_prefix}.layers.*.self_attn.k_proj": (0, True),
@@ -119,7 +123,7 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
             ),
         }
 
-        tp_slice_dim_map: dict[str, (int, bool)] = {
+        slice_dim_map: dict[str, (int, bool)] = {
             f"{model_prefix}.embed_tokens": (0, False),
             f"{model_prefix}.layers.*.self_attn.qkv_proj": (-1, False),
             f"{model_prefix}.layers.*.self_attn.o_proj": (0, True),
@@ -128,26 +132,33 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
             "lm_head": (0, False),
         }
     else:
-        raise ValueError(
-            f"Unsupported model class({model_class}) for tensor parallelism"
+        tp_plan = None
+        slice_dim_map = None
+        logger.warning(
+            f"Unsupported model class({model_class}) for TP. Please set tp_size to 1."
         )
-    # set tp_slice_dim_map
-    n_lm_layers = model.n_lm_layers
-    slice_dim_map = {}
-    for plan_key, (slice_dim, slice_bias) in tp_slice_dim_map.items():
-        if "*" in plan_key:
-            for i in range(n_lm_layers):
-                expanded_key = plan_key.replace("*", str(i))
-                slice_dim_map[expanded_key + ".weight"] = slice_dim
-                slice_dim_map[expanded_key + ".bias"] = 0 if slice_bias else None
-        else:
-            slice_dim_map[plan_key + ".weight"] = slice_dim
-            slice_dim_map[plan_key + ".bias"] = 0 if slice_bias else None
-    # check if all parameters are in slice_dim_map
-    for name, _ in model.named_parameters():
-        if name not in slice_dim_map:
-            logger.debug(f"{name} is not in tp_slice_dim_map")
 
-    model.tp_slice_dim_map = slice_dim_map
+    if tp_plan is None or slice_dim_map is None:
+        return None
+    else:
+        # Generate slice_dim_map for all parameters in tp_slice_dim_map
+        n_lm_layers = model.n_lm_layers
+        tp_slice_dim_map = {}
+        for plan_key, (slice_dim, slice_bias) in slice_dim_map.items():
+            if "*" in plan_key:
+                for i in range(n_lm_layers):
+                    expanded_key = plan_key.replace("*", str(i))
+                    tp_slice_dim_map[expanded_key + ".weight"] = slice_dim
+                    tp_slice_dim_map[expanded_key + ".bias"] = 0 if slice_bias else None
+            else:
+                tp_slice_dim_map[plan_key + ".weight"] = slice_dim
+                tp_slice_dim_map[plan_key + ".bias"] = 0 if slice_bias else None
+        # check if all parameters are in slice_dim_map
+        for name, _ in model.named_parameters():
+            if name not in tp_slice_dim_map:
+                logger.debug(f"{name} is not in tp_slice_dim_map")
 
-    return cast(dict[str, ParallelStyle], tp_plan)
+        # set tp_slice_dim_map
+        model.tp_slice_dim_map = tp_slice_dim_map
+
+        return cast(dict[str, ParallelStyle], tp_plan)

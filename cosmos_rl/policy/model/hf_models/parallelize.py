@@ -108,7 +108,10 @@ def apply_tp(
     tp_plans = get_tp_plans(
         model, enable_float8_tensorwise_tp=enable_float8_tensorwise_tp
     )
-    logger.info(f"Applying tensor parallelism to the model with plans: {tp_plans}")
+
+    if tp_plans is None:
+        logger.warning("No TP plans found. Skip TP.")
+        return
 
     parallelize_module(
         module=model.model,
