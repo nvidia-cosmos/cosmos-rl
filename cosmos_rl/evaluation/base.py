@@ -129,7 +129,6 @@ class BaseEvaluator(ABC):
             dtype=dtype,
             limit_mm_per_prompt={"video": 10, "image": 10},
             tensor_parallel_size=tp_size,
-            max_seq_len_to_capture=16384,
             max_model_len=max_length,
         )
 

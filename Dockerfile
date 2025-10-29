@@ -216,6 +216,8 @@ RUN . /opt/venv/cosmos_rl/bin/activate && \
     cd .. && \
     rm -rf tao-core
 
+RUN pip uninstall -y ray
+
 ENV NVIDIA_PRODUCT_NAME="TAO Toolkit"
 ENV TAO_TOOLKIT_VERSION="6.25.7"
 ENV NVIDIA_TAO_TOOLKIT_VERSION="${TAO_TOOLKIT_VERSION}-PyTorch"
