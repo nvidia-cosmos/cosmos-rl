@@ -27,9 +27,13 @@ from transformers.models.gemma3.modeling_gemma3 import (
     Gemma3ForConditionalGeneration,
 )
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
+from transformers.models.mistral.modeling_mistral import MistralForCausalLM
 from transformers.models.phi3.modeling_phi3 import Phi3ForCausalLM
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
+from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+    Qwen3VLForConditionalGeneration,
+)
 
 from cosmos_rl.utils.logging import logger
 
@@ -60,12 +64,17 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
     # Note:only colwise_parallel has slice_bias
     if model_class in [
         LlamaForCausalLM,
+        MistralForCausalLM,
         Gemma3ForCausalLM,
         Gemma3ForConditionalGeneration,
         Qwen2ForCausalLM,
         Qwen3ForCausalLM,
+        Qwen3VLForConditionalGeneration,
     ]:
-        if model_class is Gemma3ForConditionalGeneration:
+        if model_class in [
+            Gemma3ForConditionalGeneration,
+            Qwen3VLForConditionalGeneration,
+        ]:
             model_prefix = "model.language_model"
 
         tp_plan: dict[str, ParallelStyle] = {
