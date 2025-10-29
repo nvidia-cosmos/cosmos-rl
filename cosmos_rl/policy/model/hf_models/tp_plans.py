@@ -34,6 +34,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 from cosmos_rl.utils.logging import logger
 
 
+# For VLMs, we only support TP for the language model, and ignore the vision encoder.
 def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
     if enable_float8_tensorwise_tp:
         from torchao.float8.float8_tensor_parallel import (
@@ -54,9 +55,9 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
     tp_plan = None
     model_prefix = "model"
     model_class = model.model_class
-    # tensor_name, (slice_dim, slice_bias)
-    # only colwise_parallel has slice_bias
-    tp_slice_dim_map = None
+    # slice_dim_map is a dictionary that maps the tensor name to the slice dimension and slice bias.
+    # key: tensor_name, value: (slice_dim, slice_bias)
+    # Note:only colwise_parallel has slice_bias
     if model_class in [
         LlamaForCausalLM,
         Gemma3ForCausalLM,
@@ -141,7 +142,7 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
     if tp_plan is None or slice_dim_map is None:
         return None
     else:
-        # Generate slice_dim_map for all parameters in tp_slice_dim_map
+        # Generate tp_slice_dim_map for all parameters in slice_dim_map
         n_lm_layers = model.n_lm_layers
         tp_slice_dim_map = {}
         for plan_key, (slice_dim, slice_bias) in slice_dim_map.items():
@@ -153,7 +154,7 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
             else:
                 tp_slice_dim_map[plan_key + ".weight"] = slice_dim
                 tp_slice_dim_map[plan_key + ".bias"] = 0 if slice_bias else None
-        # check if all parameters are in slice_dim_map
+        # check if all parameters of model are in tp_slice_dim_map
         for name, _ in model.named_parameters():
             if name not in tp_slice_dim_map:
                 logger.debug(f"{name} is not in tp_slice_dim_map")
