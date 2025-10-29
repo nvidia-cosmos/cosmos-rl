@@ -99,6 +99,10 @@ class RLPayload(BaseModel):
         default=None, description="The filter reward for each completion."
     )
 
+    completions_token_length: Optional[List[int]] = Field(
+        default=None, description="The token lengths of each completion."
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.prompt or self.conversation, "Must set prompt or conversation"
@@ -155,4 +159,8 @@ class Rollout(BaseModel):
 
     filter_reward: float = Field(
         default=0.0, description="The filter reward for the rollout."
+    )
+
+    completion_token_length: int = Field(
+        default=0, description="The token length of the completion."
     )

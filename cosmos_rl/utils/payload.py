@@ -49,14 +49,16 @@ def extract_rollouts(
                 advantage=advantage,
                 prompt_idx=prompt_idx,
                 n_ignore_prefix_tokens=n_ignore_prefix_tokens,
+                completion_token_length=completion_token_length,
             )
-            for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, filter_reward in zip(
+            for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, filter_reward, completion_token_length in zip(
                 payload.completions,
                 payload.completed_conversations,
                 payload.rewards,
                 payload.advantages,
                 payload.n_ignore_prefix_tokens,
                 payload.filter_rewards,
+                payload.completions_token_length,
             )
         ]
         if payload.valid:

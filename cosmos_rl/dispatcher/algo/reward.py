@@ -181,11 +181,18 @@ def direct_math_reward_fn(
     The reward is 1 if the `to_be_evaluated` is correct, otherwise -1.
     Answer pattern can be customized.
     """
+    # Limit solution length for efficiency
+    to_be_evaluated = to_be_evaluated[
+        -300:
+    ]  # The longest answer in MATH-500 has 159 characters
+
     answer_pattern = kwargs.get("answer_pattern", r"(?i)Answer\s*:\s*([^\n]+)")
     # Extract answer from solution
     match = re.findall(answer_pattern, to_be_evaluated)
     extracted_answer = match[-1] if match else "[INVALID]"
     pred = normalize_final_answer(extracted_answer)
+
+    reference = normalize_final_answer(reference)
 
     if pred == reference:
         return 1.0

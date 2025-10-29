@@ -210,7 +210,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             detokenize=True,
         )
         self.sampling_params = SamplingParams(
-            n=1,
+            n=self.config.rollout.n_generation,
             logprobs=0,
             top_p=self.config.rollout.sampling_config.top_p,
             top_k=self.config.rollout.sampling_config.top_k,
@@ -1373,7 +1373,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     stream=self.inference_stream,
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
-                    n_repeats=self.config.rollout.n_generation,
+                    n_to_batch=self.config.rollout.n_generation_to_batch,
                 )
 
                 if len(rollout_results) == 0:

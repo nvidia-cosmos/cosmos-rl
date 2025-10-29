@@ -411,11 +411,6 @@ class GrpoConfig(BaseModel):
         description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
-    process_shared_prefix: bool = Field(
-        default=True,
-        description="Whether to process shared prefix tokens in the completion.",
-    )
-
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
@@ -921,6 +916,10 @@ class RolloutConfig(BaseModel):
     )
     n_generation: int = Field(
         default=16, description="n parameter same like what in OpenAI chat API."
+    )
+    n_generation_to_batch: bool = Field(
+        default=False,
+        description="Whether to treat n_generation as batch dimension in rollout generation.",
     )
 
     batch_size: int = Field(default=1, description="Batch size for rollout.")

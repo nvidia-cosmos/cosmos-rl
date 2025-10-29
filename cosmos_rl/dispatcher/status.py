@@ -799,6 +799,20 @@ class PolicyStatusManager:
                         "train/effective_entropy": total_effective_entropy,
                     }
 
+                    if hasattr(self, "filter_rewards") and len(self.filter_rewards) > 0:
+                        policy_report_data.update(
+                            {
+                                "rollout/filtered_positive_ratio": sum(
+                                    v for k, v in self.filter_rewards.items() if k > 0
+                                )
+                                / sum(v for v in self.filter_rewards.values()),
+                                "rollout/filtered_negative_ratio": sum(
+                                    v for k, v in self.filter_rewards.items() if k < 0
+                                )
+                                / sum(v for v in self.filter_rewards.values()),
+                            }
+                        )
+
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
                     )
@@ -812,10 +826,11 @@ class PolicyStatusManager:
                         logger.info(
                             f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Iteration time: {total_iter_time_avg:.2f}s, total grad norm: {total_grad_norm:.5f}, KL loss avg: {total_kl_loss_avg:.5f}, KL loss max: {total_kl_loss_max:.5f}."
                         )
-                        logger.info(
-                            f"filter rewards distribution so far: {self.filter_rewards}"
-                        )
-                        self.filter_rewards = {}
+                        if hasattr(self, "filter_rewards"):
+                            logger.info(
+                                f"filter rewards distribution so far: {self.filter_rewards}"
+                            )
+                            self.filter_rewards = {}
                     for logger_fn in self.custom_logger_fns:
                         try:
                             logger_fn(self.train_report_data[train_step], train_step)
@@ -1004,7 +1019,9 @@ class PolicyStatusManager:
                 filter_rewards = []
                 for rollout in rollouts_of_this_step:
                     rewards.append(rollout.reward)
-                    advantages.append(rollout.advantage)
+                    advantages.extend(
+                        [rollout.advantage] * rollout.completion_token_length
+                    )
                     filter_rewards.append(rollout.filter_reward)
                     completion_lengths.append(
                         len(self.tokenizer.encode(rollout.completion))
@@ -1014,17 +1031,18 @@ class PolicyStatusManager:
                     "train/reward_std": np.std(rewards),
                     "train/reward_max": np.max(rewards),
                     "train/reward_min": np.min(rewards),
-                    "train/completion_length_mean": np.mean(completion_lengths),
-                    "train/completion_length_max": np.max(completion_lengths),
-                    "train/completion_length_min": np.min(completion_lengths),
-                    "train/advantage_mean": np.mean(advantages),
-                    "train/advantage_std": np.std(advantages),
-                    "train/advantage_max": np.max(advantages),
-                    "train/advantage_min": np.min(advantages),
-                    "train/filter_reward_mean": np.mean(filter_rewards),
-                    "train/filter_reward_std": np.std(filter_rewards),
-                    "train/filter_reward_max": np.max(filter_rewards),
-                    "train/filter_reward_min": np.min(filter_rewards),
+                    "rollout/completion_length_mean": np.mean(completion_lengths),
+                    "rollout/completion_length_std": np.std(completion_lengths),
+                    "rollout/completion_length_max": np.max(completion_lengths),
+                    "rollout/completion_length_min": np.min(completion_lengths),
+                    "rollout/advantage_mean": np.mean(advantages),
+                    "rollout/advantage_std": np.std(advantages),
+                    "rollout/advantage_max": np.max(advantages),
+                    "rollout/advantage_min": np.min(advantages),
+                    "rollout/filter_reward_mean": np.mean(filter_rewards),
+                    "rollout/filter_reward_std": np.std(filter_rewards),
+                    "rollout/filter_reward_max": np.max(filter_rewards),
+                    "rollout/filter_reward_min": np.min(filter_rewards),
                 }
                 self.train_report_data[self.current_step] = report_data
 

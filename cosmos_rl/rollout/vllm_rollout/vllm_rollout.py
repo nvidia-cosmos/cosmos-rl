@@ -40,6 +40,7 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
+import random
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -157,6 +158,11 @@ class vLLMRollout(RolloutBase):
 
             policy_config = self.config.policy
 
+            if seed is None:
+                seed = 42
+            elif seed < 0:
+                seed = int(random.randint(0, 2**31 - 1))
+
             self.rollout_engine = LLM(
                 model=model_path,
                 enable_sleep_mode=False,  # enable sleep could corrupt the cuda allocator.
@@ -182,7 +188,7 @@ class vLLMRollout(RolloutBase):
                 enable_prefix_caching=False,
                 trust_remote_code=trust_remote_code,
                 quantization=self.quantization,
-                seed=seed or 42,
+                seed=seed,
                 load_format=load_format,
             )
             self._engine_initialized = True
@@ -204,13 +210,19 @@ class vLLMRollout(RolloutBase):
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
-        n_repeats: int = 1,
+        n_to_batch: bool = False,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
+        n_repeats = sampling_params.n if n_to_batch else 1
         payloads = [p for p in payloads for _ in range(n_repeats)]
+        if n_to_batch:
+            local_sampling_params = copy.deepcopy(sampling_params)
+            local_sampling_params.n = 1
+        else:
+            local_sampling_params = sampling_params
 
         # Pack the payloads into prompts for vllm.
         prompts = []
@@ -232,7 +244,7 @@ class vLLMRollout(RolloutBase):
             with torch.cuda.stream(stream):
                 results = self.rollout_engine.generate(
                     new_prompts,
-                    sampling_params=sampling_params,
+                    sampling_params=local_sampling_params,
                     use_tqdm=False,
                 )
             assert len(results) % n_repeats == 0, (
@@ -266,7 +278,6 @@ class vLLMRollout(RolloutBase):
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
-        n_repeats: int = 1,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
             raise RuntimeError(
@@ -352,7 +363,7 @@ class vLLMRollout(RolloutBase):
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
-        n_repeats: int = 1,
+        n_to_batch: bool = False,
     ) -> List[RolloutResult]:
         if self.rollout_config.multi_turn_config.enable:
             return self.rollout_generation_multi_turn(
@@ -360,7 +371,6 @@ class vLLMRollout(RolloutBase):
                 stream,
                 data_packer,
                 sampling_params,
-                n_repeats,
             )
         else:
             return self.rollout_generation_single_turn(
@@ -368,7 +378,7 @@ class vLLMRollout(RolloutBase):
                 stream,
                 data_packer,
                 sampling_params,
-                n_repeats,
+                n_to_batch=n_to_batch,
             )
 
     def get_underlying_model(self):
