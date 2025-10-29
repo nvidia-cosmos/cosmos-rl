@@ -13,17 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Callable, Optional
+
 import torch
 import torch.nn as nn
 from torch.distributed._composable.replicate import replicate
+from torch.distributed.tensor.parallel import parallelize_module
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
-from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
+from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from typing import Callable, Optional
+from cosmos_rl.policy.model.hf_models.tp_plans import get_tp_plans
 
 
 def parallelize(
@@ -43,13 +46,20 @@ def parallelize(
     _, pp_size = parallel_dims.pp_coord
 
     assert (
-        not parallel_dims.tp_enabled
-    ), "Tensor parallelism is not supported for HFModel"
-    assert (
         not parallel_dims.cp_enabled
     ), "Context parallelism is not supported for HFModel"
     assert pp_size == 1, "Pipeline parallelism is not supported for HFModel"
     assert not config.train.compile, "Compile is not supported for HFModel"
+
+    if parallel_dims.tp_enabled:
+        model.check_tp_compatible(world_mesh["tp"].size())
+        apply_tp(
+            model,
+            world_mesh["tp"],
+            enable_float8_tensorwise_tp=config.train.fp8.enable_fp8
+            and config.train.fp8.quant_recipe == "tensorwise",
+            enable_async_tp=config.train.async_tp_enabled,
+        )
 
     # apply FSDP or HSDP
     if parallel_dims.dp_shard_enabled:
@@ -86,6 +96,36 @@ def parallelize(
         )
 
     return None, None
+
+
+def apply_tp(
+    model: nn.Module,
+    tp_mesh: DeviceMesh,
+    enable_float8_tensorwise_tp: bool,
+    enable_async_tp: bool,
+):
+    """Apply tensor parallelism."""
+    tp_plans = get_tp_plans(
+        model, enable_float8_tensorwise_tp=enable_float8_tensorwise_tp
+    )
+    logger.info(f"Applying tensor parallelism to the model with plans: {tp_plans}")
+
+    parallelize_module(
+        module=model.model,
+        device_mesh=tp_mesh,
+        parallelize_plan=tp_plans,
+    )
+
+    if enable_async_tp:
+        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+        torch._inductor.config._micro_pipeline_tp = True
+        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
+
+    logger.info(
+        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
+        "Tensor Parallelism to the model"
+    )
 
 
 # for selective op activation checkpointing
