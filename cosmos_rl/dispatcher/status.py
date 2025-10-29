@@ -693,6 +693,11 @@ class PolicyStatusManager:
                 if filter_reward not in self.filter_rewards:
                     self.filter_rewards[filter_reward] = 0
                 self.filter_rewards[filter_reward] += 1
+            for rollout in valid_rollouts:
+                filter_reward = 0.0
+                if filter_reward not in self.filter_rewards:
+                    self.filter_rewards[filter_reward] = 0
+                self.filter_rewards[filter_reward] += 1
         else:
             rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
 
@@ -810,6 +815,12 @@ class PolicyStatusManager:
                                     v for k, v in self.filter_rewards.items() if k < 0
                                 )
                                 / sum(v for v in self.filter_rewards.values()),
+                                "rollout/kept_ratio": sum(
+                                    v
+                                    for k, v in self.filter_rewards.items()
+                                    if k == 0.0
+                                )
+                                / sum(v for v in self.filter_rewards.values()),
                             }
                         )
 
@@ -824,7 +835,7 @@ class PolicyStatusManager:
                         )
                     if "console" in self.config.logging.logger:
                         logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Iteration time: {total_iter_time_avg:.2f}s, total grad norm: {total_grad_norm:.5f}, KL loss avg: {total_kl_loss_avg:.5f}, KL loss max: {total_kl_loss_max:.5f}."
+                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['rollout/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['rollout/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Iteration time: {total_iter_time_avg:.2f}s, total grad norm: {total_grad_norm:.5f}, KL loss avg: {total_kl_loss_avg:.5f}, KL loss max: {total_kl_loss_max:.5f}."
                         )
                         if hasattr(self, "filter_rewards"):
                             logger.info(

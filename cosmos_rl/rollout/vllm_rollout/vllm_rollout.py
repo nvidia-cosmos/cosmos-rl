@@ -40,7 +40,6 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
-import random
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -158,10 +157,8 @@ class vLLMRollout(RolloutBase):
 
             policy_config = self.config.policy
 
-            if seed is None:
-                seed = 42
-            elif seed < 0:
-                seed = int(random.randint(0, 2**31 - 1))
+            if seed is not None and seed < 0:
+                seed = None
 
             self.rollout_engine = LLM(
                 model=model_path,
