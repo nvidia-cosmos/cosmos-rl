@@ -976,14 +976,14 @@ class GRPOTrainer(Trainer):
         # Add nccl allreduce operations for all parameters and necessary states.
         """
         with torch.cuda.stream(self.train_stream):
-            # for model_part in self.model_parts:
-            #     # Model part may use same physical mesh for different logical mesh,
-            #     # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
-            #     # So we need to do allreduce for each model part
-            #     if model_part is not None:
-            #         dist_util.gradient_reduce_across_dp_replicas_(
-            #             [p for p in model_part.parameters()], self.inter_policy_nccl
-            #         )
+            for model_part in self.model_parts:
+                # Model part may use same physical mesh for different logical mesh,
+                # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
+                # So we need to do allreduce for each model part
+                if model_part is not None:
+                    dist_util.gradient_reduce_across_dp_replicas_(
+                        [p for p in model_part.parameters()], self.inter_policy_nccl
+                    )
 
             """
             Compute the global grad norm on all parameters and then apply
@@ -996,18 +996,18 @@ class GRPOTrainer(Trainer):
                 for m in [model for model in self.model_parts if model is not None]
                 for p in m.parameters()
             ]
-            # grad_norm = dist_util.gradient_norm_clipping(
-            #     all_params,
-            #     self.config.train.optm_grad_norm_clip,
-            #     foreach=True,
-            #     pp_mesh=self.parallel_dims.mesh["pp"]
-            #     if self.parallel_dims.pp_enabled
-            #     else None,
-            #     return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
-            # )
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                all_params, max_norm=self.config.train.optm_grad_norm_clip
+            grad_norm = dist_util.gradient_norm_clipping(
+                all_params,
+                self.config.train.optm_grad_norm_clip,
+                foreach=True,
+                pp_mesh=self.parallel_dims.mesh["pp"]
+                if self.parallel_dims.pp_enabled
+                else None,
+                return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
             )
+            # grad_norm = torch.nn.utils.clip_grad_norm_(
+            #     all_params, max_norm=self.config.train.optm_grad_norm_clip
+            # )
 
             self.optimizers.step()
             self.optimizers.zero_grad()
