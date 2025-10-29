@@ -617,9 +617,10 @@ class ParallelTopoMapper:
             assert (
                 dims_rank_info is None
             ), f"Packed modules mapping {packed_modules_mapping} should not be used with dims_rank_info {dims_rank_info}."
-            if k in param_name:
+            hf_name = name_to_hf(param_name)
+            if k in hf_name:
                 for rename in v:
-                    name = name_to_hf(param_name).replace(k, rename)
+                    name = hf_name.replace(k, rename)
                     self.parallelism_info_for_params[name] = (
                         dims_map,
                         tensor_dim_to_parallel_map,
@@ -1643,6 +1644,21 @@ class ParallelizedShardMapper:
         )
         return recv_insts
 
+    def cleanup(self):
+        """
+        Cleanup the multiprocessing pool.
+        This method is called to cleanup the multiprocessing pool when it is no longer needed.
+        """
+        if all([s is not None for s in self.send_insts_for_policy]) and all(
+            [r is not None for r in self.recv_insts_for_rollout]
+        ):
+            if self.multiprocessing_pool is not None:
+                logger.info(
+                    "[ParallelizedShardMapper] Shutting down multiprocessing pool."
+                )
+                self.multiprocessing_pool.shutdown()
+            self.multiprocessing_pool = None
+
     async def get_send_insts_for_policy(
         self, rank: int
     ) -> List[WeightSyncInstructionsGroup]:
@@ -1653,6 +1669,7 @@ class ParallelizedShardMapper:
         """
         if self.send_insts_for_policy[rank] is None:
             self.send_insts_for_policy[rank] = await self.policy_results[rank]
+        self.cleanup()
         return self.send_insts_for_policy[rank]
 
     async def get_recv_insts_for_rollout(
@@ -1665,4 +1682,5 @@ class ParallelizedShardMapper:
         """
         if self.recv_insts_for_rollout[rank] is None:
             self.recv_insts_for_rollout[rank] = await self.rollout_results[rank]
+        self.cleanup()
         return self.recv_insts_for_rollout[rank]

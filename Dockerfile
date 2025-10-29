@@ -7,6 +7,7 @@
 ARG COSMOS_RL_BUILD_MODE=efa
 
 ARG CUDA_VERSION=12.8.1
+
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS no-efa-base
 
 ARG GDRCOPY_VERSION=v2.4.4
@@ -14,6 +15,7 @@ ARG EFA_INSTALLER_VERSION=1.42.0
 ARG AWS_OFI_NCCL_VERSION=v1.16.0
 # NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
 ARG NCCL_VERSION=2.26.2-1+cuda12.8
+ARG FLASH_ATTN_VERSION=2.8.3
 ARG PYTHON_VERSION=3.12
 
 ENV TZ=Etc/UTC
@@ -77,7 +79,7 @@ RUN apt-get update -qq && \
 RUN python${PYTHON_VERSION} -m venv /opt/venv/cosmos_rl
 ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
-RUN pip install -U pip setuptools wheel packaging
+RUN pip install -U pip setuptools wheel packaging psutil
 
 # even though we don't depend on torchaudio, vllm does. in order to
 # make sure the cuda version matches, we install it here.
@@ -91,13 +93,30 @@ COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
 RUN pip install \
     torchao==0.13.0 \
-    flash_attn==2.8.3 \
+    flash_attn==${FLASH_ATTN_VERSION} \
     vllm==0.11.0 \
     flashinfer-python \
     transformer_engine[pytorch] --no-build-isolation \
     -r /workspace/cosmos_rl/requirements.txt
 
 ###################################################
+
+
+# Phase for building any lib that we want to builf from source
+FROM no-efa-base AS source-build
+
+# install git
+RUN apt-get update -y && apt-get install -y git
+
+WORKDIR /workspace
+
+RUN git clone --branch v${FLASH_ATTN_VERSION} --single-branch https://github.com/Dao-AILab/flash-attention.git
+
+WORKDIR /workspace/flash-attention/hopper
+
+RUN python setup.py bdist_wheel
+
+
 FROM no-efa-base AS efa-base
 
 # Remove HPCX and MPI to avoid conflicts with AWS-EFA
@@ -146,7 +165,18 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 
 ###################################################
 ## Image target: cosmos_rl
-FROM ${COSMOS_RL_BUILD_MODE}-base AS package
+FROM ${COSMOS_RL_BUILD_MODE}-base AS pre-package
+
+WORKDIR /workspace
+
+# install fa3
+COPY --from=source-build /workspace/flash-attention/hopper/dist/*.whl /workspace
+RUN pip install /workspace/*.whl
+RUN rm /workspace/*.whl
+
+###################################################
+## Image target: cosmos_rl
+FROM pre-package AS package
 
 COPY . /workspace/cosmos_rl
 RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl

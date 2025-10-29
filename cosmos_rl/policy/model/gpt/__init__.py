@@ -35,7 +35,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from functools import cached_property
-import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
+from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.policy.kernel.fused import MLPActMulFunc
@@ -144,8 +144,8 @@ class Attention(nn.Module):
         self.n_kv_heads = model_args.n_kv_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
-        self.attn_func = modeling_utils.flash_attn_func
-        self.attn_func_varlen = modeling_utils.flash_attn_varlen_func
+        self.attn_func = FlashAttnMeta().flash_attn_func
+        self.attn_func_varlen = FlashAttnMeta().flash_attn_varlen_func
 
         self.q_proj = nn.Linear(
             model_args.dim,

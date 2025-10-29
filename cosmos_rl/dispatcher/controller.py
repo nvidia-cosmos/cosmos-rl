@@ -55,7 +55,6 @@ from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data import IdxAndRLPayload
-from concurrent.futures import ProcessPoolExecutor
 from itertools import islice
 
 
@@ -422,8 +421,6 @@ class Controller:
         self.rollout_status_manager.setup(
             config, self.redis_controller, tokenizer=self.tokenizer
         )
-
-        self.reward_executor = ProcessPoolExecutor(max_workers=4)
 
         # Register the exit function to be called when the program exits
         def exit_server(redis_server_proc, redis_free_port):

@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers import AutoConfig
-import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
+from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 from cosmos_rl.policy.kernel.norm import RMSNorm
 from cosmos_rl.policy.kernel.fused import MLPActMulFunc
 
@@ -183,12 +183,16 @@ else:
         """
         cos = cos.chunk(2, dim=-1)[0].contiguous()
         sin = sin.chunk(2, dim=-1)[0].contiguous()
-        q_embed = modeling_utils.apply_rotary_emb(
-            q.float(), cos.float(), sin.float()
-        ).type_as(q)
-        k_embed = modeling_utils.apply_rotary_emb(
-            k.float(), cos.float(), sin.float()
-        ).type_as(k)
+        q_embed = (
+            FlashAttnMeta()
+            .apply_rotary_emb(q.float(), cos.float(), sin.float())
+            .type_as(q)
+        )
+        k_embed = (
+            FlashAttnMeta()
+            .apply_rotary_emb(k.float(), cos.float(), sin.float())
+            .type_as(k)
+        )
         return q_embed, k_embed
 
 
@@ -199,7 +203,8 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
         self.attention_dropout = 0.0
-        self.attn_func = modeling_utils.flash_attn_varlen_func
+        flash_meta = FlashAttnMeta()
+        self.attn_func = flash_meta.flash_attn_varlen_func
 
     def forward(
         self,
