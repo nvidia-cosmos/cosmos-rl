@@ -152,6 +152,7 @@ class Controller:
                 self.dataset = CosmosDataset(
                     config=config, train_set=dataset, tokenizer=self.tokenizer
                 )
+
                 logger.info(
                     "[Controller] Using provided dataset for training, dataset specification in the toml config will be ignored"
                 )
@@ -551,6 +552,10 @@ class Controller:
             assert len(idxs) == len(payloads)
             for idx, payload in zip(idxs, payloads):
                 idx = idx.item() if isinstance(idx, torch.Tensor) else idx
+                if self.config.train.local_dataset:
+                    # If local dataset is enabled, we set prompt to None. And rollout worker will query
+                    # the prompt from local dataset.
+                    payload.prompt = None
                 prompt_id_and_payload_list.append((idx, payload))
 
         current_fetch_count = len(prompt_id_and_payload_list)

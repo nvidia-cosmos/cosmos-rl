@@ -34,7 +34,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --script)
       SCRIPT="$2"
-      echo "Using script: $SCRIPT"
       shift 2
       ;;
     --help)
@@ -47,6 +46,8 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+echo "[Controller] Using script: $SCRIPT"
 
 if [[ "$SCRIPT" != *.py ]]; then
   CMD="python -m $SCRIPT"

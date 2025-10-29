@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
+import time
 import threading
-from queue import Queue
+import torch
 import atexit
 import types
+
+from queue import Queue
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Optional, Callable, Union
 from functools import partial
@@ -29,6 +31,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import (
     COSMOS_ROLLOUT_STEP_INTERVAL,
     COSMOS_ROLLOUT_REPORT_INTERVAL,
+    COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK,
 )
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
@@ -61,11 +64,11 @@ from cosmos_rl.dispatcher.data.schema import (
     ConversationType,
 )
 from cosmos_rl.rollout.schema import RolloutResult
-from torch.utils.data import Dataset
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcher
+
 from vllm import SamplingParams
-import time
-from cosmos_rl.utils.constant import COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+from torch.utils.data import Dataset
 
 
 """
@@ -181,6 +184,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
             model_type = constant.COSMOS_HF_MODEL_TYPES
         self.weight_mapper = WeightMapper.get_weight_mapper(model_type)(hf_config)
+
         self.model_config = hf_config
 
         atexit.register(self.handle_shutdown)
@@ -229,6 +233,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.reward_dispatcher = RewardDispatcher(
             payload_per_task=COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
         )
+        self.data_fetcher = None
+        if self.config.train.local_dataset:
+            self.data_fetcher = DataFetcher(
+                config=self.config,
+                dataset=self.config.train.local_dataset,
+                tokenizer=self.tokenizer,
+            )
 
     def setup(
         self,
