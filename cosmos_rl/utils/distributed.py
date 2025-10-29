@@ -50,6 +50,7 @@ from cosmos_rl.utils.pynccl import (
     nccl_recv,
     nccl_allreduce,
 )
+from cosmos_rl.utils.constant import COSMOS_GLOO_TIMEOUT
 
 
 def init_distributed(cpu_enabled: bool = True):
@@ -61,7 +62,7 @@ def init_distributed(cpu_enabled: bool = True):
     else:
         torch.distributed.init_process_group(
             backend="cuda:nccl,cpu:gloo",
-            timeout=timedelta(seconds=600),
+            timeout=timedelta(seconds=COSMOS_GLOO_TIMEOUT),
         )
 
 
