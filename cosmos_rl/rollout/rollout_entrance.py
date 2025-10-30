@@ -61,7 +61,7 @@ def run_rollout(*args, **kwargs):
             rollout_worker = vLLMRolloutWorker(
                 cosmos_rollout_config, parallel_dims, **kwargs
             )
-        if rollout_backend == "vllm_async":
+        elif rollout_backend == "vllm_async":
             parallel_dims = ParallelDims.from_config(
                 parallesim_config=cosmos_rollout_config.rollout.parallelism
             )
