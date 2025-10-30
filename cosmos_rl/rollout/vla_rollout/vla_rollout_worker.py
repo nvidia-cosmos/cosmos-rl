@@ -17,7 +17,8 @@ import os
 import threading
 import traceback
 import torch
-from typing import List, Dict, Any, Optional
+import time
+from typing import List, Dict, Any, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 
@@ -26,9 +27,11 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data import RLPayload, IdxAndRLPayload
-from cosmos_rl.dispatcher.command import Command
+from cosmos_rl.dispatcher.command import Command, PolicyToRolloutUnicastCommand, RolloutToRolloutBroadcastCommand
 from cosmos_rl.rollout.schema import RolloutResult
-from cosmos_rl.dispatcher.replica import Rollout
+from cosmos_rl.reward.reward_calculator import RewardDispatcher
+from cosmos_rl.utils.constant import COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+import cosmos_rl.utils.distributed as dist_utils
 
 from .vla_rollout import VLARollout
 from .environment_wrappers import LiberoEnvWrapper, RobotwinEnvWrapper
@@ -52,16 +55,14 @@ class VLARolloutWorker(RolloutWorkerBase):
         self.task_suite = self.vla_config.task_suite
         self.num_parallel_envs = self.vla_config.num_parallel_envs
         
-        # Command and prompt queues (inherited from base class)
+        # VLA-specific sampling parameters from rollout config
+        self.temperature = config.rollout.sampling_config.temperature
+        self.n_generation = config.rollout.n_generation
+        
+        # Command and prompt queues (borrowed from vLLM worker pattern)
         self._command_queue: Queue[Command] = Queue()
         self._prompt_queue: Queue[List[IdxAndRLPayload]] = Queue()
         self.current_weight_version = 0
-        
-        # Communication setup (similar to vLLM rollout worker)
-        self.rollout_status_manager = None  # Will be set up during setup()
-        
-        # Data handling
-        self.data_packer = None
         
         # Initialize VLA rollout engine
         self.rollout: VLARollout = VLARollout(self.config, self.tokenizer)
@@ -79,27 +80,21 @@ class VLARolloutWorker(RolloutWorkerBase):
             
         self.background_thread: Optional[threading.Thread] = None
         
+        # Reward dispatcher with VLA-specific payload processing
+        self.reward_dispatcher = RewardDispatcher(
+            payload_per_task=COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+        )
+        
         logger.info(f"Initialized VLA rollout worker for task suite: {self.task_suite}")
         logger.info(f"Parallel environments: {self.num_parallel_envs}")
+        logger.info(f"VLA sampling: temperature={self.temperature}, n_generation={self.n_generation}")
     
     def setup(self, dataset=None, reward_fns=None, filter_reward_fns=None, 
-              val_dataset=None, val_reward_fns=None):
+              val_dataset=None, val_reward_fns=None, num_workers=8):
         """Setup VLA rollout worker with datasets and reward functions"""
         logger.info("Setting up VLA rollout worker")
         
-        # Initialize the VLA rollout engine
-        self.rollout.init_engine(
-            quantization=self.config.rollout.quantization,
-            seed=42,
-            load_format="dummy"
-        )
-        
-        # Setup communication (following vLLM rollout worker pattern)
-        from cosmos_rl.reward.reward_calculator import RewardDispatcher
-        from cosmos_rl.dispatcher.data.packer.base import DataPacker
-        
-        # Setup reward dispatcher (similar to vLLM rollout worker)
-        self.reward_dispatcher = RewardDispatcher()
+        # Setup reward dispatcher with VLA-specific configuration
         self.reward_dispatcher.setup(
             config=self.config,
             dataset=dataset,
@@ -108,167 +103,409 @@ class VLARolloutWorker(RolloutWorkerBase):
             val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
             data_packer=None,  # VLA doesn't use text data packer
-            val_data_packer=None
+            val_data_packer=None,
+            num_workers=num_workers
+            if self.parallel_dims.tp_coord[0] == 0
+            and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
+            else 0,
         )
         
         logger.info("VLA rollout worker setup completed")
     
     def work(self):
-        """Main work loop for VLA rollout worker"""
-        logger.info("Starting VLA rollout worker")
-        
-        try:
-            # Start background threads for command processing
+        """Main work method - borrowed from vLLM worker communication pattern"""
+        # Start the background thread with daemon=True, so it will exit when the main program exits.
+        if self.global_rank == 0:
+            # create a thread to query command as a producer (borrowed from vLLM worker)
             self.background_thread = threading.Thread(
-                target=self._background_work_loop,
-                daemon=True
+                target=self.query_command_from_controller, daemon=True
             )
             self.background_thread.start()
-            
-            # Main work loop - follow vLLM rollout worker pattern
-            self.main_loop()
-                    
-        except KeyboardInterrupt:
-            logger.info("VLA rollout worker interrupted")
-        except Exception as e:
-            logger.error(f"Fatal error in VLA rollout worker: {e}")
-            raise
-        finally:
-            self._cleanup()
+
+        self.main_loop()
+        # Note: VLA doesn't have inference_stream like vLLM
+        self.handle_shutdown()
     
+    # ==================== Communication Methods (borrowed from vLLM worker) ====================
+    
+    def query_command_from_controller(self):
+        """Background task to check commands from the controller (borrowed from vLLM worker)"""
+        while not self.shutdown_signal.is_set():
+            commands = []
+            try:
+                # blocking request
+                commands = self.redis_controller.subscribe_command(self.replica_name)
+            except Exception as e:
+                logger.error(
+                    f"[VLA Rollout] Failed in query commands from controller for replica {self.replica_name}\n: {str(e)}"
+                )
+
+            for instruction in commands:
+                command = Command.depack(instruction)
+                logger.debug(f"[VLA Rollout] Received command: {command.command_type}")
+                self._command_queue.put(command)
+
+    def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
+        """
+        Request new prompts from the controller for both training and validation (borrowed from vLLM worker).
+        """
+        prompts_and_is_end = (None, False)
+        if self.global_rank == 0:
+            if prompt_queue.empty():
+                # blocking request
+                payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
+                prompts_and_is_end = (
+                    payloads if len(payloads) > 0 else None,
+                    is_end,
+                )
+
+        # Broadcast the prompts and is_end to all ranks
+        prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
+        prompts, is_end = prompts_and_is_end
+        if prompts is not None:
+            prompts = [
+                (prompt[0], RLPayload.model_validate(prompt[1])) for prompt in prompts
+            ]
+            prompt_queue.put(prompts)
+        return is_end
+
+    def consume_one_command(self, cmd_pred: Optional[Callable[[Command], bool]] = None):
+        """Consume one command from the queue (borrowed from vLLM worker)"""
+        current_command = None
+        if self.global_rank == 0:
+            if not self._command_queue.empty():
+                if cmd_pred is None:
+                    current_command = self._command_queue.get()
+                else:
+                    if cmd_pred(self._command_queue.queue[0]):
+                        current_command = self._command_queue.get()
+                    else:
+                        # Do not go on if the command is not expected
+                        current_command = None
+
+        current_command = dist_utils.broadcast_object_cpu(current_command)
+
+        if current_command is not None:
+            handler = self.get_rollout_command_handler(type(current_command))
+            if handler is None:
+                raise Exception(
+                    f"No such command supported in VLA rollout {current_command}"
+                )
+            try:
+                handler(self, current_command)
+                logger.debug(
+                    f"[VLA Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"[VLA Rollout] Command execution failed for {current_command._serialize()}"
+                ) from e
+        return current_command
+
+    def consume_command(
+        self,
+        cmd_pred: Optional[Callable[[Command], bool]] = None,
+        timeout=30.0,  # COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT
+    ):
+        """Consume all pending commands (borrowed from vLLM worker)"""
+        # Consume all pending commands for weight sync.
+        # To ensure the weight update is using the up-to-date commands.
+        last_cmd = None
+        none_cnt = 0
+        start_time = time.time()
+        while time.time() - start_time < float(timeout):
+            cmd = self.consume_one_command(cmd_pred=cmd_pred)
+            if cmd is not None:
+                last_cmd = cmd
+                none_cnt = 0
+                start_time = time.time()
+            else:
+                none_cnt += 1
+            if none_cnt >= 5 and (  # COSMOS_ROLLOUT_CMD_WAIT_TIMES
+                (
+                    last_cmd is not None
+                    and not isinstance(last_cmd, PolicyToRolloutUnicastCommand)
+                )
+                or last_cmd is None
+            ):
+                # If continuously get None for 5 times, and the last command is not P2R command, we break.
+                # Since P2R must be followed by another R2R broadcast command, we need wait.
+                break
+            time.sleep(0.1)  # COSMOS_ROLLOUT_CMD_WAIT_INTERVAL
+
+    def send_end_signal(self):
+        """
+        Send end signal to the controller (borrowed from vLLM worker).
+        This is used to notify the controller that the rollout worker has finished processing all prompts.
+        """
+        payloads, is_validation, _, empty = self.report_rollouts(block=True)
+        assert (
+            not is_validation and payloads is None and empty
+        ), f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
+        from cosmos_rl.dispatcher.protocol import RolloutRequest
+        response = RolloutRequest(
+            src_replica_name=self.replica_name,
+            prompt_idxs=[],
+            payloads=[],
+            completions=[],
+            is_end=True,
+        )
+        logger.info(f"[VLA Rollout] Posting rollout end signal to controller: {response}")
+        self.api_client.post_rollout_completion(response)
+
+    def report_rollouts(self, block=False):
+        """Report rollouts to controller (borrowed from vLLM worker)"""
+        while True:
+            payloads, is_validation, step, empty = (
+                self.reward_dispatcher.dequeue_rewards_cal()
+            )
+            if payloads is not None:
+                if is_validation:
+                    break
+                from cosmos_rl.dispatcher.protocol import RolloutRequest
+                response = RolloutRequest(
+                    src_replica_name=self.replica_name,
+                    prompt_idxs=[],
+                    payloads=payloads,
+                    is_end=False,
+                )
+                self.api_client.post_rollout_completion(response)
+            elif not block or empty:
+                break
+        return payloads, is_validation, step, empty
+
     @torch.no_grad()
     def main_loop(self):
-        """Main processing loop following vLLM rollout worker pattern"""
-        while True:
-            try:
-                # Process commands from controller
-                if not self._command_queue.empty():
-                    command = self._command_queue.get_nowait()
-                    self._process_command(command)
-                
-                # Check if we can process rollouts
-                if self.state.prompt_consume_end():
-                    assert (
-                        self._prompt_queue.empty() and self.state.prompt_fetch_end()
-                    ), "[VLA Rollout] If prompts are all consumed, prompt queue should be empty and prompt end event should be set."
-                    continue
-                elif self._prompt_queue.empty():
-                    continue
-                else:
-                    logger.debug(f"[VLA Rollout] Generate start for rank {self.global_rank}")
+        """Main processing loop (adapted from vLLM worker for VLA rollouts)"""
+        while not self.shutdown_signal.is_set():
+            self.consume_command(cmd_pred=None)
+            # Note: VLA doesn't have validation flag like vLLM for now
+            # if self.validation_flag.is_set():
+            #     self.do_validation()
 
-                    # Check if the prompt is valid for the current weight version
-                    first_payload: RLPayload = self._prompt_queue.queue[0][0].payload
-                    is_valid_prompt_for_current_weight_version = (
-                        first_payload.weight_version <= self.current_weight_version
-                    )
-
-                    if not is_valid_prompt_for_current_weight_version:
-                        # Wait until the weight version is updated
-                        continue
-
-                    # Get batch of prompts to process
-                    prompt_id_and_payload_list: List[IdxAndRLPayload] = (
-                        self._prompt_queue.get()
-                    )
-                    payloads: List[RLPayload] = [
-                        idx_and_payload.payload for idx_and_payload in prompt_id_and_payload_list
-                    ]
-
-                    # Generate VLA rollouts
-                    rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
-                        payloads=payloads
-                    )
-
-                    if len(rollout_results) == 0:
-                        logger.warning("[VLA Rollout] No rollout results generated")
-                        continue
-
-                    assert len(rollout_results) == len(
-                        payloads
-                    ), f"Error: VLA rollout returned {len(rollout_results)} results for {len(payloads)} payloads"
-
-                    # Process and send results back to controller
-                    self._send_rollout_results(rollout_results, prompt_id_and_payload_list)
-                    
-            except Exception as e:
-                logger.error(f"Error in VLA rollout main loop: {e}")
-                traceback.print_exc()
+            # If weight is not ready, nothing else to do.
+            if not self.state.weight_synced():
                 continue
-    
-    def _background_work_loop(self):
-        """Background thread for continuous processing"""
-        logger.info("Starting VLA rollout background work loop")
-        
-        while True:
-            try:
-                # Background tasks like environment maintenance
-                self._maintain_environments()
-                
-                # Sleep to avoid busy waiting
-                threading.Event().wait(0.1)
-                
-            except Exception as e:
-                logger.error(f"Error in background work loop: {e}")
+
+            # try fetching new prompts if no ending signal is set
+            if not self.state.prompt_fetch_end():
+                no_more_prompts = self.request_new_prompts(
+                    self.batch_size, self._prompt_queue
+                )
+                if no_more_prompts:
+                    logger.info(
+                        f"[VLA Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
+                    )
+                    self.state.set_prompt_fetch_end()
+                    # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
+                    if self._prompt_queue.empty():
+                        self.state.set_prompt_consume_end()
+                        if self.global_rank == 0:
+                            self.send_end_signal()
+            _, is_validation, _, _ = self.report_rollouts()
+            assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
+            if self.state.prompt_consume_end():
+                assert (
+                    self._prompt_queue.empty() and self.state.prompt_fetch_end()
+                ), "[VLA Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
                 continue
+            elif self._prompt_queue.empty():
+                continue
+            else:
+                logger.debug(f"[VLA Rollout] generate start for rank {self.global_rank}")
+
+                # Check if the prompt is valid for the current weight version
+                first_payload: RLPayload = self._prompt_queue.queue[0][0][1]
+                is_valid_prompt_for_current_weight_version = (
+                    first_payload.weight_version <= self.current_weight_version
+                )
+
+                if not is_valid_prompt_for_current_weight_version:
+                    # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
+                    continue
+
+                prompt_id_and_payload_list: List[IdxAndRLPayload] = (
+                    self._prompt_queue.get()
+                )
+                payloads: List[RLPayload] = [
+                    payload for _, payload in prompt_id_and_payload_list
+                ]
+
+                # Use VLA rollout generation instead of vLLM
+                rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
+                    payloads=payloads
+                )
+
+                if len(rollout_results) == 0:
+                    continue
+
+                assert len(rollout_results) == len(
+                    payloads
+                ), f"Error: VLA returned {len(rollout_results)} for {len(payloads)}"
+
+                # Process and send results back to controller
+                self._send_rollout_results(rollout_results, prompt_id_and_payload_list)
+
+            if self.state.prompt_fetch_end() and self._prompt_queue.empty():
+                self.state.set_prompt_consume_end()
+                if self.global_rank == 0:
+                    self.send_end_signal()
+        logger.info(f"[VLA Rollout] Main loop of {self.replica_name} finished")
     
-    def _process_command(self, command: Command):
-        """Process command from controller"""
-        logger.debug(f"Processing command: {command.command_type}")
+    # ==================== Command Handlers (simplified for VLA) ====================
+    
+    @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
+    @torch.no_grad()
+    def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
+        """
+        Sync VLA model weights from policy to rollout worker via NCCL
         
-        if command.command_type == "SYNC_WEIGHT":
-            self._sync_weights(command)
-        elif command.command_type == "UPDATE_CONFIG":
-            self._update_config(command)
+        Flow:
+        1. Initialize VLA model structure (if first sync)
+        2. Setup NCCL communicator with policy worker
+        3. Receive weights from policy worker via NCCL P2P
+        4. Load weights into rollout model
+        """
+        logger.info(f"[VLA Rollout] Received weight sync command from {command.src_replica_name}")
+        
+        # Lazy initialization of the VLA engine
+        # Always use "dummy" mode for weight sync - weights will come from policy worker via NCCL
+        # This is much faster than loading full weights from HF checkpoint
+        if not self.rollout.is_engine_initialized():
+            logger.info(f"[VLA Rollout] Initializing VLA engine (dummy mode for weight sync)")
+            self.rollout.init_engine(
+                quantization="none",  # VLA models don't use quantization
+                seed=self.config.rollout.seed,
+                load_format="dummy"  # Structure only, weights from policy worker
+            )
+        
+        # Only process if command is for this replica
+        if command.dst_replica_name != self.replica_name:
+            return
+        
+        # Setup NCCL communicator for policy-to-rollout communication
+        nccl_unique_id_key = command.src_replica_name + "_" + command.dst_replica_name
+        
+        if not hasattr(self, "policy_to_rollout_nccl_communicators"):
+            self.policy_to_rollout_nccl_communicators = {}
+        
+        if nccl_unique_id_key in self.policy_to_rollout_nccl_communicators:
+            logger.debug(f"[VLA Rollout] Reusing cached communicator for {nccl_unique_id_key}")
+            communicator_index = self.policy_to_rollout_nccl_communicators[nccl_unique_id_key]
         else:
-            logger.warning(f"Unknown command type: {command.command_type}")
-    
-    def _sync_weights(self, command: Command):
-        """Sync model weights from policy workers"""
-        logger.info("Syncing weights for VLA rollout")
+            logger.debug(f"[VLA Rollout] Setting up NCCL communicator for {nccl_unique_id_key}")
+            # Query NCCL group ID from controller
+            nccl_group_id = self.query_nccl_unique_id_from_controller(nccl_unique_id_key)
+            if nccl_group_id is None:
+                raise RuntimeError("[VLA Rollout] Failed to query nccl group_id from controller!")
+            
+            # Create NCCL communicator
+            from cosmos_rl.comm.nccl_p2p import create_nccl_comm
+            communicator_index = create_nccl_comm(
+                nccl_group_id,
+                self.global_rank + command.src_replica_size,  # Rollout rank in combined group
+                self.world_size + command.src_replica_size,  # Total size
+            )
+            self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = communicator_index
+            logger.info(f"[VLA Rollout] NCCL communicator created for weight sync")
         
-        try:
-            # Weight synchronization logic
-            # TODO: Implement weight sync with VLA model
-            self.current_weight_version += 1
+        # Receive weights from policy worker
+        self._receive_weights_from_policy(communicator_index, command.trainable_only)
+        
+        # Mark weight as synced
+        self.state.set_weight_synced()
+        self.current_weight_version += 1
+        
+        logger.info(f"[VLA Rollout] ✅ Weight sync completed, version: {self.current_weight_version}")
+    
+    def _receive_weights_from_policy(self, communicator_index: int, trainable_only: bool):
+        """
+        Receive model weights from policy worker via NCCL
+        
+        Args:
+            communicator_index: NCCL communicator index
+            trainable_only: If True, only sync trainable parameters (incremental update)
+        """
+        import time
+        from cosmos_rl.comm.nccl_p2p import recv, nccl_stream_synchronize
+        
+        logger.info(f"[VLA Rollout] Starting weight receive (trainable_only={trainable_only})...")
+        
+        # Get model parameters to receive
+        model = self.rollout.module
+        if trainable_only:
+            # Only sync trainable parameters (faster for incremental updates)
+            params_to_sync = {name: param for name, param in model.named_parameters() if param.requires_grad}
+        else:
+            # Sync all parameters (first sync)
+            params_to_sync = dict(model.named_parameters())
+        
+        logger.info(f"[VLA Rollout] Receiving {len(params_to_sync)} parameters...")
+        
+        st = time.time()
+        total_bytes_received = 0
+        
+        # Create inference stream for async communication
+        if not hasattr(self, 'inference_stream'):
+            self.inference_stream = torch.cuda.Stream()
+        
+        with torch.cuda.stream(self.inference_stream):
+            # Receive each parameter
+            for param_name, param in params_to_sync.items():
+                # Receive parameter data from policy worker
+                bytes_received = recv(
+                    param.data,
+                    communicator_index,
+                    src=0,  # Policy worker is rank 0 in this P2P group
+                    stream=self.inference_stream.cuda_stream
+                )
+                total_bytes_received += bytes_received
+            
+            # Synchronize to ensure all receives complete
+            nccl_stream_synchronize(self.inference_stream.cuda_stream)
+        
+        elapsed = time.time() - st
+        throughput_gbps = (total_bytes_received / elapsed) / (1024 ** 3)
+        
+        logger.info(
+            f"[VLA Rollout] ✅ Received {len(params_to_sync)} parameters "
+            f"({total_bytes_received / (1024**2):.2f} MB) in {elapsed:.2f}s "
+            f"({throughput_gbps:.2f} GB/s)"
+        )
+    
+    def query_nccl_unique_id_from_controller(self, unique_id_key: str):
+        """
+        Query NCCL unique ID from controller for P2P communication setup
+        
+        This is needed for establishing NCCL communicators between policy and rollout workers.
+        """
+        return self.api_client.post_nccl_comm_acceptor(unique_id_key)
+
+    @RolloutWorkerBase.register_rollout_command_handler(RolloutToRolloutBroadcastCommand)
+    def broadcast_to_all_rollout_replica(self, broadcast_command: RolloutToRolloutBroadcastCommand):
+        """
+        Simplified rollout-to-rollout broadcast for VLA models (adapted from vLLM worker)
+        """
+        logger.info(f"[VLA Rollout] Received broadcast command from {broadcast_command.src_replica_name}")
+        
+        # For VLA models, we'll implement simplified broadcast handling
+        # TODO: Implement actual VLA model weight broadcasting between replicas
+        
+        current_step = broadcast_command.weight_step
+        if current_step is not None:
+            assert (
+                current_step >= self.current_weight_version
+            ), f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
+            self.current_weight_version = current_step
+
+        if not self.state.weight_synced():
             self.state.set_weight_synced()
-            
-            logger.info(f"Weight sync completed, version: {self.current_weight_version}")
-            
-        except Exception as e:
-            logger.error(f"Failed to sync weights: {e}")
-    
-    def _update_config(self, command: Command):
-        """Update configuration from controller"""
-        logger.info("Updating VLA rollout configuration")
-        
-        # TODO: Implement config updates
-        pass
-    
-    def _process_rollout_batch(self, prompts_batch: List[IdxAndRLPayload]):
-        """Process a batch of rollout requests"""
-        logger.info(f"Processing VLA rollout batch with {len(prompts_batch)} prompts")
-        
-        try:
-            # Extract prompts and metadata
-            prompts = []
-            indices = []
-            
-            for idx_and_payload in prompts_batch:
-                prompts.append(idx_and_payload.payload.prompt)
-                indices.append(idx_and_payload.idx)
-            
-            # Generate VLA rollouts
-            rollout_results = self.rollout.rollout_generation(prompts)
-            
-            # Process results and send back to controller
-            self._send_rollout_results(rollout_results, indices)
-            
-            logger.info(f"Completed VLA rollout batch processing")
-            
-        except Exception as e:
-            logger.error(f"Error processing rollout batch: {e}")
-            raise
+
+        logger.info(f"[VLA Rollout] Broadcast handling completed for step {current_step}")
+
+        if broadcast_command.replica_should_stop():
+            self.shutdown_signal.set()
+            self.shutdown_mp_signal.set()
     
     def _send_rollout_results(self, results: List[RolloutResult], prompt_id_and_payload_list: List[IdxAndRLPayload]):
         """Send rollout results back to controller via reward dispatcher"""
@@ -362,29 +599,29 @@ class VLARolloutWorker(RolloutWorkerBase):
             if hasattr(trial_seed, 'item'):
                 trial_seed = trial_seed.item()
             
-                # Create environment configuration
-                task_config = {
-                    'task_suite_name': task_suite_name,
-                    'task_name': task_suite_name,  # For compatibility
-                    'task_id': int(task_id),
-                    'trial_id': int(trial_id),
-                    'trial_seed': int(trial_seed),
-                    'max_steps': self._get_max_steps_for_task(task_suite_name),
-                    **self.vla_config.env_config
-                }
+            # Create environment configuration
+            task_config = {
+                'task_suite_name': task_suite_name,
+                'task_name': task_suite_name,  # For compatibility
+                'task_id': int(task_id),
+                'trial_id': int(trial_id),
+                'trial_seed': int(trial_seed),
+                'max_steps': 400,  # Default max steps
+                **self.vla_config.env_config
+            }
             
             return task_config
             
         except Exception as e:
             logger.warning(f"Failed to extract LIBERO task info from payload: {e}")
-                # Return default configuration
+            # Return default configuration
             return {
                 'task_suite_name': self.task_suite,
                 'task_name': self.task_suite,
                 'task_id': 0,
                 'trial_id': 0,
                 'trial_seed': -1,
-                'max_steps': self.max_steps,
+                'max_steps': 400,
                 **self.vla_config.env_config
             }
     
@@ -441,39 +678,3 @@ class VLARolloutWorker(RolloutWorkerBase):
             logger.debug(f"Error parsing task from prompt: {e}")
         
         return task_suite_name, task_id, trial_id, trial_seed
-    
-    def _maintain_environments(self):
-        """Maintain environment pool health"""
-        # Check environment status and restart if needed
-        for env_id, env_wrapper in self.env_pool.items():
-            if not env_wrapper.is_active() and env_wrapper.env is not None:
-                # Environment may need reset or cleanup
-                try:
-                    env_wrapper.reset()
-                except Exception as e:
-                    logger.warning(f"Failed to reset environment {env_id}: {e}")
-    
-    def _cleanup(self):
-        """Cleanup resources"""
-        logger.info("Cleaning up VLA rollout worker")
-        
-        # Close all environments
-        for env_id, env_wrapper in self.env_pool.items():
-            try:
-                env_wrapper.close()
-            except Exception as e:
-                logger.error(f"Error closing environment {env_id}: {e}")
-        
-        # Shutdown thread pool
-        if hasattr(self, 'env_thread_pool'):
-            self.env_thread_pool.shutdown(wait=True)
-        
-        # Cleanup rollout engine
-        if hasattr(self, 'rollout'):
-            self.rollout.cleanup()
-        
-        logger.info("VLA rollout worker cleanup completed")
-    
-    def __del__(self):
-        """Destructor"""
-        self._cleanup()

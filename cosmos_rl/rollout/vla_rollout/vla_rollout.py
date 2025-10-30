@@ -130,40 +130,152 @@ class VLARollout(RolloutBase):
         return max_steps_map.get(task_suite, self.vla_config.max_episode_length)
     
     def init_engine(self, quantization: str, seed: int, load_format: str):
-        """Initialize the VLA processing engine"""
+        """
+        Initialize the VLA processing engine with actual model loading
+        
+        Args:
+            quantization: Quantization mode (unused for VLA, kept for API compatibility)
+            seed: Random seed
+            load_format: "dummy" for structure only, "auto" for full weight loading
+        """
         try:
-            # Initialize the processor for VLA models
+            logger.info(f"Initializing VLA engine with load_format={load_format}")
+            
             model_path = self.config.policy.model_name_or_path
+            
+            # Initialize the processor for VLA models
+            logger.info(f"Loading VLA processor from {model_path}")
             self.processor = AutoProcessor.from_pretrained(
                 model_path, 
                 trust_remote_code=True
             )
-            logger.info(f"Initialized VLA processor from {model_path}")
+            logger.info("✅ VLA processor loaded")
             
-            # TODO: Initialize actual VLA model module
-            # For now, create a placeholder that will work with the inference system
-            self.module = type('DummyModule', (), {
-                'norm_stats': {
-                    self.unnorm_key: {
-                        'proprio': {'mean': 0.0, 'std': 1.0}
-                    }
-                },
-                'eval': lambda: None,
-                'train': lambda: None
-            })()
+            # Initialize VLA model
+            logger.info(f"Initializing VLA model structure for {self.vla_type}")
+            
+            if load_format == "dummy":
+                # Load model structure only (weights will come from policy worker)
+                self._init_dummy_vla_model(model_path)
+            else:  # "auto"
+                # Load full model with weights (for checkpointing/resume)
+                self._init_full_vla_model(model_path)
             
             # Initialize VLA model inference
-            # self.model_inference = VLAModelInference(self.module, self.processor, self)
+            self.model_inference = VLAModelInference(self.module, self.processor, self)
+            logger.info("✅ VLA model inference initialized")
             
-            logger.info("VLA engine initialization completed")
+            logger.info("✅ VLA engine initialization completed")
             
         except Exception as e:
-            logger.error(f"Failed to initialize VLA processor: {e}")
-            # Continue with dummy setup for testing
-            logger.warning("Continuing with dummy VLA setup")
-            self.processor = None
-            self.module = None
-            self.model_inference = None
+            logger.error(f"Failed to initialize VLA engine: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+    
+    def _init_dummy_vla_model(self, model_path: str):
+        """
+        Initialize VLA model structure without loading weights (dummy mode)
+        Weights will be synchronized from policy worker via NCCL
+        
+        This mode is for distributed training where policy workers send weights
+        to rollout workers for data parallelism.
+        """
+        from cosmos_rl.policy.model.vla import VLAModel, VLAArgs
+        from cosmos_rl.policy.model.vla_utils import create_vla_config
+        
+        logger.info("Creating VLA model structure (dummy weights, for weight sync)...")
+        
+        # Create VLA config with norm_stats
+        vla_config, processor, tokenizer = create_vla_config(
+            model_path,
+            cosmos_config=self.config,
+            model=self.vla_type
+        )
+        
+        # Create VLA args
+        vla_args = VLAArgs(
+            vla_type=self.vla_type,
+            use_proprio=self.config.vla.use_proprio,
+            proprio_dim=self.config.vla.action_dim,
+            num_images_in_input=self.config.vla.num_images_in_input,
+            hf_config=vla_config
+        )
+        
+        # Initialize model structure (no weight loading)
+        vla_model = VLAModel.from_model_args(vla_args)
+        self.module = vla_model.model  # Get the inner OpenVLAForActionPrediction model
+        self.module.eval()
+        
+        # Save processor and tokenizer
+        self.processor = processor
+        self.tokenizer = tokenizer
+        
+        # Move to GPU
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        self.module = self.module.to(device)
+        
+        logger.info(f"✅ VLA model structure created (device: {device})")
+        logger.info(f"   Weights will be synchronized from policy worker")
+        logger.info(f"   Model has norm_stats: {hasattr(self.module, 'norm_stats')}")
+        if hasattr(self.module, 'norm_stats'):
+            logger.info(f"   norm_stats keys: {list(self.module.norm_stats.keys())}")
+    
+    def _init_full_vla_model(self, model_path: str):
+        """
+        Initialize VLA model with full weight loading (auto mode)
+        Used for standalone rollout or verification at init
+        
+        Uses HF's from_pretrained interface (like RLinf) - simple and fast
+        for single-GPU rollout with data parallelism.
+        """
+        from cosmos_rl.policy.model.vla import VLAModel, VLAArgs
+        from cosmos_rl.policy.model.vla_utils import create_vla_config
+        
+        logger.info("Loading full VLA model with weights (single-GPU, like RLinf)...")
+        
+        # Create VLA config (includes norm_stats from dataset_statistics.json)
+        vla_config, processor, tokenizer = create_vla_config(
+            model_path,
+            cosmos_config=self.config,
+            model=self.vla_type
+        )
+        
+        # Create VLA args
+        vla_args = VLAArgs(
+            vla_type=self.vla_type,
+            use_proprio=self.config.vla.use_proprio,
+            proprio_dim=self.config.vla.action_dim,
+            num_images_in_input=self.config.vla.num_images_in_input,
+            hf_config=vla_config
+        )
+        
+        # Initialize model structure
+        vla_model = VLAModel.from_model_args(vla_args)
+        
+        # Load weights using HF interface (simple, like RLinf)
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        vla_model.load_from_checkpoint(
+            model_name_or_path=model_path,
+            parallel_dims=None,  # Single GPU rollout (data parallelism only)
+            device=device
+        )
+        
+        # Save references
+        self.module = vla_model.model
+        self.module.eval()
+        self.processor = vla_model.processor  # Save processor from load_from_checkpoint
+        self.tokenizer = tokenizer
+        
+        logger.info("✅ Full VLA model loaded with weights (single-GPU)")
+        logger.info(f"   Device: {device}")
+        logger.info(f"   Model has norm_stats: {hasattr(self.module, 'norm_stats')}")
+        if hasattr(self.module, 'norm_stats'):
+            logger.info(f"   norm_stats keys: {list(self.module.norm_stats.keys())}")
+    
+    def is_engine_initialized(self) -> bool:
+        """Check if the VLA engine has been initialized"""
+        return self.module is not None and self.processor is not None
     
     def _initialize_environments_for_payloads(self, payloads: List[RLPayload]) -> List[Any]:
         """Initialize environments based on task information from payloads
@@ -354,7 +466,6 @@ class VLARollout(RolloutBase):
         This follows the exact pattern from SimpleVLA-RL's _generate_minibatch_libero
         """
         logger.info(f"Starting VLA episode batch with {batch_size} environments")
-        import pdb; pdb.set_trace()
         
         # Initialize all environments
         for env_wrapper in env_wrappers:

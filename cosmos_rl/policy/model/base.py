@@ -29,6 +29,8 @@ from functools import partial
 from typing import Mapping
 from cosmos_rl.policy.lora.plugin import LoraInjectedLinear
 
+from cosmos_rl.policy.model.vla_utils import create_vla_config
+
 
 class BaseModel(torch.nn.Module, ABC):
     _gradient_checkpointing_enabled = False
@@ -506,9 +508,17 @@ class ModelRegistry:
     def build_model(cls, config: CosmosConfig):
         model_name_or_path = config.policy.model_name_or_path
         model = None
-        hf_config = util.retry(AutoConfig.from_pretrained)(
-            model_name_or_path, trust_remote_code=True
-        )
+        if config.vla.vla_type:
+            hf_config, _, _ = create_vla_config(
+                config.policy.model_name_or_path, 
+                cosmos_config=config,
+                model=config.vla.vla_type
+            )
+        else:
+            hf_config = util.retry(AutoConfig.from_pretrained)(
+                model_name_or_path, trust_remote_code=True
+            )
+
         model_type = hf_config.model_type
         is_supported_model_type = model_type in ModelRegistry._MODEL_REGISTRY
         if not is_supported_model_type:
@@ -577,6 +587,10 @@ class ModelRegistry:
                 and hf_config.llm_config.model_type == "gpt_oss"
             ):
                 logger.info(f"Using cuda for model build of {model_name_or_path}.")
+                device = "cuda"
+            # Workaround for VLA models - TIMM vision backbone incompatible with meta tensors
+            elif hf_config.model_type == "openvla":
+                logger.info(f"Using cuda for VLA model build of {model_name_or_path} (TIMM meta tensor incompatibility).")
                 device = "cuda"
             return device
 

@@ -68,11 +68,16 @@ class VLAModelInference:
         # VLA preprocessing
         self.vla_preprocess()
         
-        logger.info(f"Initialized VLA model inference for {config.vla}")
+        # Get vla_type from config (either config.vla_type or config.vla)
+        vla_type = getattr(config, 'vla_type', getattr(config, 'vla', 'unknown'))
+        logger.info(f"Initialized VLA model inference for {vla_type}")
     
     def vla_preprocess(self):
         """VLA preprocessing setup (matching SimpleVLA-RL)"""
-        if hasattr(self.config, 'vla') and self.config.vla in ["openvla", "openvla-oft"]:
+        # Get vla_type from config (handles both config.vla_type and config.vla)
+        vla_type = getattr(self.config, 'vla_type', getattr(self.config, 'vla', None))
+        
+        if vla_type and vla_type in ["openvla", "openvla-oft"]:
             try:
                 import tensorflow as tf
                 gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -82,7 +87,7 @@ class VLAModelInference:
             except ImportError:
                 logger.warning("TensorFlow not available for GPU memory growth setup")
         
-        if hasattr(self.config, 'vla') and self.config.vla in ["openvla-oft"]:
+        if vla_type and vla_type in ["openvla-oft"]:
             # Handle normalization key setup
             if hasattr(self.module, 'norm_stats') and hasattr(self.config, 'unnorm_key'):
                 if "libero" in self.config.task_suite_name:

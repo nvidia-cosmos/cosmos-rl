@@ -1019,9 +1019,20 @@ class VLAConfig(BaseModel):
     )
     
     vla_type: str = Field(
-        default="openvla",
+        default="",
         description="Type of VLA model architecture",
-        choices=["openvla", "rt1", "rt2"],
+        choices=["openvla", "openvla-oft"],
+    )
+    
+    # VLA Model-specific parameters
+    use_proprio: bool = Field(
+        default=False,
+        description="Whether to use proprioceptive information in VLA model",
+    )
+    
+    num_images_in_input: int = Field(
+        default=1,
+        description="Number of images in VLA model input",
     )
     
     env_config: Dict[str, Any] = Field(
@@ -1039,6 +1050,8 @@ class VLAConfig(BaseModel):
             raise ValueError("max_episode_length must be greater than 0")
         if self.image_size <= 0:
             raise ValueError("image_size must be greater than 0")
+        if self.num_images_in_input <= 0:
+            raise ValueError("num_images_in_input must be greater than 0")
         return self
 
 

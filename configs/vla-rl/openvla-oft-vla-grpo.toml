@@ -70,13 +70,13 @@ enforce_eager = false
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-dp_shard_size = 4
+dp_shard_size = 1
 pp_size = 1
 dp_replicate_size = 1
 cp_rotate_method = "allgather"
 
 [rollout.parallelism]
-n_init_replicas = 4
+n_init_replicas = 1
 tp_size = 1
 cp_size = 1
 dp_shard_size = 1
@@ -84,7 +84,7 @@ pp_size = 1
 dp_replicate_size = 1
 
 [validation]
-enable = false
+enable = true
 freq = 30
 batch_size = 496
 dataset.name = "libero"
@@ -93,6 +93,7 @@ dataset.split = "test"
 
 # VLA-specific configuration
 [vla]
+vla_type = "openvla-oft"
 task_suite = "libero_10"
 num_parallel_envs = 4
 action_dim = 7
@@ -102,18 +103,10 @@ use_multi_view = false
 use_wrist_camera = false
 action_normalization = "minmax"
 reward_type = "binary"
+use_proprio = false
 
 [vla.env_config]
 headless = true
 resolution = 256
-model_family = "openvla"
 benchmark_name = "libero_10"
 num_steps_wait = 10
-
-[validation]
-enable = false
-freq = 30
-batch_size = 496
-dataset.name = "libero"
-dataset.subset = "libero_10"
-dataset.split = "test"

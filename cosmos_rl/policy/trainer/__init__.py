@@ -40,7 +40,7 @@ from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
 from cosmos_rl.policy.kernel.modeling_utils import set_flash_attn_deterministic
 from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
-
+from cosmos_rl.policy.model.vla_utils import create_vla_config
 
 class Trainer(CommMixin):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
@@ -69,36 +69,44 @@ class Trainer(CommMixin):
         self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
         self.check_config()
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            config.policy.model_name_or_path,
-            trust_remote_code=True,
-        )
-        # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
-        if getattr(self.tokenizer, "pad_token_id", None) is None:
-            try:
-                logger.warning(
-                    f"Tokenizer for {config.policy.model_name_or_path} has no pad_token_id, try to use eos_token_id({self.tokenizer.eos_token_id}) as pad_token_id"
-                )
-                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-            except Exception as e:
-                logger.warning(
-                    f"Failed to set pad_token_id with eos_token_id, error = {e}, ignore if not needed"
-                )
 
-        self.hf_config = util.retry(AutoConfig.from_pretrained)(
-            config.policy.model_name_or_path,
-            trust_remote_code=True,
-        )
-        try:
-            self.hf_processor = util.retry(AutoProcessor.from_pretrained)(
+        if self.config.vla.vla_type:
+            self.hf_config, self.hf_processor, self.tokenizer = create_vla_config(
+                config.policy.model_name_or_path, 
+                cosmos_config=self.config,
+                model=self.config.vla.vla_type
+            )
+        else:
+            self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
                 config.policy.model_name_or_path,
                 trust_remote_code=True,
             )
-        except Exception as e:
-            self.hf_processor = None
-            logger.info(
-                f"Failed to load processor for {config.policy.model_name_or_path}, using tokenizer as processor, ignore if not needed, error = {e}"
+            # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
+            if getattr(self.tokenizer, "pad_token_id", None) is None:
+                try:
+                    logger.warning(
+                        f"Tokenizer for {config.policy.model_name_or_path} has no pad_token_id, try to use eos_token_id({self.tokenizer.eos_token_id}) as pad_token_id"
+                    )
+                    self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to set pad_token_id with eos_token_id, error = {e}, ignore if not needed"
+                    )
+
+            self.hf_config = util.retry(AutoConfig.from_pretrained)(
+                config.policy.model_name_or_path,
+                trust_remote_code=True,
             )
+            try:
+                self.hf_processor = util.retry(AutoProcessor.from_pretrained)(
+                    config.policy.model_name_or_path,
+                    trust_remote_code=True,
+                )
+            except Exception as e:
+                self.hf_processor = None
+                logger.info(
+                    f"Failed to load processor for {config.policy.model_name_or_path}, using tokenizer as processor, ignore if not needed, error = {e}"
+                )
 
         self.train_stream = torch.cuda.current_stream()
         self.init_comm()
