@@ -61,6 +61,10 @@ def run_rollout(*args, **kwargs):
                 filter_reward_fns=kwargs.get("filter_reward_fns"),
                 val_dataset=kwargs.get("val_dataset"),
                 val_reward_fns=kwargs.get("val_reward_fns"),
+                sampler=kwargs.get("sampler"),
+                batch_sampler=kwargs.get("batch_sampler"),
+                val_sampler=kwargs.get("val_sampler"),
+                val_batch_sampler=kwargs.get("val_batch_sampler"),
             )
         elif rollout_backend == "trtllm":
             try:

@@ -55,6 +55,10 @@ class RLPayload(BaseModel):
         default=None, description="The input prompt for the rollout."
     )
 
+    prompt_idx: int = Field(
+        default=-1, description="The index of the prompt for the rollout."
+    )
+
     conversation: Optional[ConversationType] = Field(
         default=None, description="The input conversation for the rollout."
     )
