@@ -109,10 +109,6 @@ def apply_tp(
         model, enable_float8_tensorwise_tp=enable_float8_tensorwise_tp
     )
 
-    if tp_plans is None:
-        logger.warning("No TP plans found. Skip TP.")
-        return
-
     parallelize_module(
         module=model.model,
         device_mesh=tp_mesh,

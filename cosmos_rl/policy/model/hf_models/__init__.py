@@ -602,8 +602,10 @@ class HFModel(BaseModel):
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
 
         for name, tensor in hf_state_dict.items():
+            if self.tp_slice_dim_map is not None:
+                tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, shared_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims
+                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
             )
 
             target_tensor = self_state_dict[dest_name]
