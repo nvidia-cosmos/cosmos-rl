@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Callable
+from typing import Optional, Callable, List, Dict, Iterator, Tuple
 from itertools import islice
 import math
+from tqdm import tqdm
 
+import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from transformers import AutoTokenizer
 
@@ -27,6 +29,7 @@ from cosmos_rl.dispatcher.data import (
     RLPayload,
     CosmosValidationDataset,
 )
+from cosmos_rl.dispatcher.data import IdxAndRLPayload
 from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.logging import logger
@@ -270,8 +273,121 @@ class DataFetcher:
             self.val_dataset = None
             self.val_dataloader = None
 
+        # validation
+        self.val_datasize: Optional[int] = (
+            0 if self.val_dataset is None else len(self.val_dataset.val_set)
+        )
+        self.val_iters: Dict[int, Iterator] = {}
+        self.activated_val_iter: Optional[Iterator] = None
+        self.activated_val_tqdm: Optional[tqdm] = None
+
         self.remain_samples_num = remain_samples_num
 
-    def get_payload_by_index(self, index: int) -> RLPayload:
-        # FIXME: (lms) support both training and validation datasets.
-        return self.dataset.train_set[index][1].prompt
+    def get_batched_prompt(
+        self, n: int, validation_step: Optional[int] = None
+    ) -> Tuple[bool, List[IdxAndRLPayload]]:
+        add_answer = (
+            self.config.rollout.multi_turn_config.enable
+            or not self.config.rollout.reference_answer_in_local
+        )
+        # query n prompts from the dataset [idx, payload]
+        prompt_id_and_payload_list: List[IdxAndRLPayload] = []
+        is_end = False
+
+        is_validation = validation_step is not None
+
+        if is_validation:
+            iterator = self.validation_get_dataloader(validation_step)
+            batch_size = self.val_batch_size
+        else:
+            iterator = self.train_dataloader_iter
+            batch_size = self.rollout_batch_size
+
+        def _next_payload(
+            iterator, add_answer: bool
+        ) -> tuple[List[int], List[RLPayload]]:
+            idxs, payloads = next(iterator)
+            assert len(idxs) <= batch_size
+            assert len(payloads) <= batch_size
+            assert len(idxs) == len(payloads)
+            updated_payloads: List[RLPayload] = []
+            for idx, payload in zip(idxs, payloads):
+                if add_answer:
+                    if is_validation:
+                        payload.reference_answer = (
+                            self.val_dataset.val_set.get_reference_answer(idx)
+                        )
+                    else:
+                        payload.reference_answer = (
+                            self.dataset.train_set.get_reference_answer(idx)
+                        )
+                updated_payloads.append(payload)
+            return idxs, updated_payloads
+
+        for _ in range(math.ceil(n / batch_size)):
+            payload: RLPayload | None = None
+            try:
+                idxs, payloads = _next_payload(iterator, add_answer)
+            except StopIteration:
+                if not is_validation:
+                    self.epoch += 1
+                    if self.epoch <= self.config.train.epoch:
+                        logger.info(f"[Controller] Epoch {self.epoch} start.")
+                        iterator = iter(self.train_dataloader)
+                        self.train_dataloader_iter = iterator
+
+                        idxs, payloads = _next_payload(iterator, add_answer)
+                    else:
+                        if self.epoch == self.config.train.epoch + 1:
+                            # We only log this all finished information once.
+                            logger.info(
+                                "[Controller] All epochs finished fetching rollout prompts, wait for rollouts generation and training to complete."
+                            )
+                        is_end = True
+                        break
+                else:
+                    is_end = True
+                    break
+            assert len(idxs) == len(payloads)
+            for idx, payload in zip(idxs, payloads):
+                idx = idx.item() if isinstance(idx, torch.Tensor) else idx
+                if self.config.train.local_dataset:
+                    # If local dataset is enabled, we set prompt to None. And rollout worker will query
+                    # the prompt from local dataset.
+                    payload.prompt = None
+                prompt_id_and_payload_list.append((idx, payload))
+
+        return prompt_id_and_payload_list, is_end
+
+    def validation_activate_dataloader(self, validation_step: int):
+        if validation_step not in self.val_iters:
+            logger.info(
+                f"[DataFetcher] Activating validation dataloader for step {validation_step}, with length {(self.val_datasize or len(self.val_dataloader))}"
+            )
+            self.val_iters[validation_step] = iter(self.val_dataloader)
+            self.activated_val_iter = self.val_iters[validation_step]
+            self.activated_val_tqdm = tqdm(
+                desc="validation",
+                total=(self.val_datasize or len(self.val_dataloader)),
+            )
+
+    def validation_get_dataloader(
+        self, validation_step: Optional[int] = None
+    ) -> Iterator:
+        if validation_step is None:
+            return self.activated_val_iter
+        else:
+            return self.val_iters[validation_step]
+
+    def get_payload_by_index(
+        self, index: int, is_validation: bool = False
+    ) -> RLPayload:
+        if is_validation:
+            return self.val_dataset.val_set[index][1].prompt
+        else:
+            return self.dataset.train_set[index][1].prompt
+
+    def clear_validation_status(self):
+        self.activated_val_iter = None
+        self.activated_val_tqdm.clear()
+        self.activated_val_tqdm = None

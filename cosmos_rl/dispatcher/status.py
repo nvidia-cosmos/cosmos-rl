@@ -18,7 +18,6 @@ import math
 from queue import Queue
 from strenum import StrEnum
 from typing import Dict, List, Iterator, Any, Optional, Callable
-from torch.utils.data import DataLoader
 from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import RollingDict
@@ -31,9 +30,9 @@ from cosmos_rl.utils.wandb_logger import (
     is_wandb_available,
     log_wandb,
 )
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcher
 from transformers import AutoTokenizer
 import numpy as np
-from tqdm import tqdm
 import itertools
 
 
@@ -121,9 +120,7 @@ class PolicyStatusManager:
 
         self.replica_scaling_log = []
 
-        # Validation
-        self.val_iters: Dict[int, Iterator] = {}
-        self.activated_val_iter: Optional[Iterator] = None
+        # Validation related
         self.val_report_data: Dict[int, List[Any]] = {}
 
         # Indicate whether on-policy rollout collection has completed for the current policy step
@@ -136,28 +133,27 @@ class PolicyStatusManager:
         self,
         config: Config,
         redis_handler: RedisStreamHandler,
+        data_fetcher: DataFetcher,
         remain_samples_num: int,
         samples_per_epoch: int,
         tokenizer: AutoTokenizer,
         current_step: int = 0,
-        val_dataloader: Optional[DataLoader] = None,
         max_num_steps: Optional[int] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
-        val_datasize: Optional[int] = None,
     ):
         self.redis_handler = redis_handler
         self.config = config
-        self.remain_samples_num = remain_samples_num
+        self.remain_samples_num = remain_samples_num  # FIXME: remove this, use data_fetcher.remain_samples_num instead
         self.samples_per_epoch = samples_per_epoch
         self.tokenizer = tokenizer
-        self.val_dataloader = val_dataloader
         self.current_step = current_step
         self.max_num_steps = max_num_steps
-        self.recompute_total_steps()
         self.custom_logger_fns = (
             custom_logger_fns if custom_logger_fns is not None else []
         )
-        self.val_datasize = val_datasize
+        self.data_fetcher = data_fetcher
+
+        self.recompute_total_steps()
 
     def n_atoms_per_replica(self) -> int:
         """
@@ -545,29 +541,6 @@ class PolicyStatusManager:
             )
             self.set_status(target_replica.name, PolicyStatus.READY)
 
-    ############################################################
-    # utility functions
-    ############################################################
-    def validation_activate_dataloader(self, validation_step: int):
-        if validation_step not in self.val_iters:
-            logger.info(
-                f"[Controller] Activating validation dataloader for step {validation_step}, with length {(self.val_datasize or len(self.val_dataloader))}"
-            )
-            self.val_iters[validation_step] = iter(self.val_dataloader)
-            self.activated_val_iter = self.val_iters[validation_step]
-            self.activated_val_tqdm = tqdm(
-                desc="validation",
-                total=(self.val_datasize or len(self.val_dataloader)),
-            )
-
-    def validation_get_dataloader(
-        self, validation_step: Optional[int] = None
-    ) -> Iterator:
-        if validation_step is None:
-            return self.activated_val_iter
-        else:
-            return self.val_iters[validation_step]
-
     def validation_report_validation_results(
         self,
         validation_step: int,
@@ -583,20 +556,17 @@ class PolicyStatusManager:
         )
 
         validation_finished = n_items_of_this_step == (
-            self.val_datasize or len(self.val_dataloader)
+            self.data_fetcher.val_datasize or len(self.data_fetcher.val_dataloader)
         )
 
-        if self.activated_val_tqdm:
-            self.activated_val_tqdm.update(n_items_of_this_step)
+        if self.data_fetcher.activated_val_tqdm:
+            self.data_fetcher.activated_val_tqdm.update(n_items_of_this_step)
         else:
             logger.error("[Controller] Validation tqdm is not activated")
-
         # Check if all rollout replicas have reported validation results
-        if validation_finished and self.activated_val_iter is not None:
+        if validation_finished and self.data_fetcher.activated_val_iter is not None:
             # Validation is finished, trigger next step training
-            self.activated_val_iter = None
-            self.activated_val_tqdm.clear()
-            self.activated_val_tqdm = None
+            self.data_fetcher.clear_validation_status()
 
             try:
                 all_rollouts_lists: List[List[Rollout]] = self.val_report_data[
@@ -915,7 +885,7 @@ class PolicyStatusManager:
 
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
         # If the validation dataloader is activated, do not trigger data fetch and training
-        if self.activated_val_iter is not None:
+        if self.data_fetcher.activated_val_iter is not None:
             return
 
         arrived_replicas = self.get_all_atoms_arrived_replicas()
@@ -954,7 +924,7 @@ class PolicyStatusManager:
                 self.current_step % self.config.validation.freq == 0
                 or self.current_step == self.total_steps
             ):
-                self.validation_activate_dataloader(self.current_step)
+                self.data_fetcher.validation_activate_dataloader(self.current_step)
 
             # FIXME: (lms) will this dipatch style cause non-alignment with VeRL?
             # This dispatch style will cause rollouts from same prompt may be dispatched to different replicas.

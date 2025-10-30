@@ -160,13 +160,13 @@ async def meta():
     meta = {
         "config": controller.config,
     }
-    if controller.user_data_packer is not None:
+    if controller.data_fetcher.user_data_packer is not None:
         meta["user_data_packer"] = base64.b64encode(
-            cloudpickle.dumps(controller.user_data_packer)
+            cloudpickle.dumps(controller.data_fetcher.user_data_packer)
         ).decode("utf-8")
-    if controller.user_val_data_packer is not None:
+    if controller.data_fetcher.user_val_data_packer is not None:
         meta["user_val_data_packer"] = base64.b64encode(
-            cloudpickle.dumps(controller.user_val_data_packer)
+            cloudpickle.dumps(controller.data_fetcher.user_val_data_packer)
         ).decode("utf-8")
     return meta
 
