@@ -18,6 +18,8 @@ from itertools import islice
 import math
 
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from transformers import AutoTokenizer
+
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data import (
@@ -42,6 +44,7 @@ class DataFetcher:
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
+        tokenizer: Optional[AutoTokenizer] = None,
         is_rl: bool = False,
     ):
         self.config = config
@@ -58,6 +61,7 @@ class DataFetcher:
         self.batch_sampler = batch_sampler
         self.val_sampler = val_sampler
         self.val_batch_sampler = val_batch_sampler
+        self.tokenizer = tokenizer
 
         self.ckpt_extra_info = {}
 
@@ -270,4 +274,4 @@ class DataFetcher:
 
     def get_payload_by_index(self, index: int) -> RLPayload:
         # FIXME: (lms) support both training and validation datasets.
-        return self.dataset.train_set[index]
+        return self.dataset.train_set[index][1].prompt
