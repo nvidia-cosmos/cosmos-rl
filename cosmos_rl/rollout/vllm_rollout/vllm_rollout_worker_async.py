@@ -319,6 +319,8 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             # Scheduler is stopped in main_loop_async's finally block
             logger.info("[RolloutWorkerAsync] Handling shutdown")
 
+            self.rollout.shutdown()
+
             if not self.shutdown_signal.is_set():
                 logger.info(
                     f"[Rollout] shutdown instruction of {self.replica_name}, setting shutdown signal"
@@ -341,7 +343,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         """
         return self.rollout.get_underlying_model()
 
-    def f(self, load_format):
+    def lazy_initialize_rollout_engine(self, load_format):
         # lazy initialization of the vllm engine.
         if not self.rollout.is_engine_initialized():
             self.rollout.init_engine(
@@ -544,11 +546,11 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
         while not self.shutdown_signal.is_set():
             # Sync consume command
-            self.consume_command(cmd_pred=None)
+            await self.consume_command(cmd_pred=None)
 
             if self.validation_flag.is_set():
                 # If encounter validation flag during last rollout generation or this command fetch, do validation first.
-                self.do_validation()
+                await self.do_validation()
 
             # If weight is not ready, nothing else to do.
             if not self.state.weight_synced():
@@ -597,7 +599,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                     continue
 
                 self.scheduler.resume()  # resume the scheduler to generate the prompts
-                self.do_generate()
+                await self.do_generate()
 
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 

@@ -201,6 +201,11 @@ class vLLMRolloutAsync(RolloutBase):
                 with set_current_vllm_config(vllm_config):
                     apply_fp8_linear_patch(self.get_underlying_model())
 
+    def shutdown(self):
+        if self._engine_initialized:
+            self._engine_initialized = False
+            self.rollout_engine.shutdown()
+
     @torch.no_grad()
     async def rollout_generation_single_turn(
         self,
@@ -371,7 +376,8 @@ class vLLMRolloutAsync(RolloutBase):
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
-        return self.rollout_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        # TODO(zjx): get tensor via ipc in the future
+        return torch.nn.Module()
 
     def get_engine(self):
         if not self._engine_initialized:
