@@ -20,8 +20,7 @@ import toml
 import threading
 import uuid
 import functools
-from unittest.mock import MagicMock
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Any, Dict
 
 import datasets
 from transformers import AutoTokenizer
@@ -56,11 +55,22 @@ class MockAPIClient(APIClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.config = getMockConfig()
+        
+        # initialize the data_packer
+        tokenizer = AutoTokenizer.from_pretrained(self.config.policy.model_name_or_path)
+        data_packer = DecoderOnlyLLMDataPacker()
+        data_packer.setup(config=self.config, tokenizer=tokenizer)
+        self.data_packer = data_packer
+
         # load test dataset
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         self.dataset = datasets.load_from_disk(os.path.join(cur_dir, "data_fixtures", "sharegpt52k_small"))["train"]
         self.data_iter = iter(self.dataset)
         self.cur_epoch = 0
+
+    def post_rollout_shard_info(self, shard_infos: List[Dict[str, Any]], param_groups: List[List[str]], sorted_params: List[List[str]]):
+        pass
 
     def register(self, replica_name: str, role: str, mesh_names: List[str], ranks: List[int], group_size: int, global_rank: int, host_ip: str, host_name: str):
         logger.info(f"[MockAPIClient] Register: {replica_name}, {role}, {mesh_names}, {ranks}, {group_size}, {global_rank}, {host_ip}, {host_name}")
@@ -73,7 +83,13 @@ class MockAPIClient(APIClient):
             batch = []
             for i in range(batch_size):
                 dat = next(self.data_iter)
-                batch.append((i, RLPayload(conversation=dat["conversation"])))
+                conversation = dat["conversation"]
+                prompt = self.data_packer.get_rollout_input(conversation)
+                payload = RLPayload(
+                    prompt=prompt,
+                    conversation=conversation
+                )
+                batch.append((i, payload))
             return batch
 
         try:
@@ -249,14 +265,11 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         # Skip weight sync preparation in test since we don't need it
         worker.lazy_initialize_rollout_engine(load_format="auto")
         
-        # Build mesh after vLLM has initialized the distributed environment
-        parallel_dims.build_mesh(device_type="cuda")
         worker.state.set_weight_synced()
         worker.setup()
         worker.work()
 
         # clean the test environment
-        worker.rollout.get_engine().shutdown()
         worker.handle_shutdown()
 
 

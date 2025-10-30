@@ -65,7 +65,7 @@ def run_rollout(*args, **kwargs):
                 val_dataset=kwargs.get("val_dataset"),
                 val_reward_fns=kwargs.get("val_reward_fns"),
             )
-        if rollout_backend == "vllm_async":
+        elif rollout_backend == "vllm_async":
             parallel_dims = ParallelDims.from_config(
                 parallesim_config=cosmos_rollout_config.rollout.parallelism
             )
