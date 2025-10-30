@@ -31,3 +31,4 @@ rouge_score
 bert-score
 accelerate
 kernels
+llmcompressor==0.7.0
