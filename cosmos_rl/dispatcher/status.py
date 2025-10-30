@@ -129,6 +129,9 @@ class PolicyStatusManager:
         # Indicate whether on-policy rollout collection has completed for the current policy step
         self.on_policy_rollout_completed: bool = False
 
+        # Record filter rewards distribution for dynamic sampling
+        self.filter_records = {}
+
     def setup(
         self,
         config: Config,
@@ -686,18 +689,17 @@ class PolicyStatusManager:
             rollouts_to_put = valid_rollouts
             # In single-thread: invalid rollouts should also be decreased from the total number of samples
             self.remain_samples_num -= len(invalid_rollouts)
-            if not hasattr(self, "filter_rewards"):
-                self.filter_rewards = {}
             for rollout in invalid_rollouts:
                 filter_reward = rollout.filter_reward
-                if filter_reward not in self.filter_rewards:
-                    self.filter_rewards[filter_reward] = 0
-                self.filter_rewards[filter_reward] += 1
+                key = "filtered_positive" if filter_reward > 0 else "filtered_negative"
+                if key not in self.filter_records:
+                    self.filter_records[key] = 0
+                self.filter_records[key] += 1
             for rollout in valid_rollouts:
-                filter_reward = 0.0
-                if filter_reward not in self.filter_rewards:
-                    self.filter_rewards[filter_reward] = 0
-                self.filter_rewards[filter_reward] += 1
+                key = "sampled"
+                if key not in self.filter_records:
+                    self.filter_records[key] = 0
+                self.filter_records[key] += 1
         else:
             rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
 
@@ -804,26 +806,14 @@ class PolicyStatusManager:
                         "train/effective_entropy": total_effective_entropy,
                     }
 
-                    if hasattr(self, "filter_rewards") and len(self.filter_rewards) > 0:
-                        policy_report_data.update(
-                            {
-                                "rollout/filtered_positive_ratio": sum(
-                                    v for k, v in self.filter_rewards.items() if k > 0
-                                )
-                                / sum(v for v in self.filter_rewards.values()),
-                                "rollout/filtered_negative_ratio": sum(
-                                    v for k, v in self.filter_rewards.items() if k < 0
-                                )
-                                / sum(v for v in self.filter_rewards.values()),
-                                "rollout/kept_ratio": sum(
-                                    v
-                                    for k, v in self.filter_rewards.items()
-                                    if k == 0.0
-                                )
-                                / sum(v for v in self.filter_rewards.values()),
-                            }
+                    if len(self.filter_records) > 0:
+                        total_samples_for_filtering = sum(
+                            v for v in self.filter_records.values()
                         )
-
+                        for k, v in self.filter_records.items():
+                            policy_report_data.update(
+                                {f"rollout/{k}_ratio": v / total_samples_for_filtering}
+                            )
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
                     )
@@ -835,13 +825,13 @@ class PolicyStatusManager:
                         )
                     if "console" in self.config.logging.logger:
                         logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['rollout/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['rollout/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Iteration time: {total_iter_time_avg:.2f}s, total grad norm: {total_grad_norm:.5f}, KL loss avg: {total_kl_loss_avg:.5f}, KL loss max: {total_kl_loss_max:.5f}."
+                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['rollout/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['rollout/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Grad Norm: {total_grad_norm:.5f}, KL Loss Avg: {total_kl_loss_avg:.5f}, KL Loss Max: {total_kl_loss_max:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
-                        if hasattr(self, "filter_rewards"):
+                        if len(self.filter_records) > 0:
                             logger.info(
-                                f"filter rewards distribution so far: {self.filter_rewards}"
+                                f"Dynamic sampling rewards distribution so far: {self.filter_records}."
                             )
-                            self.filter_rewards = {}
+                    self.filter_records = {}
                     for logger_fn in self.custom_logger_fns:
                         try:
                             logger_fn(self.train_report_data[train_step], train_step)

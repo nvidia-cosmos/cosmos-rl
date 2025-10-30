@@ -1808,7 +1808,7 @@ class GRPOTrainer(Trainer):
                                             is None
                                         ):
                                             assert (
-                                                i_mu == 0
+                                                i_mu == 0 and not need_compute_old_ahead
                                             ), "Only first iteration should append `old_per_token_logps`"
                                             self.old_per_token_logps[
                                                 local_mini_step
