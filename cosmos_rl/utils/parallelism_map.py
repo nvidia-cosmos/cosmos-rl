@@ -704,7 +704,6 @@ class ParallelTopoMapper:
             )
             if decomposed_key_and_slices:
                 for part_name, part_slice in decomposed_key_and_slices:
-                    logger.info(f"decomposed key and slices: {part_name}, {part_slice}")
                     splitted_dim_rank_info = {}
                     part_in_local = {}
                     part_slice = {
@@ -739,9 +738,6 @@ class ParallelTopoMapper:
                         splitted_dim_rank_info[dim] = slice_in_splited.__dict__
                         part_in_local[dim] = overlap_in_local
                     if splitted_dim_rank_info is not None:
-                        logger.info(
-                            f"inserting to parallelism info: {part_name}, {splitted_dim_rank_info}"
-                        )
                         self.insert_to_parallelism_info(
                             part_name,
                             dims_map,
