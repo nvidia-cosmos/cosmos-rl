@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers import AutoConfig
-import cosmos_rl.policy.kernel.modeling_utils as modeling_utils
+from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 
 
 @dataclass
@@ -181,12 +181,9 @@ else:
         """
         cos = cos.chunk(2, dim=-1)[0].contiguous()
         sin = sin.chunk(2, dim=-1)[0].contiguous()
-        q_embed = modeling_utils.apply_rotary_emb(
-            q.float(), cos.float(), sin.float()
-        ).type_as(q)
-        k_embed = modeling_utils.apply_rotary_emb(
-            k.float(), cos.float(), sin.float()
-        ).type_as(k)
+        apply_rotary_emb = FlashAttnMeta().apply_rotary_emb
+        q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
+        k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
         return q_embed, k_embed
 
 
@@ -197,7 +194,8 @@ class Qwen3VLMoeVisionAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
         self.attention_dropout = 0.0
-        self.attn_func = modeling_utils.flash_attn_varlen_func
+        self.attn_func = FlashAttnMeta().flash_attn_varlen_func
+        self.apply_rotary_pos_emb_vision = apply_rotary_pos_emb_vision
 
     def forward(
         self,
@@ -215,7 +213,9 @@ class Qwen3VLMoeVisionAttention(nn.Module):
         )
         cos, sin = position_embeddings
 
-        q, k = apply_rotary_pos_emb_vision(q.unsqueeze(0), k.unsqueeze(0), cos, sin)
+        q, k = self.apply_rotary_pos_emb_vision(
+            q.unsqueeze(0), k.unsqueeze(0), cos, sin
+        )
         q = q.squeeze(0)
         k = k.squeeze(0)
 
