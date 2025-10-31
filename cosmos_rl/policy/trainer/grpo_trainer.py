@@ -76,6 +76,13 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_masks,
 )
 from cosmos_rl.utils.balance_seqlen import rearrange_mini_batches
+import enum
+
+
+class TrainerPhase(enum.Enum):
+    REF_COMPUTE = "ref_compute"
+    OLD_LOGP_COMPUTE = "old_logp_compute"
+    TRAIN = "train"
 
 
 def compute_loss(
@@ -1343,15 +1350,24 @@ class GRPOTrainer(Trainer):
             ), f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
 
         need_compute_ref, kl_beta = self._swap_model_state_dict()
-
+        need_compute_old_ahead = batch_size > per_optimize_batch_size
         loss_sum = torch.tensor(0.0, device=self.device)
         kl_loss_sum = torch.tensor(0.0, device=self.device)
         grad_norm_sum = torch.tensor(0.0, device=self.device)
         loss_count = 0
         grad_norm_count = 0
-        is_computing_refs = [True, False] if need_compute_ref else [False]
+
+        trainer_phases = []
+        if need_compute_ref:
+            trainer_phases.append(TrainerPhase.REF_COMPUTE)
+        if need_compute_old_ahead:
+            trainer_phases.append(TrainerPhase.OLD_LOGP_COMPUTE)
+        trainer_phases.append(TrainerPhase.TRAIN)
+
         cached_minibatch_arrangements = []
-        for is_computing_ref in is_computing_refs:
+        for phase in trainer_phases:
+            is_computing_ref = phase == TrainerPhase.REF_COMPUTE
+            is_computing_old_ahead = phase == TrainerPhase.OLD_LOGP_COMPUTE
             # Set model to eval mode if reference model is being used
             if is_computing_ref:
                 self.model.eval()
@@ -1360,10 +1376,17 @@ class GRPOTrainer(Trainer):
                     # Swap model state dict back to the original model
                     need_compute_ref = False
                     self._swap_model_state_dict()
-                self.model.train()
+                if is_computing_old_ahead:
+                    self.model.eval()
+                else:
+                    self.model.train()
 
-            with torch.set_grad_enabled(not is_computing_ref):
-                for i_mu in range(1 if is_computing_ref else self.mu_iterations):
+            with torch.set_grad_enabled(phase == TrainerPhase.TRAIN):
+                for i_mu in range(
+                    1
+                    if (is_computing_ref or is_computing_old_ahead)
+                    else self.mu_iterations
+                ):
                     local_mini_step = 0
                     local_optimize_step = 0
                     with torch.cuda.stream(self.train_stream):
@@ -1613,6 +1636,10 @@ class GRPOTrainer(Trainer):
                                         [is_computing_ref] * mini_batch_size,
                                         dtype=torch.bool,
                                     )
+                                    is_computing_old_ahead_cpu = torch.tensor(
+                                        [is_computing_old_ahead] * mini_batch_size,
+                                        dtype=torch.bool,
+                                    )
                                     # Positive flags for Positive-NLL loss (only if coef >0)
                                     if self._positive_flags_t is not None:
                                         is_pos_cpu = (
@@ -1639,6 +1666,9 @@ class GRPOTrainer(Trainer):
                                         )
                                         user_mini_batch["is_computing_ref"] = (
                                             is_computing_ref_cpu
+                                        )
+                                        user_mini_batch["is_computing_old_ahead"] = (
+                                            is_computing_old_ahead_cpu
                                         )
                                         if self._positive_flags_t is not None:
                                             user_mini_batch["positive_flags"] = (
@@ -1671,7 +1701,7 @@ class GRPOTrainer(Trainer):
                                             position_ids=position_ids
                                         )
 
-                                    if is_computing_ref:
+                                    if is_computing_ref or is_computing_old_ahead:
                                         # Continue to next mini-batch since loss is not needed for reference model
                                         continue
                                     else:
@@ -1749,20 +1779,29 @@ class GRPOTrainer(Trainer):
                                         # Skip the rest of the loop
                                         local_mini_step += 1
                                         continue
+                                    elif is_computing_old_ahead:
+                                        assert (
+                                            i_mu == 0
+                                        ), "Only first iteration should compute old ahead"
+                                        self.old_per_token_logps[local_mini_step] = (
+                                            current_per_token_logprobs.detach()
+                                        )
+                                        local_mini_step += 1
+                                        continue
                                     else:
                                         if (
                                             self.old_per_token_logps[local_mini_step]
                                             is None
                                         ):
                                             assert (
-                                                i_mu == 0
+                                                i_mu == 0 and not need_compute_old_ahead
                                             ), "Only first iteration should append `old_per_token_logps`"
                                             self.old_per_token_logps[
                                                 local_mini_step
                                             ] = current_per_token_logprobs.detach()
                                         else:
                                             assert (
-                                                i_mu > 0
+                                                i_mu > 0 or need_compute_old_ahead
                                             ), "Only inner iteration should reuse `old_per_token_logps`"
 
                                         loss, per_token_loss, kl_loss = compute_loss(
@@ -1842,7 +1881,11 @@ class GRPOTrainer(Trainer):
                                 else:
                                     all_reduced = False
 
-                            if not is_computing_ref and not all_reduced:
+                            if (
+                                not is_computing_ref
+                                and not is_computing_old_ahead
+                                and not all_reduced
+                            ):
                                 grad_norm_sum += self.execute_all_reduce()
                                 grad_norm_count += 1
                             local_optimize_step += 1
@@ -1978,6 +2021,7 @@ def _swizzle_pp_grpo_forward(
     micro_batch_ids = kwargs.pop("micro_batch_ids")
     loss_scaling = kwargs.pop("loss_scaling")
     is_computing_ref = kwargs.pop("is_computing_ref")
+    is_computing_old_ahead = kwargs.pop("is_computing_old_ahead")
     advantages = kwargs.pop("advantages")
     positive_flags = kwargs.pop("positive_flags", None)
 
@@ -1985,6 +2029,7 @@ def _swizzle_pp_grpo_forward(
     mini_batch_id = mini_batch_ids[0].item()
     loss_scaling = loss_scaling[0].item()
     is_computing_ref = is_computing_ref[0].item()
+    is_computing_old_ahead = is_computing_old_ahead[0].item()
 
     # User defined input
     user_input = kwargs.copy()
@@ -2043,6 +2088,18 @@ def _swizzle_pp_grpo_forward(
                 current_per_token_logprobs.detach()
             ]
         # Skip the rest logic since we are computing ref
+        return None
+    if is_computing_old_ahead:
+        if trainer.old_per_token_logps[mini_batch_id] is not None:
+            assert isinstance(trainer.old_per_token_logps[mini_batch_id], list)
+            trainer.old_per_token_logps[mini_batch_id].append(
+                current_per_token_logprobs.detach()
+            )
+        else:
+            trainer.old_per_token_logps[mini_batch_id] = [
+                current_per_token_logprobs.detach()
+            ]
+        # Skip the rest logic since we are computing old ahead
         return None
 
     if (

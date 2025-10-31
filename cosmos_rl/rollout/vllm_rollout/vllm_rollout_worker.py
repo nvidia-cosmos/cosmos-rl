@@ -1373,6 +1373,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     stream=self.inference_stream,
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
+                    n_to_batch=self.config.rollout.n_generation_to_batch,
                 )
 
                 if len(rollout_results) == 0:

@@ -959,6 +959,7 @@ def run_dummy_rollout():
             stream,
             data_packer,
             sampling_params,
+            n_to_batch: bool = False,
         ) -> List[RolloutResult]:
             completions_per_prompt = [
                 RolloutResult(prompt=payload.prompt, completions=[payload.prompt])
@@ -2166,7 +2167,7 @@ def run_dynamic_batchsize_test(
             remain_samples_num=-1,
             do_save_checkpoint=False,
         )
-    assert trainer.test_hooked_compute_logprobs_cnt == 8
+    assert trainer.test_hooked_compute_logprobs_cnt == 16
     assert trainer.test_hooked_all_reduce_cnt == 4
     trainer.batch_size_per_optimize = 4
     trainer.config.train.train_policy.max_token_len_per_mini_batch = 4096
