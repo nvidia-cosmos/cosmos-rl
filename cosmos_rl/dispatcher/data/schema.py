@@ -95,9 +95,13 @@ class RLPayload(BaseModel):
         default=True, description="Whether the rollout is valid."
     )
 
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None, description="Additional metadata for the rollout (e.g., VLA task info)."
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
-        assert self.prompt or self.conversation, "Must set prompt or conversation"
+        assert self.prompt or self.conversation or self.metadata, "Must set prompt, conversation, or metadata"
         return self
 
     @staticmethod

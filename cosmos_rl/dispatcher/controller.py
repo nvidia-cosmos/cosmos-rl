@@ -470,6 +470,7 @@ class Controller:
             self.config.rollout.multi_turn_config.enable
             or not self.config.rollout.reference_answer_in_local
         )
+        add_answer = False
 
         # query n prompts from the dataset [idx, payload]
         prompt_id_and_payload_list: List[IdxAndRLPayload] = []

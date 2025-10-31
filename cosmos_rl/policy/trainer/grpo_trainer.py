@@ -340,6 +340,15 @@ class GRPOTrainer(Trainer):
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
             if name not in trainable_params:
                 logger.debug(f"[Policy] Not trainable for param {name}")
+        
+        # Log parameter collection for debugging
+        logger.info(f"[Policy] Collected {len(keys_n_ranks)} parameters from weight_sync_transforms")
+        vision_params = [n for n, _ in keys_n_ranks if 'vision_backbone' in n]
+        vision_qkv = [n for n in vision_params if 'attn.qkv' in n]
+        logger.info(f"[Policy] Vision backbone parameters: {len(vision_params)}")
+        logger.info(f"[Policy] Vision backbone QKV parameters: {len(vision_qkv)}")
+        if vision_qkv:
+            logger.info(f"[Policy] First 5 QKV params: {vision_qkv[:5]}")
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config=self.hf_config,
@@ -714,6 +723,10 @@ class GRPOTrainer(Trainer):
 
     @Trainer.register_policy_command_handler(PolicyToRolloutUnicastCommand)
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
+        logger.info(f"[Policy] Received P2R command: {command.src_replica_name} -> {command.dst_replica_name}")
+        logger.info(f"[Policy] My replica: {self.replica_name}, Global rank: {self.global_rank}, World size: {self.world_size}")
+        logger.info(f"[Policy] Command src_size: {command.src_replica_size}, dst_size: {command.dst_replica_size}")
+        
         assert command.src_replica_size == self.world_size
         if not command.src_replica_name == self.replica_name:
             logger.error(
@@ -728,30 +741,34 @@ class GRPOTrainer(Trainer):
             nccl_uuid = None
             if self.global_rank == 0:
                 # Only create nccl group id in rank 0.
+                logger.info(f"[Policy] Rank 0 creating NCCL UID for mesh_key: {mesh_key}")
                 nccl_uuid = create_nccl_uid()
-                logger.debug(f"[Policy] mesh_key: {mesh_key}")
+                logger.info(f"[Policy] Posting NCCL UID to controller...")
                 self.api_client.post_nccl_comm_initiator(mesh_key, nccl_uuid)
+                logger.info(f"[Policy] ✅ Posted NCCL UID: {nccl_uuid[:4]}...")
             # broadcast the nccl group id to all ranks
             nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
             self.p2r_nccl_uuids[mesh_key] = nccl_uuid
+            logger.info(f"[Policy] All ranks have NCCL UID")
 
         if mesh_key not in self.rollouts_comm:
             assert mesh_key in self.p2r_nccl_uuids
             nccl_uuid = self.p2r_nccl_uuids[mesh_key]
-            logger.debug(
-                f"[Policy] Creating nccl communicator for `P2R` with mesh_key: {mesh_key}"
-            )
+            my_nccl_rank = self.global_rank
+            nccl_world_size = self.world_size + command.dst_replica_size
+            logger.info(f"[Policy] Creating NCCL comm for P2R: rank={my_nccl_rank}, world_size={nccl_world_size}")
+            logger.info(f"[Policy] Waiting for all {nccl_world_size} ranks to join...")
+            
             comm_id = create_nccl_comm(
                 nccl_uuid,
-                self.global_rank,
-                self.world_size + command.dst_replica_size,
+                my_nccl_rank,
+                nccl_world_size,
             )
-            logger.debug(
-                f"[Policy] `P2R` nccl comm: {comm_id} for `P2R` with mesh_key: {mesh_key} is created."
-            )
+            logger.info(f"[Policy] ✅ NCCL comm created (index={comm_id})")
             self.rollouts_comm[mesh_key] = comm_id
         else:
             comm_id = self.rollouts_comm[mesh_key]
+            logger.info(f"[Policy] Reusing cached NCCL comm (index={comm_id})")
         assert (
             self.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."

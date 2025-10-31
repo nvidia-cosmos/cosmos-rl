@@ -202,21 +202,31 @@ class VLARollout(RolloutBase):
             hf_config=vla_config
         )
         
-        # Initialize model structure (no weight loading)
-        vla_model = VLAModel.from_model_args(vla_args)
-        self.module = vla_model.model  # Get the inner OpenVLAForActionPrediction model
+        # Initialize model structure on CUDA directly (no meta device)
+        # Note: VLA models use TIMM vision backbone which is incompatible with meta tensors
+        logger.info("Initializing VLA model on CUDA (TIMM meta tensor incompatibility)")
+        vla_model = VLAModel(vla_args, init_device="cuda")
+        
+        # Load frozen vision backbone weights directly from checkpoint
+        # These weights are never updated during training, so no need to sync via NCCL
+        logger.info(f"Loading frozen vision backbone weights from {model_path}...")
+        self._load_frozen_vision_backbone_weights(vla_model.model, model_path)
+        logger.info("✅ Frozen vision backbone weights loaded")
+        
+        # Save both the wrapper and inner module
+        self.vla_model = vla_model  # Keep wrapper for weight_sync_transforms
+        self.module = vla_model.model  # Inner OpenVLAForActionPrediction for inference
         self.module.eval()
         
-        # Save processor and tokenizer
+        # Save processor, tokenizer, and config for later use
         self.processor = processor
         self.tokenizer = tokenizer
+        self.hf_config = vla_config  # Save for shard info generation
         
-        # Move to GPU
         device = torch.device(f"cuda:{torch.cuda.current_device()}")
-        self.module = self.module.to(device)
-        
         logger.info(f"✅ VLA model structure created (device: {device})")
-        logger.info(f"   Weights will be synchronized from policy worker")
+        logger.info(f"   Trainable weights initialized randomly (will be synced from policy via NCCL)")
+        logger.info(f"   Frozen vision backbone loaded from checkpoint")
         logger.info(f"   Model has norm_stats: {hasattr(self.module, 'norm_stats')}")
         if hasattr(self.module, 'norm_stats'):
             logger.info(f"   norm_stats keys: {list(self.module.norm_stats.keys())}")
@@ -261,17 +271,93 @@ class VLARollout(RolloutBase):
             device=device
         )
         
-        # Save references
-        self.module = vla_model.model
+        # Save both the wrapper and inner module
+        self.vla_model = vla_model  # Keep wrapper for weight_sync_transforms
+        self.module = vla_model.model  # Inner OpenVLAForActionPrediction for inference
         self.module.eval()
         self.processor = vla_model.processor  # Save processor from load_from_checkpoint
         self.tokenizer = tokenizer
+        self.hf_config = vla_config  # Save for shard info generation
         
         logger.info("✅ Full VLA model loaded with weights (single-GPU)")
         logger.info(f"   Device: {device}")
         logger.info(f"   Model has norm_stats: {hasattr(self.module, 'norm_stats')}")
         if hasattr(self.module, 'norm_stats'):
             logger.info(f"   norm_stats keys: {list(self.module.norm_stats.keys())}")
+    
+    def _load_frozen_vision_backbone_weights(self, model, model_path: str):
+        """
+        Load frozen vision backbone weights directly from HuggingFace checkpoint
+        
+        These weights are frozen during training, so we load them once from the checkpoint
+        instead of syncing them via NCCL from the policy worker.
+        
+        Args:
+            model: The VLA model (OpenVLAForActionPrediction)
+            model_path: Path to HuggingFace checkpoint
+        """
+        import torch
+        from safetensors import safe_open
+        from pathlib import Path
+        from huggingface_hub import snapshot_download
+        
+        try:
+            # Resolve model path
+            path = Path(model_path)
+            if not path.exists():
+                logger.info(f"Downloading model from HuggingFace Hub: {model_path}")
+                path = Path(snapshot_download(repo_id=model_path))
+            
+            # Load vision backbone weights from checkpoint
+            device = torch.device(f"cuda:{torch.cuda.current_device()}")
+            vision_backbone_weights = {}
+            
+            # Try safetensors first
+            safetensor_files = list(path.glob("*.safetensors"))
+            if safetensor_files:
+                logger.info(f"Loading vision backbone from safetensors: {[f.name for f in safetensor_files]}")
+                for st_file in safetensor_files:
+                    with safe_open(st_file, framework="pt", device=str(device)) as f:
+                        for key in f.keys():
+                            if key.startswith("vision_backbone"):
+                                vision_backbone_weights[key] = f.get_tensor(key)
+            else:
+                # Fallback to pytorch checkpoints
+                pt_files = list(path.glob("pytorch_model*.bin"))
+                if pt_files:
+                    logger.info(f"Loading vision backbone from PyTorch checkpoints: {[f.name for f in pt_files]}")
+                    for pt_file in pt_files:
+                        state_dict = torch.load(pt_file, map_location=device)
+                        for key, value in state_dict.items():
+                            if key.startswith("vision_backbone"):
+                                vision_backbone_weights[key] = value
+                else:
+                    raise FileNotFoundError(f"No safetensors or pytorch_model.bin found in {path}")
+            
+            if not vision_backbone_weights:
+                logger.warning("⚠️  No vision_backbone weights found in checkpoint!")
+                return
+            
+            # Load the weights into model
+            missing_keys, unexpected_keys = model.load_state_dict(vision_backbone_weights, strict=False)
+            
+            # Report loading results
+            logger.info(f"✅ Loaded {len(vision_backbone_weights)} vision backbone parameters")
+            vision_qkv = [k for k in vision_backbone_weights.keys() if 'attn.qkv' in k]
+            logger.info(f"   Including {len(vision_qkv)} QKV parameters")
+            
+            if missing_keys:
+                # Filter to only show missing vision_backbone keys
+                missing_vision = [k for k in missing_keys if k.startswith("vision_backbone")]
+                if missing_vision:
+                    logger.warning(f"⚠️  Missing {len(missing_vision)} vision backbone keys")
+                    logger.warning(f"   First 5: {missing_vision[:5]}")
+            
+        except Exception as e:
+            logger.error(f"Failed to load frozen vision backbone weights: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
     def is_engine_initialized(self) -> bool:
         """Check if the VLA engine has been initialized"""

@@ -88,6 +88,9 @@ class VLARolloutWorker(RolloutWorkerBase):
         logger.info(f"Initialized VLA rollout worker for task suite: {self.task_suite}")
         logger.info(f"Parallel environments: {self.num_parallel_envs}")
         logger.info(f"VLA sampling: temperature={self.temperature}, n_generation={self.n_generation}")
+        
+        # Note: Shard info posting will be done after model initialization in lazy_initialize_rollout_engine
+        # This is deferred because VLA model is initialized lazily on first weight sync command
     
     def setup(self, dataset=None, reward_fns=None, filter_reward_fns=None, 
               val_dataset=None, val_reward_fns=None, num_workers=8):
@@ -366,22 +369,31 @@ class VLARolloutWorker(RolloutWorkerBase):
         3. Receive weights from policy worker via NCCL P2P
         4. Load weights into rollout model
         """
-        logger.info(f"[VLA Rollout] Received weight sync command from {command.src_replica_name}")
+        logger.info(f"[VLA Rollout] Received weight sync command from {command.src_replica_name} -> {command.dst_replica_name}")
+        logger.info(f"[VLA Rollout] My replica: {self.replica_name}, Global rank: {self.global_rank}, World size: {self.world_size}")
+        logger.info(f"[VLA Rollout] Command src_size: {command.src_replica_size}, dst_size: {command.dst_replica_size}")
         
         # Lazy initialization of the VLA engine
         # Always use "dummy" mode for weight sync - weights will come from policy worker via NCCL
         # This is much faster than loading full weights from HF checkpoint
         if not self.rollout.is_engine_initialized():
-            logger.info(f"[VLA Rollout] Initializing VLA engine (dummy mode for weight sync)")
+            logger.info(f"[VLA Rollout] Initializing VLA engine (dummy mode for weight sync)...")
+            import time
+            start_time = time.time()
             self.rollout.init_engine(
                 quantization="none",  # VLA models don't use quantization
                 seed=self.config.rollout.seed,
                 load_format="dummy"  # Structure only, weights from policy worker
             )
+            elapsed = time.time() - start_time
+            logger.info(f"[VLA Rollout] ✅ Engine initialization completed in {elapsed:.2f}s")
         
         # Only process if command is for this replica
         if command.dst_replica_name != self.replica_name:
+            logger.info(f"[VLA Rollout] Command not for this replica, returning")
             return
+        
+        logger.info(f"[VLA Rollout] Processing weight sync for this replica")
         
         # Setup NCCL communicator for policy-to-rollout communication
         nccl_unique_id_key = command.src_replica_name + "_" + command.dst_replica_name
@@ -393,24 +405,51 @@ class VLARolloutWorker(RolloutWorkerBase):
             logger.debug(f"[VLA Rollout] Reusing cached communicator for {nccl_unique_id_key}")
             communicator_index = self.policy_to_rollout_nccl_communicators[nccl_unique_id_key]
         else:
-            logger.debug(f"[VLA Rollout] Setting up NCCL communicator for {nccl_unique_id_key}")
+            logger.info(f"[VLA Rollout] Setting up NEW NCCL communicator for {nccl_unique_id_key}")
             # Query NCCL group ID from controller
+            logger.info(f"[VLA Rollout] Querying NCCL UID from controller...")
             nccl_group_id = self.query_nccl_unique_id_from_controller(nccl_unique_id_key)
             if nccl_group_id is None:
                 raise RuntimeError("[VLA Rollout] Failed to query nccl group_id from controller!")
+            logger.info(f"[VLA Rollout] ✅ Got NCCL UID from controller: {nccl_group_id[:4]}...")
             
             # Create NCCL communicator
-            from cosmos_rl.comm.nccl_p2p import create_nccl_comm
+            from cosmos_rl.utils.pynccl import create_nccl_comm
+            my_nccl_rank = self.global_rank + command.src_replica_size
+            nccl_world_size = command.src_replica_size + self.world_size
+            logger.info(f"[VLA Rollout] Creating NCCL comm: rank={my_nccl_rank}, world_size={nccl_world_size}")
+            logger.info(f"[VLA Rollout] Waiting for all {nccl_world_size} ranks to join...")
+            
             communicator_index = create_nccl_comm(
                 nccl_group_id,
-                self.global_rank + command.src_replica_size,  # Rollout rank in combined group
-                self.world_size + command.src_replica_size,  # Total size
+                my_nccl_rank,  # Rollout rank in combined group
+                nccl_world_size,  # Total size (policy + rollout)
             )
             self.policy_to_rollout_nccl_communicators[nccl_unique_id_key] = communicator_index
-            logger.info(f"[VLA Rollout] NCCL communicator created for weight sync")
+            logger.info(f"[VLA Rollout] ✅ NCCL communicator created (index={communicator_index})")
         
-        # Receive weights from policy worker
-        self._receive_weights_from_policy(communicator_index, command.trainable_only)
+        # Post shard info to controller (if first sync)
+        if not hasattr(self, "_shard_info_posted"):
+            logger.info(f"[VLA Rollout] Posting shard info to controller...")
+            self._post_shard_info_to_controller()
+            self._shard_info_posted = True
+            logger.info(f"[VLA Rollout] ✅ Shard info posted")
+        
+        # Fetch receive instructions from controller (if first sync)
+        if not hasattr(self, "policy_to_rollout_recv_insts"):
+            assert not command.trainable_only, "all params must be transferred at the first time P2R"
+            logger.info(f"[VLA Rollout] Fetching receive instructions from controller...")
+            self.policy_to_rollout_recv_insts = self.api_client.post_rollout_shard_recv_insts(self.global_rank)
+            logger.info(f"[VLA Rollout] ✅ Got {len(self.policy_to_rollout_recv_insts)} instruction groups")
+        else:
+            assert command.trainable_only, "only trainable params should be transferred at not first time P2R"
+        
+        # Receive weights from policy worker using instructions
+        # ALWAYS verify first sync to ensure NCCL transfer is working correctly
+        do_verification = (self.current_weight_version == 0)
+        if do_verification:
+            logger.info(f"[VLA Rollout] First weight sync - verification ENABLED (compulsory)")
+        self._receive_weights_from_policy(communicator_index, command.trainable_only, do_verification)
         
         # Mark weight as synced
         self.state.set_weight_synced()
@@ -418,60 +457,201 @@ class VLARolloutWorker(RolloutWorkerBase):
         
         logger.info(f"[VLA Rollout] ✅ Weight sync completed, version: {self.current_weight_version}")
     
-    def _receive_weights_from_policy(self, communicator_index: int, trainable_only: bool):
+    def _receive_weights_from_policy(self, communicator_index: int, trainable_only: bool, do_verification: bool = False):
         """
-        Receive model weights from policy worker via NCCL
+        Receive model weights from policy worker via NCCL using instruction-based coordination
         
         Args:
             communicator_index: NCCL communicator index
             trainable_only: If True, only sync trainable parameters (incremental update)
+            do_verification: If True, verify received weights against HF checkpoint
         """
         import time
-        from cosmos_rl.comm.nccl_p2p import recv, nccl_stream_synchronize
+        from cosmos_rl.utils.pynccl import nccl_recv
         
-        logger.info(f"[VLA Rollout] Starting weight receive (trainable_only={trainable_only})...")
+        logger.info(f"[VLA Rollout] Starting instruction-based weight receive (trainable_only={trainable_only}, verification={do_verification})...")
         
-        # Get model parameters to receive
+        # Load reference weights if verification is enabled
+        reference_weights = {}
+        if do_verification:
+            logger.info(f"[VLA Rollout] Loading reference weights from HF checkpoint for verification...")
+            reference_weights = self._load_reference_weights()
+            logger.info(f"[VLA Rollout] ✅ Loaded {len(reference_weights)} reference parameters")
+        
+        # Get model parameters dict
         model = self.rollout.module
-        if trainable_only:
-            # Only sync trainable parameters (faster for incremental updates)
-            params_to_sync = {name: param for name, param in model.named_parameters() if param.requires_grad}
-        else:
-            # Sync all parameters (first sync)
-            params_to_sync = dict(model.named_parameters())
+        model_params = dict(model.named_parameters())
         
-        logger.info(f"[VLA Rollout] Receiving {len(params_to_sync)} parameters...")
+        # Prepare trainable params list if needed
+        if trainable_only:
+            if not hasattr(self, 'trainable_params'):
+                logger.info(f"[VLA Rollout] Fetching trainable params from controller...")
+                self.trainable_params = set(self.api_client.get_trainable_params() if self.global_rank == 0 else [])
+                # Broadcast to all ranks
+                from cosmos_rl.utils import distributed as dist_utils
+                self.trainable_params = dist_utils.broadcast_object_cpu(self.trainable_params)
+                logger.info(f"[VLA Rollout] Got {len(self.trainable_params)} trainable params")
         
         st = time.time()
         total_bytes_received = 0
+        transferred_params = 0
+        skipped_params = 0
         
         # Create inference stream for async communication
         if not hasattr(self, 'inference_stream'):
             self.inference_stream = torch.cuda.Stream()
         
         with torch.cuda.stream(self.inference_stream):
-            # Receive each parameter
-            for param_name, param in params_to_sync.items():
-                # Receive parameter data from policy worker
-                bytes_received = recv(
-                    param.data,
-                    communicator_index,
-                    src=0,  # Policy worker is rank 0 in this P2P group
-                    stream=self.inference_stream.cuda_stream
-                )
-                total_bytes_received += bytes_received
+            # Process each instruction group
+            for insts_group in self.policy_to_rollout_recv_insts:
+                # Process each parameter in this group
+                for insts_for_per_param in insts_group.param_instructions:
+                    param_name = insts_for_per_param.param_name
+                    
+                    # Skip if trainable_only and param is not trainable
+                    if trainable_only and param_name not in self.trainable_params:
+                        logger.debug(f"[VLA Rollout] Skip {param_name} (not trainable)")
+                        skipped_params += 1
+                        continue
+                    
+                    # Get the parameter tensor
+                    if param_name not in model_params:
+                        logger.warning(f"[VLA Rollout] Parameter {param_name} not found in model, skipping")
+                        continue
+                    
+                    target_param = model_params[param_name]
+                    transferred_params += 1
+                    
+                    # Process each instruction for this parameter
+                    for inst in insts_for_per_param.instructions:
+                        p_rank = inst.policy_rank  # Policy rank to receive from
+                        r_rank = inst.rollout_rank  # Rollout rank (should match self.global_rank)
+                        
+                        if r_rank != self.global_rank:
+                            continue  # This instruction is for a different rollout rank
+                        
+                        # For VLA models (no model parallelism), we expect full tensors
+                        # The slice strategy should be empty or indicate full tensor
+                        recv_tensor = target_param.data if target_param.data.is_contiguous() else target_param.data.contiguous()
+                        
+                        logger.debug(
+                            f"[VLA Rollout] Receiving {param_name} from policy rank {p_rank}, "
+                            f"shape {recv_tensor.shape}, dtype {recv_tensor.dtype}"
+                        )
+                        
+                        # Receive from the correct policy rank
+                        nccl_recv(
+                            recv_tensor,
+                            p_rank,  # Receive from this policy rank
+                            communicator_index,
+                            stream=self.inference_stream
+                        )
+                        
+                        # Copy back if we created a contiguous copy
+                        if recv_tensor is not target_param.data:
+                            target_param.data.copy_(recv_tensor)
+                        
+                        total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
             
             # Synchronize to ensure all receives complete
-            nccl_stream_synchronize(self.inference_stream.cuda_stream)
+            self.inference_stream.synchronize()
         
         elapsed = time.time() - st
-        throughput_gbps = (total_bytes_received / elapsed) / (1024 ** 3)
+        throughput_gbps = (total_bytes_received / elapsed) / (1024 ** 3) if elapsed > 0 else 0
         
         logger.info(
-            f"[VLA Rollout] ✅ Received {len(params_to_sync)} parameters "
+            f"[VLA Rollout] ✅ Received {transferred_params} parameters (skipped {skipped_params}) "
             f"({total_bytes_received / (1024**2):.2f} MB) in {elapsed:.2f}s "
             f"({throughput_gbps:.2f} GB/s)"
         )
+        
+        # Verify weights if enabled
+        if do_verification and reference_weights:
+            logger.info(f"[VLA Rollout] Starting weight verification...")
+            self._verify_weights(model_params, reference_weights, trainable_only)
+            logger.info(f"[VLA Rollout] ✅ Weight verification passed!")
+    
+    def _post_shard_info_to_controller(self):
+        """
+        Post shard information to controller for VLA models
+        
+        Uses the same parameter collection method as policy (weight_sync_transforms)
+        to ensure proper matching during weight synchronization.
+        """
+        from cosmos_rl.utils import distributed as dist_utils
+        from cosmos_rl.utils.parallelism_map import ParallelTopoMapperGroup
+        
+        # CRITICAL: Use the SAME parameter collection method as policy worker
+        # The policy uses model.weight_sync_transforms (not model.named_parameters())
+        # This property includes special logic for:
+        # - Parameter transformations (e.g., qkv decomposition)
+        # - Filtering based on weight_mapper logic
+        # - Proper handling of frozen/trainable parameters
+        # Using model.named_parameters() would cause mismatches!
+        vla_model = self.rollout.vla_model
+        keys_n_ranks = []
+        
+        # Use weight_sync_transforms just like policy does (see grpo_trainer.py line 334)
+        for name, tensor_or_callable in vla_model.weight_sync_transforms:
+            if isinstance(tensor_or_callable, torch.Tensor):
+                keys_n_ranks.append((name, tensor_or_callable.ndim))
+            else:
+                # It's a callable, call it to get the tensor
+                from collections.abc import Callable
+                assert isinstance(tensor_or_callable, Callable)
+                tensor = tensor_or_callable()
+                keys_n_ranks.append((name, tensor.ndim))
+        
+        logger.info(f"[VLA Rollout] Collected {len(keys_n_ranks)} parameters from weight_sync_transforms")
+        
+        # Log parameter breakdown for debugging
+        vision_params = [n for n, _ in keys_n_ranks if 'vision_backbone' in n]
+        vision_qkv = [n for n in vision_params if 'attn.qkv' in n]
+        logger.info(f"[VLA Rollout] Vision backbone parameters: {len(vision_params)}")
+        logger.info(f"[VLA Rollout] Vision backbone QKV parameters: {len(vision_qkv)}")
+        if vision_params:
+            logger.info(f"[VLA Rollout] First 5 vision params: {vision_params[:5]}")
+        if not vision_qkv:
+            logger.error(f"[VLA Rollout] ❌ NO QKV parameters found in vision backbone!")
+            logger.error(f"[VLA Rollout] This will cause controller to skip these parameters!")
+            # Log all parameter names for debugging
+            all_params = [n for n, _ in keys_n_ranks]
+            logger.error(f"[VLA Rollout] All {len(all_params)} parameter names:")
+            for i, name in enumerate(all_params[:20]):
+                logger.error(f"  {i}: {name}")
+        
+        # Get hf_config and weight_mapper from VLA model
+        hf_config = self.rollout.hf_config
+        weight_mapper = vla_model.weight_mapper
+        
+        # Prepare local shard infos using ParallelTopoMapperGroup
+        # For VLA with no model parallelism (single GPU), this generates empty parallelization info
+        logger.info(f"[VLA Rollout] Generating shard info for {len(keys_n_ranks)} parameters...")
+        local_shard_infos = ParallelTopoMapperGroup(
+            self.parallel_dims,
+            hf_config,
+            is_policy=False,
+            underlying_model=vla_model.model,  # Use the inner OpenVLAForActionPrediction model
+            backend="vllm",  # Use vLLM backend conventions
+            weight_mapper=weight_mapper,
+        ).prepare_local_shard_infos(keys_n_ranks, self.global_rank)
+        
+        # Gather shard info from all ranks
+        all_rank_shard_infos = dist_utils.all_gather_object_cpu(local_shard_infos)
+        
+        # Create sorted param list (for matching with policy)
+        sorted_params = sorted([x[0] for x in keys_n_ranks])
+        sorted_params_all_rank = dist_utils.all_gather_object_cpu(sorted_params)
+        
+        # Only rank 0 posts to controller
+        if self.global_rank == 0:
+            logger.info(f"[VLA Rollout] Rank 0 posting shard info for {len(keys_n_ranks)} parameters")
+            self.api_client.post_rollout_shard_info(
+                shard_infos=all_rank_shard_infos,
+                param_groups=[],  # No grouped parameters for VLA
+                sorted_params=sorted_params_all_rank,
+            )
+            logger.info(f"[VLA Rollout] ✅ Shard info posted to controller")
     
     def query_nccl_unique_id_from_controller(self, unique_id_key: str):
         """
@@ -480,6 +660,147 @@ class VLARolloutWorker(RolloutWorkerBase):
         This is needed for establishing NCCL communicators between policy and rollout workers.
         """
         return self.api_client.post_nccl_comm_acceptor(unique_id_key)
+    
+    def _load_reference_weights(self) -> Dict[str, torch.Tensor]:
+        """
+        Load reference weights from HuggingFace checkpoint for verification
+        
+        Returns:
+            Dict mapping parameter names to reference weight tensors
+        """
+        from cosmos_rl.policy.model.vla import VLAModel, VLAArgs
+        from cosmos_rl.policy.model.vla_utils import create_vla_config
+        
+        model_path = self.config.policy.model_name_or_path
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        
+        logger.info(f"[VLA Rollout] Loading reference model from {model_path}...")
+        
+        # Create VLA config
+        vla_config, _, _ = create_vla_config(
+            model_path,
+            cosmos_config=self.config,
+            model=self.config.vla.vla_type
+        )
+        
+        # Create VLA args
+        vla_args = VLAArgs(
+            vla_type=self.config.vla.vla_type,
+            use_proprio=self.config.vla.use_proprio,
+            proprio_dim=self.config.vla.action_dim,
+            num_images_in_input=self.config.vla.num_images_in_input,
+            hf_config=vla_config
+        )
+        
+        # Load full model with weights from HF
+        reference_model = VLAModel.from_model_args(vla_args)
+        reference_model.load_from_checkpoint(
+            model_name_or_path=model_path,
+            parallel_dims=None,
+            device=device
+        )
+        
+        # Extract weights
+        reference_weights = {
+            name: param.data.clone()
+            for name, param in reference_model.model.named_parameters()
+        }
+        
+        # Clean up reference model
+        del reference_model
+        torch.cuda.empty_cache()
+        
+        logger.info(f"[VLA Rollout] ✅ Loaded {len(reference_weights)} reference weights")
+        return reference_weights
+    
+    def _verify_weights(
+        self, 
+        model_params: Dict[str, torch.nn.Parameter], 
+        reference_weights: Dict[str, torch.Tensor],
+        trainable_only: bool
+    ):
+        """
+        Verify that received weights match reference weights from HF checkpoint
+        
+        Note: Vision backbone parameters are loaded directly from checkpoint (not synced),
+        so they are excluded from this verification.
+        
+        Args:
+            model_params: Current model parameters (after NCCL sync)
+            reference_weights: Reference weights from HF checkpoint
+            trainable_only: Whether only trainable params were synced
+        
+        Raises:
+            ValueError: If weights don't match
+        """
+        mismatches = []
+        total_verified = 0
+        max_abs_diff = 0.0
+        max_rel_diff = 0.0
+        
+        # Get trainable params if needed
+        if trainable_only:
+            trainable_params = self.trainable_params
+        else:
+            trainable_params = set(model_params.keys())
+        
+        for param_name in trainable_params:
+            if param_name not in model_params:
+                continue
+            
+            # Skip vision backbone parameters - they're loaded directly from checkpoint, not synced via NCCL
+            if param_name.startswith("vision_backbone"):
+                logger.debug(f"[VLA Rollout] Skipping vision_backbone parameter {param_name} (loaded from checkpoint)")
+                continue
+            
+            if param_name not in reference_weights:
+                logger.warning(f"[VLA Rollout] Parameter {param_name} not in reference weights, skipping")
+                continue
+            
+            received_weight = model_params[param_name].data
+            reference_weight = reference_weights[param_name]
+            
+            # Compare shapes
+            if received_weight.shape != reference_weight.shape:
+                mismatches.append(
+                    f"{param_name}: shape mismatch (received {received_weight.shape} vs reference {reference_weight.shape})"
+                )
+                continue
+            
+            # Compare values
+            try:
+                # Use allclose with reasonable tolerances
+                if not torch.allclose(received_weight, reference_weight, rtol=1e-5, atol=1e-7):
+                    abs_diff = (received_weight - reference_weight).abs().max().item()
+                    rel_diff = ((received_weight - reference_weight).abs() / (reference_weight.abs() + 1e-8)).max().item()
+                    max_abs_diff = max(max_abs_diff, abs_diff)
+                    max_rel_diff = max(max_rel_diff, rel_diff)
+                    
+                    mismatches.append(
+                        f"{param_name}: value mismatch (max_abs_diff={abs_diff:.2e}, max_rel_diff={rel_diff:.2e})"
+                    )
+                else:
+                    total_verified += 1
+            except Exception as e:
+                mismatches.append(f"{param_name}: comparison failed ({e})")
+        
+        # Report results
+        logger.info(f"[VLA Rollout] Verification results:")
+        logger.info(f"  ✅ Matched: {total_verified} parameters")
+        logger.info(f"  ❌ Mismatched: {len(mismatches)} parameters")
+        if mismatches:
+            logger.info(f"  Max absolute difference: {max_abs_diff:.2e}")
+            logger.info(f"  Max relative difference: {max_rel_diff:.2e}")
+            logger.info(f"  First 10 mismatches:")
+            for mismatch in mismatches[:10]:
+                logger.info(f"    - {mismatch}")
+        
+        # Raise error if there are mismatches
+        if mismatches:
+            raise ValueError(
+                f"Weight verification failed: {len(mismatches)} parameters don't match reference weights. "
+                f"This indicates an issue with NCCL weight synchronization."
+            )
 
     @RolloutWorkerBase.register_rollout_command_handler(RolloutToRolloutBroadcastCommand)
     def broadcast_to_all_rollout_replica(self, broadcast_command: RolloutToRolloutBroadcastCommand):

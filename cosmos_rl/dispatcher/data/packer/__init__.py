@@ -18,7 +18,11 @@ from .decoder_only_llm_data_packer import DecoderOnlyLLMDataPacker
 from .qwen2_5_vlm_data_packer import Qwen2_5_VLM_DataPacker
 from .qwen3_vl_data_packer import Qwen3_VL_DataPacker
 from .hf_vlm_data_packer import HFVLMDataPacker
+from .vla_data_packer import VLADataPacker
 from .base import worker_entry_parser
+
+# Register VLA data packer for VLA model types
+DataPacker.register(["openvla", "openvla-oft"], VLADataPacker)
 
 __all__ = [
     "DataPacker",
@@ -26,5 +30,6 @@ __all__ = [
     "Qwen2_5_VLM_DataPacker",
     "Qwen3_VL_DataPacker",
     "HFVLMDataPacker",
+    "VLADataPacker",
     "worker_entry_parser",
 ]

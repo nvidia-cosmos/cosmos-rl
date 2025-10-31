@@ -58,8 +58,16 @@ class VLAModel(BaseModel):
     def supported_model_types():
         return ["openvla", "openvla-oft"]
     
-    def __init__(self, vla_args: VLAArgs):
-        """Initialize VLA model following cosmos-rl pattern"""
+    def __init__(self, vla_args: VLAArgs, init_device: str = "cuda"):
+        """
+        Initialize VLA model following cosmos-rl pattern
+        
+        Args:
+            vla_args: VLA configuration arguments
+            init_device: Device to initialize model on ("cuda", "cpu", or "meta")
+                        Note: VLA models use TIMM vision backbone which has issues with
+                        meta tensors. For rollout workers, use "cuda" (policy worker does the same).
+        """
         super().__init__(vla_args.hf_config)
         self.config = vla_args
         self.hf_config = vla_args.hf_config
@@ -72,13 +80,23 @@ class VLAModel(BaseModel):
             from cosmos_rl.policy.model.vla.openvla.modeling_prismatic import OpenVLAForActionPrediction  
             logger.info("Using OpenVLA direct implementation")
         
-        # Create model directly (structure only, no weights)
-        logger.info(f"Creating VLA model structure with config: {self.hf_config.model_type}")
-        self.model = OpenVLAForActionPrediction(self.hf_config)
+        # Create model with specified device (use "meta" for fast initialization)
+        logger.info(f"Creating VLA model structure on device: {init_device}")
+        with torch.device(init_device):
+            self.model = OpenVLAForActionPrediction(self.hf_config)
         
-        # Convert to proper dtype
-        if hasattr(self.hf_config, 'torch_dtype'):
-            self.model = self.model.to(dtype=self.hf_config.torch_dtype)
+        # For meta device, allocate memory without initializing weights
+        if init_device == "meta":
+            device = torch.device(f"cuda:{torch.cuda.current_device()}")
+            logger.info(f"Allocating VLA model on {device} (weights uninitialized, for NCCL sync)")
+            self.model.to_empty(device=device)
+            # Set dtype after allocation
+            if hasattr(self.hf_config, 'torch_dtype'):
+                self.model = self.model.to(dtype=self.hf_config.torch_dtype)
+        else:
+            # Normal initialization with random weights
+            if hasattr(self.hf_config, 'torch_dtype'):
+                self.model = self.model.to(dtype=self.hf_config.torch_dtype)
         
         # Initialize additional attributes  
         self.processor = None
@@ -95,9 +113,15 @@ class VLAModel(BaseModel):
         logger.info(f"✅ Initialized VLA model structure: {vla_args.vla_type}")
 
     @classmethod
-    def from_model_args(cls, vla_args: VLAArgs) -> "VLAModel":
-        """Initialize VLA model from VLAArgs object (following Qwen VL pattern)"""
-        return cls(vla_args)
+    def from_model_args(cls, vla_args: VLAArgs, init_device: str = "cuda") -> "VLAModel":
+        """
+        Initialize VLA model from VLAArgs object (following Qwen VL pattern)
+        
+        Args:
+            vla_args: VLA configuration arguments
+            init_device: Device to initialize model on ("cuda", "cpu", or "meta")
+        """
+        return cls(vla_args, init_device=init_device)
 
     @cached_property
     def model_forward_valid_kwargs(self):
@@ -370,38 +394,94 @@ class VLAModel(BaseModel):
             kwargs["revision"] = revision
         
         try:
-            # Try loading from pretrained using our config (with VLA attributes)
+            # Load state dict from checkpoint (better for TIMM models)
+            # This ensures TIMM vision backbone weights are properly loaded
+            logger.info(f"Loading VLA state dict from {model_name_or_path}...")
+            from safetensors import safe_open
+            from pathlib import Path
+            import os
+            
+            # Find safetensors or pytorch_model.bin files
+            model_path = Path(model_name_or_path)
+            if not model_path.exists():
+                # Download from HF if needed
+                from huggingface_hub import snapshot_download
+                model_path = Path(snapshot_download(repo_id=model_name_or_path, revision=revision))
+            
+            # Try safetensors first (preferred for VLA models)
+            safetensor_files = list(model_path.glob("*.safetensors"))
+            if safetensor_files:
+                logger.info(f"Loading from safetensors: {[f.name for f in safetensor_files]}")
+                state_dict = {}
+                for st_file in safetensor_files:
+                    with safe_open(st_file, framework="pt", device=str(device)) as f:
+                        for key in f.keys():
+                            state_dict[key] = f.get_tensor(key)
+                logger.info(f"✅ Loaded {len(state_dict)} parameters from safetensors")
+            else:
+                # Fallback to pytorch_model.bin
+                pt_files = list(model_path.glob("pytorch_model*.bin"))
+                if pt_files:
+                    logger.info(f"Loading from PyTorch checkpoints: {[f.name for f in pt_files]}")
+                    state_dict = {}
+                    for pt_file in pt_files:
+                        state_dict.update(torch.load(pt_file, map_location=device))
+                    logger.info(f"✅ Loaded {len(state_dict)} parameters from PyTorch checkpoints")
+                else:
+                    raise FileNotFoundError(f"No safetensors or pytorch_model.bin found in {model_path}")
+            
+            # Load state dict into model (handles distributed tensors automatically)
+            missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+            
+            # Verify vision backbone was loaded
+            vision_backbone_keys = [k for k in state_dict.keys() if 'vision_backbone' in k]
+            logger.info(f"✅ Loaded VLA weights from {model_name_or_path}")
+            logger.info(f"   Total parameters in checkpoint: {len(state_dict)}")
+            logger.info(f"   Vision backbone parameters: {len(vision_backbone_keys)}")
+            if vision_backbone_keys:
+                logger.info(f"   First 5 vision params: {vision_backbone_keys[:5]}")
+            
+            if missing_keys:
+                logger.warning(f"⚠️  {len(missing_keys)} missing keys in checkpoint")
+                logger.warning(f"   First 10: {missing_keys[:10]}")
+                vision_missing = [k for k in missing_keys if 'vision_backbone' in k]
+                if vision_missing:
+                    logger.error(f"   ❌ Vision backbone missing: {len(vision_missing)} parameters!")
+                    logger.error(f"   This will cause verification failure!")
+            if unexpected_keys:
+                logger.warning(f"⚠️  {len(unexpected_keys)} unexpected keys in checkpoint")
+                logger.warning(f"   First 10: {unexpected_keys[:10]}")
+                
+        except Exception as e:
+            logger.error(f"Failed to load VLA state dict, falling back to from_pretrained: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Fallback to from_pretrained method
             hf_model = OpenVLAForActionPrediction.from_pretrained(
                 model_name_or_path, 
-                config=self.hf_config,  # ✅ Use our existing config with VLA attributes
+                config=self.hf_config,
                 **kwargs
             )
             logger.info(f"✅ Loaded reference model from HF: {type(hf_model)}")
-        except Exception as e:
-            logger.error(f"Failed to load VLA model from {model_name_or_path}: {e}")
-            raise
+            
+            # Copy weights using load_state_dict (proper way for TIMM models)
+            hf_state_dict = hf_model.state_dict()
+            missing_keys, unexpected_keys = self.model.load_state_dict(hf_state_dict, strict=False)
+            
+            del hf_model
+            torch.cuda.empty_cache()
+            
+            if missing_keys:
+                logger.warning(f"⚠️  {len(missing_keys)} missing keys")
+                logger.warning(f"   First 10: {missing_keys[:10]}")
+            if unexpected_keys:
+                logger.warning(f"⚠️  {len(unexpected_keys)} unexpected keys")
+                logger.warning(f"   First 10: {unexpected_keys[:10]}")
         
-        # Copy weights from reference model to our model
-        hf_state_dict = hf_model.state_dict()
-        self_state_dict = self.model.state_dict()
-        
-        # Copy matching weights
-        for name, tensor in hf_state_dict.items():
-            if name in self_state_dict:
-                target_tensor = self_state_dict[name]
-                
-                # Handle distributed tensors if present
-                is_dist_tensor = hasattr(target_tensor, 'to_local')
-                local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-                
-                # Copy data
-                with torch.no_grad():
-                    local_view.data.copy_(tensor.to(device))
-            else:
-                logger.warning(f"Weight {name} not found in VLA model")
-        
-        # Setup VLA-specific features
-        self._setup_vla_specific_features(model_name_or_path, hf_model)
+        # Setup VLA-specific features (only needed for from_pretrained path)
+        # For direct state_dict loading, these features should already be in the checkpoint
+        # self._setup_vla_specific_features(model_name_or_path, hf_model)
         
         # Load processor
         try:
@@ -416,8 +496,6 @@ class VLAModel(BaseModel):
         # Load normalization stats
         self._load_vla_norm_stats(model_name_or_path)
         
-        # Clean up reference model
-        del hf_model
         logger.info("✅ VLA weight loading completed")
         
     def _setup_vla_specific_features(self, model_name_or_path: str, hf_model):

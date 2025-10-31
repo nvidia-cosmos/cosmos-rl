@@ -167,27 +167,38 @@ def create_vla_config(
     if model in ["openvla", "openvla-oft"]:
         import json
         
-        # Resolve the actual local path (handles HuggingFace downloads)
+        # Try to load dataset_statistics.json
+        # First check if model is already downloaded locally
         try:
             local_model_path = resolve_model_path(name_or_path)
-            logger.debug(f"Resolved model path: {name_or_path} -> {local_model_path}")
-        except Exception as e:
-            logger.warning(f"Failed to resolve model path: {e}, using original path")
-            local_model_path = name_or_path
-        
-        dataset_stats_path = os.path.join(local_model_path, "dataset_statistics.json")
-        if os.path.isfile(dataset_stats_path):
-            try:
+            dataset_stats_path = os.path.join(local_model_path, "dataset_statistics.json")
+            
+            if os.path.isfile(dataset_stats_path):
+                # Load from local path
                 with open(dataset_stats_path, "r") as f:
                     norm_stats = json.load(f)
-                logger.info("✅ Loaded norm_stats from dataset_statistics.json")
-            except Exception as e:
-                logger.warning(f"Failed to load dataset_statistics.json: {e}")
-        else:
-            logger.warning(
-                "No dataset_statistics.json found. This may cause issues with action normalization. "
-                "You can ignore this if loading a base (not fine-tuned) VLA checkpoint."
-            )
+                logger.info("✅ Loaded norm_stats from local dataset_statistics.json")
+            else:
+                logger.info("Model not fully downloaded, attempting to fetch dataset_statistics.json only...")
+                # Model not downloaded yet - download just the JSON file
+                from huggingface_hub import hf_hub_download
+                try:
+                    json_path = hf_hub_download(
+                        repo_id=name_or_path,
+                        filename="dataset_statistics.json",
+                        repo_type="model"
+                    )
+                    with open(json_path, "r") as f:
+                        norm_stats = json.load(f)
+                    logger.info("✅ Loaded norm_stats from HuggingFace Hub (single file download)")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to download dataset_statistics.json from HuggingFace Hub: {e}. "
+                        "This may cause issues with action normalization. "
+                        "You can ignore this if loading a base (not fine-tuned) VLA checkpoint."
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to load dataset_statistics.json: {e}")
     
     # Extract VLA-specific parameters from cosmos config or kwargs
     if cosmos_config is not None and hasattr(cosmos_config, 'vla'):
@@ -305,4 +316,5 @@ def validate_vla_config(config: PretrainedConfig, vla_type: str) -> bool:
         logger.debug(f"VLA config validation passed for type: {vla_type}")
     
     return is_valid
+
 

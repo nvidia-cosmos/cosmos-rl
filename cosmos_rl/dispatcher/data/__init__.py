@@ -30,6 +30,31 @@ from .schema import RLPayload, IdxAndRLPayload
 class RLDataset(Dataset):
     def __init__(self, dataset: Any, tokenizer: AutoTokenizer, config: CosmosConfig):
         self.dataset = dataset
+        self.config = config
+        self.tokenizer = tokenizer
+        
+        # Setup data packer for model type (e.g., VLA uses VLADataPacker)
+        self.data_packer = None
+        try:
+            from cosmos_rl.dispatcher.data.packer import DataPacker
+            # Get model type from config to determine appropriate data packer
+            # Check for VLA models first (config.vla.vla_type)
+            model_type = None
+            if hasattr(config, 'vla') and hasattr(config.vla, 'vla_type') and config.vla.vla_type:
+                model_type = config.vla.vla_type
+                logger.info(f"Detected VLA model type: {model_type}")
+            elif hasattr(config.policy, 'model_type'):
+                model_type = config.policy.model_type
+            
+            if model_type:
+                self.data_packer = DataPacker.get_default_data_packer(model_type)
+                if hasattr(self.data_packer, 'setup'):
+                    self.data_packer.setup(config, tokenizer)
+                logger.info(f"Using data packer: {type(self.data_packer).__name__} for model type: {model_type}")
+        except (ValueError, AttributeError) as e:
+            logger.debug(f"No data packer found for model, will use default RLPayload wrapping: {e}")
+        
+        # Setup the underlying dataset if it has a setup method
         if hasattr(self.dataset, "setup"):
             self.dataset.setup(tokenizer=tokenizer, config=config)
 
@@ -37,10 +62,24 @@ class RLDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
-        prompt = self.dataset[idx]
-        if isinstance(prompt, RLPayload):
-            return idx, prompt
-        return idx, RLPayload(prompt=prompt)
+        item = self.dataset[idx]
+        
+        # If already an RLPayload, return as-is
+        if isinstance(item, RLPayload):
+            return idx, item
+        
+        # Use data packer if available (e.g., VLADataPacker for VLA models)
+        # The data packer converts raw data (dict, str, etc.) to RLPayload format
+        if self.data_packer is not None:
+            try:
+                payload = self.data_packer.get_rollout_input(item)
+                return idx, payload
+            except Exception as e:
+                logger.warning(f"Data packer failed for item {idx}: {e}, falling back to default wrapping")
+        
+        # Fallback: wrap as RLPayload with prompt field
+        # This works for text-based models where item is a string or ChatMessage list
+        return idx, RLPayload(prompt=item)
 
     def get_reference_answer(self, idx: int) -> Any:
         assert hasattr(
