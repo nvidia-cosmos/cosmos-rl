@@ -41,9 +41,6 @@ from cosmos_rl.dispatcher.command import (
 )
 import atexit
 from cosmos_rl.utils.util import (
-    msgpack_c_long,
-    msgunpack_c_long,
-    fix_data_type_size,
     compute_mfu,
 )
 from cosmos_rl.utils.parallelism_map import (
@@ -445,187 +442,6 @@ class GRPOTrainer(Trainer):
             for rollout in rollouts:
                 self.data_queue.put_nowait(rollout)
 
-    def wrap_to_cuda_tensor(self, key, obj, in_place=False):
-        """
-        wrap the object to cuda tensor for sync parameters using nccl.
-        """
-        if isinstance(obj, torch.Tensor):
-            if isinstance(obj, torch.distributed.tensor.DTensor):
-                obj = obj.to_local()
-
-            if obj.device != self.device:
-                if in_place:
-                    raise ValueError(
-                        f"Object {key} is not on the same device as the model. Please set in_place to False."
-                    )
-                obj = obj.to(self.device)
-            return obj
-        elif isinstance(obj, np.ndarray):
-            if in_place:
-                raise ValueError(
-                    f"Object {key} is not a tensor. Please set in_place to False."
-                )
-            obj = torch.from_numpy(obj).to(self.device)
-            return obj
-        else:
-            if in_place:
-                raise ValueError(
-                    f"Object {key} is not a tensor. Please set in_place to False."
-                )
-            if isinstance(obj, tuple):
-                obj = tuple(
-                    [x.tolist() if isinstance(x, np.ndarray) else x for x in obj]
-                )
-                obj = fix_data_type_size(obj)
-            bytes = msgpack.packb(obj, default=msgpack_c_long)
-            obj = torch.frombuffer(bytes, dtype=torch.uint8).to(self.device)
-            return obj
-
-    def extract_from_cuda_tensor(self, key, obj, tensor):
-        """
-        Extract the object from cuda tensor for sync parameters using nccl.
-        """
-        if isinstance(obj, torch.distributed.tensor.DTensor):
-            if obj.device != self.device:
-                local_shard = obj.to_local()
-                local_shard.copy_(tensor)
-        elif isinstance(obj, torch.Tensor):
-            if obj.device != self.device:
-                obj.copy_(tensor)
-        elif isinstance(obj, np.ndarray):
-            if obj.shape != tensor.shape:
-                raise ValueError(
-                    f"Object {key} is not the same shape as the tensor. Please check the data consistency."
-                )
-            x = tensor.cpu()
-            obj.copy_(x.numpy())
-        else:
-            np_arr = tensor.cpu()
-            obj_new = msgpack.unpackb(bytes(np_arr.numpy()), ext_hook=msgunpack_c_long)
-            if isinstance(obj, tuple):
-                assert len(obj) == len(obj_new)
-                obj = tuple(
-                    [
-                        np.array(obj_new[idx])
-                        if isinstance(x, np.ndarray)
-                        else tuple(obj_new[idx])
-                        if isinstance(x, tuple)
-                        else obj_new[idx]
-                        for idx, x in enumerate(obj)
-                    ]
-                )
-            else:
-                obj = obj_new
-        return obj
-
-    def sync_all_states(self, is_send: bool, send_hook: callable, recv_hook: callable):
-        """
-        Sync all states of the model and optimizer.
-        """
-        len_params = 0
-        # It's a HFModel, we need to sync the named buffers
-        if hasattr(self.model, "reset_named_buffers"):
-            # Convert the model to the hf_config.torch_dtype, which is param_dtype
-            self.model.model = self.model.model.to(
-                dtype=self.model.hf_config.torch_dtype
-            )
-            named_buffers_dict = dict(self.model.named_buffers())
-            model_state_dict = [self.model.state_dict(), named_buffers_dict]
-        else:
-            model_state_dict = [self.model.state_dict()]
-
-        # If KL-divergence is enabled, we need to also sync the reference model state dict
-        if self.config.train.train_policy.kl_beta != 0.0:
-            if len(self.reference_state_dict) == 0:
-                assert (
-                    not is_send
-                ), "Reference model state dict should be populated before sending"
-                for key, value in model_state_dict[0].items():
-                    self.reference_state_dict[key] = torch.empty_like(
-                        value, device="cpu"
-                    )
-            model_state_dict.append(self.reference_state_dict)
-
-        # 1. Sync all model states
-        for state_to_sync in model_state_dict:
-            for dest_name in sorted(state_to_sync.keys()):
-                obj = state_to_sync[dest_name]
-                assert isinstance(obj, torch.Tensor)
-                local_view = self.wrap_to_cuda_tensor(
-                    dest_name, obj, in_place=obj.is_cuda
-                )
-                if is_send:
-                    send_hook(local_view)
-                else:
-                    recv_hook(local_view)
-                    if isinstance(obj, torch.distributed.tensor.DTensor):
-                        to_write = obj.to_local()
-                    else:
-                        to_write = obj
-
-                    # Copy again for offloaded tensor since it is not inplace received
-                    if not to_write.is_cuda:
-                        to_write.copy_(local_view)
-                len_params += 1
-
-        # 2. Sync optimizer states
-        optimizer_state = self.optimizers.state_dict()
-        for dest_name in sorted(optimizer_state.keys()):
-            obj = optimizer_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            if local_view.data_ptr() is None:
-                # skip the optimizer state if the data pointer is None
-                continue
-            if is_send:
-                # nccl send
-                send_hook(local_view)
-            else:
-                # nccl recv
-                recv_hook(local_view)
-                optimizer_state[dest_name] = self.extract_from_cuda_tensor(
-                    dest_name, obj, local_view
-                )
-            len_params += 1
-        if not is_send:
-            self.optimizers.load_state_dict(optimizer_state)
-
-        # 3. Sync lr_scheduler states
-        lr_sheduler_state = self.lr_schedulers.state_dict()
-        for dest_name in sorted(lr_sheduler_state.keys()):
-            obj = lr_sheduler_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            if is_send:
-                # nccl send
-                send_hook(local_view)
-            else:
-                # nccl recv
-                recv_hook(local_view)
-                lr_sheduler_state[dest_name] = self.extract_from_cuda_tensor(
-                    dest_name, obj, local_view
-                )
-            len_params += 1
-        if not is_send:
-            self.lr_schedulers.load_state_dict(lr_sheduler_state)
-
-        # 4. Sync rng_state
-        rng_state = self.ckpt_manager.get_rng_state()
-        for dest_name in sorted(rng_state.keys()):
-            obj = rng_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            if is_send:
-                # nccl send
-                send_hook(local_view)
-            else:
-                # nccl recv
-                recv_hook(local_view)
-                rng_state[dest_name] = self.extract_from_cuda_tensor(
-                    dest_name, obj, local_view
-                )
-            len_params += 1
-        if not is_send:
-            self.ckpt_manager.set_rng_state(rng_state)
-        return len_params
-
     def pre_P2R_collect_parameters(self):
         needed_tensors = []
         for insts_group in self.policy_to_rollout_insts:
@@ -661,6 +477,7 @@ class GRPOTrainer(Trainer):
             is_send=send,
             send_hook=send_recv_hook,
             recv_hook=send_recv_hook,
+            reference_model=self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -688,6 +505,7 @@ class GRPOTrainer(Trainer):
             is_send=send,
             send_hook=send_hook,
             recv_hook=recv_hook,
+            reference_model=self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
