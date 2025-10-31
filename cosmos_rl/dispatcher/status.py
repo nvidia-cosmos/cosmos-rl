@@ -143,7 +143,7 @@ class PolicyStatusManager:
     ):
         self.redis_handler = redis_handler
         self.config = config
-        self.remain_samples_num = remain_samples_num  # FIXME: remove this, use data_fetcher.remain_samples_num instead
+        self.remain_samples_num = remain_samples_num
         self.samples_per_epoch = samples_per_epoch
         self.tokenizer = tokenizer
         self.current_step = current_step
