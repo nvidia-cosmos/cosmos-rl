@@ -19,7 +19,8 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 import vllm
 import torch
 import copy
-from typing import List, Optional, Dict, Tuple
+from torch.multiprocessing.reductions import reduce_tensor
+from typing import List, Optional, Dict, Tuple, Any
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.v1.engine.async_llm import AsyncLLM as AsyncLLMEngine, AsyncEngineArgs
@@ -57,16 +58,7 @@ class VLLMColocateWorkerExtension:
         
         param : torch.Tensor
         for name, param in model.named_parameters():
-            if param.is_cuda:
-                # Get the CUDA IPC handle
-                ipc_handle = param.untyped_storage()._share_cuda_()
-                state_dict_ipc[name] = (
-                    ipc_handle,
-                    tuple(param.shape),  # convert to tuple for serialization
-                    str(param.dtype).strip("torch."),
-                    param.device.index,
-                    param.storage_offset(),  # Save tensor's offset in its storage
-                )
+            state_dict_ipc[name] = reduce_tensor(param)
         
         return state_dict_ipc
     
@@ -114,77 +106,8 @@ def ipc_to_colocate_state_dict(state_dict_ipc: Dict[str, Tuple]) -> Dict[str, to
         the colocate state dict
     """
     state_dict = {}
-    for name, ipc_data in state_dict_ipc.items():
-        # Handle both old format (4 items) and new format (5 items) for backwards compatibility
-        if len(ipc_data) == 4:
-            ipc_handle, shape, dtype_str, device_id = ipc_data
-            tensor_storage_offset = 0  # Default for old format
-        else:
-            ipc_handle, shape, dtype_str, device_id, tensor_storage_offset = ipc_data
-        
-        dtype = util.str2torch_dtype(dtype_str)
-        
-        # Restore storage from IPC handle
-        # IPC handle is a tuple of (device_id, storage_handle, storage_size, 
-        # storage_offset, ref_counter_handle, ref_counter_offset, event_handle, event_sync_required)
-        storage_device, storage_handle, storage_size_bytes, storage_offset_bytes, \
-            ref_counter_handle, ref_counter_offset, event_handle, event_sync_required = ipc_handle
-        
-        # Create storage from IPC handle
-        untyped_storage = torch.UntypedStorage._new_shared_cuda(
-            storage_device,
-            storage_handle,
-            storage_size_bytes,
-            storage_offset_bytes,
-            ref_counter_handle,
-            ref_counter_offset,
-            event_handle,
-            event_sync_required,
-        )
-        
-        # Use the tensor's storage offset (in elements)
-        # Note: storage_offset_bytes from IPC handle is the storage's offset in shared memory,
-        # NOT the tensor's offset within the storage. We need tensor_storage_offset for that.
-        tensor_offset = tensor_storage_offset
-        
-        # Calculate total number of elements in the tensor
-        numel = 1
-        for dim in shape:
-            numel *= dim
-        
-        # Calculate strides for contiguous layout
-        stride = []
-        s = 1
-        for dim in reversed(shape):
-            stride.insert(0, s)
-            s *= dim if dim > 0 else 1
-        stride = tuple(stride) if len(stride) > 0 else (1,)
-        
-        # Verify storage is large enough
-        required_size = (tensor_offset + numel) * dtype.itemsize
-        if storage_size_bytes < required_size:
-            raise RuntimeError(
-                f"Storage too small for {name}: has {storage_size_bytes} bytes, "
-                f"needs {required_size} bytes (offset={tensor_offset}, numel={numel}, itemsize={dtype.itemsize})"
-            )
-        
-        # Create a TypedStorage that wraps the untyped storage
-        typed_storage = torch.storage.TypedStorage(
-            wrap_storage=untyped_storage,
-            dtype=dtype,
-            _internal=True
-        )
-        
-        # Use torch._utils._rebuild_tensor_v2 which handles IPC storage correctly
-        # This is the same method used by PyTorch's multiprocessing for deserializing tensors
-        state_dict[name] = torch._utils._rebuild_tensor_v2(
-            typed_storage,
-            tensor_offset,
-            shape,
-            stride,
-            False,  # requires_grad
-            None,  # backward_hooks (OrderedDict or None)
-        )
+    for name, (rebuild_func, args) in state_dict_ipc.items():
+        state_dict[name] = rebuild_func(*args)
     return state_dict
 
 
