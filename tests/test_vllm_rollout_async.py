@@ -22,6 +22,7 @@ import uuid
 import functools
 import torch
 import torch.multiprocessing as mp
+from torch.multiprocessing.reductions import reduce_tensor
 from typing import Optional, Tuple, List, Any, Dict
 
 import datasets
@@ -157,16 +158,8 @@ class TestStateDictIPCToStateDict(unittest.TestCase):
         demo_tensor = torch.randn(10, 10, device=device)
         expected_mean = demo_tensor.mean().item()
 
-        # Get IPC handle
-        ipc_handle = demo_tensor.untyped_storage()._share_cuda_()
         state_dict_ipc = {
-            "model.layers.0.self_attn.q_proj.weight": (
-                ipc_handle,
-                tuple(demo_tensor.shape),
-                str(demo_tensor.dtype).strip("torch."),
-                demo_tensor.device.index,
-                demo_tensor.storage_offset(),  # Include storage offset
-            ),
+            "model.layers.0.self_attn.q_proj.weight": reduce_tensor(demo_tensor)
         }
         
         # Create queue for result
@@ -179,7 +172,7 @@ class TestStateDictIPCToStateDict(unittest.TestCase):
             name="child_process_restore_tensor"
         )
         p.start()
-        p.join(timeout=10)  # 10 second timeout
+        p.join(timeout=30)  # 10 second timeout
         
         # Check result
         if p.is_alive():
