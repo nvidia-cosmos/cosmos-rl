@@ -19,6 +19,9 @@ from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )
 import torch
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from torch.utils.data import Dataset
+from typing import Union, Callable, Optional
 import inspect
 import os
 from cosmos_rl.utils.logging import logger
@@ -46,8 +49,9 @@ from cosmos_rl.utils.util import (
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcher
 from functools import cached_property
-from typing import List, Callable, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 import types
 from functools import partial
 import msgpack
@@ -254,7 +258,7 @@ def compute_loss(
 
 
 class GRPOTrainer(Trainer):
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
+    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
         super().__init__(config, parallel_dims)
         self.reference_state_dict = {}
 
@@ -324,6 +328,44 @@ class GRPOTrainer(Trainer):
         self.prepare_shard_infos_for_weight_sync_insts()
         if config.train.train_policy.variant == "gspo":
             logger.info("[Policy] Use GSPO loss in RL.")
+
+        self.setup(
+            dataset=kwargs.get("dataset", None),
+            data_packer=kwargs.get("data_packer", None),
+            val_dataset=kwargs.get("val_dataset", None),
+            val_data_packer=kwargs.get("val_data_packer", None),
+            sampler=kwargs.get("sampler", None),
+            batch_sampler=kwargs.get("batch_sampler", None),
+            val_sampler=kwargs.get("val_sampler", None),
+            val_batch_sampler=kwargs.get("val_batch_sampler", None),
+        )
+
+    def setup(
+        self,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        data_packer: Optional[DataPacker] = None,
+        val_dataset: Optional[Dataset] = None,
+        val_data_packer: Optional[DataPacker] = None,
+        sampler: Optional[Callable] = None,
+        batch_sampler: Optional[Callable] = None,
+        val_sampler: Optional[Callable] = None,
+        val_batch_sampler: Optional[Callable] = None,
+    ):
+        self.data_fetcher = None
+        if self.config.train.local_dataset:
+            self.data_fetcher = DataFetcher(
+                config=self.config,
+                dataset=dataset,
+                data_packer=data_packer,
+                val_dataset=val_dataset,
+                val_data_packer=val_data_packer,
+                sampler=sampler,
+                batch_sampler=batch_sampler,
+                val_sampler=val_sampler,
+                val_batch_sampler=val_batch_sampler,
+                tokenizer=self.tokenizer,
+                is_rl=True,
+            )
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
@@ -1100,6 +1142,13 @@ class GRPOTrainer(Trainer):
         start_event.record()
         logger.debug("[Policy] Prepare training data.")
         rollouts: List[Rollout] = self.dispatch_rollouts()
+
+        # preprocess rollouts
+        if self.config.train.local_dataset:
+            for i in range(len(rollouts)):
+                rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
+                    rollouts[i].prompt_idx
+                )
 
         # For single-turn rollout, we use the prompt, for multi-turn rollout, we use the completed conversation
         if self.config.rollout.multi_turn_config.enable:

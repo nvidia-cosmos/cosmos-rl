@@ -582,7 +582,7 @@ class RewardDispatcher:
 
     def dequeue_rewards_cal(
         self,
-    ) -> Optional[Tuple[List[RLPayload], bool, int, bool]]:
+    ) -> Tuple[Optional[List[RLPayload]], bool, int, bool]:
         """
         Dequeue the reward calculation result.
         If the task queue is empty, return None.
