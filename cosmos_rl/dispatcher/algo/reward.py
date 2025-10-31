@@ -182,9 +182,11 @@ def direct_math_reward_fn(
     Answer pattern can be customized.
     """
     # Limit solution length for efficiency
-    to_be_evaluated = to_be_evaluated[
-        -300:
-    ]  # The longest answer in MATH-500 has 159 characters
+    if kwargs.get("solution_length_limit", None) is not None:
+        solution_length_limit = int(kwargs["solution_length_limit"])
+        to_be_evaluated = to_be_evaluated[
+            -solution_length_limit:
+        ]  # For example: The longest answer in MATH-500 has 159 characters
 
     answer_pattern = kwargs.get("answer_pattern", r"(?i)Answer\s*:\s*([^\n]+)")
     # Extract answer from solution
