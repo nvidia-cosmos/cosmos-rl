@@ -65,6 +65,7 @@ class DataFetcher:
         self.val_sampler = val_sampler
         self.val_batch_sampler = val_batch_sampler
         self.tokenizer = tokenizer
+        self.epoch = 1
 
         self.ckpt_extra_info = {}
 
