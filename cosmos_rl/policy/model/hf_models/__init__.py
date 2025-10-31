@@ -72,6 +72,7 @@ class HFModel(BaseModel):
         self.model_class = model_class
         self.is_vlm = is_vlm
         self.need_dequantization = need_dequantization
+        self.tp_slice_dim_map = None
         if getattr(model, "_checkpoint_conversion_mapping", None):
             if hf_config.model_type in ["R"]:
                 logger.warning(
@@ -483,8 +484,11 @@ class HFModel(BaseModel):
 
             for name in weights_of_ckpt.keys():
                 tensor = weights_of_ckpt[name]
+                tp_slice_dim = None
+                if self.tp_slice_dim_map is not None:
+                    tp_slice_dim = self.tp_slice_dim_map.get(name, None)
                 dest_name, shared_weight = convert_weight_from_hf(
-                    tensor, name, model_type, parallel_dims
+                    tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
                 )
 
                 target_tensor = self_state_dict[dest_name]
@@ -508,8 +512,11 @@ class HFModel(BaseModel):
             name = lm_head_weight_key
             assert embed_tokens_weight_key in reserved
             tensor = reserved[embed_tokens_weight_key]
+            tp_slice_dim = None
+            if self.tp_slice_dim_map is not None:
+                tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, shared_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims
+                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
             )
             if dest_name in self_state_dict:
                 target_tensor = self_state_dict[dest_name]
@@ -595,8 +602,10 @@ class HFModel(BaseModel):
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
 
         for name, tensor in hf_state_dict.items():
+            if self.tp_slice_dim_map is not None:
+                tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, shared_weight = convert_weight_from_hf(
-                tensor, name, model_type, parallel_dims
+                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
             )
 
             target_tensor = self_state_dict[dest_name]
@@ -805,7 +814,16 @@ class HFModel(BaseModel):
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         assert cp_size == 1, "cp is not supported for HFModel"
-        assert tp_size == 1, "tp is not supported for HFModel"
+
+    def check_tp_compatible(self, tp_size: int):
+        num_attention_heads = self.text_config.num_attention_heads
+        num_key_value_heads = self.text_config.num_key_value_heads
+        assert (
+            num_attention_heads % tp_size == 0
+        ), f"{num_attention_heads=} must be divisible by TP size ({tp_size})"
+        assert (
+            num_key_value_heads % tp_size == 0
+        ), f"{num_key_value_heads=} must be divisible by TP size ({tp_size})"
 
     def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
         if "gpt_oss" in self.hf_config.model_type:

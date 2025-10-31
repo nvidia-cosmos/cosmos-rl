@@ -33,7 +33,8 @@ The ``HFModel`` class, implemented in ``cosmos_rl/policy/model/hf_models/__init_
 Distributed Training Support
 ----------------------------
 
-Currently, the Policy module exclusively supports **Fully Sharded Data Parallel (FSDP)** for distributed training and inference operations.
+- Fully Sharded Data Parallel (FSDP)
+- Tensor Parallelism (TP)
 
 Training Examples
 -----------------
