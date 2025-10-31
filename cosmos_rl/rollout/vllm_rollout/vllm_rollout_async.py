@@ -19,7 +19,7 @@ from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear
 import vllm
 import torch
 import copy
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.v1.engine.async_llm import AsyncLLM as AsyncLLMEngine, AsyncEngineArgs
@@ -28,49 +28,164 @@ from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
-from cosmos_rl.policy.config import RolloutConfig
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.model import WeightMapper
-from cosmos_rl.utils.tools_use import ToolParser
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
-    add_tool_response_messages,
-    add_assistant_message,
 )
-from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
+from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vllm_version_check
+
+class VLLMColocateWorkerExtension:
+    """
+    The extension designed to shared weight between the main process and the worker process via IPC.
+    This way, the code can be compatible with both vLLM V0 and V1.
+    NOTE: this class in a extension module, to use this class, you should pass the full qualified
+    name as `worker_extension_cls` argument to the AsyncLLMEngine.from_engine_args() method.
+    """
+
+    def get_state_dict_ipc(self) -> Dict[str, Tuple]:
+        """
+        Get the CUDA IPC handles of the model weights.
+        
+        Returns:
+            Dict[param_name, (ipc_handle, shape, dtype, device_id)]
+        """
+        state_dict_ipc = {}
+        model = self.model_runner.model
+        
+        param : torch.Tensor
+        for name, param in model.named_parameters():
+            if param.is_cuda:
+                # Get the CUDA IPC handle
+                ipc_handle = param.untyped_storage()._share_cuda_()
+                state_dict_ipc[name] = (
+                    ipc_handle,
+                    tuple(param.shape),  # convert to tuple for serialization
+                    str(param.dtype).strip("torch."),
+                    param.device.index,
+                    param.storage_offset(),  # Save tensor's offset in its storage
+                )
+        
+        return state_dict_ipc
+    
+    def get_weight_stats(self, layer_name: str = None) -> Dict:
+        """
+        Get the statistics of the model weights.
+        
+        Args:
+            layer_name: optional, the name of the layer
+            
+        Returns:
+            Dict with statistics
+        """
+        model = self.model_runner.model
+        stats = {}
+        
+        for name, param in model.named_parameters():
+            if layer_name and layer_name not in name:
+                continue
+                
+            stats[name] = {
+                'mean': param.mean().item(),
+                'std': param.std().item(),
+                'min': param.min().item(),
+                'max': param.max().item(),
+                'shape': tuple(param.shape),
+                'device': str(param.device),
+            }
+        
+        return stats
+    
+    def get_layer_names(self) -> list[str]:
+        """Get the names of all the layers in the model."""
+        return [name for name, _ in self.model_runner.model.named_parameters()]
 
 
-def vllm_version_check(rollout_config: RolloutConfig):
-    vllm_version = vllm.__version__
-    if vllm_version < "0.9.0" and rollout_config.parallelism.pp_size > 1:
-        raise NotImplementedError(
-            "Pipeline parallelism is not supported for vLLM < 0.9.0, current version is %s"
-            % vllm_version
+def ipc_to_colocate_state_dict(state_dict_ipc: Dict[str, Tuple]) -> Dict[str, torch.Tensor]:
+    """
+    Convert the state dict IPC to the colocate state dict.
+
+    Args:
+        state_dict_ipc: the state dict IPC
+        
+    Returns:
+        the colocate state dict
+    """
+    state_dict = {}
+    for name, ipc_data in state_dict_ipc.items():
+        # Handle both old format (4 items) and new format (5 items) for backwards compatibility
+        if len(ipc_data) == 4:
+            ipc_handle, shape, dtype_str, device_id = ipc_data
+            tensor_storage_offset = 0  # Default for old format
+        else:
+            ipc_handle, shape, dtype_str, device_id, tensor_storage_offset = ipc_data
+        
+        dtype = util.str2torch_dtype(dtype_str)
+        
+        # Restore storage from IPC handle
+        # IPC handle is a tuple of (device_id, storage_handle, storage_size, 
+        # storage_offset, ref_counter_handle, ref_counter_offset, event_handle, event_sync_required)
+        storage_device, storage_handle, storage_size_bytes, storage_offset_bytes, \
+            ref_counter_handle, ref_counter_offset, event_handle, event_sync_required = ipc_handle
+        
+        # Create storage from IPC handle
+        untyped_storage = torch.UntypedStorage._new_shared_cuda(
+            storage_device,
+            storage_handle,
+            storage_size_bytes,
+            storage_offset_bytes,
+            ref_counter_handle,
+            ref_counter_offset,
+            event_handle,
+            event_sync_required,
         )
-
-
-def update_conversation_wth_rollout_result(
-    conversation: ConversationType,
-    rollout_result: str,
-    tool_parser: ToolParser,
-    tools: list[OpenAIFunctionToolSchema],
-) -> ConversationType:
-    """
-    Update the conversation with the rollout result.
-
-    1. if the rollout result contains tool calls, add the tool response messages to the conversation
-    2. otherwise, add the assistant message to the conversation
-    """
-    content, function_calls = tool_parser.extract_tool_calls(rollout_result)
-
-    if function_calls:
-        conversation = add_tool_response_messages(conversation, function_calls)
-    else:
-        conversation = add_assistant_message(conversation, content)
-
-    return conversation
+        
+        # Use the tensor's storage offset (in elements)
+        # Note: storage_offset_bytes from IPC handle is the storage's offset in shared memory,
+        # NOT the tensor's offset within the storage. We need tensor_storage_offset for that.
+        tensor_offset = tensor_storage_offset
+        
+        # Calculate total number of elements in the tensor
+        numel = 1
+        for dim in shape:
+            numel *= dim
+        
+        # Calculate strides for contiguous layout
+        stride = []
+        s = 1
+        for dim in reversed(shape):
+            stride.insert(0, s)
+            s *= dim if dim > 0 else 1
+        stride = tuple(stride) if len(stride) > 0 else (1,)
+        
+        # Verify storage is large enough
+        required_size = (tensor_offset + numel) * dtype.itemsize
+        if storage_size_bytes < required_size:
+            raise RuntimeError(
+                f"Storage too small for {name}: has {storage_size_bytes} bytes, "
+                f"needs {required_size} bytes (offset={tensor_offset}, numel={numel}, itemsize={dtype.itemsize})"
+            )
+        
+        # Create a TypedStorage that wraps the untyped storage
+        typed_storage = torch.storage.TypedStorage(
+            wrap_storage=untyped_storage,
+            dtype=dtype,
+            _internal=True
+        )
+        
+        # Use torch._utils._rebuild_tensor_v2 which handles IPC storage correctly
+        # This is the same method used by PyTorch's multiprocessing for deserializing tensors
+        state_dict[name] = torch._utils._rebuild_tensor_v2(
+            typed_storage,
+            tensor_offset,
+            shape,
+            stride,
+            False,  # requires_grad
+            None,  # backward_hooks (OrderedDict or None)
+        )
+    return state_dict
 
 
 class vLLMRolloutAsync(RolloutBase):
@@ -166,6 +281,7 @@ class vLLMRolloutAsync(RolloutBase):
                 pipeline_parallel_size=pp_size,
                 enable_expert_parallel=enable_ep_parallelism,
                 distributed_executor_backend="external_launcher",
+                worker_extension_cls="cosmos_rl.rollout.vllm_rollout.vllm_rollout_async.VLLMColocateWorkerExtension",
                 dtype="auto",
                 enforce_eager=self.rollout_config.enforce_eager,  # enable cuda graph
                 gpu_memory_utilization=self.rollout_config.gpu_memory_utilization,
@@ -378,6 +494,19 @@ class vLLMRolloutAsync(RolloutBase):
             )
         # TODO(zjx): get tensor via ipc in the future
         return torch.nn.Module()
+
+    async def get_underlying_model_state_dict(self) -> Dict[str, torch.Tensor]:
+        """
+        Get the state dict of the underlying model.
+        """
+        if not self._engine_initialized:
+            raise RuntimeError(
+                "[Rollout] Engine is not initialized, please call init_engine first."
+            )
+
+        state_dict_ipc = await self.rollout_engine.collective_rpc("get_state_dict_ipc")
+        sd_ipc_worker0 = state_dict_ipc[0]
+        return ipc_to_colocate_state_dict(sd_ipc_worker0)
 
     def get_engine(self):
         if not self._engine_initialized:
