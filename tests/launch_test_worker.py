@@ -2200,6 +2200,132 @@ def run_dynamic_batchsize_test(
     destroy_distributed()
 
 
+def run_sft_ddp_load_check():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(
+        cur_dir,
+        "configs",
+        "test_simple_sft.toml",
+    )
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+    config = CosmosConfig.from_dict(
+        config_dict,
+    )
+    config.policy.parallelism.dp_replicate_size = 2
+    config.policy.parallelism.tp_size = 1
+    config.policy.parallelism.dp_shard_size = 2
+    parallel_dims = ParallelDims.from_config(
+        parallesim_config=config.policy.parallelism
+    )
+    init_distributed()
+    parallel_dims.build_mesh(device_type="cuda")
+
+    def dummy(self):
+        self.replica_name = str(dist_utils.broadcast_object_cpu(uuid.uuid4()))
+        self.api_client = APIClient(self.role, ["0.0.0.0"], 8000)
+        self.data_packer = DecoderOnlyLLMDataPacker()
+        self.data_packer.setup(self.config, self.tokenizer)
+        pass
+
+    CommMixin.init_comm = dummy
+
+    def dummy_sync_all_states(
+        self,
+        is_send: bool,
+        send_hook: callable,
+        recv_hook: callable,
+        reference_model: bool = False,
+    ):
+        if not hasattr(self, "sync_cnt"):
+            self.sync_cnt = 0
+
+        def offload_state_dict_cpu(state_dict: dict):
+            state_dict_cpu = {}
+            for key, value in state_dict.items():
+                if isinstance(value, torch.distributed.tensor.DTensor):
+                    state_dict_cpu[key] = value.to_local().cpu()
+                elif isinstance(value, torch.Tensor):
+                    state_dict_cpu[key] = value.cpu()
+            return state_dict_cpu
+
+        if self.parallel_dims.dp_replicate_coord[0] != 0:
+            pre_model_state_dict_cpu = offload_state_dict_cpu(self.model.state_dict())
+            pre_model_state_dict_cpu_for_load = (
+                self.ckpt_manager.offload_state_dict_cpu(self.model.state_dict())
+            )
+            pre_optimizer_state_dict_cpu = offload_state_dict_cpu(
+                self.optimizers.state_dict()
+            )
+            self.model.load_hf_weights(
+                self.config.policy.model_name_or_path,
+                self.parallel_dims,
+                self.device,
+                revision=self.config.policy.model_revision,
+            )
+            gt_model_state_dict_cpu = offload_state_dict_cpu(self.model.state_dict())
+            self.model.load_state_dict(pre_model_state_dict_cpu_for_load)
+        ret = self.original_sync_all_states(
+            is_send, send_hook, recv_hook, reference_model
+        )
+        if self.parallel_dims.dp_replicate_coord[0] != 0:
+            new_model_state_dict_cpu = offload_state_dict_cpu(self.model.state_dict())
+            new_optimizer_state_dict_cpu = offload_state_dict_cpu(
+                self.optimizers.state_dict()
+            )
+            results1 = []
+            results2 = []
+            cnt = 0
+            for key in pre_model_state_dict_cpu.keys():
+                results1.append(
+                    torch.allclose(
+                        gt_model_state_dict_cpu[key], new_model_state_dict_cpu[key]
+                    )
+                )
+                results2.append(
+                    torch.allclose(
+                        pre_model_state_dict_cpu[key], new_model_state_dict_cpu[key]
+                    )
+                )
+                cnt += 1
+                if cnt > 10:
+                    break
+            assert all(
+                results1
+            ), "DDP load failed for some model parameters, they should match hf loaded weights"
+            assert not all(
+                results2
+            ), "DDP load failed for some model parameters, they should be different after load"
+            results1 = []
+            cnt = 0
+            for key in pre_optimizer_state_dict_cpu.keys():
+                results1.append(
+                    torch.allclose(
+                        pre_optimizer_state_dict_cpu[key],
+                        new_optimizer_state_dict_cpu[key],
+                    )
+                )
+                cnt += 1
+                if cnt > 10:
+                    break
+            assert all(results1), "DDP load failed for some optimizer parameters"
+        self.sync_cnt += 1
+        return ret
+
+    Trainer.original_sync_all_states = Trainer.sync_all_states
+    Trainer.sync_all_states = dummy_sync_all_states
+    trainer = SFTTrainer(
+        config=config,
+        parallel_dims=parallel_dims,
+        dataset=TestDataset,
+    )
+
+    trainer.sync_all_states = types.MethodType(dummy_sync_all_states, trainer)
+
+    assert trainer.sync_cnt == 1
+    destroy_distributed()
+
+
 async def main():
     # Get shared memory name and size from command line arguments
     import argparse
@@ -2269,6 +2395,9 @@ async def main():
         exit(0)
     elif mode == "dynamic_batchsize_test":
         run_dynamic_batchsize_test()
+        exit(0)
+    elif mode == "sft_ddp_load_check":
+        run_sft_ddp_load_check()
         exit(0)
 
     # Initialize distributed environment
