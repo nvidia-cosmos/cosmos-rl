@@ -32,6 +32,9 @@ from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from transformers.models.mistral.modeling_mistral import MistralForCausalLM
 from transformers.models.phi3.modeling_phi3 import Phi3ForCausalLM
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VLForConditionalGeneration,
+)
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLForConditionalGeneration,
@@ -70,11 +73,13 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
         Gemma3ForCausalLM,
         Gemma3ForConditionalGeneration,
         Qwen2ForCausalLM,
+        Qwen2_5_VLForConditionalGeneration,
         Qwen3ForCausalLM,
         Qwen3VLForConditionalGeneration,
     ]:
         if model_class in [
             Gemma3ForConditionalGeneration,
+            Qwen2_5_VLForConditionalGeneration,
             Qwen3VLForConditionalGeneration,
         ]:
             model_prefix = "model.language_model"
@@ -143,7 +148,7 @@ def get_tp_plans(model, enable_float8_tensorwise_tp: bool = False):
             f"{model_prefix}.layers.*.mlp.down_proj": (-1, False),
             "lm_head": (0, False),
         }
-    # TODO: support TP for attention sinks
+    # TODO(huik): support TP for attention sinks
     # elif model_class is GptOssForCausalLM:
     #     tp_plan: dict[str, ParallelStyle] = {
     #         f"{model_prefix}.embed_tokens": rowwise_parallel(input_layouts=Replicate()),
