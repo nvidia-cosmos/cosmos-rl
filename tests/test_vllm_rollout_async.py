@@ -20,6 +20,8 @@ import toml
 import threading
 import uuid
 import functools
+import torch
+import torch.multiprocessing as mp
 from typing import Optional, Tuple, List, Any, Dict
 
 import datasets
@@ -34,7 +36,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.rollout.vllm_rollout.vllm_rollout_async import vLLMRolloutAsync
+from cosmos_rl.rollout.vllm_rollout.vllm_rollout_async import vLLMRolloutAsync, ipc_to_colocate_state_dict
 from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.utils.logging import logger
@@ -121,6 +123,80 @@ def getMockConfig():
 
 
 
+
+class TestStateDictIPCToStateDict(unittest.TestCase):
+    """Test state dict IPC to state dict."""
+
+    @staticmethod
+    def _child_process_restore_tensor(state_dict_ipc, expected_mean, result_queue):
+        """Child process function to restore tensor from IPC handle."""
+        try:
+            # Initialize CUDA in child process
+            torch.cuda.set_device(0)
+            
+            # Restore state dict from IPC handle
+            state_dict = ipc_to_colocate_state_dict(state_dict_ipc)
+            
+            # Verify the restored tensor
+            restored_tensor = state_dict["model.layers.0.self_attn.q_proj.weight"]
+            actual_mean = restored_tensor.mean().item()
+            
+            # Check if the mean is close to expected (indicates successful restoration)
+            is_close = abs(actual_mean - expected_mean) < 1e-5
+            result_queue.put(('success', is_close, actual_mean))
+        except Exception as e:
+            result_queue.put(('error', str(e), None))
+
+
+    def test_state_dict_ipc_to_state_dict(self):
+        """Test state dict IPC to state dict across processes."""
+        # Ensure 'spawn' start method for CUDA compatibility
+        ctx = mp.get_context('spawn')
+        
+        device = torch.device("cuda:0")
+        demo_tensor = torch.randn(10, 10, device=device)
+        expected_mean = demo_tensor.mean().item()
+
+        # Get IPC handle
+        ipc_handle = demo_tensor.untyped_storage()._share_cuda_()
+        state_dict_ipc = {
+            "model.layers.0.self_attn.q_proj.weight": (
+                ipc_handle,
+                tuple(demo_tensor.shape),
+                str(demo_tensor.dtype).strip("torch."),
+                demo_tensor.device.index,
+                demo_tensor.storage_offset(),  # Include storage offset
+            ),
+        }
+        
+        # Create queue for result
+        result_queue = ctx.Queue()
+        
+        # Start child process to restore tensor
+        p = ctx.Process(
+            target=self._child_process_restore_tensor,
+            args=(state_dict_ipc, expected_mean, result_queue),
+            name="child_process_restore_tensor"
+        )
+        p.start()
+        p.join(timeout=10)  # 10 second timeout
+        
+        # Check result
+        if p.is_alive():
+            p.terminate()
+            self.fail("Child process timed out")
+        
+        self.assertEqual(p.exitcode, 0, "Child process failed")
+        
+        # Get result from queue
+        status, result, actual_mean = result_queue.get(timeout=5)
+        
+        if status == 'error':
+            self.fail(f"Child process error: {result}")
+        
+        self.assertTrue(result, f"Tensor mean mismatch: expected {expected_mean}, got {actual_mean}")
+
+
 class TestVLLMRolloutAsync(unittest.TestCase):
     """Test vLLMRolloutAsync."""
 
@@ -181,7 +257,6 @@ class TestVLLMRolloutAsync(unittest.TestCase):
             print(f"Result {i}: {result}")
 
 
-
     def test_async_rollout_multi_turn_generate(self):
         """Test async rollout multi turn."""
         cosmos_config = getMockConfig()
@@ -219,6 +294,18 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         for i, result in enumerate(results):
             print(f"Result {i}: {result}")
 
+
+    def test_async_rollout_get_underlying_model_state_dict(self):
+        """Test async rollout get underlying model state dict."""
+        cosmos_config = getMockConfig()
+        cosmos_config.rollout.parallelism.tp_size = 1
+        rollout_engine, _ = self.get_rollout_engine_and_data_packer(cosmos_config)
+        state_dict = asyncio.run(rollout_engine.get_underlying_model_state_dict())
+        print(f"State dict: {state_dict}")
+
+        self.assertIn("model.layers.0.self_attn.q_proj.weight", state_dict)
+        self.assertGreater(state_dict["model.layers.0.self_attn.q_proj.weight"].sum(), 0)
+        rollout_engine.shutdown()
 
 
 class TestVLLMRolloutWorkerAsync(unittest.TestCase):
