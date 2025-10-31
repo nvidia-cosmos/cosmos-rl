@@ -842,6 +842,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.val_batch_size,
                 validation_queue,
                 validation_step=self.current_step,
+                is_validation=True,
             )
             if not validation_queue.empty():
                 prompt_id_and_payload_list: List[IdxAndRLPayload] = (
@@ -1227,7 +1228,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     if self.config.train.local_dataset:
                         for payload in payloads:
                             payload[1]["prompt"] = (
-                                self.data_fetcher.get_payload_by_index(payload[0])
+                                self.data_fetcher.get_payload_by_index(
+                                    payload[0],
+                                    is_validation=kwargs.get("is_validation", False),
+                                )
                             )
                     payloads = [
                         (payload[0], RLPayload.model_validate(payload[1]))
@@ -1336,6 +1340,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             if payloads is not None:
                 if is_validation:
                     break
+                # when using local dataset, we don't need to send the prompt to the controller
+                if self.config.train.local_dataset:
+                    for i in range(len(payloads)):
+                        payloads[i].prompt = None
+
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,
                     prompt_idxs=[],

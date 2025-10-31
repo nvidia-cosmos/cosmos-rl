@@ -609,7 +609,7 @@ class TrainingConfig(BaseModel):
     )
 
     local_dataset: Optional[bool] = Field(
-        default=False,
+        default=True,
         description="Whether to use local dataset to query sample. If set to True, will use the local dataset.",
     )
 
