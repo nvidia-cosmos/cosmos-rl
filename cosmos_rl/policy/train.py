@@ -53,7 +53,18 @@ def main(*args, **kwargs):
         ):
             if policy_type == "grpo":
                 logger.info("Starting GRPO training...")
-                trainer = GRPOTrainer(config=cosmos_config, parallel_dims=parallel_dims)
+                trainer = GRPOTrainer(
+                    config=cosmos_config,
+                    parallel_dims=parallel_dims,
+                    dataset=kwargs.get("dataset", None),
+                    data_packer=kwargs.get("data_packer", None),
+                    val_dataset=kwargs.get("val_dataset", None),
+                    val_data_packer=kwargs.get("val_data_packer", None),
+                    sampler=kwargs.get("sampler", None),
+                    batch_sampler=kwargs.get("batch_sampler", None),
+                    val_sampler=kwargs.get("val_sampler", None),
+                    val_batch_sampler=kwargs.get("val_batch_sampler", None),
+                )
                 trainer.main_loop()
             elif policy_type == "sft":
                 custom_sft_dataset = kwargs.get("dataset")
