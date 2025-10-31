@@ -67,7 +67,6 @@ class Controller:
     def _init_status(self):
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
-        self.epoch = 1
         self.stat_prompt_tokens_count = 0
         self.stat_completion_tokens_count = 0
         self.stat_n_samples = 0
