@@ -195,7 +195,6 @@ class Qwen3VLMoeVisionAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.attention_dropout = 0.0
         self.attn_func = FlashAttnMeta().flash_attn_varlen_func
-        self.apply_rotary_pos_emb_vision = apply_rotary_pos_emb_vision
 
     def forward(
         self,
@@ -213,9 +212,7 @@ class Qwen3VLMoeVisionAttention(nn.Module):
         )
         cos, sin = position_embeddings
 
-        q, k = self.apply_rotary_pos_emb_vision(
-            q.unsqueeze(0), k.unsqueeze(0), cos, sin
-        )
+        q, k = apply_rotary_pos_emb_vision(q.unsqueeze(0), k.unsqueeze(0), cos, sin)
         q = q.squeeze(0)
         k = k.squeeze(0)
 
