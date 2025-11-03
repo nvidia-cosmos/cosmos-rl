@@ -1238,6 +1238,13 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                                     is_validation=is_validation,
                                 )
                             )
+                            payload[1]["conversation"] = (
+                                self.data_fetcher.get_payload_by_index(
+                                    payload[0],
+                                    is_validation=is_validation,
+                                    attr="conversation",
+                                )
+                            )
                     payloads = [
                         (payload[0], RLPayload.model_validate(payload[1]))
                         for payload in payloads
@@ -1354,9 +1361,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     ].completed_conversations = self.data_packer.get_rollout_output(
                         payloads[i].completed_conversations
                     )
-                    # when using local dataset, we don't need to send the prompt to the controller
+                    # when using local dataset, we don't need to send the prompt/conversation to the controller
                     if self.config.train.local_dataset:
                         payloads[i].prompt = None
+                        payloads[i].conversation = None
 
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,

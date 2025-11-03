@@ -1135,6 +1135,10 @@ class GRPOTrainer(Trainer):
                 rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                     rollouts[i].prompt_idx
                 )
+                rollouts[i].conversation = self.data_fetcher.get_payload_by_index(
+                    rollouts[i].prompt_idx,
+                    attr="conversation",
+                )
 
         # For single-turn rollout, we use the prompt, for multi-turn rollout, we use the completed conversation
         if self.config.rollout.multi_turn_config.enable:

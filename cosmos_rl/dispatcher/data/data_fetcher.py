@@ -454,6 +454,9 @@ class ControllerDataFetcher(DataFetcherBase):
                     # If local dataset is enabled, we set prompt to None. And rollout worker will query
                     # the prompt from local dataset.
                     payload.prompt = None
+                    payload.conversation = None
+                    payload.reference_answer = None
+
                 prompt_id_and_payload_list.append((idx, payload))
 
         return prompt_id_and_payload_list, is_end
@@ -547,15 +550,17 @@ class WorkerDataFetcher(DataFetcherBase):
                 )
 
     def get_payload_by_index(
-        self, index: int, is_validation: bool = False
+        self, index: int, is_validation: bool = False, attr: str = "prompt"
     ) -> RLPayload:
+        row: IdxAndRLPayload = None
         if is_validation:
             if self.val_dataset is None or not self.config.validation.enable:
                 raise ValueError(
                     "[DataFetcher] Validation dataset is not loaded or validation is not enabled"
                 )
-            return self.val_dataset.val_set[index][1].prompt
+            row = self.val_dataset.val_set[index]
         else:
             if self.dataset is None:
                 raise ValueError("[DataFetcher] Local dataset is not loaded")
-            return self.dataset.train_set[index][1].prompt
+            row = self.dataset.train_set[index]
+        return getattr(row[1], attr)
