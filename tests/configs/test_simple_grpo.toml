@@ -37,8 +37,11 @@ model_gradient_checkpointing = true
 
 [train.train_policy]
 type = "grpo"
-dataset.name = "nvidia/ProfBench" # Just a small dataset for testing, not used in tests.
-dataset.split = "test"
+dataset.name = "data_fixtures/test_dataset"
+prompt_column_name = "prompt"
+response_column_name = "result"
+dataset.split = "train"
+reward_function = "boxed_math"
 temperature = 0.9
 epsilon_low = 0.2
 epsilon_high = 0.2
