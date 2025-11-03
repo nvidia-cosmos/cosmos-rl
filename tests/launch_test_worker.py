@@ -121,7 +121,7 @@ class TestDataset(Dataset):
         return len(self.dataset)
 
 
-def load_simple_config(config_name: str = "test_simple_grpo.toml"):
+def load_simple_grpo_config(config_name: str = "test_simple_grpo.toml"):
     cur_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(cur_dir, "configs", config_name)
     with open(config_path, "r") as f:
@@ -129,6 +129,14 @@ def load_simple_config(config_name: str = "test_simple_grpo.toml"):
         config_dict["train"]["train_policy"]["dataset"]["name"] = os.path.join(
             cur_dir, config_dict["train"]["train_policy"]["dataset"]["name"]
         )
+        return config_dict
+
+
+def load_simple_sft_config():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(cur_dir, "configs", "test_simple_sft.toml")
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
         return config_dict
 
 
@@ -428,7 +436,7 @@ async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank:
         )
         for r_rank in range(r_world_size)
     ]
-    config_dict = load_simple_config()
+    config_dict = load_simple_grpo_config()
     cosmos_config = CosmosConfig.from_dict(config_dict)
     cosmos_config.policy.parallelism = policy_parallelism_config
     cosmos_config.rollout.parallelism = rollout_parallelism_config
@@ -609,7 +617,7 @@ def policy_to_policy_sync_common(
         comm_idx = create_nccl_comm(nccl_uid, nccl_rank, nccl_size)
 
         # Construct the model and trainer
-        config_dict = load_simple_config()
+        config_dict = load_simple_grpo_config()
 
         cosmos_config = CosmosConfig.from_dict(
             config_dict,
@@ -990,7 +998,7 @@ def run_dummy_rollout():
 
 def run_policy_parallelism_extract(rank, fsdp, tp, pp):
     cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_dict = load_simple_config()
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1044,7 +1052,7 @@ def run_policy_parallelism_extract(rank, fsdp, tp, pp):
 
 
 def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
-    config_dict = load_simple_config()
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1224,7 +1232,7 @@ async def parallel_map_check():
     }
     r_data = msgpack.packb(r_body)
 
-    config_dict = load_simple_config()
+    config_dict = load_simple_grpo_config()
     cosmos_config = CosmosConfig.from_dict(config_dict)
     cosmos_config.policy.parallelism = policy_parallelism_config
     cosmos_config.rollout.parallelism = rollout_parallelism_config
@@ -1429,7 +1437,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                     return losses
         return losses
 
-    config_dict = load_simple_config(config_name="test_simple_sft.toml")
+    config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1477,7 +1485,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
 
 
 def run_sft_validation():
-    config_dict = load_simple_config(config_name="test_simple_sft.toml")
+    config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1533,7 +1541,7 @@ def run_sft_validation():
 
 
 def run_reward_check():
-    config_dict = load_simple_config()
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1640,7 +1648,7 @@ def run_reward_check():
 
 
 def run_sft_custom_sampler():
-    config_dict = load_simple_config("test_simple_sft.toml")
+    config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1851,7 +1859,7 @@ def run_sft_custom_sampler():
 
 
 def run_gspo_test():
-    config_dict = load_simple_config()
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1938,7 +1946,7 @@ def run_gspo_test():
 
 
 def run_reference_reset_test():
-    config_dict = load_simple_config()
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -2013,7 +2021,7 @@ def run_reference_reset_test():
 def run_dynamic_batchsize_test(
     max_token_len_per_mini_batch: int = 2048, batch_size_per_optimize: int = 2
 ):
-    config_dict = load_simple_config()
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
