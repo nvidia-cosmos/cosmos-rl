@@ -15,7 +15,7 @@
 
 from cosmos_rl.utils.parallelism import ParallelDims
 import torch
-from typing import Tuple
+from typing import Tuple, Optional
 
 
 def convert_weight_from_hf(
@@ -23,6 +23,7 @@ def convert_weight_from_hf(
     name: str,
     src_model_type: str,
     parallel_dims: ParallelDims,
+    tp_slice_dim: Optional[int] = None,
     ignore_unknown_weights: bool = False,
 ) -> Tuple[str, torch.Tensor]:
     if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
@@ -32,8 +33,13 @@ def convert_weight_from_hf(
         dp_shard_rank = 0
         dp_shard_size = 1
 
+    if tp_slice_dim is not None:
+        tp_rank, tp_size = parallel_dims.tp_coord
+        shard = tensor.tensor_split(tp_size, dim=tp_slice_dim)[tp_rank]
+    else:
+        shard = tensor
+
     dest_name = name
-    shard = tensor
     # Do FSDP sharding
     shard = shard.contiguous()
     row_size = shard.shape[0]
