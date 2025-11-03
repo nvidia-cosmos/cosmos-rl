@@ -16,6 +16,7 @@
 import os
 import torch
 import time
+from typing import Any
 from multiprocessing import shared_memory, Event as mp_Event
 import numpy as np
 import torch.distributed as dist
@@ -112,6 +113,7 @@ class TestDataset(Dataset):
         dataset_list = []
         for split_name in config.train.train_policy.dataset.split:
             dataset_list.append(dataset[split_name])
+        self.response_column = config.train.train_policy.response_column_name
         self.dataset = concatenate_datasets(dataset_list)
 
     def __getitem__(self, idx):
@@ -120,8 +122,12 @@ class TestDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    def get_reference_answer(self, idx: int) -> Any:
+        return self.dataset[idx][self.response_column]
 
-def load_simple_grpo_config(config_name: str = "test_simple_grpo.toml"):
+
+def load_simple_grpo_config():
+    config_name = "test_simple_grpo.toml"
     cur_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(cur_dir, "configs", config_name)
     with open(config_path, "r") as f:
