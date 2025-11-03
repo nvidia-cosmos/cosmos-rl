@@ -21,15 +21,12 @@ from concurrent.futures import ProcessPoolExecutor
 from torch.utils.data import Dataset
 from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
 from cosmos_rl.dispatcher.algo.reward import Reward
-from cosmos_rl.dispatcher.data import (
-    CosmosDataset,
-    CosmosValidationDataset,
-)
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.constant as constant
 from transformers import AutoTokenizer
 import cosmos_rl.utils.util as util
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from queue import Queue
 
 
@@ -137,12 +134,13 @@ class RewardCalculator:
         self,
         config: Config,
         dataset: Optional[Dataset] = None,
+        val_dataset: Optional[Dataset] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
-        val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[DataPacker] = None,
         val_data_packer: Optional[DataPacker] = None,
+        data_fetcher: Optional[DataFetcherBase] = None,
     ) -> None:
         """
         Setup the RewardCalculator with the given configuration and datasets.
@@ -160,23 +158,8 @@ class RewardCalculator:
         self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
             self.config.policy.model_name_or_path
         )
+        self.data_fetcher = data_fetcher
 
-        if config.rollout.reference_answer_in_local:
-            if dataset is not None and isinstance(dataset, Callable):
-                dataset = dataset(config)
-            if val_dataset is not None and isinstance(val_dataset, Callable):
-                val_dataset = val_dataset(config)
-
-            if dataset is not None:
-                assert isinstance(dataset, Dataset)
-                self.dataset = CosmosDataset(
-                    config=config, train_set=dataset, tokenizer=self.tokenizer
-                )
-                logger.info(
-                    "[Reward] Using provided dataset for training, dataset specification in the toml config will be ignored"
-                )
-            else:
-                self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
         self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
             reward_fn=Reward(
                 config=config,
@@ -189,19 +172,6 @@ class RewardCalculator:
             unbiased=config.train.train_policy.unbiased_advantage,
         )
         if config.validation.enable:
-            if config.rollout.reference_answer_in_local:
-                if val_dataset is not None:
-                    assert isinstance(val_dataset, Dataset)
-                    self.val_dataset = CosmosValidationDataset(
-                        config=config, val_set=val_dataset, tokenizer=self.tokenizer
-                    )
-                    logger.info(
-                        "[Reward] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
-                    )
-                else:
-                    self.val_dataset = CosmosValidationDataset(
-                        config=config, tokenizer=self.tokenizer
-                    )
             if not config.validation.reward_function:
                 if val_reward_fns is None:
                     val_reward_fns = reward_fns
@@ -239,20 +209,7 @@ class RewardCalculator:
     def query_reference_answer(
         self, prompt_idx: int, dataset_type: str = "train"
     ) -> Any:
-        """
-        Query the reference answer from the dataset based on the prompt index.
-        Args:
-            prompt_idx (int): The index of the prompt in the dataset.
-            dataset_type (str): The type of the dataset, either "train" or "val".
-        Returns:
-            Any: The reference answer corresponding to the prompt index.
-        """
-        if dataset_type == "train":
-            return self.dataset.train_set.get_reference_answer(prompt_idx)
-        elif dataset_type == "val":
-            return self.val_dataset.val_set.get_reference_answer(prompt_idx)
-        else:
-            raise ValueError(f"Unknown dataset type: {dataset_type}")
+        return self.data_fetcher.query_reference_answer(prompt_idx, dataset_type)
 
     def compute_validation_rewards(
         self,
@@ -274,9 +231,8 @@ class RewardCalculator:
         """
 
         assert (
-            not self.config.rollout.reference_answer_in_local
-            or len(prompt_idxs) == len(payloads)
-        ), "[Reward] prompt_idxs length should match payloads length when reference_answer_in_local is True"
+            not self.config.train.local_dataset or len(prompt_idxs) == len(payloads)
+        ), "[Reward] prompt_idxs length should match payloads length when local_dataset is True"
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
                 prompt_idx=prompt_idxs[i] if len(prompt_idxs) == len(payloads) else -1,
@@ -284,7 +240,7 @@ class RewardCalculator:
                 # Only report once per replica, so is_end is always True
                 is_end=True,
                 reference_answer=payload.reference_answer
-                if not self.config.rollout.reference_answer_in_local
+                if not self.config.train.local_dataset
                 else self.query_reference_answer(prompt_idxs[i], "val"),
             )
             for i, payload in enumerate(payloads)
@@ -346,9 +302,8 @@ class RewardCalculator:
             return self.compute_validation_rewards(payloads, step, prompt_idxs)
 
         assert (
-            not self.config.rollout.reference_answer_in_local
-            or len(prompt_idxs) == len(payloads)
-        ), "[Reward] prompt_idxs length should match payloads length when reference_answer_in_local is True"
+            not self.config.train.local_dataset or len(prompt_idxs) == len(payloads)
+        ), "[Reward] prompt_idxs length should match payloads length when local_dataset is True"
         # Placeholder for advantage computation logic
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
@@ -356,7 +311,7 @@ class RewardCalculator:
                 payload=payload,
                 is_end=False,
                 reference_answer=payload.reference_answer
-                if not self.config.rollout.reference_answer_in_local
+                if not self.config.train.local_dataset
                 else self.query_reference_answer(prompt_idxs[i]),
             )
             for i, payload in enumerate(payloads)
@@ -469,6 +424,7 @@ class RewardDispatcher:
     def setup(
         self,
         config: Config,
+        data_fetcher: DataFetcherBase,
         dataset: Optional[Dataset] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
@@ -512,6 +468,7 @@ class RewardDispatcher:
                 val_reward_fns=val_reward_fns,
                 data_packer=data_packer,
                 val_data_packer=val_data_packer,
+                data_fetcher=data_fetcher,
             )
 
         if num_workers > 0:

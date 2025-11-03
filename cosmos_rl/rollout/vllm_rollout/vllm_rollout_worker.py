@@ -65,7 +65,7 @@ from cosmos_rl.dispatcher.data.schema import (
 )
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
-from cosmos_rl.dispatcher.data.data_fetcher import DataFetcher
+from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 
 from vllm import SamplingParams
 from torch.utils.data import Dataset
@@ -242,14 +242,22 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
-        sampler: Optional[Callable] = None,
-        batch_sampler: Optional[Callable] = None,
-        val_sampler: Optional[Callable] = None,
-        val_batch_sampler: Optional[Callable] = None,
         num_workers: int = 8,
     ):
+        # Set up data fetcher
+        self.data_fetcher = WorkerDataFetcher(
+            config=self.config,
+            dataset=dataset,
+            val_dataset=val_dataset,
+            data_packer=self.data_packer,
+            val_data_packer=self.val_data_packer,
+            tokenizer=self.tokenizer,
+            is_rl=True,
+        )
+
         self.reward_dispatcher.setup(
             config=self.config,
+            data_fetcher=self.data_fetcher,
             dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
@@ -262,22 +270,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
             else 0,
         )
-
-        # Set up data fetcher
-        if self.config.train.local_dataset:
-            self.data_fetcher = DataFetcher(
-                config=self.config,
-                dataset=dataset,
-                data_packer=self.data_packer,
-                tokenizer=self.tokenizer,
-                sampler=sampler,
-                batch_sampler=batch_sampler,
-                val_dataset=val_dataset,
-                val_data_packer=self.val_data_packer,
-                val_sampler=val_sampler,
-                val_batch_sampler=val_batch_sampler,
-                is_rl=True,
-            )
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         if self.quantization_type == "fp8":

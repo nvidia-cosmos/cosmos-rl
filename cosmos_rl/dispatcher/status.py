@@ -30,7 +30,7 @@ from cosmos_rl.utils.wandb_logger import (
     is_wandb_available,
     log_wandb,
 )
-from cosmos_rl.dispatcher.data.data_fetcher import DataFetcher
+from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from transformers import AutoTokenizer
 import numpy as np
 import itertools
@@ -133,7 +133,7 @@ class PolicyStatusManager:
         self,
         config: Config,
         redis_handler: RedisStreamHandler,
-        data_fetcher: DataFetcher,
+        data_fetcher: ControllerDataFetcher,
         remain_samples_num: int,
         samples_per_epoch: int,
         tokenizer: AutoTokenizer,

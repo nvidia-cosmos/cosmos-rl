@@ -49,7 +49,7 @@ from cosmos_rl.utils.util import (
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
-from cosmos_rl.dispatcher.data.data_fetcher import DataFetcher
+from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 from functools import cached_property
 from typing import List, Dict, Any, Tuple
 import types
@@ -334,38 +334,24 @@ class GRPOTrainer(Trainer):
             data_packer=kwargs.get("data_packer", None),
             val_dataset=kwargs.get("val_dataset", None),
             val_data_packer=kwargs.get("val_data_packer", None),
-            sampler=kwargs.get("sampler", None),
-            batch_sampler=kwargs.get("batch_sampler", None),
-            val_sampler=kwargs.get("val_sampler", None),
-            val_batch_sampler=kwargs.get("val_batch_sampler", None),
         )
 
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         data_packer: Optional[DataPacker] = None,
-        val_dataset: Optional[Dataset] = None,
         val_data_packer: Optional[DataPacker] = None,
-        sampler: Optional[Callable] = None,
-        batch_sampler: Optional[Callable] = None,
-        val_sampler: Optional[Callable] = None,
-        val_batch_sampler: Optional[Callable] = None,
     ):
-        self.data_fetcher = None
-        if self.config.train.local_dataset:
-            self.data_fetcher = DataFetcher(
-                config=self.config,
-                dataset=dataset,
-                data_packer=data_packer,
-                val_dataset=val_dataset,
-                val_data_packer=val_data_packer,
-                sampler=sampler,
-                batch_sampler=batch_sampler,
-                val_sampler=val_sampler,
-                val_batch_sampler=val_batch_sampler,
-                tokenizer=self.tokenizer,
-                is_rl=True,
-            )
+        self.data_fetcher = WorkerDataFetcher(
+            config=self.config,
+            dataset=dataset,
+            val_dataset=val_dataset,
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+            tokenizer=self.tokenizer,
+            is_rl=True,
+        )
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):

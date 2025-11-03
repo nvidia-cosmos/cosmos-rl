@@ -47,7 +47,7 @@ from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data import IdxAndRLPayload
-from cosmos_rl.dispatcher.data.data_fetcher import DataFetcher
+from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 
 
 class Controller:
@@ -121,7 +121,7 @@ class Controller:
 
         self.is_rl = task_type != "sft"
 
-        self.data_fetcher = DataFetcher(
+        self.data_fetcher = ControllerDataFetcher(
             config=config,
             dataset=dataset,
             data_packer=data_packer,

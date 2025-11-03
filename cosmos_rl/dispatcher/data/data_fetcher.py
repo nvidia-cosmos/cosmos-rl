@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Callable, List, Dict, Iterator, Tuple
+from typing import Optional, Callable, List, Dict, Iterator, Tuple, Any
 from itertools import islice
 import math
 from tqdm import tqdm
+from abc import ABC
 
 import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
@@ -35,99 +36,173 @@ from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.logging import logger
 
 
-class DataFetcher:
+class DataFetcherBase(ABC):
+    """
+    DataFetcherBase is the base class for all data fetchers.
+    """
+
     def __init__(
         self,
         config: Config,
-        dataset: Optional[Dataset] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_dataset: Optional[Dataset] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: DataPacker,
+        val_data_packer: DataPacker,
+        tokenizer: AutoTokenizer,
+        dataset: Optional[Callable[[Config], Dataset]] = None,
+        val_dataset: Optional[Callable[[Config], Dataset]] = None,
+        is_rl: bool = True,
+        has_customized_datapacker: bool = False,
+    ):
+        self.config = config
+        self.data_packer = data_packer
+        self.val_data_packer = val_data_packer
+        self.tokenizer = tokenizer
+        self.dataset = dataset
+        self.val_dataset = val_dataset
+        self.is_rl = is_rl
+        # If the data packer is customized by user, we set this field to True.
+        self.has_customized_datapacker = has_customized_datapacker
+
+    def load_dataset(self):
+        if self.dataset is not None and isinstance(self.dataset, Callable):
+            self.dataset = self.dataset(self.config)
+        if self.val_dataset is not None and isinstance(self.val_dataset, Callable):
+            self.val_dataset = self.val_dataset(self.config)
+
+    def query_reference_answer(
+        self, prompt_idx: int, dataset_type: str = "train"
+    ) -> Any:
+        """
+        Query the reference answer from the dataset based on the prompt index.
+        Args:
+            prompt_idx (int): The index of the prompt in the dataset.
+            dataset_type (str): The type of the dataset, either "train" or "val".
+        Returns:
+            Any: The reference answer corresponding to the prompt index.
+        """
+        if self.dataset is None:
+            raise ValueError("Dataset is not loaded")
+        if self.config.validation.enable and self.val_dataset is None:
+            raise ValueError("Validation dataset is not loaded")
+
+        if dataset_type == "train":
+            return self.dataset.train_set.get_reference_answer(prompt_idx)
+        elif dataset_type == "val":
+            return self.val_dataset.val_set.get_reference_answer(prompt_idx)
+        else:
+            raise ValueError(f"Unknown dataset type: {dataset_type}")
+
+
+class ControllerDataFetcher(DataFetcherBase):
+    """
+    ControllerDataFetcher is responsible for fetching data from the dataset for policy and rollout.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        data_packer: DataPacker,
+        val_data_packer: DataPacker,
+        tokenizer: AutoTokenizer,
+        dataset: Optional[Callable[[Config], Dataset]] = None,
+        val_dataset: Optional[Callable[[Config], Dataset]] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
-        tokenizer: Optional[AutoTokenizer] = None,
-        is_rl: bool = False,
+        is_rl: bool = True,
+        has_customized_datapacker: bool = False,
+        # FIXME: (lms) how to check if has customized datapacker?
     ):
-        self.config = config
-        if dataset is not None and isinstance(dataset, Callable):
-            dataset = dataset(config)
-        if val_dataset is not None and isinstance(val_dataset, Callable):
-            val_dataset = val_dataset(config)
+        super().__init__(
+            config,
+            data_packer,
+            val_data_packer,
+            tokenizer,
+            dataset,
+            val_dataset,
+            is_rl,
+            has_customized_datapacker,
+        )
 
-        self.user_data_packer = data_packer
-        self.user_val_data_packer = val_data_packer
-        self.dataset = None
-        self.val_dataset = None
+        self.ckpt_extra_info = {}
+        self.epoch = 1
+        self.remain_samples_num = -1
         self.sampler = sampler
         self.batch_sampler = batch_sampler
         self.val_sampler = val_sampler
         self.val_batch_sampler = val_batch_sampler
-        self.tokenizer = tokenizer
-        self.epoch = 1
 
-        self.ckpt_extra_info = {}
+        # Controller should always load the dataset and dataloader.
+        self.load_dataset()
+
+    def load_dataset(self):
+        """
+        Load the dataset and dataloader for epochs.
+        """
+        super().load_dataset()
 
         remain_samples_num = 0
-
-        if is_rl:
+        if self.is_rl:
             self.rollout_batch_size = (
-                config.train.train_policy.dataloader_batch_size
-                or config.rollout.batch_size
+                self.config.train.train_policy.dataloader_batch_size
+                or self.config.rollout.batch_size
             )
-            if dataset is not None:
-                assert isinstance(dataset, Dataset)
+            if self.dataset is not None:
+                assert isinstance(self.dataset, Dataset)
                 self.dataset = CosmosDataset(
-                    config=config, train_set=dataset, tokenizer=self.tokenizer
+                    config=self.config, train_set=self.dataset, tokenizer=self.tokenizer
                 )
                 logger.info(
                     "[Controller] Using provided dataset for training, dataset specification in the toml config will be ignored"
                 )
             else:
-                self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
+                self.dataset = CosmosDataset(
+                    config=self.config, tokenizer=self.tokenizer
+                )
 
             remain_samples_num = (
                 (
                     len(self.dataset.train_set)
-                    * config.rollout.n_generation
-                    * config.train.epoch
+                    * self.config.rollout.n_generation
+                    * self.config.train.epoch
                 )
                 if self.dataset is not None
                 else 0
             )  # Total number of samples of policy training will consume.
 
-            if sampler is not None:
+            if self.sampler is not None:
                 logger.info("[DataFetcher] Using provided sampler for training")
-                if isinstance(sampler, Callable):
-                    train_sampler = sampler(
+                if isinstance(self.sampler, Callable):
+                    train_sampler = self.sampler(
                         self.dataset.train_set,
                         num_replicas=1,
                         rank=0,
-                        shuffle=config.train.train_policy.dataloader_shuffle,
+                        shuffle=self.config.train.train_policy.dataloader_shuffle,
                         drop_last=False,
                     )
                 else:
-                    train_sampler = sampler
+                    train_sampler = self.sampler
             else:
                 train_sampler = DistributedSampler(
                     self.dataset.train_set,
                     num_replicas=1,
                     rank=0,
-                    shuffle=config.train.train_policy.dataloader_shuffle,
+                    shuffle=self.config.train.train_policy.dataloader_shuffle,
                     drop_last=False,
                 )
-            if batch_sampler is not None and isinstance(batch_sampler, Callable):
-                batch_sampler = batch_sampler(
+            if self.batch_sampler is not None and isinstance(
+                self.batch_sampler, Callable
+            ):
+                self.batch_sampler = self.batch_sampler(
                     train_sampler,
                     batch_size=self.rollout_batch_size,
                     drop_last=False,
                 )
-            if config.train.resume:
+            if self.config.train.resume:
                 try:
                     # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
                     PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
-                    self.ckpt_manager = CheckpointMananger(config)
+                    self.ckpt_manager = CheckpointMananger(self.config)
                     self.ckpt_extra_info = (
                         self.ckpt_manager.load_extra_info_from_checkpoint()
                     )
@@ -135,13 +210,13 @@ class DataFetcher:
                         "remain_samples_num", remain_samples_num
                     )
                     self.epoch = (
-                        config.train.epoch
+                        self.config.train.epoch
                         - (
                             math.ceil(
                                 remain_samples_num
                                 / (
                                     len(self.dataset.train_set)
-                                    * config.rollout.n_generation
+                                    * self.config.rollout.n_generation
                                 )
                             )
                         )
@@ -157,7 +232,8 @@ class DataFetcher:
                         - (
                             (
                                 math.ceil(
-                                    remain_samples_num / config.rollout.n_generation
+                                    remain_samples_num
+                                    / self.config.rollout.n_generation
                                 )
                             )
                             % len(self.dataset.train_set)
@@ -177,14 +253,14 @@ class DataFetcher:
                             else 1
                         ),
                     )
-                    if batch_sampler is not None:
-                        batch_sampler = SkippingSampler(
-                            base_sampler=batch_sampler,
+                    if self.batch_sampler is not None:
+                        self.batch_sampler = SkippingSampler(
+                            base_sampler=self.batch_sampler,
                             skip_samples=train_dataloader_bias
                             // (
-                                len(list(islice(iter(batch_sampler), 1))[0])
+                                len(list(islice(iter(self.batch_sampler), 1))[0])
                                 if isinstance(
-                                    list(islice(iter(batch_sampler), 1))[0], list
+                                    list(islice(iter(self.batch_sampler), 1))[0], list
                                 )
                                 else 1
                             ),
@@ -196,76 +272,98 @@ class DataFetcher:
                     logger.error(
                         f"[DataFetcher] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
                     )
-            if batch_sampler is not None:
+            if self.batch_sampler is not None:
                 logger.info(
                     "[DataFetcher] Using custom batch Sampler that yields list of indices for training dataset."
                 )
                 self.train_dataloader = DataLoader(
                     self.dataset.train_set,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    num_workers=self.config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=RLPayload.collate_fn,
-                    batch_sampler=batch_sampler,
+                    batch_sampler=self.batch_sampler,
                 )
             else:
                 self.train_dataloader = DataLoader(
                     self.dataset.train_set,
                     batch_size=self.rollout_batch_size,
                     shuffle=False,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    num_workers=self.config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     collate_fn=RLPayload.collate_fn,
                     sampler=train_sampler,
                 )
             self.train_dataloader_iter = iter(self.train_dataloader)
 
-            if config.validation.enable:
+            if self.config.validation.enable:
                 self.val_batch_size = (
-                    config.train.train_policy.dataloader_batch_size
-                    or config.validation.batch_size
+                    self.config.train.train_policy.dataloader_batch_size
+                    or self.config.validation.batch_size
                     or self.rollout_batch_size
                 )
                 assert (
                     self.val_batch_size > 0
                 ), "[DataFetcher] val_batch_size should be greater than 0."
-                if val_dataset is not None:
-                    assert isinstance(val_dataset, Dataset)
+                if self.val_dataset is not None:
+                    assert isinstance(self.val_dataset, Dataset)
                     self.val_dataset = CosmosValidationDataset(
-                        config=config, val_set=val_dataset, tokenizer=self.tokenizer
+                        config=self.config,
+                        val_set=self.val_dataset,
+                        tokenizer=self.tokenizer,
                     )
                     logger.info(
                         "[DataFetcher] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
                     )
                 else:
                     self.val_dataset = CosmosValidationDataset(
-                        config=config, tokenizer=self.tokenizer
+                        config=self.config, tokenizer=self.tokenizer
                     )
-                if val_sampler is not None:
+                if self.val_sampler is not None:
                     logger.info("[DataFetcher] Using provided sampler for validation")
-                    if isinstance(val_sampler, Callable):
-                        val_sampler = val_sampler(
+                    if isinstance(self.val_sampler, Callable):
+                        self.val_sampler = self.val_sampler(
                             self.val_dataset.val_set,
                             num_replicas=1,
                             rank=0,
                             shuffle=False,
                             drop_last=False,
                         )
-                    self.val_dataloader = DataLoader(
-                        self.val_dataset.val_set,
-                        num_workers=config.train.train_policy.dataloader_num_workers,
-                        prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                        collate_fn=RLPayload.collate_fn,
-                        batch_sampler=val_batch_sampler,
+                # FIXME: (lms) We should add a default val_sampler for else-branch?
+
+                if self.val_batch_sampler is not None:
+                    logger.info(
+                        "[DataFetcher] Using custom batch Sampler that yields list of indices for validation dataset."
                     )
+                    if isinstance(self.val_batch_sampler, Callable):
+                        self.val_batch_sampler = self.val_batch_sampler(
+                            self.val_sampler
+                            if self.val_sampler is not None
+                            else DistributedSampler(
+                                self.val_dataset.val_set,
+                                num_replicas=1,
+                                rank=0,
+                                shuffle=False,
+                                drop_last=False,
+                            ),
+                            batch_size=self.val_batch_size,
+                            drop_last=False,
+                        )
+                        self.val_dataloader = DataLoader(
+                            self.val_dataset.val_set,
+                            num_workers=self.config.train.train_policy.dataloader_num_workers,
+                            prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
+                            collate_fn=RLPayload.collate_fn,
+                            batch_sampler=self.val_batch_sampler,
+                        )
                 else:
                     self.val_dataloader = DataLoader(
                         self.val_dataset.val_set,
                         batch_size=self.val_batch_size,
                         shuffle=False,
-                        num_workers=config.train.train_policy.dataloader_num_workers,
-                        prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                        num_workers=self.config.train.train_policy.dataloader_num_workers,
+                        prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                         collate_fn=RLPayload.collate_fn,
-                        sampler=val_sampler,
+                        sampler=self.val_sampler,
                     )
             else:
                 self.val_dataset = None
@@ -289,7 +387,7 @@ class DataFetcher:
     ) -> Tuple[bool, List[IdxAndRLPayload]]:
         add_answer = (
             self.config.rollout.multi_turn_config.enable
-            or not self.config.rollout.reference_answer_in_local
+            or not self.config.train.local_dataset
         )
         # query n prompts from the dataset [idx, payload]
         prompt_id_and_payload_list: List[IdxAndRLPayload] = []
@@ -380,15 +478,84 @@ class DataFetcher:
         else:
             return self.val_iters[validation_step]
 
+    def clear_validation_status(self):
+        self.activated_val_iter = None
+        if self.activated_val_tqdm is not None:
+            self.activated_val_tqdm.clear()
+        self.activated_val_tqdm = None
+
+
+class WorkerDataFetcher(DataFetcherBase):
+    """
+    WorkerDataFetcher is responsible for fetching data locally for policy and rollout, according to the index returned by the controller.
+    WorkerDataFetcher is much more simpler than ControllerDataFetcher, because it only supports query data by index.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        data_packer: DataPacker,
+        val_data_packer: DataPacker,
+        tokenizer: AutoTokenizer,
+        dataset: Optional[Callable[[Config], Dataset]] = None,
+        val_dataset: Optional[Callable[[Config], Dataset]] = None,
+        is_rl: bool = True,
+        has_customized_datapacker: bool = False,
+    ):
+        super().__init__(
+            config,
+            data_packer,
+            val_data_packer,
+            tokenizer,
+            dataset,
+            val_dataset,
+            is_rl,
+            has_customized_datapacker,
+        )
+
+        if self.config.train.local_dataset:
+            self.load_dataset()
+
+    def load_dataset(self):
+        super().load_dataset()
+
+        if self.dataset is not None:
+            assert isinstance(self.dataset, Dataset)
+            self.dataset = CosmosDataset(
+                config=self.config, train_set=self.dataset, tokenizer=self.tokenizer
+            )
+            logger.info(
+                "[DataFetcher] Using provided dataset for training, dataset specification in the toml config will be ignored"
+            )
+        else:
+            self.dataset = CosmosDataset(config=self.config, tokenizer=self.tokenizer)
+
+        if self.config.validation.enable:
+            if self.val_dataset is not None:
+                assert isinstance(self.val_dataset, Dataset)
+                self.val_dataset = CosmosValidationDataset(
+                    config=self.config,
+                    val_set=self.val_dataset,
+                    tokenizer=self.tokenizer,
+                )
+                logger.info(
+                    "[DataFetcher] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
+                )
+            else:
+                self.val_dataset = CosmosValidationDataset(
+                    config=self.config, tokenizer=self.tokenizer
+                )
+
     def get_payload_by_index(
         self, index: int, is_validation: bool = False
     ) -> RLPayload:
         if is_validation:
+            if self.val_dataset is None or not self.config.validation.enable:
+                raise ValueError(
+                    "[DataFetcher] Validation dataset is not loaded or validation is not enabled"
+                )
             return self.val_dataset.val_set[index][1].prompt
         else:
+            if self.dataset is None:
+                raise ValueError("[DataFetcher] Local dataset is not loaded")
             return self.dataset.train_set[index][1].prompt
-
-    def clear_validation_status(self):
-        self.activated_val_iter = None
-        self.activated_val_tqdm.clear()
-        self.activated_val_tqdm = None
