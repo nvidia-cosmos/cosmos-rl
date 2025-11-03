@@ -842,7 +842,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 self.val_batch_size,
                 validation_queue,
                 validation_step=self.current_step,
-                is_validation=True,
             )
             if not validation_queue.empty():
                 prompt_id_and_payload_list: List[IdxAndRLPayload] = (
@@ -1236,6 +1235,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             if prompt_queue.empty():
                 # blocking request
                 payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
+                is_validation = kwargs.get("validation_step", None) is not None
 
                 if len(payloads) > 0:
                     if self.config.train.local_dataset:
@@ -1243,7 +1243,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                             payload[1]["prompt"] = (
                                 self.data_fetcher.get_payload_by_index(
                                     payload[0],
-                                    is_validation=kwargs.get("is_validation", False),
+                                    is_validation=is_validation,
                                 )
                             )
                     payloads = [
