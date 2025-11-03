@@ -1429,7 +1429,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                     return losses
         return losses
 
-    config_dict = load_simple_config()
+    config_dict = load_simple_config(config_name="test_simple_sft.toml")
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1477,7 +1477,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
 
 
 def run_sft_validation():
-    config_dict = load_simple_config()
+    config_dict = load_simple_config(config_name="test_simple_sft.toml")
     config = CosmosConfig.from_dict(
         config_dict,
     )
