@@ -401,3 +401,6 @@ class TestHFModelTP(unittest.TestCase):
 # torchrun --nproc_per_node=2 test_hf_models_tp.py
 if __name__ == "__main__":
     unittest.main()
+
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
