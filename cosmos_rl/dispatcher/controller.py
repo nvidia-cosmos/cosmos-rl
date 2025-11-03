@@ -120,6 +120,7 @@ class Controller:
             )
 
         self.is_rl = task_type != "sft"
+        self.weight_version_to_prompt_num = {}  # Only for on-policy.
 
         self.data_fetcher = ControllerDataFetcher(
             config=config,
