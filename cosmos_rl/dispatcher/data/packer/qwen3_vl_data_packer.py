@@ -13,17 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
-from typing import List, Any, Dict, Optional, Tuple
+import io
+import base64
+import logging
 import torch
 import torch.nn.functional as F
+from PIL import Image
+from typing import List, Any, Dict, Optional, Tuple
+from transformers import AutoTokenizer, AutoProcessor, AutoConfig
+from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
+
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
-from transformers import AutoTokenizer, AutoProcessor, AutoConfig
-from PIL import Image
-import base64
-import io
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 IGNORE_LABEL_ID = -100
 
@@ -36,8 +39,6 @@ def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
             for item in x["content"]:
                 if item["type"] == "image":
                     image_inputs.append(item["image"])
-                if item["type"] == "video":
-                    video_inputs.append(item["video"])
     return image_inputs, video_inputs
 
 
@@ -71,6 +72,10 @@ class Qwen3_VL_DataPacker(DataPacker):
         self.hf_processor = retry(AutoProcessor.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
         )
+
+        qwen_vl_utils_logger = logging.getLogger("qwen_vl_utils")
+        qwen_vl_utils_logger.setLevel(logging.WARNING)
+        qwen_vl_utils_logger.propagate = False
 
         hf_config = retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
@@ -148,16 +153,20 @@ class Qwen3_VL_DataPacker(DataPacker):
         prompt = self.hf_processor.apply_chat_template(
             sample, tokenize=False, add_generation_prompt=True
         )
+        video_kwargs = {}
+        # In case of no vision information, we use the qwen_vl_process_vision_info to process the vision information
         image_inputs, video_inputs = process_vision_info(sample)
-        # TODO: add video support
+        if len(image_inputs) == 0 and len(video_inputs) == 0:
+            image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
+                sample, return_video_kwargs=True
+            )
         if len(video_inputs) > 0:
             return {
                 "prompt": prompt,
                 "multi_modal_data": {"video": video_inputs},
-                "mm_processor_kwargs": {},
+                "mm_processor_kwargs": video_kwargs,
             }
         elif len(image_inputs) > 0:
-            assert len(image_inputs) == 1, f"{len(image_inputs)=}"
             return {
                 "prompt": prompt,
                 "multi_modal_data": {"image": image_inputs},
@@ -446,25 +455,44 @@ class Qwen3_VL_DataPacker(DataPacker):
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
             )
+            video_kwargs = {}
+            video_metadatas = None
+            image_inputs, video_inputs = process_vision_info(conversation)
             if "images" in conversation:
                 image_inputs = conversation["images"]
-            else:
-                image_inputs, video_inputs = process_vision_info(conversation)
-                assert all(
-                    (isinstance(x, str) for x in image_inputs)
-                ), f"{image_inputs=}"
-                assert (
-                    len(video_inputs) == 0
-                ), "Currently video input is not supported for Qwen3_VL_DataPacker"
+            if "image" in conversation:
+                image_inputs = conversation["image"]
+
+            if len(image_inputs) == 0:
                 image_inputs = decode_base64_to_image(image_inputs)
+
+            if len(image_inputs) == 0 and len(video_inputs) == 0:
+                image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
+                    conversation,
+                    image_patch_size=16,
+                    return_video_kwargs=True,
+                    return_video_metadata=True,
+                )
+                if video_inputs is not None:
+                    video_inputs, video_metadatas = zip(*video_inputs)
+                    video_inputs, video_metadatas = (
+                        list(video_inputs),
+                        list(video_metadatas),
+                    )
+                else:
+                    video_metadatas = None
 
             kwarg = {
                 "return_tensors": "pt",
                 "images": image_inputs,
+                "videos": video_inputs,
+                "video_metadata": video_metadatas,
+                "do_resize": False,
             }
             inputs = self.hf_processor(
                 text=[text],
                 **kwarg,
+                **video_kwargs,
             )
             input_ids = inputs["input_ids"][0].tolist()
             label_ids = [IGNORE_LABEL_ID] * len(input_ids)
