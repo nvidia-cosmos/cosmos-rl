@@ -123,11 +123,9 @@ class PostCompletionSampleDataPacker(DecoderOnlyLLMDataPacker):
         self.storage.delete_item(id)
         return super().get_policy_input(item, rollout_output, n_ignore_prefix_tokens)
 
-    def completion_post_process(
-        self, items: Optional[List[Any]]
-    ) -> Optional[List[Any]]:
+    def get_rollout_output(self, items: Optional[List[Any]]) -> Optional[List[Any]]:
         """
-        Post-process the rollout outputs from the rollout engine
+        Post-process to get the rollout outputs from the rollout engine
         For example, we can clean up the completions here.
         """
         if items is None:
@@ -211,6 +209,6 @@ if __name__ == "__main__":
     launch_worker(dataset=get_dataset, data_packer=PostCompletionSampleDataPacker())
 
     """
-    Sample commands: 
+    Sample commands:
         cosmos-rl --config configs/qwen2-5/qwen2-5-7b-p-fsdp4-r-tp2-pp1-grpo.toml tools/dataset/post_completion.py
     """

@@ -142,9 +142,9 @@ class DataPacker(ABC):
         """
         return items
 
-    def completion_post_process(self, items: List[Any]) -> List[Any]:
+    def get_rollout_output(self, items: List[Any]) -> List[Any]:
         """
-        Post-process the rollout outputs from the rollout engine
+        Post-process to get the rollout outputs from the rollout engine
         """
         return items
 
