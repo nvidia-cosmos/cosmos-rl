@@ -37,6 +37,12 @@ def extract_rollouts(
             prompt_idx = -1
         else:
             prompt_idx = prompt_idxs[idx]
+
+        if payload.filter_rewards is None:
+            payload.filter_rewards = [0.0] * len(payload.rewards)
+        if payload.completions_token_length is None:
+            payload.completions_token_length = [0] * len(payload.rewards)
+
         rollouts = [
             Rollout(
                 prompt=payload.prompt,
