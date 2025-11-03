@@ -340,15 +340,6 @@ class GRPOTrainer(Trainer):
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
             if name not in trainable_params:
                 logger.debug(f"[Policy] Not trainable for param {name}")
-        
-        # Log parameter collection for debugging
-        logger.info(f"[Policy] Collected {len(keys_n_ranks)} parameters from weight_sync_transforms")
-        vision_params = [n for n, _ in keys_n_ranks if 'vision_backbone' in n]
-        vision_qkv = [n for n in vision_params if 'attn.qkv' in n]
-        logger.info(f"[Policy] Vision backbone parameters: {len(vision_params)}")
-        logger.info(f"[Policy] Vision backbone QKV parameters: {len(vision_qkv)}")
-        if vision_qkv:
-            logger.info(f"[Policy] First 5 QKV params: {vision_qkv[:5]}")
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config=self.hf_config,

@@ -28,6 +28,7 @@ Key Functions:
 
 import warnings
 import os
+import numpy as np
 from typing import Optional, Any, Tuple
 from transformers import AutoTokenizer, AutoConfig, AutoProcessor, PretrainedConfig
 from cosmos_rl.utils.logging import logger
@@ -54,6 +55,78 @@ def set_pad_token_id(tokenizer):
             logger.info(f"Set pad_token_id to default: {tokenizer.pad_token_id}")
     else:
         logger.debug(f"pad_token_id already set: {tokenizer.pad_token_id}")
+
+
+def normalize_norm_stats(norm_stats: dict, action_dim: int = 7) -> dict:
+    """
+    Normalize norm_stats to ensure correct shape for action statistics.
+    
+    VLA models predict multiple action chunks (temporal predictions), but all chunks
+    use the SAME action space normalization. This function ensures norm_stats are
+    stored per-dimension, not concatenated across chunks.
+    
+    Args:
+        norm_stats: Dictionary of normalization statistics from dataset_statistics.json
+        action_dim: Dimensionality of action space (default: 7 for LIBERO)
+                   If 0 or not specified, will infer from the smallest stat array size
+        
+    Returns:
+        Normalized norm_stats with correct shapes
+        
+    Example:
+        If norm_stats["dataset"]["action"]["min"] has shape (14,) for 2 chunks of 7 dims,
+        this will slice it to (7,) since all chunks use the same normalization.
+    """
+    # Auto-detect action_dim if not provided or is 0
+    if action_dim <= 0:
+        # Find the smallest action stat array size across all datasets
+        min_size = float('inf')
+        for dataset_stats in norm_stats.values():
+            if 'action' in dataset_stats:
+                for stat_key in ['min', 'max', 'q01', 'q99']:
+                    if stat_key in dataset_stats['action']:
+                        size = len(dataset_stats['action'][stat_key])
+                        min_size = min(min_size, size)
+        
+        if min_size != float('inf') and min_size > 0:
+            action_dim = min_size
+            logger.info(f"Auto-detected action_dim = {action_dim} from norm_stats")
+        else:
+            action_dim = 7  # Default fallback for LIBERO
+            logger.warning(f"Could not auto-detect action_dim, using default: {action_dim}")
+    
+    normalized_stats = {}
+    
+    for dataset_key, dataset_stats in norm_stats.items():
+        if 'action' not in dataset_stats:
+            normalized_stats[dataset_key] = dataset_stats
+            continue
+            
+        action_stats = dataset_stats['action'].copy()
+        
+        # Check and fix shape of action statistics
+        for stat_key in ['min', 'max', 'q01', 'q99', 'mask']:
+            if stat_key not in action_stats:
+                continue
+                
+            stat_array = np.array(action_stats[stat_key])
+            
+            # If stats are concatenated across chunks (e.g., 14 = 2 * 7), slice to first action_dim
+            # Only normalize if array is significantly larger (at least 1.5x)
+            if len(stat_array.shape) == 1 and stat_array.shape[0] > action_dim * 1.5:
+                logger.info(
+                    f"Normalizing {dataset_key}.action.{stat_key}: "
+                    f"shape {stat_array.shape} -> ({action_dim},) [concatenated chunks detected]"
+                )
+                action_stats[stat_key] = stat_array[:action_dim].tolist()
+            else:
+                # Keep as-is (already correct shape)
+                action_stats[stat_key] = stat_array.tolist()
+        
+        # Reconstruct dataset stats with normalized action stats
+        normalized_stats[dataset_key] = {**dataset_stats, 'action': action_stats}
+    
+    return normalized_stats
 
 
 def update_model_config(config: PretrainedConfig, override_config_kwargs: Optional[dict] = None):
@@ -162,6 +235,11 @@ def create_vla_config(
     logger.info(f"Loading VLA config from {name_or_path}")
     vla_config = AutoConfig.from_pretrained(name_or_path, trust_remote_code=True)
     
+    # Check if config already has norm_stats (from model's config.json)
+    config_has_norm_stats = hasattr(vla_config, 'norm_stats') and vla_config.norm_stats is not None
+    if config_has_norm_stats:
+        logger.info("Config already contains norm_stats (from model's config.json)")
+    
     # Load norm_stats from dataset_statistics.json (required for VLA models)
     norm_stats = None
     if model in ["openvla", "openvla-oft"]:
@@ -238,10 +316,25 @@ def create_vla_config(
     override_config_kwargs["num_images_in_input"] = num_images_in_input
     override_config_kwargs["vla_type"] = model
     
-    # Add norm_stats to config if loaded (critical for action normalization)
+    # Handle norm_stats from multiple sources and normalize them
+    # Priority: dataset_statistics.json > config.norm_stats
+    final_norm_stats = None
     if norm_stats is not None:
-        override_config_kwargs["norm_stats"] = norm_stats
-        logger.info(f"Added norm_stats to config with keys: {list(norm_stats.keys())}")
+        # Loaded from dataset_statistics.json
+        logger.info("Using norm_stats from dataset_statistics.json")
+        final_norm_stats = norm_stats
+    elif config_has_norm_stats:
+        # Use norm_stats from model's config.json
+        logger.info("Using norm_stats from model's config.json")
+        final_norm_stats = vla_config.norm_stats
+    
+    # Normalize norm_stats to ensure correct shape (fix root cause of shape mismatches)
+    if final_norm_stats is not None:
+        final_norm_stats = normalize_norm_stats(final_norm_stats, action_dim=proprio_dim)
+        override_config_kwargs["norm_stats"] = final_norm_stats
+        logger.info(f"✅ Normalized and added norm_stats to config with keys: {list(final_norm_stats.keys())}")
+    else:
+        logger.warning("⚠️  No norm_stats available from any source!")
     
     # Apply overrides to config
     update_model_config(vla_config, override_config_kwargs=override_config_kwargs)

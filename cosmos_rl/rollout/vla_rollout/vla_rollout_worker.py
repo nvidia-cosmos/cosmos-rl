@@ -581,52 +581,24 @@ class VLARolloutWorker(RolloutWorkerBase):
         from cosmos_rl.utils import distributed as dist_utils
         from cosmos_rl.utils.parallelism_map import ParallelTopoMapperGroup
         
-        # CRITICAL: Use the SAME parameter collection method as policy worker
-        # The policy uses model.weight_sync_transforms (not model.named_parameters())
-        # This property includes special logic for:
-        # - Parameter transformations (e.g., qkv decomposition)
-        # - Filtering based on weight_mapper logic
-        # - Proper handling of frozen/trainable parameters
-        # Using model.named_parameters() would cause mismatches!
+        # Use weight_sync_transforms to match policy worker's parameter collection
         vla_model = self.rollout.vla_model
         keys_n_ranks = []
         
-        # Use weight_sync_transforms just like policy does (see grpo_trainer.py line 334)
         for name, tensor_or_callable in vla_model.weight_sync_transforms:
             if isinstance(tensor_or_callable, torch.Tensor):
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
             else:
-                # It's a callable, call it to get the tensor
                 from collections.abc import Callable
                 assert isinstance(tensor_or_callable, Callable)
                 tensor = tensor_or_callable()
                 keys_n_ranks.append((name, tensor.ndim))
-        
-        logger.info(f"[VLA Rollout] Collected {len(keys_n_ranks)} parameters from weight_sync_transforms")
-        
-        # Log parameter breakdown for debugging
-        vision_params = [n for n, _ in keys_n_ranks if 'vision_backbone' in n]
-        vision_qkv = [n for n in vision_params if 'attn.qkv' in n]
-        logger.info(f"[VLA Rollout] Vision backbone parameters: {len(vision_params)}")
-        logger.info(f"[VLA Rollout] Vision backbone QKV parameters: {len(vision_qkv)}")
-        if vision_params:
-            logger.info(f"[VLA Rollout] First 5 vision params: {vision_params[:5]}")
-        if not vision_qkv:
-            logger.error(f"[VLA Rollout] ❌ NO QKV parameters found in vision backbone!")
-            logger.error(f"[VLA Rollout] This will cause controller to skip these parameters!")
-            # Log all parameter names for debugging
-            all_params = [n for n, _ in keys_n_ranks]
-            logger.error(f"[VLA Rollout] All {len(all_params)} parameter names:")
-            for i, name in enumerate(all_params[:20]):
-                logger.error(f"  {i}: {name}")
         
         # Get hf_config and weight_mapper from VLA model
         hf_config = self.rollout.hf_config
         weight_mapper = vla_model.weight_mapper
         
         # Prepare local shard infos using ParallelTopoMapperGroup
-        # For VLA with no model parallelism (single GPU), this generates empty parallelization info
-        logger.info(f"[VLA Rollout] Generating shard info for {len(keys_n_ranks)} parameters...")
         local_shard_infos = ParallelTopoMapperGroup(
             self.parallel_dims,
             hf_config,

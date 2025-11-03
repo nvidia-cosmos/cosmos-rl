@@ -203,8 +203,8 @@ class LiberoEnvWrapper(BaseEnvWrapper):
     def _create_libero_env(self, task, model_family: str, resolution: int):
         """Create LIBERO environment"""
         try:
-            # Import LIBERO utilities
-            from verl.utils.libero_utils import get_libero_env
+            # Import local LIBERO utilities
+            from cosmos_rl.rollout.vla_rollout.libero_utils import get_libero_env
             return get_libero_env(task, model_family, resolution)
         except ImportError:
             logger.error("LIBERO utilities not available. Please install LIBERO.")
@@ -213,16 +213,16 @@ class LiberoEnvWrapper(BaseEnvWrapper):
     def _get_dummy_action(self) -> List[float]:
         """Get dummy action for LIBERO"""
         try:
-            from verl.utils.libero_utils import get_libero_dummy_action
+            from cosmos_rl.rollout.vla_rollout.libero_utils import get_libero_dummy_action
             return get_libero_dummy_action(self.model_family)
         except ImportError:
             # Fallback dummy action
-            return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]
     
     def _process_action_for_libero(self, action: np.ndarray) -> List[float]:
         """Process action for LIBERO environment"""
         try:
-            from verl.utils.libero_utils import normalize_gripper_action, invert_gripper_action
+            from cosmos_rl.rollout.vla_rollout.libero_utils import normalize_gripper_action, invert_gripper_action
             
             # Ensure action is the right shape
             if action.ndim > 1:

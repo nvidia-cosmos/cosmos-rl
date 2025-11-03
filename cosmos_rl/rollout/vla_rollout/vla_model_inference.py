@@ -178,7 +178,8 @@ class VLAModelInference:
                 pixel_values = pixel_values_list[0]
             
             # Handle OpenVLA-OFT specific formatting
-            if hasattr(self.config, 'vla') and self.config.vla == "openvla-oft":
+            vla_type = getattr(self.config, 'vla_type', getattr(self.config, 'vla', None))
+            if vla_type == "openvla-oft":
                 # Add space token if needed (matching SimpleVLA-RL)
                 space_token_id = 29871  # Space token for LLaMA-based models
                 input_ids = torch.cat((input_ids, torch.tensor([[space_token_id]], dtype=input_ids.dtype)), dim=1)
@@ -200,7 +201,8 @@ class VLAModelInference:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Handle batch formatting based on VLA type
-        if hasattr(self.config, 'vla') and self.config.vla == "openvla-oft":
+        vla_type = getattr(self.config, 'vla_type', getattr(self.config, 'vla', None))
+        if vla_type == "openvla-oft":
             # OpenVLA-OFT specific batch processing
             batchdata["input_ids"] = [x.transpose(0, 1) for x in batchdata["input_ids"]]
             batchdata["attention_mask"] = [x.transpose(0, 1) for x in batchdata["attention_mask"]]
@@ -246,14 +248,18 @@ class VLAModelInference:
         Returns:
             VLA output with actions and metadata
         """
-        if hasattr(self.config, 'vla'):
-            if self.config.vla == "openvla-oft":
-                return self._generate_one_step_oft(prompts)
-            elif self.config.vla == "openvla":
-                return self._generate_one_step_openvla(prompts)
+        # Get vla_type from config (handles both vla_type and vla attributes)
+        vla_type = getattr(self.config, 'vla_type', getattr(self.config, 'vla', None))
+        
+        if vla_type == "openvla-oft":
+            logger.debug(f"Using OpenVLA-OFT generation method")
+            return self._generate_one_step_oft(prompts)
+        elif vla_type == "openvla":
+            logger.debug(f"Using OpenVLA generation method")
+            return self._generate_one_step_openvla(prompts)
         
         # Fallback to dummy implementation
-        logger.warning("No VLA model specified, using dummy action generation")
+        logger.warning(f"No VLA model specified (vla_type={vla_type}), using dummy action generation")
         return self._generate_dummy_step(prompts)
     
     def _generate_one_step_oft(self, prompts: Dict[str, torch.Tensor]) -> Dict[str, Any]:
@@ -288,8 +294,14 @@ class VLAModelInference:
                             temperature=temperature,
                         )
                         
+                        # Convert actions to numpy if needed (might already be numpy from _unnormalize_actions)
+                        if isinstance(actions, torch.Tensor):
+                            actions_np = actions.cpu().numpy()
+                        else:
+                            actions_np = actions
+                        
                         return {
-                            "action": actions.cpu().numpy(),  
+                            "action": actions_np,
                             "responses": responses,
                             "input_ids": input_ids,
                             "attention_mask": attention_mask,
@@ -325,8 +337,14 @@ class VLAModelInference:
                         temperature=temperature,
                     )
                     
+                    # Convert actions to numpy if needed (might already be numpy from _unnormalize_actions)
+                    if isinstance(actions, torch.Tensor):
+                        actions_np = actions.cpu().numpy()
+                    else:
+                        actions_np = actions
+                    
                     return {
-                        "action": actions.cpu().numpy(),
+                        "action": actions_np,
                         "responses": responses,
                         "input_ids": input_ids,
                         "attention_mask": attention_mask,
