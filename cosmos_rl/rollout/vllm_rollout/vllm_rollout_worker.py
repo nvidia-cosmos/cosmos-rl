@@ -863,13 +863,17 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
                 if payloads is not None:
                     for i in range(len(payloads)):
-                        payloads[i].completions = self.data_packer.get_rollout_output(
+                        payloads[
+                            i
+                        ].completions = self.val_data_packer.get_rollout_output(
                             payloads[i].completions
                         )
                         payloads[
                             i
-                        ].completed_conversations = self.data_packer.get_rollout_output(
-                            payloads[i].completed_conversations
+                        ].completed_conversations = (
+                            self.val_data_packer.get_rollout_output(
+                                payloads[i].completed_conversations
+                            )
                         )
                     response = ValidationReportRequest(
                         src_replica_name=self.replica_name,
