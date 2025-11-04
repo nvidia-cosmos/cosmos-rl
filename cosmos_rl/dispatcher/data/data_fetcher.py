@@ -448,7 +448,9 @@ class ControllerDataFetcher(DataFetcherBase):
                     # the prompt from local dataset.
                     payload.prompt = None
                     payload.conversation = None
-                    payload.reference_answer = None
+                    if not self.config.rollout.multi_turn_config.enable:
+                        # For non-multi-turn rollout, we set reference answer to None.
+                        payload.reference_answer = None
 
                 prompt_id_and_payload_list.append((idx, payload))
 

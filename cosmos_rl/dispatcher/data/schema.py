@@ -133,7 +133,7 @@ class Rollout(BaseModel):
     )
 
     prompt_idx: int = Field(
-        default=0, description="The index of the prompt for the rollout."
+        default=-1, description="The index of the prompt for the rollout."
     )
 
     conversation: Optional[ConversationType] = Field(
