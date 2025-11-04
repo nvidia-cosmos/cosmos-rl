@@ -719,7 +719,9 @@ class PolicyStatusManager:
                 self[replica_name].sub_profiler_config.do_profile = False
 
             # Sum and report data
-            if self.config.logging.logger:
+            if self.config.logging.logger and not all(
+                [not data for data in self.report_data_list]
+            ):
                 try:
                     total_loss_avg = np.mean(
                         [data["train/loss_avg"] for data in self.report_data_list]

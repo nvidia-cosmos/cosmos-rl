@@ -250,11 +250,6 @@ class Controller:
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                     )
 
-        prompt_id_and_payload_list, is_end = self.data_fetcher.get_batched_prompt(
-            n, validation_step
-        )
-
-        current_fetch_count = len(prompt_id_and_payload_list)
         if (
             (not is_validation)
             and self.config.train.train_policy.on_policy
@@ -274,6 +269,26 @@ class Controller:
                 num_of_valid_prompts_consumed // global_batch_size
             )
 
+            if self.config.train.train_policy.variant != "dapo":
+                # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
+                if (
+                    weight_version_for_current_batch
+                    not in self.weight_version_to_prompt_num
+                ):
+                    n = min(n, global_batch_size)
+                else:
+                    n = min(
+                        n,
+                        global_batch_size
+                        - self.weight_version_to_prompt_num[
+                            weight_version_for_current_batch
+                        ],
+                    )
+
+            prompt_id_and_payload_list, is_end = self.data_fetcher.get_batched_prompt(
+                n, validation_step
+            )
+            current_fetch_count = len(prompt_id_and_payload_list)
             # record the number of valid prompts for current weight version
             if (
                 weight_version_for_current_batch
@@ -309,6 +324,10 @@ class Controller:
                 ].weight_version = weight_version_for_current_batch
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
+            prompt_id_and_payload_list, is_end = self.data_fetcher.get_batched_prompt(
+                n, validation_step
+            )
+            current_fetch_count = len(prompt_id_and_payload_list)
             for i in range(current_fetch_count):
                 prompt_id_and_payload_list[i][1].weight_version = 0
 
