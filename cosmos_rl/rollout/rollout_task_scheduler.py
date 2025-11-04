@@ -536,6 +536,25 @@ class RolloutTaskScheduler:
                 break
         return results
 
+    async def draining_activate_tasks(self, timeout: Optional[float] = None):
+        """
+        Draining all active tasks from the active tasks set, and block processing task from task queue.
+
+        Which is useful when we want to update the weights during training.
+
+        Args:
+            timeout: Maximum time in seconds to wait for active tasks (None means wait forever)
+
+        Returns:
+            True if all active tasks are drained, False if timeout occurs
+        """
+        start_time = time.time()
+        while len(self.active_tasks) > 0:
+            if timeout is not None and (time.time() - start_time) > timeout:
+                raise TimeoutError(
+                    f"[RolloutTaskScheduler] Timeout waiting for {len(self.active_tasks)} active tasks"
+                )
+            await asyncio.sleep(0.1)
 
     async def wait_for_all_tasks_to_complete(self):
         """

@@ -20,9 +20,6 @@ import toml
 import threading
 import uuid
 import functools
-import torch
-import torch.multiprocessing as mp
-from torch.multiprocessing.reductions import reduce_tensor
 from typing import Optional, Tuple, List, Any, Dict
 
 import datasets
@@ -30,15 +27,16 @@ from transformers import AutoTokenizer
 from vllm import SamplingParams
 
 
-from cosmos_rl.rollout import State
 from cosmos_rl.dispatcher.data.schema import RLPayload
-from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.rollout.vllm_rollout.vllm_rollout_async import vLLMRolloutAsync, ipc_to_colocate_state_dict
-from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import DecoderOnlyLLMDataPacker, DataPacker
+from cosmos_rl.rollout.vllm_rollout.vllm_rollout_async import vLLMRolloutAsync
+from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
+    DecoderOnlyLLMDataPacker,
+    DataPacker,
+)
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
@@ -59,7 +57,7 @@ class MockAPIClient(APIClient):
         super().__init__(*args, **kwargs)
 
         self.config = getMockConfig()
-        
+
         # initialize the data_packer
         tokenizer = AutoTokenizer.from_pretrained(self.config.policy.model_name_or_path)
         data_packer = DecoderOnlyLLMDataPacker()
@@ -68,30 +66,48 @@ class MockAPIClient(APIClient):
 
         # load test dataset
         cur_dir = os.path.dirname(os.path.abspath(__file__))
-        self.dataset = datasets.load_from_disk(os.path.join(cur_dir, "data_fixtures", "sharegpt52k_small"))["train"]
+        self.dataset = datasets.load_from_disk(
+            os.path.join(cur_dir, "data_fixtures", "sharegpt52k_small")
+        )["train"]
         self.data_iter = iter(self.dataset)
         self.cur_epoch = 0
 
-    def post_rollout_shard_info(self, shard_infos: List[Dict[str, Any]], param_groups: List[List[str]], sorted_params: List[List[str]]):
+    def post_rollout_shard_info(
+        self,
+        shard_infos: List[Dict[str, Any]],
+        param_groups: List[List[str]],
+        sorted_params: List[List[str]],
+    ):
         pass
 
-    def register(self, replica_name: str, role: str, mesh_names: List[str], ranks: List[int], group_size: int, global_rank: int, host_ip: str, host_name: str):
-        logger.info(f"[MockAPIClient] Register: {replica_name}, {role}, {mesh_names}, {ranks}, {group_size}, {global_rank}, {host_ip}, {host_name}")
+    def register(
+        self,
+        replica_name: str,
+        role: str,
+        mesh_names: List[str],
+        ranks: List[int],
+        group_size: int,
+        global_rank: int,
+        host_ip: str,
+        host_name: str,
+    ):
+        logger.info(
+            f"[MockAPIClient] Register: {replica_name}, {role}, {mesh_names}, {ranks}, {group_size}, {global_rank}, {host_ip}, {host_name}"
+        )
 
     def unregister(self, replica_name: str):
         logger.info(f"[MockAPIClient] Unregister: {replica_name}")
 
-    def get_next_prompt(self, batch_size: int, validation_step: Optional[int] = None) -> Tuple[List[Tuple[int, str]], bool]:
+    def get_next_prompt(
+        self, batch_size: int, validation_step: Optional[int] = None
+    ) -> Tuple[List[Tuple[int, str]], bool]:
         def _collect_batch(self):
             batch = []
             for i in range(batch_size):
                 dat = next(self.data_iter)
                 conversation = dat["conversation"]
                 prompt = self.data_packer.get_rollout_input(conversation)
-                payload = RLPayload(
-                    prompt=prompt,
-                    conversation=conversation
-                )
+                payload = RLPayload(prompt=prompt, conversation=conversation)
                 batch.append((i, payload))
             return batch
 
@@ -101,12 +117,11 @@ class MockAPIClient(APIClient):
             self.data_iter = iter(self.dataset)
             batch = _collect_batch(self)
             self.cur_epoch += 1
-        
+
         return batch, self.cur_epoch == 2
 
     def post_rollout_completion(self, response: RolloutRequest):
         logger.info(f"[MockAPIClient] Post rollout completion: {response}")
-
 
     def post_validation_report(self, report: ValidationReportRequest):
         logger.info(f"[MockAPIClient] Post validation report: {report}")
@@ -123,73 +138,6 @@ def getMockConfig():
     return CosmosConfig.from_dict(config_dict)
 
 
-
-
-class TestStateDictIPCToStateDict(unittest.TestCase):
-    """Test state dict IPC to state dict."""
-
-    @staticmethod
-    def _child_process_restore_tensor(state_dict_ipc, expected_mean, result_queue):
-        """Child process function to restore tensor from IPC handle."""
-        try:
-            # Initialize CUDA in child process
-            torch.cuda.set_device(0)
-            
-            # Restore state dict from IPC handle
-            state_dict = ipc_to_colocate_state_dict(state_dict_ipc)
-            
-            # Verify the restored tensor
-            restored_tensor = state_dict["model.layers.0.self_attn.q_proj.weight"]
-            actual_mean = restored_tensor.mean().item()
-            
-            # Check if the mean is close to expected (indicates successful restoration)
-            is_close = abs(actual_mean - expected_mean) < 1e-5
-            result_queue.put(('success', is_close, actual_mean))
-        except Exception as e:
-            result_queue.put(('error', str(e), None))
-
-
-    def test_state_dict_ipc_to_state_dict(self):
-        """Test state dict IPC to state dict across processes."""
-        # Ensure 'spawn' start method for CUDA compatibility
-        ctx = mp.get_context('spawn')
-        
-        device = torch.device("cuda:0")
-        demo_tensor = torch.randn(10, 10, device=device)
-        expected_mean = demo_tensor.mean().item()
-
-        state_dict_ipc = {
-            "model.layers.0.self_attn.q_proj.weight": reduce_tensor(demo_tensor)
-        }
-        
-        # Create queue for result
-        result_queue = ctx.Queue()
-        
-        # Start child process to restore tensor
-        p = ctx.Process(
-            target=self._child_process_restore_tensor,
-            args=(state_dict_ipc, expected_mean, result_queue),
-            name="child_process_restore_tensor"
-        )
-        p.start()
-        p.join(timeout=30)  # 10 second timeout
-        
-        # Check result
-        if p.is_alive():
-            p.terminate()
-            self.fail("Child process timed out")
-        
-        self.assertEqual(p.exitcode, 0, "Child process failed")
-        
-        # Get result from queue
-        status, result, actual_mean = result_queue.get(timeout=5)
-        
-        if status == 'error':
-            self.fail(f"Child process error: {result}")
-        
-        self.assertTrue(result, f"Tensor mean mismatch: expected {expected_mean}, got {actual_mean}")
-
-
 class TestVLLMRolloutAsync(unittest.TestCase):
     """Test vLLMRolloutAsync."""
 
@@ -202,7 +150,9 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         os.environ.update(self.old_env)
         destroy_distributed()
 
-    def get_rollout_engine_and_data_packer(self, config: CosmosConfig) -> Tuple[vLLMRolloutAsync, DataPacker]:
+    def get_rollout_engine_and_data_packer(
+        self, config: CosmosConfig
+    ) -> Tuple[vLLMRolloutAsync, DataPacker]:
         # initialize tokenizer
         tokenizer = AutoTokenizer.from_pretrained(config.policy.model_name_or_path)
         # initialize rollout engine
@@ -221,7 +171,9 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         # force try tp1, pp1
         cosmos_config.rollout.parallelism.tp_size = 1
 
-        rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(cosmos_config)
+        rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(
+            cosmos_config
+        )
 
         payloads = [
             RLPayload(prompt="What is 2+2?", weight_version=0),
@@ -235,12 +187,14 @@ class TestVLLMRolloutAsync(unittest.TestCase):
             n=2,  # 2 responses for each prompt
         )
 
-        results = asyncio.run(rollout_engine.rollout_generation(
-            payloads=payloads,
-            stream=None,
-            data_packer=data_packer,
-            sampling_params=sampling_params
-        ))
+        results = asyncio.run(
+            rollout_engine.rollout_generation(
+                payloads=payloads,
+                stream=None,
+                data_packer=data_packer,
+                sampling_params=sampling_params,
+            )
+        )
 
         rollout_engine.get_engine().shutdown()
 
@@ -248,7 +202,6 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         self.assertEqual(len(results), len(payloads))
         for i, result in enumerate(results):
             print(f"Result {i}: {result}")
-
 
     def test_async_rollout_multi_turn_generate(self):
         """Test async rollout multi turn."""
@@ -260,10 +213,15 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         # force try tp1, pp1
         cosmos_config.rollout.parallelism.tp_size = 1
 
-        rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(cosmos_config)
+        rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(
+            cosmos_config
+        )
 
         payloads = [
-            RLPayload(conversation=[ChatMessage(role="user", content="What is 2+2?")], weight_version=0),
+            RLPayload(
+                conversation=[ChatMessage(role="user", content="What is 2+2?")],
+                weight_version=0,
+            ),
         ]
 
         sampling_params = SamplingParams(
@@ -273,12 +231,14 @@ class TestVLLMRolloutAsync(unittest.TestCase):
             n=2,  # 2 responses for each prompt
         )
 
-        results = asyncio.run(rollout_engine.rollout_generation(
-            payloads=payloads,
-            stream=None,
-            data_packer=data_packer,
-            sampling_params=sampling_params
-        ))
+        results = asyncio.run(
+            rollout_engine.rollout_generation(
+                payloads=payloads,
+                stream=None,
+                data_packer=data_packer,
+                sampling_params=sampling_params,
+            )
+        )
 
         rollout_engine.get_engine().shutdown()
 
@@ -286,7 +246,6 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         self.assertEqual(len(results), len(payloads))
         for i, result in enumerate(results):
             print(f"Result {i}: {result}")
-
 
     def test_async_rollout_get_underlying_model_state_dict(self):
         """Test async rollout get underlying model state dict."""
@@ -297,7 +256,9 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         print(f"State dict: {state_dict}")
 
         self.assertIn("model.layers.0.self_attn.q_proj.weight", state_dict)
-        self.assertGreater(state_dict["model.layers.0.self_attn.q_proj.weight"].sum(), 0)
+        self.assertGreater(
+            state_dict["model.layers.0.self_attn.q_proj.weight"].sum(), 0
+        )
         rollout_engine.shutdown()
 
 
@@ -312,7 +273,7 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self.old_env)
         destroy_distributed()
-    
+
     def test_async_rollout_worker_1gpu(self):
         """Test async rollout worker."""
         cosmos_config = getMockConfig()
@@ -322,11 +283,15 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
 
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
 
-        from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker_async import vLLMRolloutWorkerAsync
+        from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker_async import (
+            vLLMRolloutWorkerAsync,
+        )
 
         # here dummy some functions to make the worker work
         def dummy_init_comm(self):
-            self.api_client = MockAPIClient(role="ROLLOUT", remote_ips=["localhost"], remote_port=8000)
+            self.api_client = MockAPIClient(
+                role="ROLLOUT", remote_ips=["localhost"], remote_port=8000
+            )
             self.data_packer = DecoderOnlyLLMDataPacker()
             self.val_data_packer = self.data_packer
 
@@ -344,7 +309,7 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         worker.heartbeat_thread = None
         # Skip weight sync preparation in test since we don't need it
         worker.lazy_initialize_rollout_engine(load_format="auto")
-        
+
         worker.state.set_weight_synced()
         worker.setup()
         worker.work()

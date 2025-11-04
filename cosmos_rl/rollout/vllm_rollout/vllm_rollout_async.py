@@ -16,11 +16,9 @@ import os
 import uuid
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
 
-import vllm
 import torch
 import copy
-from torch.multiprocessing.reductions import reduce_tensor
-from typing import List, Optional, Dict, Tuple, Any
+from typing import List, Optional, Dict, Tuple
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.v1.engine.async_llm import AsyncLLM as AsyncLLMEngine, AsyncEngineArgs
@@ -37,6 +35,11 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vllm_version_check
+from cosmos_rl.utils.ipc.tensor_util import (
+    named_tensors_to_serialize,
+    named_tensors_from_serialize,
+)
+
 
 class VLLMColocateWorkerExtension:
     """
@@ -49,66 +52,12 @@ class VLLMColocateWorkerExtension:
     def get_state_dict_ipc(self) -> Dict[str, Tuple]:
         """
         Get the CUDA IPC handles of the model weights.
-        
+
         Returns:
             Dict[param_name, (ipc_handle, shape, dtype, device_id)]
         """
-        state_dict_ipc = {}
-        model = self.model_runner.model
-        
-        param : torch.Tensor
-        for name, param in model.named_parameters():
-            state_dict_ipc[name] = reduce_tensor(param)
-        
-        return state_dict_ipc
-    
-    def get_weight_stats(self, layer_name: str = None) -> Dict:
-        """
-        Get the statistics of the model weights.
-        
-        Args:
-            layer_name: optional, the name of the layer
-            
-        Returns:
-            Dict with statistics
-        """
-        model = self.model_runner.model
-        stats = {}
-        
-        for name, param in model.named_parameters():
-            if layer_name and layer_name not in name:
-                continue
-                
-            stats[name] = {
-                'mean': param.mean().item(),
-                'std': param.std().item(),
-                'min': param.min().item(),
-                'max': param.max().item(),
-                'shape': tuple(param.shape),
-                'device': str(param.device),
-            }
-        
-        return stats
-    
-    def get_layer_names(self) -> list[str]:
-        """Get the names of all the layers in the model."""
-        return [name for name, _ in self.model_runner.model.named_parameters()]
-
-
-def ipc_to_colocate_state_dict(state_dict_ipc: Dict[str, Tuple]) -> Dict[str, torch.Tensor]:
-    """
-    Convert the state dict IPC to the colocate state dict.
-
-    Args:
-        state_dict_ipc: the state dict IPC
-        
-    Returns:
-        the colocate state dict
-    """
-    state_dict = {}
-    for name, (rebuild_func, args) in state_dict_ipc.items():
-        state_dict[name] = rebuild_func(*args)
-    return state_dict
+        model: torch.nn.Module = self.model_runner.model
+        return named_tensors_to_serialize(model.named_parameters())
 
 
 class vLLMRolloutAsync(RolloutBase):
@@ -259,7 +208,9 @@ class vLLMRolloutAsync(RolloutBase):
             )
 
         # TODO(zjx): should remove if vllm support putting multiple prompts in one call
-        assert len(payloads) == 1, "vLLM async rollout only support one prompt at a time."
+        assert (
+            len(payloads) == 1
+        ), "vLLM async rollout only support one prompt at a time."
 
         # Pack the payloads into prompts for vllm.
         prompts = []
@@ -280,11 +231,11 @@ class vLLMRolloutAsync(RolloutBase):
         try:
             with torch.cuda.stream(stream):
                 async for result in self.rollout_engine.generate(
-                        prompt=new_prompts[0],
-                        sampling_params=sampling_params,
-                        # there is no request tracking now.
-                        request_id=str(uuid.uuid4()),
-                    ):
+                    prompt=new_prompts[0],
+                    sampling_params=sampling_params,
+                    # there is no request tracking now.
+                    request_id=str(uuid.uuid4()),
+                ):
                     if result.finished:
                         response.append(
                             RolloutResult(
@@ -334,10 +285,10 @@ class vLLMRolloutAsync(RolloutBase):
 
                 with torch.cuda.stream(stream):
                     async for result in self.rollout_engine.generate(
-                            prompt=prompts[0],
-                            sampling_params=sampling_params,
-                            request_id=request_id,
-                        ):
+                        prompt=prompts[0],
+                        sampling_params=sampling_params,
+                        request_id=request_id,
+                    ):
                         if result.finished:
                             responses = [result.outputs[0].text]
                             break
@@ -352,8 +303,7 @@ class vLLMRolloutAsync(RolloutBase):
 
                 # check if the sequence length is reached the max_sequence_length
                 if (
-                    len(result.prompt_token_ids)
-                    + len(result.outputs[0].token_ids)
+                    len(result.prompt_token_ids) + len(result.outputs[0].token_ids)
                     > self.rollout_config.max_response_length
                 ):
                     logger.warning(
@@ -375,7 +325,10 @@ class vLLMRolloutAsync(RolloutBase):
             conversations = []
             completions = []
             for _ in range(n_generation):
-                new_conversation, completion = await generation_multi_turn_for_one_payload(
+                (
+                    new_conversation,
+                    completion,
+                ) = await generation_multi_turn_for_one_payload(
                     copy.deepcopy(payload.conversation)
                 )
                 conversations.append(new_conversation)
@@ -427,9 +380,11 @@ class vLLMRolloutAsync(RolloutBase):
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
 
-        state_dict_ipc = await self.rollout_engine.collective_rpc("get_state_dict_ipc")
-        sd_ipc_worker0 = state_dict_ipc[0]
-        return ipc_to_colocate_state_dict(sd_ipc_worker0)
+        named_tensors_ipc = await self.rollout_engine.collective_rpc(
+            "get_state_dict_ipc"
+        )
+        sd_ipc_worker0 = named_tensors_ipc[0]
+        return named_tensors_from_serialize(sd_ipc_worker0)
 
     def get_engine(self):
         if not self._engine_initialized:
