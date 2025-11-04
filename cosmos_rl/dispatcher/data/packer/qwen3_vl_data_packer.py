@@ -159,6 +159,21 @@ class Qwen3_VL_DataPacker(DataPacker):
             image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                 sample, return_video_kwargs=True
             )
+            image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
+                prompt,
+                image_patch_size=16,
+                return_video_kwargs=True,
+                return_video_metadata=True,
+            )
+            if video_inputs is not None:
+                video_inputs, video_metadatas = zip(*video_inputs)
+                video_inputs, video_metadatas = (
+                    list(video_inputs),
+                    list(video_metadatas),
+                )
+            else:
+                video_metadatas = None
+
         if len(video_inputs) > 0:
             return {
                 "prompt": prompt,
