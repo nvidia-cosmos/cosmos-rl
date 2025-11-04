@@ -236,7 +236,6 @@ class HFVLMDataPacker(DataPacker):
             pad_run_length = 10
             assistant_contents = []
             messages = None
-            # SFT
             if "messages" in conversation:
                 messages = conversation["messages"]
                 for message in messages:
@@ -270,7 +269,6 @@ class HFVLMDataPacker(DataPacker):
                             )
                         message["content"] = new_content
             else:
-                # RL
                 messages = conversation
                 if self.image_token is not None:
                     for x in messages:

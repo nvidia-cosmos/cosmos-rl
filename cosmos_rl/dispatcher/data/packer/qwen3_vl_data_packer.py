@@ -411,7 +411,7 @@ class Qwen3_VL_DataPacker(DataPacker):
             pad_run_length = 10
             assistant_contents = []
             messages = None
-            # SFT
+
             if "messages" in conversation:
                 messages = conversation["messages"]
                 for message in messages:
@@ -481,12 +481,19 @@ class Qwen3_VL_DataPacker(DataPacker):
             video_inputs = []
             video_metadatas = None
 
+            # For dataset with PIL image objects
             if "images" in conversation:
                 image_inputs = conversation["images"]
             else:
                 image_inputs, video_inputs = process_vision_info(conversation)
                 image_inputs = decode_base64_to_image(image_inputs)
 
+            kwarg = {
+                "return_tensors": "pt",
+                "images": image_inputs,
+            }
+
+            # For dataset with image or video urls
             if len(image_inputs) == 0 and len(video_inputs) == 0:
                 image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                     conversation,
@@ -503,13 +510,11 @@ class Qwen3_VL_DataPacker(DataPacker):
                 else:
                     video_metadatas = None
 
-            kwarg = {
-                "return_tensors": "pt",
-                "images": image_inputs,
-                "videos": video_inputs,
-                "video_metadata": video_metadatas,
-                "do_resize": False,
-            }
+                kwarg["images"] = image_inputs
+                kwarg["videos"] = video_inputs
+                kwarg["video_metadata"] = video_metadatas
+                kwarg["do_resize"] = False
+
             inputs = self.hf_processor(
                 text=[text],
                 **kwarg,
