@@ -148,19 +148,11 @@ class HFVLMDataPacker(DataPacker):
             and len(video_inputs) == 0
         ):
             image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
-                prompt,
+                sample,
                 image_patch_size=16,
                 return_video_kwargs=True,
                 return_video_metadata=True,
             )
-            if video_inputs is not None:
-                video_inputs, video_metadatas = zip(*video_inputs)
-                video_inputs, video_metadatas = (
-                    list(video_inputs),
-                    list(video_metadatas),
-                )
-            else:
-                video_metadatas = None
 
         if len(video_inputs) > 0:
             return {
@@ -306,6 +298,8 @@ class HFVLMDataPacker(DataPacker):
             image_inputs = []
             video_inputs = []
             video_metadatas = None
+
+            # For dataset with PIL image objects
             if "images" in conversation:
                 image_inputs = conversation["images"]
             else:
@@ -317,6 +311,7 @@ class HFVLMDataPacker(DataPacker):
                 "images": image_inputs,
             }
 
+            # For dataset with image or video urls
             if len(image_inputs) == 0 and len(video_inputs) == 0:
                 if self.use_qwen_vl_process:
                     image_inputs, video_inputs, video_kwargs = (
