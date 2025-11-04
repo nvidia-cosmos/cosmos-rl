@@ -13,15 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
 import torch
 import threading
 import asyncio
-import functools
 from queue import Queue
 import atexit
 import types
-from functools import partial
 from asyncio import timeout as asyncio_timeout
 
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
@@ -36,11 +33,10 @@ from cosmos_rl.rollout.rollout_task_scheduler import (
     RolloutTaskScheduler,
     CompletedRollout,
 )
-from cosmos_rl.dispatcher.protocol import ValidationReportRequest, RolloutRequest
+from cosmos_rl.dispatcher.protocol import ValidationReportRequest
 from cosmos_rl.dispatcher.command import (
     Command,
     PolicyToRolloutUnicastCommand,
-    RolloutToRolloutBroadcastCommand,
 )
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -142,16 +138,32 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
         # TODO(zjx): refactor those methods to common methods in RolloutWorkerBase
         # reuse some of the vLLMRolloutWorker methods
-        self.prepare_trainable_params = types.MethodType(vLLMRolloutWorker.prepare_trainable_params, self)
-        self.prepare_shard_infos_for_weight_sync_insts = types.MethodType(vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts, self)
-        self.build_global_mesh = types.MethodType(vLLMRolloutWorker.build_global_mesh, self)
-        self.recv_weight_shard = types.MethodType(vLLMRolloutWorker.recv_weight_shard, self)
-        self.broadcast_to_all_rollout_replica = types.MethodType(vLLMRolloutWorker.broadcast_to_all_rollout_replica, self)
+        self.prepare_trainable_params = types.MethodType(
+            vLLMRolloutWorker.prepare_trainable_params, self
+        )
+        self.prepare_shard_infos_for_weight_sync_insts = types.MethodType(
+            vLLMRolloutWorker.prepare_shard_infos_for_weight_sync_insts, self
+        )
+        self.build_global_mesh = types.MethodType(
+            vLLMRolloutWorker.build_global_mesh, self
+        )
+        self.recv_weight_shard = types.MethodType(
+            vLLMRolloutWorker.recv_weight_shard, self
+        )
+        self.broadcast_to_all_rollout_replica = types.MethodType(
+            vLLMRolloutWorker.broadcast_to_all_rollout_replica, self
+        )
 
         self.report_rollouts = types.MethodType(vLLMRolloutWorker.report_rollouts, self)
-        self.query_command_from_controller = types.MethodType(vLLMRolloutWorker.query_command_from_controller, self)
-        self.query_nccl_unique_id_from_controller = types.MethodType(vLLMRolloutWorker.query_nccl_unique_id_from_controller, self)
-        self.consume_one_command = types.MethodType(vLLMRolloutWorker.consume_one_command, self)
+        self.query_command_from_controller = types.MethodType(
+            vLLMRolloutWorker.query_command_from_controller, self
+        )
+        self.query_nccl_unique_id_from_controller = types.MethodType(
+            vLLMRolloutWorker.query_nccl_unique_id_from_controller, self
+        )
+        self.consume_one_command = types.MethodType(
+            vLLMRolloutWorker.consume_one_command, self
+        )
         self.send_end_signal = types.MethodType(vLLMRolloutWorker.send_end_signal, self)
 
         # real init variables
@@ -295,7 +307,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         logger.info("[RolloutWorkerAsync] Initializing RolloutTaskScheduler")
 
         # Get max concurrent requests from config or use default
-        max_concurrent_requests = self.config.rollout.async_config.max_concurrent_requests
+        max_concurrent_requests = (
+            self.config.rollout.async_config.max_concurrent_requests
+        )
 
         self.scheduler = RolloutTaskScheduler(
             rollout_engine=self.rollout,
@@ -578,8 +592,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             # Check if all prompts are consumed
             if self.state.prompt_consume_end():
                 assert (
-                    self.scheduler.task_queue.empty()
-                    and self.state.prompt_fetch_end()
+                    self.scheduler.task_queue.empty() and self.state.prompt_fetch_end()
                 ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
                 continue
             elif self.scheduler.task_queue.empty():
@@ -603,12 +616,11 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
-
     def work(self):
         """Main work method - runs the async event loop."""
         # Initialize scheduler after engine is ready
         self.init_scheduler()
-        # we need all rank run the scheduler in the same time. 
+        # we need all rank run the scheduler in the same time.
         self.scheduler.start()
 
         # Start the thread with daemon=True
