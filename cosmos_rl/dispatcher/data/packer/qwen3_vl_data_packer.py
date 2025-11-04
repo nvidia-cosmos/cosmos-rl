@@ -15,7 +15,6 @@
 
 import io
 import base64
-import logging
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -73,9 +72,9 @@ class Qwen3_VL_DataPacker(DataPacker):
             config.policy.model_name_or_path, trust_remote_code=True
         )
 
-        qwen_vl_utils_logger = logging.getLogger("qwen_vl_utils")
-        qwen_vl_utils_logger.setLevel(logging.WARNING)
-        qwen_vl_utils_logger.propagate = False
+        # qwen_vl_utils_logger = logging.getLogger("qwen_vl_utils")
+        # qwen_vl_utils_logger.setLevel(logging.WARNING)
+        # qwen_vl_utils_logger.propagate = False
 
         hf_config = retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
@@ -434,21 +433,31 @@ class Qwen3_VL_DataPacker(DataPacker):
                             )
                         message["content"] = new_content
             else:
-                # RL
                 messages = conversation
-                if self.image_token is not None:
-                    for x in messages:
-                        if x["role"] == "user":
-                            contents = x["content"]
-                            for idx, content in enumerate(contents):
-                                if (
-                                    content["type"] == "text"
-                                    and self.image_token in content["text"]
-                                ):
-                                    new_content = content.copy()
-                                    contents[idx]["text"] = new_content["text"].replace(
-                                        self.image_token, ""
-                                    )
+                for x in messages:
+                    if x["role"] == "user":
+                        contents = x["content"]
+                        for idx, content in enumerate(contents):
+                            if (
+                                content["type"] == "text"
+                                and self.image_token in content["text"]
+                            ):
+                                new_content = content.copy()
+                                contents[idx]["text"] = new_content["text"].replace(
+                                    self.image_token, ""
+                                )
+                    elif x["role"] == "assistant":
+                        content = x["content"]
+                        if isinstance(content, str):
+                            assistant_contents.append(content)
+                        elif isinstance(content, dict):
+                            assert "text" in content, f"text not in content: {content}"
+                            assistant_contents.append(content["text"])
+                        else:
+                            raise ValueError(
+                                f"Unsupported content type: {type(content)}"
+                            )
+                        x["content"] = pad_token * pad_run_length
 
             text = self.hf_processor.apply_chat_template(
                 messages,
@@ -456,14 +465,14 @@ class Qwen3_VL_DataPacker(DataPacker):
                 add_generation_prompt=add_generation_prompt,
             )
             video_kwargs = {}
+            image_inputs = []
+            video_inputs = []
             video_metadatas = None
-            image_inputs, video_inputs = process_vision_info(conversation)
+
             if "images" in conversation:
                 image_inputs = conversation["images"]
-            if "image" in conversation:
-                image_inputs = conversation["image"]
-
-            if len(image_inputs) == 0:
+            else:
+                image_inputs, video_inputs = process_vision_info(conversation)
                 image_inputs = decode_base64_to_image(image_inputs)
 
             if len(image_inputs) == 0 and len(video_inputs) == 0:
