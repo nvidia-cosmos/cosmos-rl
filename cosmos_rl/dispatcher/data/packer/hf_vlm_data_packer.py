@@ -148,9 +148,6 @@ class HFVLMDataPacker(DataPacker):
             and len(video_inputs) == 0
         ):
             image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
-                sample, return_video_kwargs=True
-            )
-            image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
                 prompt,
                 image_patch_size=16,
                 return_video_kwargs=True,
