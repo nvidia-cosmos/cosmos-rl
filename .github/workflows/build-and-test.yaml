@@ -49,7 +49,7 @@ jobs:
           ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
 
           # run tests
-          ${DOCKER_RUN} python tests/test_process_flow.py
+          ${LONG_DOCKER_RUN} python tests/test_process_flow.py
 
       - name: Cleanup
         if: always()
