@@ -142,6 +142,12 @@ class DataPacker(ABC):
         """
         return items
 
+    def get_rollout_output(self, items: List[Any]) -> List[Any]:
+        """
+        Post-process to get the rollout outputs from the rollout engine
+        """
+        return items
+
     @abstractmethod
     def get_policy_input(
         self,

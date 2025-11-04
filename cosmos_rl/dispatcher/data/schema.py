@@ -91,10 +91,12 @@ class RLPayload(BaseModel):
         default=None, description="The advantage for each completion."
     )
 
+    # Whether the rollout is valid for dynamic sampling
     valid: Optional[bool] = Field(
         default=True, description="Whether the rollout is valid."
     )
 
+    # For metrics collection
     filter_rewards: Optional[List[float]] = Field(
         default=None, description="The filter reward for each completion."
     )
