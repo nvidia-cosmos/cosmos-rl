@@ -160,6 +160,12 @@ class LiberoEnvWrapper(BaseEnvWrapper):
                 # Execute action
                 obs, reward, done, info = self.env.step(processed_action)
                 
+                # IMPORTANT: Flip LIBERO images (they come upside-down and mirrored)
+                if 'agentview_image' in obs:
+                    obs['agentview_image'] = obs['agentview_image'][::-1, ::-1]
+                if 'robot0_eye_in_hand_image' in obs:
+                    obs['robot0_eye_in_hand_image'] = obs['robot0_eye_in_hand_image'][::-1, ::-1]
+                
                 self.finish_step += 1
                 
                 # Check termination conditions
@@ -179,6 +185,13 @@ class LiberoEnvWrapper(BaseEnvWrapper):
         with self.lock:
             if self.env is not None:
                 obs = self.env.reset()
+                
+                # IMPORTANT: Flip LIBERO images (they come upside-down and mirrored)
+                if 'agentview_image' in obs:
+                    obs['agentview_image'] = obs['agentview_image'][::-1, ::-1]
+                if 'robot0_eye_in_hand_image' in obs:
+                    obs['robot0_eye_in_hand_image'] = obs['robot0_eye_in_hand_image'][::-1, ::-1]
+                
                 self.active = True
                 self.complete = False
                 self.finish_step = 0

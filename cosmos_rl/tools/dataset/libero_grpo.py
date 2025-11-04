@@ -87,8 +87,6 @@ if __name__ == "__main__":
     def get_val_dataset(config: CosmosConfig) -> Dataset:
         return LIBERODataset(50, "val")
 
-    print("do we enter here????????????????????????")
-
     launch_worker(
         dataset=get_dataset,
         val_dataset=get_val_dataset,

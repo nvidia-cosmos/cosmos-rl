@@ -1035,6 +1035,11 @@ class VLAConfig(BaseModel):
         description="Number of images in VLA model input",
     )
     
+    center_crop: bool = Field(
+        default=False,
+        description="Whether to apply center crop (0.9 scale zoom) to images",
+    )
+    
     env_config: Dict[str, Any] = Field(
         default_factory=dict,
         description="Additional environment-specific configuration",

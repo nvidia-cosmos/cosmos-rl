@@ -34,13 +34,61 @@ from cosmos_rl.utils.logging import logger
 
 
 def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
-    """Center crop image to specified size"""
-    width, height = image.size
-    left = (width - crop_size) // 2
-    top = (height - crop_size) // 2
-    right = left + crop_size
-    bottom = top + crop_size
-    return image.crop((left, top, right, bottom))
+    """
+    Center crop image with 0.9 scale then resize (matching SimpleVLA-RL)
+    
+    This function mimics SimpleVLA-RL's TensorFlow-based center crop:
+    - Crops to 90% of the center (zoom in effect)
+    - Resizes back to 224x224
+    """
+    import tensorflow as tf
+    
+    batch_size = 1
+    crop_scale = 0.9  # Match SimpleVLA-RL
+    
+    # Convert PIL to tensor
+    img_array = np.array(image)
+    img_tensor = tf.convert_to_tensor(img_array)
+    orig_dtype = img_tensor.dtype
+    
+    # Convert to float for processing
+    img_tensor = tf.image.convert_image_dtype(img_tensor, tf.float32)
+    
+    # Expand to batch dimension
+    if len(img_tensor.shape) == 3:
+        img_tensor = tf.expand_dims(img_tensor, axis=0)
+    
+    # Crop and resize (matching SimpleVLA-RL's crop_and_resize function)
+    new_height = tf.reshape(tf.clip_by_value(tf.sqrt(crop_scale), 0, 1), shape=(batch_size,))
+    new_width = tf.reshape(tf.clip_by_value(tf.sqrt(crop_scale), 0, 1), shape=(batch_size,))
+    
+    height_offset = (1 - new_height) / 2
+    width_offset = (1 - new_width) / 2
+    bounding_box = tf.stack([
+        height_offset,
+        width_offset,
+        height_offset + new_height,
+        width_offset + new_width,
+    ], axis=1)
+    
+    # Crop and resize to 224x224 (matching SimpleVLA-RL)
+    img_tensor = tf.image.crop_and_resize(
+        img_tensor, 
+        bounding_box, 
+        tf.range(batch_size), 
+        (224, 224)
+    )
+    
+    # Convert back to uint8
+    img_tensor = tf.clip_by_value(img_tensor, 0, 1)
+    img_tensor = tf.image.convert_image_dtype(img_tensor, orig_dtype, saturate=True)
+    
+    # Remove batch dimension and convert back to PIL
+    img_array = img_tensor[0].numpy()
+    result_image = Image.fromarray(img_array)
+    result_image = result_image.convert("RGB")
+    
+    return result_image
 
 
 def normalize_proprio(proprio: np.ndarray, norm_stats: Dict) -> np.ndarray:
@@ -182,8 +230,9 @@ class VLAModelInference:
             if vla_type == "openvla-oft":
                 # Add space token if needed (matching SimpleVLA-RL)
                 space_token_id = 29871  # Space token for LLaMA-based models
-                input_ids = torch.cat((input_ids, torch.tensor([[space_token_id]], dtype=input_ids.dtype)), dim=1)
-                attention_mask = torch.cat((attention_mask, torch.tensor([[True]], dtype=attention_mask.dtype)), dim=1)
+                if not torch.all(input_ids[:, -1] == space_token_id):
+                    input_ids = torch.cat((input_ids, torch.tensor([[space_token_id]], dtype=input_ids.dtype, device=input_ids.device)), dim=1)
+                    attention_mask = torch.cat((attention_mask, torch.tensor([[True]], dtype=attention_mask.dtype, device=attention_mask.device)), dim=1)
             
             batchdata["input_ids"].append(input_ids)
             batchdata["attention_mask"].append(attention_mask)

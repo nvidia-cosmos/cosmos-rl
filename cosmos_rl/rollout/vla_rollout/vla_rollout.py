@@ -79,9 +79,9 @@ class VLARollout(RolloutBase):
         # VLA inference configuration (stored as instance variables)
         self.task_suite_name = self.task_suite
         self.vla_type = self.vla_config.vla_type
-        self.do_sample = True  # Default VLA sampling behavior
+        self.do_sample = False  # Default VLA sampling behavior
         self.temperature = config.rollout.sampling_config.temperature
-        self.center_crop = False  # Default center crop
+        self.center_crop = self.vla_config.center_crop  # Default center crop
         self.use_proprio = False  # Default proprioception usage
         self.use_wrist_camera = self.vla_config.use_wrist_camera
         self.unnorm_key = self.task_suite
@@ -152,9 +152,16 @@ class VLARollout(RolloutBase):
             
             model_path = self.config.policy.model_name_or_path
             
-            # Initialize the processor for VLA models
-            logger.info(f"Loading VLA processor from {model_path}")
-            self.processor = AutoProcessor.from_pretrained(
+            # Initialize the processor for VLA models using PrismaticProcessor
+            # IMPORTANT: Must use PrismaticProcessor, not generic AutoProcessor!
+            logger.info(f"Loading VLA processor from {model_path} (type: {self.vla_type})")
+            
+            if self.vla_type == "openvla-oft":
+                from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import PrismaticProcessor
+            else:  # openvla
+                from cosmos_rl.policy.model.vla.openvla.processing_prismatic import PrismaticProcessor
+            
+            self.processor = PrismaticProcessor.from_pretrained(
                 model_path, 
                 trust_remote_code=True
             )
@@ -342,8 +349,13 @@ class VLARollout(RolloutBase):
                     raise FileNotFoundError(f"No safetensors or pytorch_model.bin found in {path}")
             
             if not vision_backbone_weights:
-                logger.warning("⚠️  No vision_backbone weights found in checkpoint!")
-                return
+                logger.error("❌ CRITICAL: No vision_backbone weights found in checkpoint!")
+                logger.error(f"   This means vision backbone has RANDOM TIMM weights!")
+                logger.error(f"   Checkpoint path: {path}")
+                logger.error(f"   Files found: safetensors={len(safetensor_files)}, pytorch={len(pt_files) if 'pt_files' in locals() else 0}")
+                logger.error(f"   Model will have INCORRECT vision features!")
+                # Don't return - raise an error to fail fast
+                raise RuntimeError(f"Vision backbone weights not found in checkpoint {model_path}")
             
             # Load the weights into model
             missing_keys, unexpected_keys = model.load_state_dict(vision_backbone_weights, strict=False)
@@ -582,6 +594,15 @@ class VLARollout(RolloutBase):
             is_valid: Whether to generate validation videos
             global_steps: Current training step (for video naming)
         """
+        # ============ DEBUG: Force batch size to 1 ============
+        DEBUG_FORCE_BATCH_1 = True  # Set to False to disable
+        if DEBUG_FORCE_BATCH_1 and len(env_wrappers) > 1:
+            logger.warning(f"⚠️  DEBUG: Forcing batch_size=1 (was {len(env_wrappers)})")
+            env_wrappers = [env_wrappers[0]]
+            instructions = [instructions[0]]
+            batch_size = 1
+        # ======================================================
+
         logger.info(f"Starting VLA episode batch: {batch_size} tasks, max_steps={self.max_steps}")
         
         # Collect initial observations and task descriptions
@@ -598,7 +619,10 @@ class VLARollout(RolloutBase):
             # Convert observation to input format (matching SimpleVLA-RL's _obs_to_input)
             input_data = self._obs_to_input(current_obs, is_robotwin="robotwin" in self.task_suite)
             inputs.append(input_data)
-            task_descriptions.append(instructions[idx])
+            
+            # Use actual task description from environment (not fallback from payload)
+            actual_instruction = init_result.get('instruction', instructions[idx])
+            task_descriptions.append(actual_instruction)
             
             task_file_name = f"{self.task_suite}_task_{idx}"
             task_records.append({
@@ -610,8 +634,8 @@ class VLARollout(RolloutBase):
             
             # Record initial frame for video (always save for debugging)
             if "agentview_image" in current_obs:
-                # Flip image to match SimpleVLA-RL format
-                img = current_obs["agentview_image"][::-1, ::-1]
+                # Image is already flipped by LiberoEnvWrapper
+                img = current_obs["agentview_image"]
                 valid_video[task_file_name].append(img)
         
         # Episode execution loop (matching SimpleVLA-RL)
@@ -694,8 +718,8 @@ class VLARollout(RolloutBase):
                     task_file_name = task_records[idx]['task_file_name']
                     for obs in step_observations:
                         if "agentview_image" in obs:
-                            # Flip image to match SimpleVLA-RL format
-                            img = obs["agentview_image"][::-1, ::-1]
+                            # Image is already flipped by LiberoEnvWrapper
+                            img = obs["agentview_image"]
                             valid_video[task_file_name].append(img)
                     
                     if done or not task_records[idx]['active']:
@@ -762,8 +786,25 @@ class VLARollout(RolloutBase):
             }
         else:
             # LIBERO format
+            # IMPORTANT: Resize to 224x224 to match SimpleVLA-RL's get_libero_image()
+            img = obs.get('agentview_image', np.zeros((256, 256, 3)))
+            
+            # Resize using TensorFlow (EXACT match to SimpleVLA-RL's resize_image function)
+            if img.shape[0] != 224 or img.shape[1] != 224:
+                import tensorflow as tf
+                # Exactly match SimpleVLA-RL's resize_image implementation:
+                # - Encode as JPEG (as done in RLDS dataset builder)
+                # - Decode back
+                # - Resize with lanczos3 and antialias
+                # - Clip and round
+                img = tf.image.encode_jpeg(img)
+                img = tf.io.decode_image(img, expand_animations=False, dtype=tf.uint8)
+                img = tf.image.resize(img, (224, 224), method="lanczos3", antialias=True)
+                img = tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8)
+                img = img.numpy()
+            
             return {
-                'full_image': obs.get('agentview_image', np.zeros((256, 256, 3)))
+                'full_image': img
             }
     
     def _generate_dummy_batch_actions(self, inputs: List[Dict], task_descriptions: List[str]) -> Dict:

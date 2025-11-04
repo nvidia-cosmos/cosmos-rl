@@ -68,22 +68,18 @@ def setup_libero_environment(task_suite: str, task_id: int, trial_id: int) -> Tu
         
         # Wait for environment to stabilize (as done in SimpleVLA-RL)
         # This is CRITICAL - LIBERO cameras need several steps to initialize properly
-        num_wait_steps = 15  # Increased from 10 to ensure proper camera initialization
-        logger.info(f"Stabilizing LIBERO environment with {num_wait_steps} dummy steps...")
+        num_wait_steps = 10  # Increased from 10 to ensure proper camera initialization
         
         for step in range(num_wait_steps):
             dummy_action = get_libero_dummy_action()
             obs, _, _, _ = env.step(dummy_action)
             
-            # Check if camera is producing valid images (non-black)
-            if step > 5 and 'agentview_image' in obs:  # Skip first few steps
-                image = obs['agentview_image']
-                if image.sum() > 0:  # Non-zero pixels indicate valid rendering
-                    logger.info(f"✅ Camera initialized successfully at step {step}")
-                    break
-        
-        # Final observation after stabilization
-        obs = env._get_observations() if hasattr(env, '_get_observations') else obs
+        # IMPORTANT: Flip LIBERO images (they come upside-down and mirrored)
+        # This matches SimpleVLA-RL behavior
+        if 'agentview_image' in obs:
+            obs['agentview_image'] = obs['agentview_image'][::-1, ::-1]
+        if 'robot0_eye_in_hand_image' in obs:
+            obs['robot0_eye_in_hand_image'] = obs['robot0_eye_in_hand_image'][::-1, ::-1]
         
         logger.info(f"LIBERO environment setup completed: {task_description}")
         return env, task_description, obs
@@ -215,7 +211,8 @@ def get_libero_dummy_action() -> List[float]:
     """
     # LIBERO uses 7-DOF delta position control
     # [delta_x, delta_y, delta_z, delta_rx, delta_ry, delta_rz, gripper]
-    return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]  # No movement, gripper open
+    # IMPORTANT: Use -1.0 for gripper to match SimpleVLA-RL (gripper closed)
+    return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]  # No movement, gripper closed
 
 
 def process_libero_action(action: np.ndarray) -> np.ndarray:
