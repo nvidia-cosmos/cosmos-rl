@@ -55,6 +55,7 @@ from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
     WeightSyncInstructionsGroup,
 )
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -125,7 +126,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     vLLMRolloutWorker should support scaling launch.
     """
 
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
+    def __init__(
+        self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs
+    ) -> None:
         super(vLLMRolloutWorker, self).__init__(config, parallel_dims)
 
         self.state = State()
@@ -235,15 +238,32 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         )
         self.data_fetcher = None
 
+        self.setup(
+            dataset=kwargs.get("dataset"),
+            data_packer=kwargs.get("data_packer"),
+            reward_fns=kwargs.get("reward_fns"),
+            filter_reward_fns=kwargs.get("filter_reward_fns"),
+            val_dataset=kwargs.get("val_dataset"),
+            val_data_packer=kwargs.get("val_data_packer"),
+            val_reward_fns=kwargs.get("val_reward_fns"),
+        )
+
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        data_packer: Optional[DataPacker] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
+        val_data_packer: Optional[DataPacker] = None,
         val_reward_fns: Optional[List[Callable]] = None,
         num_workers: int = 8,
     ):
+        # setup data packer first
+        self.init_data_packer(
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+        )
         # Set up data fetcher
         self.data_fetcher = WorkerDataFetcher(
             config=self.config,

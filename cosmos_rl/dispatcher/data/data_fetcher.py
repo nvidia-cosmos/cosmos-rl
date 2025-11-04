@@ -97,8 +97,6 @@ class ControllerDataFetcher(DataFetcherBase):
     def __init__(
         self,
         config: Config,
-        data_packer: DataPacker,
-        val_data_packer: DataPacker,
         tokenizer: AutoTokenizer,
         dataset: Optional[Callable[[Config], Dataset]] = None,
         val_dataset: Optional[Callable[[Config], Dataset]] = None,
@@ -108,10 +106,11 @@ class ControllerDataFetcher(DataFetcherBase):
         val_batch_sampler: Optional[Callable] = None,
         is_rl: bool = True,
     ):
+        # ControllerDataFetcher doesn't need data packer.
         super().__init__(
             config,
-            data_packer,
-            val_data_packer,
+            None,
+            None,
             tokenizer,
             dataset,
             val_dataset,
@@ -125,10 +124,6 @@ class ControllerDataFetcher(DataFetcherBase):
         self.batch_sampler = batch_sampler
         self.val_sampler = val_sampler
         self.val_batch_sampler = val_batch_sampler
-
-        # For ControllerDataFetcher, if data_packer is not None, that
-        # means the data packer is customized by user and passed in by
-        # the launcher.
 
         # Controller should always load the dataset and dataloader.
         self.load_dataset()

@@ -44,7 +44,6 @@ from cosmos_rl.dispatcher.status import (
 from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from transformers import AutoTokenizer
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data import IdxAndRLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
@@ -88,9 +87,7 @@ class Controller:
         redis_port: int,
         redis_logfile_path: str,
         dataset: Optional[Dataset] = None,
-        data_packer: Optional[DataPacker] = None,
         val_dataset: Optional[Dataset] = None,
-        val_data_packer: Optional[DataPacker] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
@@ -125,9 +122,7 @@ class Controller:
         self.data_fetcher = ControllerDataFetcher(
             config=config,
             dataset=dataset,
-            data_packer=data_packer,
             val_dataset=val_dataset,
-            val_data_packer=val_data_packer,
             sampler=sampler,
             batch_sampler=batch_sampler,
             val_sampler=val_sampler,
