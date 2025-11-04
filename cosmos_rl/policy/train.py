@@ -26,6 +26,7 @@ from cosmos_rl.dispatcher.api.client import APIClient
 
 def main(*args, **kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+
     api_client = APIClient(role="POLICY")
     metadata = api_client.get_controller_metadata()
 

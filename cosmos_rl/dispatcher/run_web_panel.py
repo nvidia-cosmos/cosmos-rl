@@ -160,13 +160,19 @@ async def meta():
     meta = {
         "config": controller.config,
     }
-    if controller.data_fetcher.has_customized_datapacker:
+    if controller.data_fetcher.data_packer is not None:
+        # if controller.data_fetcher.data_packer is not None, that
+        # means the data packer is customized by user and passed in by
+        # the launcher.
         meta["user_data_packer"] = base64.b64encode(
-            cloudpickle.dumps(controller.data_fetcher.user_data_packer)
+            cloudpickle.dumps(controller.data_fetcher.data_packer)
         ).decode("utf-8")
-    if controller.data_fetcher.has_customized_datapacker:
+    if controller.data_fetcher.val_data_packer is not None:
+        # if controller.data_fetcher.val_data_packer is not None, that
+        # means the validation data packer is customized by user and passed in by
+        # the launcher.
         meta["user_val_data_packer"] = base64.b64encode(
-            cloudpickle.dumps(controller.data_fetcher.user_val_data_packer)
+            cloudpickle.dumps(controller.data_fetcher.val_data_packer)
         ).decode("utf-8")
     return meta
 

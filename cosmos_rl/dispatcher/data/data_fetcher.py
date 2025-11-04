@@ -50,7 +50,6 @@ class DataFetcherBase(ABC):
         dataset: Optional[Callable[[Config], Dataset]] = None,
         val_dataset: Optional[Callable[[Config], Dataset]] = None,
         is_rl: bool = True,
-        has_customized_datapacker: bool = False,
     ):
         self.config = config
         self.data_packer = data_packer
@@ -59,8 +58,6 @@ class DataFetcherBase(ABC):
         self.dataset = dataset
         self.val_dataset = val_dataset
         self.is_rl = is_rl
-        # If the data packer is customized by user, we set this field to True.
-        self.has_customized_datapacker = has_customized_datapacker
 
     def load_dataset(self):
         if self.dataset is not None and isinstance(self.dataset, Callable):
@@ -110,8 +107,6 @@ class ControllerDataFetcher(DataFetcherBase):
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
         is_rl: bool = True,
-        has_customized_datapacker: bool = False,
-        # FIXME: (lms) how to check if has customized datapacker?
     ):
         super().__init__(
             config,
@@ -121,7 +116,6 @@ class ControllerDataFetcher(DataFetcherBase):
             dataset,
             val_dataset,
             is_rl,
-            has_customized_datapacker,
         )
 
         self.ckpt_extra_info = {}
@@ -131,6 +125,10 @@ class ControllerDataFetcher(DataFetcherBase):
         self.batch_sampler = batch_sampler
         self.val_sampler = val_sampler
         self.val_batch_sampler = val_batch_sampler
+
+        # For ControllerDataFetcher, if data_packer is not None, that
+        # means the data packer is customized by user and passed in by
+        # the launcher.
 
         # Controller should always load the dataset and dataloader.
         self.load_dataset()
@@ -503,7 +501,6 @@ class WorkerDataFetcher(DataFetcherBase):
         dataset: Optional[Callable[[Config], Dataset]] = None,
         val_dataset: Optional[Callable[[Config], Dataset]] = None,
         is_rl: bool = True,
-        has_customized_datapacker: bool = False,
     ):
         super().__init__(
             config,
@@ -513,7 +510,6 @@ class WorkerDataFetcher(DataFetcherBase):
             dataset,
             val_dataset,
             is_rl,
-            has_customized_datapacker,
         )
 
         if self.config.train.local_dataset:
