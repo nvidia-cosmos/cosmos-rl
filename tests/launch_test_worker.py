@@ -2320,8 +2320,6 @@ def run_sft_ddp_load_check():
         dataset=TestDataset,
     )
 
-    trainer.sync_all_states = types.MethodType(dummy_sync_all_states, trainer)
-
     assert trainer.sync_cnt == 1
     destroy_distributed()
 
