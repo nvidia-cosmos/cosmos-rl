@@ -15,7 +15,7 @@
 
 import torch.distributed as dist
 import uuid
-from typing import Dict, Callable, Type, Optional, Any
+from typing import Dict, Callable, Type, Optional
 import copy
 import time
 import atexit
@@ -37,8 +37,6 @@ import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
 import cosmos_rl.utils.util as util
-import base64
-import cloudpickle
 from transformers import AutoConfig
 import multiprocessing as mp
 from cosmos_rl.dispatcher.api.client import APIClient
@@ -87,27 +85,24 @@ class CommMixin:
         )
 
         self.api_client = APIClient(self.role)
-        self.init_meta()
-
         self.register_to_controller()
 
-    def init_meta(self):
-        # Fetch metadata from the controller
-        metadata = self.api_client.get_controller_metadata()
-        self.init_data_packer(metadata)
-
-    def init_data_packer(self, metadata: Dict[str, Any]):
+    def init_data_packer(
+        self,
+        data_packer: Optional[DataPacker] = None,
+        val_data_packer: Optional[DataPacker] = None,
+    ):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
         )
         is_vlm = getattr(hf_config, "vision_config", None) is not None
         model_type = hf_config.model_type
 
-        user_data_packer = metadata.get("user_data_packer", None)
-        if user_data_packer:
-            user_data_packer = base64.b64decode(user_data_packer)
-            user_data_packer = cloudpickle.loads(user_data_packer)
-            self.data_packer = user_data_packer
+        if data_packer:
+            assert isinstance(
+                data_packer, DataPacker
+            ), "data_packer must be a DataPacker instance"
+            self.data_packer = data_packer
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
             try:
@@ -123,11 +118,11 @@ class CommMixin:
 
         self.data_packer.setup(self.config, self.tokenizer)
 
-        user_val_data_packer = metadata.get("user_val_data_packer", None)
-        if user_val_data_packer:
-            user_val_data_packer = base64.b64decode(user_val_data_packer)
-            user_val_data_packer = cloudpickle.loads(user_val_data_packer)
-            self.val_data_packer = user_val_data_packer
+        if val_data_packer:
+            assert isinstance(
+                val_data_packer, DataPacker
+            ), "val_data_packer must be a DataPacker instance"
+            self.val_data_packer = val_data_packer
             logger.info(
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )

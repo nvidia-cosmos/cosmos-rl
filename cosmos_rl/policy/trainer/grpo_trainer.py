@@ -300,9 +300,6 @@ class GRPOTrainer(Trainer):
             self.dp_rank = parallel_dims.mesh["dp"].get_local_rank()
             self.dp_world_size = parallel_dims.mesh["dp"].size()
 
-        # Init redis controller
-        self.init_redis()
-
         # For iteration control
         self.mini_step = 0
         self.replica_batch_for_this_step = 0
@@ -343,12 +340,18 @@ class GRPOTrainer(Trainer):
         data_packer: Optional[DataPacker] = None,
         val_data_packer: Optional[DataPacker] = None,
     ):
+        # setup data packer first
+        self.init_data_packer(
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+        )
+        # Set up data fetcher
         self.data_fetcher = WorkerDataFetcher(
             config=self.config,
             dataset=dataset,
             val_dataset=val_dataset,
-            data_packer=data_packer,
-            val_data_packer=val_data_packer,
+            data_packer=self.data_packer,
+            val_data_packer=self.val_data_packer,
             tokenizer=self.tokenizer,
             is_rl=True,
         )

@@ -21,8 +21,6 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from torch.utils.data import Dataset
 import asyncio
-import base64
-import cloudpickle
 import threading
 
 
@@ -160,20 +158,6 @@ async def meta():
     meta = {
         "config": controller.config,
     }
-    if controller.data_fetcher.data_packer is not None:
-        # if controller.data_fetcher.data_packer is not None, that
-        # means the data packer is customized by user and passed in by
-        # the launcher.
-        meta["user_data_packer"] = base64.b64encode(
-            cloudpickle.dumps(controller.data_fetcher.data_packer)
-        ).decode("utf-8")
-    if controller.data_fetcher.val_data_packer is not None:
-        # if controller.data_fetcher.val_data_packer is not None, that
-        # means the validation data packer is customized by user and passed in by
-        # the launcher.
-        meta["user_val_data_packer"] = base64.b64encode(
-            cloudpickle.dumps(controller.data_fetcher.val_data_packer)
-        ).decode("utf-8")
     return meta
 
 
@@ -590,6 +574,8 @@ def main(
                 filter_reward_fns=filter_reward_fns,
                 val_dataset=val_dataset,
                 val_reward_fns=val_reward_fns,
+                data_packer=data_packer,
+                val_data_packer=val_data_packer,
             )
         return
 
@@ -639,9 +625,7 @@ def main(
             redis_port=args.redis_port,
             redis_logfile_path=args.redis_logfile_path,
             dataset=dataset,
-            data_packer=data_packer,
             val_dataset=val_dataset,
-            val_data_packer=val_data_packer,
             custom_logger_fns=custom_logger_fns,
             sampler=sampler,
             batch_sampler=batch_sampler,

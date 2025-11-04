@@ -111,6 +111,9 @@ class Trainer(CommMixin):
 
         self.train_stream = torch.cuda.current_stream()
         self.init_comm()
+        # Init redis controller
+        self.init_redis()
+
         model = ModelRegistry.build_model(config)
 
         # FP8 settings
