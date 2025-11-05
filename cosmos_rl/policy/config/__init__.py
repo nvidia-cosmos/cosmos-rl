@@ -710,11 +710,11 @@ class LoraConfig(BaseModel):
         description="List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint. ",
     )
     alpha_pattern: Optional[Dict[str, float]] = Field(
-        default=None,
+        default_factory=dict,  # Empty dict instead of None to avoid PEFT loading issues
         description="Per-module overrides for lora_alpha. Keys are regex patterns; evaluated in insertion order, first match wins.",
     )
     r_pattern: Optional[Dict[str, int]] = Field(
-        default=None,
+        default_factory=dict,  # Empty dict instead of None to avoid PEFT loading issues
         description="Per-module overrides for LoRA rank r. Keys are regex patterns; evaluated in insertion order, first match wins.",
     )
     init_lora_weights: Union[

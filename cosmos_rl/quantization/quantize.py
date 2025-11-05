@@ -45,6 +45,7 @@ from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 from cosmos_rl.utils.decorators import monitor_status
 from cosmos_rl.utils.tao_status_logger import log_tao_status
+from cosmos_rl.utils.lora_utils import merge_lora_model
 from nvidia_tao_core.loggers.logging import get_status_logger, Status, Verbosity
 
 # Constants
@@ -296,6 +297,18 @@ def parse_args():
         default=False,
         help="Skip test generation after quantization"
     )
+    parser.add_argument(
+        "--enable_lora",
+        type=str_to_bool,
+        default=False,
+        help="Enable LoRA model merging (required if model_path is a LoRA checkpoint)"
+    )
+    parser.add_argument(
+        "--base_model_path",
+        type=str,
+        default=None,
+        help="Base model path for LoRA merging (required if enable_lora is True)"
+    )
 
     return parser.parse_args()
 
@@ -330,7 +343,9 @@ def run_quantization(args):
                 "model_path": args.model_path,
                 "results_dir": str(results_dir),
                 "quantization_scheme": args.quantization_scheme,
-                "num_calibration_samples": args.num_calibration_samples
+                "num_calibration_samples": args.num_calibration_samples,
+                "lora_enabled": args.enable_lora,
+                "base_model_path": args.base_model_path if args.enable_lora else None
             },
             component_name=COMPONENT_NAME
         )
@@ -353,17 +368,54 @@ def run_quantization(args):
         logger.info(f"Save Directory: {results_dir}")
         logger.info(SEPARATOR)
 
+        # Handle LoRA merging if enabled
+        model_path = args.model_path
+        if args.enable_lora:
+            if not args.base_model_path:
+                raise ValueError("--base_model_path is required when --enable_lora is specified")
+
+            s_logger.write(
+                status_level=Status.RUNNING,
+                message=f"Merging LoRA adapter from {model_path} with base model {args.base_model_path}",
+                verbosity_level=Verbosity.INFO
+            )
+            logger.info(f"Merging LoRA adapter from {model_path} with base model {args.base_model_path}")
+
+            model_path = merge_lora_model(args.model_path, args.base_model_path)
+
+            s_logger.write(
+                status_level=Status.SUCCESS,
+                message=f"LoRA merging complete. Using merged model: {model_path}",
+                verbosity_level=Verbosity.INFO
+            )
+            logger.info(f"LoRA merging complete. Using merged model: {model_path}")
+        else:
+            # Check if the model is in PEFT/LoRA format
+            adapter_config_path = os.path.join(model_path, "adapter_config.json")
+            if os.path.exists(adapter_config_path):
+                error_msg = (
+                    f"The checkpoint at {model_path} is in PEFT/LoRA format. "
+                    "Please enable LoRA merging by setting --enable_lora=true and providing --base_model_path."
+                )
+                s_logger.write(
+                    status_level=Status.FAILURE,
+                    message=error_msg,
+                    verbosity_level=Verbosity.ERROR
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
         # Load model
         s_logger.write(
             status_level=Status.RUNNING,
-            message=f"Loading model: {args.model_path}",
+            message=f"Loading model: {model_path}",
             verbosity_level=Verbosity.INFO
         )
-        logger.info(f"Loading model: {args.model_path}")
+        logger.info(f"Loading model: {model_path}")
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            args.model_path, torch_dtype="auto", trust_remote_code=True, device_map="auto"
+            model_path, torch_dtype="auto", trust_remote_code=True, device_map="auto"
         )
-        processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 
         s_logger.write(
             status_level=Status.SUCCESS,
@@ -555,7 +607,9 @@ def run_quantization(args):
             "results_dir": str(results_dir),
             "quantization_scheme": args.quantization_scheme,
             "num_calibration_samples": args.num_calibration_samples,
-            "smoothing_strength": args.smoothing_strength
+            "smoothing_strength": args.smoothing_strength,
+            "lora_enabled": args.enable_lora,
+            "base_model_path": args.base_model_path if args.enable_lora else None
         }
 
         # Log final results to TAO
