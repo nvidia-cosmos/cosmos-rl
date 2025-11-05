@@ -19,10 +19,15 @@ import unittest
 import torch
 import torch.multiprocessing as mp
 
-from cosmos_rl.utils.ipc.tensor_util import (
+from cosmos_rl.utils.ipc import (
+    ModuleLike,
     named_tensors_from_serialize,
     named_tensors_to_serialize,
 )
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 class TestTensorIPCUtils(unittest.TestCase):
@@ -159,5 +164,84 @@ class TestTensorIPCUtils(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestModuleLike(unittest.TestCase):
+    """Test ModuleLike."""
+
+    def get_module(self) -> ModuleLike:
+        """Get the module."""
+        state_dict = {
+            "model.embed_tokens.weight": torch.randn(10, 10),
+            "model.layers.0.self_attn.q_proj.weight": torch.randn(10, 10),
+            "model.layers.0.self_attn.k_proj.weight": torch.randn(10, 10),
+            "model.layers.0.self_attn.v_proj.weight": torch.randn(10, 10),
+            "model.layers.0.self_attn.o_proj.weight": torch.randn(10, 10),
+            "model.layers.0.self_attn.o_proj.bias": torch.randn(10),
+            "model.layers.1.self_attn.q_proj.weight": torch.randn(10, 10),
+            "model.layers.1.self_attn.k_proj.weight": torch.randn(10, 10),
+            "model.layers.1.self_attn.v_proj.weight": torch.randn(10, 10),
+            "model.layers.1.self_attn.o_proj.weight": torch.randn(10, 10),
+            "model.layers.1.self_attn.o_proj.bias": torch.randn(10),
+        }
+
+        module_names = [
+            "",
+            "model",
+            "model.embed_tokens",
+            "model.layers",
+            "model.layers.0",
+            "model.layers.0.self_attn",
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.0.self_attn.k_proj",
+            "model.layers.0.self_attn.v_proj",
+            "model.layers.0.self_attn.o_proj",
+            "model.layers.1",
+            "model.layers.1.self_attn",
+            "model.layers.1.self_attn.q_proj",
+            "model.layers.1.self_attn.k_proj",
+            "model.layers.1.self_attn.v_proj",
+            "model.layers.1.self_attn.o_proj",
+        ]
+        return ModuleLike(state_dict), state_dict, module_names
+
+    def test_getattribute(self):
+        """Test getattribute of ModuleLike."""
+        fake_module, _, _ = self.get_module()
+
+        self.assertTrue(hasattr(fake_module, "model"))
+        self.assertTrue(isinstance(fake_module.model, ModuleLike))
+        self.assertTrue(hasattr(fake_module.model, "embed_tokens"))
+        self.assertTrue(isinstance(fake_module.model.embed_tokens.weight, torch.Tensor))
+        self.assertTrue(fake_module.model.embed_tokens.weight.shape, (10, 10))
+        self.assertTrue(isinstance(fake_module.model.embed_tokens, ModuleLike))
+        self.assertTrue(hasattr(fake_module.model, "layers"))
+        self.assertTrue(isinstance(fake_module.model.layers, ModuleLike))
+        self.assertTrue(hasattr(fake_module.model.layers[0], "self_attn"))
+        self.assertTrue(isinstance(fake_module.model.layers[0], ModuleLike))
+        self.assertTrue(hasattr(fake_module.model.layers[0].self_attn, "q_proj"))
+        self.assertTrue(isinstance(fake_module.model.layers[0].self_attn, ModuleLike))
+        self.assertTrue(hasattr(fake_module.model.layers[1], "self_attn"))
+        self.assertTrue(isinstance(fake_module.model.layers[1], ModuleLike))
+        self.assertTrue(hasattr(fake_module.model.layers[1].self_attn, "q_proj"))
+
+    def test_get_state_dict(self):
+        """Test get state dict of ModuleLike."""
+        fake_module, original_state_dict, _ = self.get_module()
+        state_dict = fake_module.state_dict()
+
+        self.assertEqual(len(state_dict), len(original_state_dict))
+        for name, value in original_state_dict.items():
+            self.assertTrue(name in state_dict)
+            self.assertTrue(isinstance(state_dict[name], torch.Tensor))
+            self.assertTrue(state_dict[name].shape, value.shape)
+            self.assertTrue(state_dict[name].dtype, value.dtype)
+
+    def test_named_modules(self):
+        """Test named modules of ModuleLike."""
+        fake_module, _, original_module_names = self.get_module()
+
+        module_names = []
+        for name, _ in fake_module.named_modules():
+            module_names.append(name)
+
+        assert len(module_names) == len(original_module_names)
+        assert set(module_names) == set(original_module_names)
