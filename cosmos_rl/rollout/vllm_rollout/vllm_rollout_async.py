@@ -14,7 +14,7 @@
 # limitations under the License.
 import os
 import uuid
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
+import asyncio
 
 import torch
 import copy
@@ -35,10 +35,12 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vllm_version_check
-from cosmos_rl.utils.ipc.tensor_util import (
+from cosmos_rl.utils.ipc import (
+    ModuleLike,
     named_tensors_to_serialize,
     named_tensors_from_serialize,
 )
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
 
 
 class VLLMColocateWorkerExtension:
@@ -49,6 +51,10 @@ class VLLMColocateWorkerExtension:
     name as `worker_extension_cls` argument to the AsyncLLMEngine.from_engine_args() method.
     """
 
+    @property
+    def _get_model(self) -> torch.nn.Module:
+        return self.model_runner.model
+
     def get_state_dict_ipc(self) -> Dict[str, Tuple]:
         """
         Get the CUDA IPC handles of the model weights.
@@ -56,8 +62,16 @@ class VLLMColocateWorkerExtension:
         Returns:
             Dict[param_name, (ipc_handle, shape, dtype, device_id)]
         """
-        model: torch.nn.Module = self.model_runner.model
-        return named_tensors_to_serialize(model.named_parameters())
+        return named_tensors_to_serialize(self._get_model.named_parameters())
+
+    def apply_fp8_linear_patch(self):
+        """
+        Apply the fp8 linear patch to the model when initialize the rollout engine.
+        """
+        from vllm.config import set_current_vllm_config
+
+        with set_current_vllm_config(self.vllm_config):
+            apply_fp8_linear_patch(self._get_model)
 
 
 class vLLMRolloutAsync(RolloutBase):
@@ -104,7 +118,7 @@ class vLLMRolloutAsync(RolloutBase):
 
         self.preset_vllm_env()
 
-    def init_engine(
+    async def init_engine(
         self,
         quantization: Optional[str] = None,
         seed: int = 42,
@@ -183,11 +197,7 @@ class vLLMRolloutAsync(RolloutBase):
 
             # patch the vllm model to use rowwise fp8
             if self.quantization == "fp8":
-                from vllm.config import set_current_vllm_config
-
-                vllm_config = self.rollout_engine.llm_engine.vllm_config
-                with set_current_vllm_config(vllm_config):
-                    apply_fp8_linear_patch(self.get_underlying_model())
+                await self.rollout_engine.collective_rpc("apply_fp8_linear_patch")
 
     def shutdown(self):
         if self._engine_initialized:
@@ -368,8 +378,8 @@ class vLLMRolloutAsync(RolloutBase):
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
-        # TODO(zjx): get tensor via ipc in the future
-        return torch.nn.Module()
+        state_dict = asyncio.run(self.get_underlying_model_state_dict())
+        return ModuleLike(state_dict)
 
     async def get_underlying_model_state_dict(self) -> Dict[str, torch.Tensor]:
         """
@@ -458,7 +468,9 @@ class vLLMRolloutAsync(RolloutBase):
             swizzled_weight_scale_mxfp4.storage.data,
         )
 
-    def model_param_map(self, weight_mapper: WeightMapper) -> Dict[str, torch.Tensor]:
+    async def model_param_map(
+        self, weight_mapper: WeightMapper
+    ) -> Dict[str, torch.Tensor]:
         """
         All the parameters of the rollout model:
             - All the parameters of the model.
@@ -471,9 +483,9 @@ class vLLMRolloutAsync(RolloutBase):
 
         if self._model_param_map:
             return self._model_param_map
-        model = self.get_underlying_model()
+        state_dict = await self.get_underlying_model_state_dict()
         param_map = {}
-        for name, param in model.state_dict().items():
+        for name, param in state_dict.items():
             compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
             param_map[compatible_name] = param
 
