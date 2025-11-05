@@ -22,6 +22,7 @@ used across evaluation, inference, and other components.
 
 import os
 import json
+import traceback
 import logging
 from typing import Optional
 
@@ -84,21 +85,42 @@ def merge_lora_model(lora_path: str, base_model_path: Optional[str] = None) -> s
         logger.info(f"Loading LoRA adapter: {lora_path}")
 
         # Load base model
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            base_model_path,
-            torch_dtype="auto"
-        )
+        logger.info("Step 1/4: Loading base model...")
+        try:
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                base_model_path,
+                torch_dtype="auto"
+            )
+            logger.info(f"Base model loaded successfully. Type: {type(model)}")
+        except Exception as e:
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            logger.error(f"Failed to load base model from {base_model_path}: {e}")
+            raise RuntimeError(f"Base model loading failed: {e}") from e
 
         # Load LoRA adapter
-        peft_model = PeftModel.from_pretrained(model, lora_path)
+        logger.info("Step 2/4: Loading LoRA adapter...")
+        logger.info(f"  Base model device: {next(model.parameters()).device if model.parameters() else 'N/A'}")
+        try:
+            peft_model = PeftModel.from_pretrained(model, lora_path)
+            logger.info(f"LoRA adapter loaded successfully. Type: {type(peft_model)}")
+        except Exception as e:
+            logger.error(f"Failed to load LoRA adapter from {lora_path}: {e}")
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            raise RuntimeError(f"LoRA adapter loading failed: {e}") from e
 
         # Merge and unload
-        logger.info("Merging LoRA weights with base model...")
-        merged_model = peft_model.merge_and_unload()
+        logger.info("Step 3/4: Merging LoRA weights with base model...")
+        try:
+            merged_model = peft_model.merge_and_unload()
+            logger.info(f"LoRA weights merged successfully. Type: {type(merged_model)}")
+        except Exception as e:
+            logger.error(f"Failed during merge_and_unload: {e}")
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            raise RuntimeError(f"LoRA merge failed: {e}") from e
 
         # Save merged model
+        logger.info(f"Step 4/4: Saving merged model to: {merged_path}")
         os.makedirs(merged_path, exist_ok=True)
-        logger.info(f"Saving merged model to: {merged_path}")
         merged_model.save_pretrained(merged_path)
 
         # Also save the processor/tokenizer
