@@ -1269,7 +1269,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         (payload[0], RLPayload.model_validate(payload[1]))
                         for payload in payloads
                     ]
-
+                    assert all(
+                        payload[1].prompt_idx >= 0 for payload in payloads
+                    ), "All payloads should have a valid prompt index"
                 prompts_and_is_end = (
                     payloads if len(payloads) > 0 else None,
                     is_end,

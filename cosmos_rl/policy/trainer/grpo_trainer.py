@@ -1134,6 +1134,9 @@ class GRPOTrainer(Trainer):
         start_event.record()
         logger.debug("[Policy] Prepare training data.")
         rollouts: List[Rollout] = self.dispatch_rollouts()
+        assert all(
+            rollout.prompt_idx >= 0 for rollout in rollouts
+        ), "All rollouts from controller should have a valid prompt index"
 
         # preprocess rollouts
         if self.config.train.local_dataset:

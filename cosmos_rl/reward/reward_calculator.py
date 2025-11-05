@@ -84,7 +84,7 @@ class RolloutGroup:
                 is_end=self.is_end,
                 reward=reward[0],
                 advantage=advantage,
-                prompt_idx=self.prompt_idx,
+                prompt_idx=self.payload.prompt_idx,
                 filter_reward=reward[1],
             )
             for completion, completed_conversation, reward, advantage in zip(
@@ -235,7 +235,7 @@ class RewardCalculator:
         ), "[Reward] prompt_idxs length should match payloads length when local_dataset is True"
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
-                prompt_idx=prompt_idxs[i] if len(prompt_idxs) == len(payloads) else -1,
+                prompt_idx=payload.prompt_idx,
                 payload=payload,
                 # Only report once per replica, so is_end is always True
                 is_end=True,
@@ -256,6 +256,7 @@ class RewardCalculator:
             payload_list.append(
                 RLPayload(
                     prompt=rollouts_group[0].prompt,
+                    prompt_idx=rollouts_group[0].prompt_idx,
                     conversation=rollouts_group[0].conversation,
                     completions=[rollout.completion for rollout in rollouts_group],
                     completed_conversations=[
@@ -307,7 +308,7 @@ class RewardCalculator:
         # Placeholder for advantage computation logic
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
-                prompt_idx=prompt_idxs[i] if len(prompt_idxs) == len(payloads) else -1,
+                prompt_idx=payload.prompt_idx,
                 payload=payload,
                 is_end=False,
                 reference_answer=payload.reference_answer
@@ -361,6 +362,7 @@ class RewardCalculator:
                 payload_list.append(
                     RLPayload(
                         prompt=rollouts_group[0].prompt,
+                        prompt_idx=rollouts_group[0].prompt_idx,
                         conversation=rollouts_group[0].conversation,
                         completions=[rollout.completion for rollout in rollouts_group],
                         completed_conversations=[
@@ -386,6 +388,7 @@ class RewardCalculator:
                 payload_list.append(
                     RLPayload(
                         prompt=rollouts_group[0].prompt,
+                        prompt_idx=rollouts_group[0].prompt_idx,
                         conversation=rollouts_group[0].conversation,
                         completions=[rollout.completion for rollout in rollouts_group],
                         completed_conversations=[
