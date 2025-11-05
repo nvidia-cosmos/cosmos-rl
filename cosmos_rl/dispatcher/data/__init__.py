@@ -39,6 +39,7 @@ class RLDataset(Dataset):
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
         prompt = self.dataset[idx]
         if isinstance(prompt, RLPayload):
+            prompt.prompt_idx = idx
             return idx, prompt
         return idx, RLPayload(prompt=prompt, prompt_idx=idx)
 
