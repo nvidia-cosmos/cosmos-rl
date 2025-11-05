@@ -1,7 +1,6 @@
 import io
 import base64
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from typing import List, Any, Dict, Optional, Tuple
 from transformers import AutoTokenizer, AutoProcessor, AutoConfig
@@ -453,16 +452,6 @@ class HFVLMDataPacker(DataPacker):
             assert all(
                 [x is not None for x in pixel_values_videos]
             ), "pixel_values_videos should not be None"
-            max_len = max([x.shape[0] for x in pixel_values_videos])
-            for i in range(len(pixel_values_videos)):
-                pixel_values_videos[i] = pixel_values_videos[i].unsqueeze(0)
-                assert (
-                    pixel_values_videos[i].ndim == 3
-                ), f"pixel_values_videos[i].ndim: {pixel_values_videos[i].ndim}"
-                pixel_values_videos[i] = F.pad(
-                    pixel_values_videos[i],
-                    (0, 0, 0, max_len - pixel_values_videos[i].shape[1]),
-                )
             pixel_values_videos = torch.cat(pixel_values_videos, dim=0)
         else:
             assert all(
