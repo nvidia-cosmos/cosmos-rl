@@ -1,16 +1,16 @@
 fastapi
 uvicorn
-transformers>=4.51.1,!=4.52.*,!=4.53.* # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
+transformers>=4.54.0 # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
 datasets
 pydantic
 math_verify
 pybind11[global]
-tensordict==0.7.2
+tensordict
 toml
 StrEnum
 redis
 msgpack
-qwen_vl_utils==0.0.11
+qwen_vl_utils
 pynvml
 boto3
 modelscope
@@ -24,11 +24,10 @@ liger_kernel
 leptonai
 seaborn
 peft
-decord
 evaluate
 sacrebleu
 rouge_score
 bert-score
 accelerate
 kernels
-llmcompressor==0.7.0
+llmcompressor
