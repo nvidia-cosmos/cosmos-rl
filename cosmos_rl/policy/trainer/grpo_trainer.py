@@ -300,6 +300,9 @@ class GRPOTrainer(Trainer):
             self.dp_rank = parallel_dims.mesh["dp"].get_local_rank()
             self.dp_world_size = parallel_dims.mesh["dp"].size()
 
+        # Init redis controller
+        self.init_redis()
+
         # For iteration control
         self.mini_step = 0
         self.replica_batch_for_this_step = 0
