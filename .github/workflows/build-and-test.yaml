@@ -49,7 +49,30 @@ jobs:
           ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
 
           # run tests
-          ${LONG_DOCKER_RUN} python tests/test_process_flow.py
+          ${DOCKER_RUN} python tests/test_cosmos_hf_precision.py
+          ${DOCKER_RUN} /bin/bash -c "CP_SIZE=2 TP_SIZE=1 DP_SIZE=2 torchrun --nproc_per_node=4 tests/test_context_parallel.py"
+          ${DOCKER_RUN} python tests/test_cache.py
+          ${DOCKER_RUN} python tests/test_comm.py
+          ${DOCKER_RUN} python tests/test_fp8.py
+          ${DOCKER_RUN} python tests/test_lora.py
+          # ${DOCKER_RUN} python tests/test_grad_allreduce.py
+          ${DOCKER_RUN} python tests/test_high_availability_nccl.py
+          ${DOCKER_RUN} python tests/test_nccl_collectives.py
+          ${DOCKER_RUN} python tests/test_nccl_timeout.py
+          ${DOCKER_RUN} python tests/test_parallel_map.py
+          ${DOCKER_RUN} python tests/test_policy_to_policy.py
+          ${DOCKER_RUN} python tests/test_policy_to_rollout.py
+          ${DOCKER_RUN} python tests/test_process_flow.py
+          ${DOCKER_RUN} python tests/test_custom_class.py
+          ${DOCKER_RUN} python tests/test_math_verify.py
+          ${DOCKER_RUN} python tests/test_policy_overfit.py
+          ${DOCKER_RUN} python tests/test_data_packer.py
+          ${DOCKER_RUN} python tests/test_sequence_packing.py
+          ${LONG_DOCKER_RUN} python tests/test_integration.py --stream
+          ${LONG_DOCKER_RUN} python tests/test_hf_models.py
+          ${LONG_DOCKER_RUN} /bin/bash -c "torchrun --nproc_per_node=2 tests/test_hf_models_tp.py"
+          ${DOCKER_RUN} python tests/test_activation_offload.py
+          ${DOCKER_RUN} python tests/test_policy_variant.py
 
       - name: Cleanup
         if: always()
