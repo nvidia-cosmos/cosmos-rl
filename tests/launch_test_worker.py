@@ -1912,10 +1912,9 @@ def run_gspo_test():
     dataset.setup(config=config, tokenizer=None)
     length = []
     for i in range(total_steps * trainer.replica_batch_for_this_step):
-        prompt = dataset[i % len(dataset)][config.train.train_policy.prompt_column_name]
-        completion = dataset[i % len(dataset)][
-            config.train.train_policy.response_column_name
-        ]
+        index = i % len(dataset)
+        prompt = dataset[index][config.train.train_policy.prompt_column_name]
+        completion = dataset[index][config.train.train_policy.response_column_name]
         completion_ids = trainer.tokenizer(
             completion, add_special_tokens=False
         ).input_ids
@@ -1927,7 +1926,10 @@ def run_gspo_test():
         ):
             length.append(len(completion_ids))
         rollout = Rollout(
-            prompt=prompt, completion=completion, advantage=0.05 * (i % 20)
+            prompt=prompt,
+            completion=completion,
+            advantage=0.05 * (i % 20),
+            prompt_idx=index,
         )
         trainer.data_queue.put(rollout)
 
@@ -2003,11 +2005,12 @@ def run_reference_reset_test():
     dataset = TestDataset(config)
     dataset.setup(config=config, tokenizer=None)
     for i in range(total_steps * trainer.replica_batch_for_this_step):
-        prompt = dataset[i % len(dataset)][config.train.train_policy.prompt_column_name]
-        completion = dataset[i % len(dataset)][
-            config.train.train_policy.response_column_name
-        ]
-        rollout = Rollout(prompt=prompt, completion=completion, advantage=1.0)
+        index = i % len(dataset)
+        prompt = dataset[index][config.train.train_policy.prompt_column_name]
+        completion = dataset[index][config.train.train_policy.response_column_name]
+        rollout = Rollout(
+            prompt=prompt, completion=completion, advantage=1.0, prompt_idx=index
+        )
         trainer.data_queue.put(rollout)
 
     for i in range(total_steps):
@@ -2073,11 +2076,14 @@ def run_dynamic_batchsize_test(
     dataset = TestDataset(config)
     dataset.setup(config=config, tokenizer=None)
     for i in range(total_steps * trainer.replica_batch_for_this_step):
-        prompt = dataset[i % len(dataset)][config.train.train_policy.prompt_column_name]
+        index = i % len(dataset)
+        prompt = dataset[index][config.train.train_policy.prompt_column_name]
         completion = dataset[i % len(dataset)][
             config.train.train_policy.response_column_name
         ]
-        rollout = Rollout(prompt=prompt, completion=completion, advantage=1.0)
+        rollout = Rollout(
+            prompt=prompt, completion=completion, advantage=1.0, prompt_idx=index
+        )
         trainer.data_queue.put(rollout)
 
     def hooked_execute_all_reduce(self):
