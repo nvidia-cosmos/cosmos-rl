@@ -119,7 +119,7 @@ class ModuleLike:
         """
         Get the named parameters of the module.
         """
-        for name, param in self.state_dict.items():
+        for name, param in self.state_dict().items():
             yield name, param
 
     def named_modules(

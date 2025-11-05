@@ -13,17 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pickle
 
 import torch
-from torch.multiprocessing.reductions import reduce_tensor
 from typing import Any, Dict
+from torch.multiprocessing import reductions
 
 
 def tensor_ipc_serialize(tensor: torch.Tensor) -> Any:
     """
     Convert the tensor to the IPC handle.
     """
-    return reduce_tensor(tensor)
+    rebuild_func, args = reductions.reduce_tensor(tensor)
+    obj = pickle.dumps((str(rebuild_func.__name__), args))
+    return obj
 
 
 def tensor_ipc_deserialize(ipc_data: Any) -> torch.Tensor:
@@ -36,7 +39,8 @@ def tensor_ipc_deserialize(ipc_data: Any) -> torch.Tensor:
     Returns:
         original tensor shared same physical memory in same device
     """
-    rebuild_func, args = ipc_data
+    rebuild_func_name, args = pickle.loads(ipc_data)
+    rebuild_func = getattr(reductions, rebuild_func_name)
     return rebuild_func(*args)
 
 
