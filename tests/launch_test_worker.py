@@ -72,6 +72,7 @@ from cosmos_rl.dispatcher.data.packer import (
     DecoderOnlyLLMDataPacker,
 )
 import cosmos_rl.utils.distributed as dist_utils
+from cosmos_rl.policy.config import GrpoConfig
 import uuid
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
@@ -113,7 +114,9 @@ class TestDataset(Dataset):
         dataset_list = []
         for split_name in config.train.train_policy.dataset.split:
             dataset_list.append(dataset[split_name])
-        self.response_column = config.train.train_policy.response_column_name
+        self.response_column = None
+        if isinstance(config.train.train_policy, GrpoConfig):
+            self.response_column = config.train.train_policy.response_column_name
         self.dataset = concatenate_datasets(dataset_list)
 
     def __getitem__(self, idx):
@@ -123,6 +126,10 @@ class TestDataset(Dataset):
         return len(self.dataset)
 
     def get_reference_answer(self, idx: int) -> Any:
+        if self.response_column is None:
+            raise ValueError(
+                "You are under SFT config, but trying to get reference answer for GRPO."
+            )
         return self.dataset[idx][self.response_column]
 
 
@@ -2153,14 +2160,7 @@ def run_dynamic_batchsize_test(
 
 
 def run_sft_ddp_load_check():
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_sft.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
