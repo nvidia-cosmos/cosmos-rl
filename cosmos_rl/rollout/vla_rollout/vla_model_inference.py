@@ -178,8 +178,7 @@ class VLAModelInference:
             elif 'agentview_image' in input_data:
                 image_array = input_data["agentview_image"]
             else:
-                # Create dummy image if none available
-                image_array = np.zeros((256, 256, 3), dtype=np.uint8)
+                raise RuntimeError(f"No image found in input_data, expected full_image or agentview_image, got {input_data.keys()}")
             
             image = Image.fromarray(image_array).convert("RGB")
             
@@ -189,19 +188,10 @@ class VLAModelInference:
             
             # Create prompt (matching SimpleVLA-RL format)
             prompt = f"In: What action should the robot take to {task_description.lower()}?\nOut:"
-            
-            # Process with VLA processor
-            try:
-                batch_feature = self.processor(prompt, image)
-                input_ids = batch_feature["input_ids"]
-                attention_mask = batch_feature.get("attention_mask", torch.ones_like(input_ids))
-                pixel_values = batch_feature["pixel_values"]
-            except Exception as e:
-                logger.warning(f"VLA processor failed, using dummy data: {e}")
-                # Create dummy data if processor fails
-                input_ids = torch.randint(0, 1000, (1, 20))
-                attention_mask = torch.ones_like(input_ids)
-                pixel_values = torch.randn(1, 3, 224, 224)
+            batch_feature = self.processor(prompt, image)
+            input_ids = batch_feature["input_ids"]
+            attention_mask = batch_feature.get("attention_mask", torch.ones_like(input_ids))
+            pixel_values = batch_feature["pixel_values"]
             
             # Handle multi-view images (wrist cameras, etc.)
             pixel_values_list = [pixel_values]

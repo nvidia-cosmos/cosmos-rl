@@ -488,6 +488,44 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             return torch.cat((projected_patch_embeddings, proprio_features), dim=1)
         return projected_patch_embeddings
 
+    def _convert_to_bidirectional_4d_mask(self, attention_mask_2d):
+        """
+        Convert 2D attention mask to 4D bidirectional mask.
+        
+        This implements the bidirectional attention fix from:
+        https://github.com/huggingface/transformers/commit/bc339d9ad707454c0c115970db43c260067c61ab
+        
+        Args:
+            attention_mask_2d: [batch_size, seq_len] where 1 = attend, 0 = pad token
+            
+        Returns:
+            4D mask [batch_size, 1, seq_len, seq_len] where:
+            - 0.0 = attend (bidirectional)
+            - -inf = don't attend (pad tokens only)
+        """
+        if attention_mask_2d is None:
+            return None
+        
+        batch_size, seq_len = attention_mask_2d.shape
+        
+        # Convert 2D mask to 4D: [B, S] -> [B, 1, 1, S]
+        # This represents which KEY positions to mask for ALL query positions
+        mask_4d = attention_mask_2d.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
+        
+        # Expand to full 4D: [B, 1, 1, S] -> [B, 1, S, S]
+        # Each query position gets the same key mask (bidirectional)
+        mask_4d = mask_4d.expand(batch_size, 1, seq_len, seq_len)
+        
+        # Convert from 1/0 to 0/-inf format for attention
+        # 1 (attend) -> 0.0, 0 (pad/ignore) -> -inf
+        mask_4d = torch.where(
+            mask_4d == 0,
+            torch.tensor(float('-inf'), dtype=torch.float32, device=attention_mask_2d.device),
+            torch.tensor(0.0, dtype=torch.float32, device=attention_mask_2d.device)
+        )
+        
+        return mask_4d
+    
     def _build_multimodal_attention(self, input_embeddings, projected_patch_embeddings, attention_mask):
         """Build multimodal embeddings and attention mask"""
         # Update attention mask
@@ -507,9 +545,13 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
         multimodal_attention_mask = None
         if attention_mask is not None:
-            multimodal_attention_mask = torch.cat(
+            # Build 2D mask
+            multimodal_attention_mask_2d = torch.cat(
                 [attention_mask[:, :1], projected_patch_attention_mask, attention_mask[:, 1:]], dim=1
             )
+            
+            # Convert to 4D bidirectional mask for OpenVLA-OFT compatibility
+            multimodal_attention_mask = self._convert_to_bidirectional_4d_mask(multimodal_attention_mask_2d)
 
         return multimodal_embeddings, multimodal_attention_mask
 

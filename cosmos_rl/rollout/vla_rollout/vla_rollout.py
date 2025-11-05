@@ -23,6 +23,7 @@ from collections import defaultdict
 import gc
 import traceback
 import time
+from multiprocessing import Process, Queue
 
 from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
@@ -36,6 +37,7 @@ from .action_processing import VLAActionProcessor
 from .utils import encode_observation, create_vla_prompt, compute_vla_reward
 from .vla_model_inference import VLAModelInference
 from .libero_utils import save_rollout_video
+from .env_worker import libero_env_worker, robotwin_env_worker
 
 # Import VLA constants (will be set based on robot platform at module load time)
 try:
@@ -583,62 +585,103 @@ class VLARollout(RolloutBase):
     def _run_vla_episode_batch(self, env_wrappers: List, instructions: List[str], batch_size: int, 
                                is_valid: bool = False, global_steps: int = 0) -> Dict:
         """
-        Run VLA episode batch with parallel environments (matching SimpleVLA-RL pattern)
+        Run VLA episode batch with multiprocessing (matching SimpleVLA-RL pattern)
         
-        This follows the exact pattern from SimpleVLA-RL's _generate_minibatch_libero
+        Uses separate processes for each environment to avoid shared OpenGL/MuJoCo state.
         
         Args:
-            env_wrappers: List of environment wrappers
-            instructions: List of task instructions
+            env_wrappers: List of environment wrappers (contains task config info)
+            instructions: List of task instructions  
             batch_size: Number of environments
-            is_valid: Whether to generate validation videos
+            is_valid: Whether to save validation videos
             global_steps: Current training step (for video naming)
         """
-        # ============ DEBUG: Force batch size to 1 ============
-        DEBUG_FORCE_BATCH_1 = True  # Set to False to disable
-        if DEBUG_FORCE_BATCH_1 and len(env_wrappers) > 1:
-            logger.warning(f"⚠️  DEBUG: Forcing batch_size=1 (was {len(env_wrappers)})")
-            env_wrappers = [env_wrappers[0]]
-            instructions = [instructions[0]]
-            batch_size = 1
-        # ======================================================
 
-        logger.info(f"Starting VLA episode batch: {batch_size} tasks, max_steps={self.max_steps}")
+        logger.info(f"Starting VLA episode batch with multiprocessing: {batch_size} tasks, max_steps={self.max_steps}, save_videos={is_valid}")
         
-        # Collect initial observations and task descriptions
+        # Extract task information from env_wrappers
+        task_suite_names = []
+        task_ids = []
+        trial_ids = []
+        
+        for env_wrapper in env_wrappers:
+            if isinstance(env_wrapper, LiberoEnvWrapper):
+                task_suite_names.append(env_wrapper.benchmark_name)
+                task_ids.append(env_wrapper.task_id)
+                trial_ids.append(env_wrapper.trial_id)
+            elif isinstance(env_wrapper, RobotwinEnvWrapper):
+                task_suite_names.append(env_wrapper.task_name)
+                task_ids.append(env_wrapper.task_id)
+                trial_ids.append(env_wrapper.trial_id)
+            else:
+                # Fallback
+                task_suite_names.append(self.task_suite)
+                task_ids.append(0)
+                trial_ids.append(0)
+        
+        # Spawn worker processes for each environment
+        processes = []
+        input_queues = []
+        output_queues = []
+        
+        for idx in range(batch_size):
+            task_name = task_suite_names[idx]
+            t_id = task_ids[idx]
+            tr_id = trial_ids[idx]
+            input_q = Queue()
+            output_q = Queue()
+            
+            # Determine worker function based on task type
+            if 'libero' in task_name.lower():
+                worker_fn = libero_env_worker
+                args = (task_name, t_id, tr_id, input_q, output_q, is_valid, global_steps, self.max_steps)
+            elif 'robotwin' in task_name.lower():
+                worker_fn = robotwin_env_worker
+                args = (task_name, t_id, tr_id, input_q, output_q, is_valid, global_steps, self.max_steps)
+            else:
+                logger.warning(f"Unknown task type {task_name}, defaulting to LIBERO")
+                worker_fn = libero_env_worker
+                args = (task_name, t_id, tr_id, input_q, output_q, is_valid, global_steps, self.max_steps)
+            
+            p = Process(target=worker_fn, args=args)
+            p.start()
+            processes.append(p)
+            input_queues.append(input_q)
+            output_queues.append(output_q)
+        
+        logger.info(f"Spawned {len(processes)} worker processes")
+        
+        # Collect initial observations from workers
         inputs = []
         task_descriptions = []
         task_records = []
-        valid_video = defaultdict(list)  # Store video frames for validation runs
+        valid_video = defaultdict(list)
         
-        for idx, env_wrapper in enumerate(env_wrappers):
-            # Initialize environment and get initial observation
-            init_result = env_wrapper.initialize()
-            current_obs = init_result['obs']
-            
-            # Convert observation to input format (matching SimpleVLA-RL's _obs_to_input)
-            input_data = self._obs_to_input(current_obs, is_robotwin="robotwin" in self.task_suite)
-            inputs.append(input_data)
-            
-            # Use actual task description from environment (not fallback from payload)
-            actual_instruction = init_result.get('instruction', instructions[idx])
-            task_descriptions.append(actual_instruction)
-            
-            task_file_name = f"{self.task_suite}_task_{idx}"
-            task_records.append({
-                "active": env_wrapper.is_active(),
-                "complete": env_wrapper.is_complete(),
-                "finish_step": 0,
-                "task_file_name": task_file_name
-            })
-            
-            # Record initial frame for video (always save for debugging)
-            if "agentview_image" in current_obs:
-                # Image is already flipped by LiberoEnvWrapper
-                img = current_obs["agentview_image"]
-                valid_video[task_file_name].append(img)
+        for idx in range(batch_size):
+            try:
+                init_data = output_queues[idx].get(timeout=120)
+                assert init_data['type'] == 'init', f"Expected 'init', got '{init_data['type']}'"
+                
+                task_descriptions.append(init_data["task_description"])
+                inputs.append(self._obs_to_input(init_data['obs'], is_robotwin='robotwin' in task_suite_names[idx].lower()))
+                task_records.append({
+                    "active": init_data['active'],
+                    "complete": init_data['complete'],
+                    "finish_step": init_data['finish_step'],
+                    "task_file_name": init_data['task_file_name']
+                })
+                
+                # Collect initial video frames
+                if is_valid:
+                    valid_video[init_data['task_file_name']].extend(init_data['valid_images'])
+                    logger.info(f"Task {idx} collected {len(init_data['valid_images'])} initial frames for video '{init_data['task_file_name']}'")
+                    
+                logger.info(f"Task {idx} initialized: {task_descriptions[idx][:60]}")
+            except Exception as e:
+                logger.error(f"Failed to initialize task {idx}: {e}")
+                raise
         
-        # Episode execution loop (matching SimpleVLA-RL)
+        # Episode execution loop
         step = 0
         vla_history = []
         
@@ -653,22 +696,16 @@ class VLARollout(RolloutBase):
             
             logger.info(f"[Step {step}] Active: {len(active_indices)}/{batch_size}")
             
+            # VLA model inference on all inputs
             current_inputs = inputs
             current_task_descriptions = task_descriptions
             
-            # Process inputs for VLA model (matching SimpleVLA-RL's process_input)
-            if self.model_inference is not None:
-                vla_input = self.model_inference.process_input(current_inputs, current_task_descriptions)
-                
-                # Generate VLA actions (matching SimpleVLA-RL's _generate_one_step)
-                vla_output = self.model_inference.generate_one_step(vla_input)
-            else:
-                # Fallback to dummy action generation
-                vla_output = self._generate_dummy_batch_actions(current_inputs, current_task_descriptions)
+            vla_input = self.model_inference.process_input(current_inputs, current_task_descriptions)
+            vla_output = self.model_inference.generate_one_step(vla_input)
             
-            actions = vla_output.get("action", np.random.randn(batch_size, 7))
+            actions = vla_output.get("action", np.random.randn(batch_size, NUM_ACTIONS_CHUNK, 7))
             
-            # Store step data (matching SimpleVLA-RL format)
+            # Store step data
             step_data = {
                 "responses": vla_output.get("responses", [f"Step {step}"] * batch_size),
                 "input_ids": vla_output.get("input_ids", torch.randint(0, 1000, (batch_size, 10))),
@@ -678,68 +715,50 @@ class VLARollout(RolloutBase):
                 "step": step
             }
             vla_history.append(step_data)
-            new_inputs = inputs.copy()
-            completed_this_step = []
             
+            # Send actions to active workers
+            for idx in active_indices:
+                input_queues[idx].put(actions[idx])
+            
+            # Collect results from active workers
+            new_inputs = inputs.copy()
             for idx in active_indices:
                 try:
-                    # Execute action chunks (matching SimpleVLA-RL's env_worker pattern)
-                    # actions[idx] has shape [num_action_chunks, action_dim] = [8, 7]
-                    # We need to step through each action in the chunk sequentially
-                    action_chunk = actions[idx] if actions.ndim > 1 else actions
+                    result = output_queues[idx].get(timeout=30)
+                    assert result['type'] == 'step', f"Expected 'step', got '{result['type']}'"
                     
-                    # Store observations for each step (for potential video generation)
-                    step_observations = []
+                    new_inputs[idx] = self._obs_to_input(result['obs'], is_robotwin='robotwin' in task_suite_names[idx].lower())
+                    task_records[idx]['active'] = result['active']
+                    task_records[idx]['complete'] = result['complete']
+                    task_records[idx]['finish_step'] = result['finish_step']
                     
-                    # Loop through all actions in the chunk
-                    for chunk_idx in range(len(action_chunk)):
-                        single_action = action_chunk[chunk_idx]
-                        
-                        # Execute action in environment
-                        # Note: LiberoEnvWrapper handles action processing (normalize + invert gripper)
-                        # and increments finish_step counter internally
-                        next_obs, done = env_wrappers[idx].step(single_action)
-                        
-                        # Record observation for this step (for video generation)
-                        step_observations.append(next_obs)
-                        
-                        # Check if episode finished during chunk execution
-                        if done or not env_wrappers[idx].is_active():
-                            break
+                    # Collect video frames
+                    if is_valid and len(result['valid_images']) > 0:
+                        valid_video[task_records[idx]['task_file_name']].extend(result['valid_images'])
+                        logger.debug(f"Task {idx} collected {len(result['valid_images'])} step frames (total now: {len(valid_video[task_records[idx]['task_file_name']])})")
                     
-                    # Update input and task record after all chunk actions executed
-                    # Use the last observation as the next input to the model
-                    new_inputs[idx] = self._obs_to_input(next_obs, is_robotwin="robotwin" in self.task_suite)
-                    task_records[idx]['active'] = env_wrappers[idx].is_active()
-                    task_records[idx]['complete'] = env_wrappers[idx].is_complete()
-                    task_records[idx]['finish_step'] = env_wrappers[idx].finish_step
-                    
-                    # Store step observations for video generation (always save for debugging)
-                    task_file_name = task_records[idx]['task_file_name']
-                    for obs in step_observations:
-                        if "agentview_image" in obs:
-                            # Image is already flipped by LiberoEnvWrapper
-                            img = obs["agentview_image"]
-                            valid_video[task_file_name].append(img)
-                    
-                    if done or not task_records[idx]['active']:
-                        task_records[idx]['active'] = False
-                        status = "✅ SUCCESS" if task_records[idx]['complete'] else "❌ FAILED"
-                        completed_this_step.append(f"Task {idx}: {status}")
+                    if not result['active']:
+                        status = "✅ SUCCESS" if result['complete'] else "❌ FAILED"
+                        logger.info(f"Task {idx}: {status} (steps={result['finish_step']})")
                         
                 except Exception as e:
-                    logger.error(f"[Task {idx}] Error: {e}")
+                    logger.error(f"[Task {idx}] Error receiving result: {e}")
                     task_records[idx]['active'] = False
-                    completed_this_step.append(f"Task {idx}: ⚠️ ERROR")
             
             inputs = new_inputs
-            # Increment step by number of actions in chunk (matching SimpleVLA-RL pattern)
-            # Each model inference produces NUM_ACTIONS_CHUNK actions that are executed sequentially
             step += NUM_ACTIONS_CHUNK
         
-        # Cleanup environments
-        for env_wrapper in env_wrappers:
-            env_wrapper.close()
+        # Terminate workers
+        logger.info("Terminating worker processes...")
+        for q in input_queues:
+            q.put(None)  # Send termination signal
+        
+        for p in processes:
+            p.join(timeout=20)
+            if p.is_alive():
+                logger.warning(f"Process {p.pid} didn't terminate, killing...")
+                p.terminate()
+                p.join(timeout=5)
         
         # Log final statistics
         successes = sum(1 for r in task_records if r['complete'])
@@ -748,14 +767,16 @@ class VLARollout(RolloutBase):
         
         logger.info(f"Episode batch completed: Success={successes}/{batch_size} ({100*successes/batch_size if batch_size > 0 else 0:.1f}%), Avg steps={avg_steps:.1f}")
         
-        # Save rollout videos (always save for debugging, regardless of success/failure)
+        # Save rollout videos
         if valid_video:
             logger.info(f"Saving {len(valid_video)} rollout videos...")
+            for task_file, images in valid_video.items():
+                logger.info(f"  Video '{task_file}': {len(images)} frames")
+            
             experiment_name = getattr(self.config, 'experiment_name', 'vla_rollout')
             
             for task_file, images in valid_video.items():
                 if len(images) > 0:
-                    # Determine if this task was successful
                     complete = any(r['complete'] for r in task_records if r['task_file_name'] == task_file)
                     
                     try:
@@ -766,14 +787,18 @@ class VLARollout(RolloutBase):
                             global_steps,
                             complete
                         )
-                        logger.info(f"  ✅ Saved: {video_path}")
+                        logger.info(f"  ✅ Saved {len(images)} frames to: {video_path}")
                     except Exception as e:
                         logger.warning(f"  ⚠️  Failed to save {task_file}: {e}")
+                        import traceback
+                        traceback.print_exc()
+        else:
+            logger.warning(f"⚠️  No video frames collected! is_valid={is_valid}")
         
         # Clear memory
         torch.cuda.empty_cache()
         
-        # Prepare output batch (matching SimpleVLA-RL's _prepare_output_batch)
+        # Prepare output batch
         return self._prepare_output_batch(vla_history, task_records, batch_size)
     
     def _obs_to_input(self, obs: Dict, is_robotwin: bool = False) -> Dict:
