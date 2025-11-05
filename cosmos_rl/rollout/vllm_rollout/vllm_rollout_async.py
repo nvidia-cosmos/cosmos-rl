@@ -14,7 +14,6 @@
 # limitations under the License.
 import os
 import uuid
-import asyncio
 
 import torch
 import copy
@@ -51,7 +50,6 @@ class VLLMColocateWorkerExtension:
     name as `worker_extension_cls` argument to the AsyncLLMEngine.from_engine_args() method.
     """
 
-    @property
     def _get_model(self) -> torch.nn.Module:
         return self.model_runner.model
 
@@ -62,7 +60,7 @@ class VLLMColocateWorkerExtension:
         Returns:
             Dict[param_name, (ipc_handle, shape, dtype, device_id)]
         """
-        return named_tensors_to_serialize(self._get_model.named_parameters())
+        return named_tensors_to_serialize(self._get_model().state_dict())
 
     def apply_fp8_linear_patch(self):
         """
@@ -71,7 +69,7 @@ class VLLMColocateWorkerExtension:
         from vllm.config import set_current_vllm_config
 
         with set_current_vllm_config(self.vllm_config):
-            apply_fp8_linear_patch(self._get_model)
+            apply_fp8_linear_patch(self._get_model())
 
 
 class vLLMRolloutAsync(RolloutBase):
@@ -370,7 +368,7 @@ class vLLMRolloutAsync(RolloutBase):
                 payloads, stream, data_packer, sampling_params
             )
 
-    def get_underlying_model(self):
+    async def get_underlying_model(self):
         """
         Get the underlying parallelized model in vLLM internal.
         """
@@ -378,7 +376,7 @@ class vLLMRolloutAsync(RolloutBase):
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
-        state_dict = asyncio.run(self.get_underlying_model_state_dict())
+        state_dict = await self.get_underlying_model_state_dict()
         return ModuleLike(state_dict)
 
     async def get_underlying_model_state_dict(self) -> Dict[str, torch.Tensor]:
@@ -489,7 +487,7 @@ class vLLMRolloutAsync(RolloutBase):
             compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
             param_map[compatible_name] = param
 
-        quantized_tensors = self.get_quantized_tensors(weight_mapper)
+        quantized_tensors = await self.get_quantized_tensors(weight_mapper)
         param_map.update(quantized_tensors)
 
         self._model_param_map = param_map
@@ -532,7 +530,7 @@ class vLLMRolloutAsync(RolloutBase):
             log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0")
             log_env("VLLM_MXFP4_USE_MARLIN", "0")
 
-    def get_quantized_tensors(
+    async def get_quantized_tensors(
         self, weight_mapper: WeightMapper
     ) -> Dict[str, torch.Tensor]:
         """
@@ -542,7 +540,7 @@ class vLLMRolloutAsync(RolloutBase):
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
-        model = self.get_underlying_model()
+        model = await self.get_underlying_model()
         quantized_tensors = {}
         # Handle special cases for some quantized models
         if "gpt_oss" in self.model_config.model_type and self.quantization == "mxfp4":
