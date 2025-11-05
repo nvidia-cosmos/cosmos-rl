@@ -1,14 +1,15 @@
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
-from typing import List, Any, Dict, Optional, Tuple
+import io
+import base64
 import torch
-import torch.nn.functional as F
+from PIL import Image
+from typing import List, Any, Dict, Optional, Tuple
+from transformers import AutoTokenizer, AutoProcessor, AutoConfig
+from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
+
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
-from transformers import AutoTokenizer, AutoProcessor, AutoConfig
-from PIL import Image
-import base64
-import io
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 IGNORE_LABEL_ID = -100
 
@@ -21,8 +22,6 @@ def process_vision_info(sample: List[Dict[str, Any]]) -> Tuple[Any, Any]:
             for item in x["content"]:
                 if item["type"] == "image":
                     image_inputs.append(item["image"])
-                if item["type"] == "video":
-                    video_inputs.append(item["video"])
     return image_inputs, video_inputs
 
 
@@ -87,6 +86,8 @@ class HFVLMDataPacker(DataPacker):
             self.video_token_id = video_token_id
         self.vision_ids = [self.image_token_id, self.video_token_id]
         self.hf_config = hf_config
+        self.model_type = hf_config.model_type
+        self.use_qwen_vl_process = self.model_type == "qwen3_vl"
 
     def get_rollout_input(self, sample: Payload) -> Any:
         """
@@ -138,16 +139,27 @@ class HFVLMDataPacker(DataPacker):
         prompt = self.hf_processor.apply_chat_template(
             sample, tokenize=False, add_generation_prompt=True
         )
+        video_kwargs = {}
         image_inputs, video_inputs = process_vision_info(sample)
-        # TODO: add video support
+        if (
+            self.use_qwen_vl_process
+            and len(image_inputs) == 0
+            and len(video_inputs) == 0
+        ):
+            image_inputs, video_inputs, video_kwargs = qwen_vl_process_vision_info(
+                sample,
+                image_patch_size=16,
+                return_video_kwargs=True,
+                return_video_metadata=True,
+            )
+
         if len(video_inputs) > 0:
             return {
                 "prompt": prompt,
                 "multi_modal_data": {"video": video_inputs},
-                "mm_processor_kwargs": {},
+                "mm_processor_kwargs": video_kwargs,
             }
         elif len(image_inputs) > 0:
-            assert len(image_inputs) == 1, f"{len(image_inputs)=}"
             return {
                 "prompt": prompt,
                 "multi_modal_data": {"image": image_inputs},
@@ -215,7 +227,6 @@ class HFVLMDataPacker(DataPacker):
             pad_run_length = 10
             assistant_contents = []
             messages = None
-            # SFT
             if "messages" in conversation:
                 messages = conversation["messages"]
                 for message in messages:
@@ -249,7 +260,6 @@ class HFVLMDataPacker(DataPacker):
                             )
                         message["content"] = new_content
             else:
-                # RL
                 messages = conversation
                 if self.image_token is not None:
                     for x in messages:
@@ -264,31 +274,71 @@ class HFVLMDataPacker(DataPacker):
                                     contents[idx]["text"] = new_content["text"].replace(
                                         self.image_token, ""
                                     )
+                for x in messages:
+                    if x["role"] == "assistant":
+                        content = x["content"]
+                        if isinstance(content, str):
+                            assistant_contents.append(content)
+                        elif isinstance(content, dict):
+                            assert "text" in content, f"text not in content: {content}"
+                            assistant_contents.append(content["text"])
+                        else:
+                            raise ValueError(
+                                f"Unsupported content type: {type(content)}"
+                            )
+                        x["content"] = pad_token * pad_run_length
 
             text = self.hf_processor.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=add_generation_prompt,
             )
+            video_kwargs = {}
+            image_inputs = []
+            video_inputs = []
+            video_metadatas = None
+
+            # For dataset with PIL image objects
             if "images" in conversation:
                 image_inputs = conversation["images"]
             else:
                 image_inputs, video_inputs = process_vision_info(conversation)
-                assert all(
-                    (isinstance(x, str) for x in image_inputs)
-                ), f"{image_inputs=}"
-                assert (
-                    len(video_inputs) == 0
-                ), "Currently video input is not supported for HF VLM"
                 image_inputs = decode_base64_to_image(image_inputs)
 
             kwarg = {
                 "return_tensors": "pt",
                 "images": image_inputs,
             }
+
+            # For dataset with image or video urls
+            if len(image_inputs) == 0 and len(video_inputs) == 0:
+                if self.use_qwen_vl_process:
+                    image_inputs, video_inputs, video_kwargs = (
+                        qwen_vl_process_vision_info(
+                            conversation,
+                            image_patch_size=16,
+                            return_video_kwargs=True,
+                            return_video_metadata=True,
+                        )
+                    )
+                    if video_inputs is not None:
+                        video_inputs, video_metadatas = zip(*video_inputs)
+                        video_inputs, video_metadatas = (
+                            list(video_inputs),
+                            list(video_metadatas),
+                        )
+                    else:
+                        video_metadatas = None
+
+                    kwarg["images"] = image_inputs
+                    kwarg["videos"] = video_inputs
+                    kwarg["video_metadata"] = video_metadatas
+                    kwarg["do_resize"] = False
+
             inputs = self.hf_processor(
                 text=[text],
                 **kwarg,
+                **video_kwargs,
             )
             input_ids = inputs["input_ids"][0].tolist()
             label_ids = [IGNORE_LABEL_ID] * len(input_ids)
@@ -402,16 +452,6 @@ class HFVLMDataPacker(DataPacker):
             assert all(
                 [x is not None for x in pixel_values_videos]
             ), "pixel_values_videos should not be None"
-            max_len = max([x.shape[0] for x in pixel_values_videos])
-            for i in range(len(pixel_values_videos)):
-                pixel_values_videos[i] = pixel_values_videos[i].unsqueeze(0)
-                assert (
-                    pixel_values_videos[i].ndim == 3
-                ), f"pixel_values_videos[i].ndim: {pixel_values_videos[i].ndim}"
-                pixel_values_videos[i] = F.pad(
-                    pixel_values_videos[i],
-                    (0, 0, 0, max_len - pixel_values_videos[i].shape[1]),
-                )
             pixel_values_videos = torch.cat(pixel_values_videos, dim=0)
         else:
             assert all(

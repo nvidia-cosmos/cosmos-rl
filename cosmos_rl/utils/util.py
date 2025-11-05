@@ -1183,17 +1183,6 @@ def decode_vision_info(prompts):
                     pass
                 else:
                     raise ValueError(f"Unsupported image type: {img_type}")
-            if "video" in multi_modal_data:
-                video_obj = multi_modal_data["video"]
-                assert isinstance(
-                    video_obj, list
-                ), f"video should be a list, but got {type(video_obj)}"
-                video_type = type(video_obj[0])
-                # No need to decode video tensor
-                if video_type == torch.Tensor:
-                    pass
-                else:
-                    raise ValueError(f"Unsupported video type: {video_type}")
 
             new_prompt["multi_modal_data"] = multi_modal_data
         new_prompts.append(new_prompt)
