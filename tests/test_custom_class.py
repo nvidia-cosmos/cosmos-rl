@@ -122,6 +122,7 @@ class TestCustomRolloutOutput(unittest.TestCase):
             payloads.append(
                 RLPayload(
                     prompt=dataset[i]["prompt"],
+                    prompt_idx=0,  # Mock the prompt index
                     completions=[dataset[i]["result"] for _ in range(16)],
                     completed_conversations=[[]] * 16,
                     rewards=[0.5] * 16,
