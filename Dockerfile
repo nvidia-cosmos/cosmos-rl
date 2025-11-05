@@ -147,7 +147,11 @@ RUN if [ "$TARGETARCH" != "amd64" ]; then \
 # but pip installs above will be cached
 COPY . .
 
-RUN pip install --no-cache-dir -c constraints.txt -r requirements.txt
+RUN if [ "$TARGETARCH" != "amd64" ]; then \
+        pip install --no-cache-dir -c constraints.txt -r requirements.txt ; \
+    else \
+        pip install --no-cache-dir -r requirements.txt ; \
+    fi
 
 ###################################################
 FROM no-efa-base AS efa-base
