@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from transformers import AutoConfig
+import torch
 from typing import Any
+from transformers import AutoConfig
+from cosmos_rl.utils.logging import logger
 
 
 def pre_hf_models_patch(hf_config: AutoConfig):
@@ -35,3 +37,90 @@ def post_hf_models_patch(hf_config: AutoConfig, model: Any):
     ):
         model.img_context_token_id = 200021
         print("Set img_context_token_id to 200021")
+
+
+def sequence_packing_forward_patch(hf_config: AutoConfig, hfmodel):
+    patch_success = False
+    if hf_config.model_type in SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS:
+        SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS[hf_config.model_type](hfmodel)
+        patch_success = True
+    else:
+        if not hfmodel.is_vlm:
+            SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS["llm"](hfmodel)
+        else:
+            logger.warning(
+                f"Failed to patch sequence packing forward for {hf_config.model_type}, supported models: {SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS.keys()}"
+            )
+
+    return patch_success
+
+
+def sequence_packing_forward_qwen3_vl(model):
+    original_forward = model.language_model.forward
+
+    def sequence_packing_forward_qwen3_vl_inner(*args, **kwargs):
+        valid_input_len = kwargs.get("valid_input_len", None)
+        if valid_input_len is not None:
+            inputs_embeds = kwargs.get("inputs_embeds")
+            visual_pos_masks = kwargs.get("visual_pos_masks")
+            position_ids = kwargs.get("position_ids")
+
+            # TODO: consider seq_len_multiple and cases where there are multiple images/videos in samples
+            batch_size = valid_input_len.shape[0]
+            cache_position_list = []
+            inputs_embeds_list = []
+            visual_pos_masks_list = []
+            position_ids_list = []
+            for i in range(batch_size):
+                valid_len = valid_input_len[i].item()
+                cur_inputs_embeds = inputs_embeds[i : i + 1, :valid_len, :]
+                cur_visual_mask = visual_pos_masks[i : i + 1, :valid_len]
+                cur_position_ids = position_ids[:, i : i + 1, :valid_len]
+                cache_position_list.append(
+                    torch.arange(0, valid_len, device=inputs_embeds.device)
+                )
+                inputs_embeds_list.append(cur_inputs_embeds)
+                visual_pos_masks_list.append(cur_visual_mask)
+                position_ids_list.append(cur_position_ids)
+
+            kwargs["inputs_embeds"] = torch.cat(inputs_embeds_list, dim=1)
+            kwargs["visual_pos_masks"] = torch.cat(visual_pos_masks_list, dim=1)
+            kwargs["position_ids"] = torch.cat(position_ids_list, dim=2)
+            kwargs["cache_position"] = torch.cat(cache_position_list, dim=0)
+        else:
+            logger.warning(
+                "valid_input_len is not provided, skip sequence packing forward"
+            )
+        # Call original forward
+        result = original_forward(*args, **kwargs)
+        return result
+
+    # Replace the forward method
+    model.language_model.forward = sequence_packing_forward_qwen3_vl_inner
+
+
+def sequence_packing_forward_llm(model):
+    original_forward = model.language_model.forward
+
+    def sequence_packing_forward_llm_inner(*args, **kwargs):
+        valid_input_len = kwargs.get("valid_input_len", None)
+        if valid_input_len is not None:
+            pass
+        else:
+            logger.warning(
+                "valid_input_len is not provided, skip sequence packing forward"
+            )
+        # Call original forward
+        result = original_forward(*args, **kwargs)
+        return result
+
+    # Replace the forward method
+    model.language_model.forward = sequence_packing_forward_llm_inner
+
+
+# In order to support sequence packing during forward passes, the forward method of the language model must be patched.
+# The patching logic is model-dependent, with special handling required for Vision-Language Models (VLMs) and other architectures.
+SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS = {
+    "qwen3_vl": sequence_packing_forward_qwen3_vl,
+    "llm": sequence_packing_forward_llm,
+}
