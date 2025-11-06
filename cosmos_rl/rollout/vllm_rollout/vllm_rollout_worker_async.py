@@ -42,6 +42,7 @@ from cosmos_rl.rollout.rollout_task_scheduler import (
 from cosmos_rl.dispatcher.protocol import ValidationReportRequest
 from cosmos_rl.dispatcher.command import (
     Command,
+    BuildMeshCommand,
     PolicyToRolloutUnicastCommand,
     RolloutToRolloutBroadcastCommand,
 )
@@ -49,7 +50,6 @@ import cosmos_rl.utils.util as util
 import cosmos_rl.utils.pynccl as pynccl
 from cosmos_rl.utils import constant
 import cosmos_rl.utils.distributed as dist_utils
-from cosmos_rl.utils.async_utils import is_async_callable
 from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
     ConversationType,
@@ -57,6 +57,7 @@ from cosmos_rl.dispatcher.data.schema import (
 )
 from torch.utils.data import Dataset
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
+from cosmos_rl.utils.command_executor import CommandExecutor
 from vllm import SamplingParams
 
 from .vllm_rollout_worker import vLLMRolloutWorker
@@ -149,9 +150,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         # reuse some of the vLLMRolloutWorker methods
         self.prepare_trainable_params = types.MethodType(
             vLLMRolloutWorker.prepare_trainable_params, self
-        )
-        self.build_global_mesh = types.MethodType(
-            vLLMRolloutWorker.build_global_mesh, self
         )
 
         self.report_rollouts = types.MethodType(vLLMRolloutWorker.report_rollouts, self)
@@ -271,6 +269,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         self.scheduler: Optional[RolloutTaskScheduler] = None
         self._scheduler_thread: Optional[threading.Thread] = None
 
+        # setup the command executor
+        self.command_executor = CommandExecutor()
+
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
@@ -293,6 +294,18 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             if self.parallel_dims.tp_coord[0] == 0
             and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
             else 0,
+        )
+
+        # setup the command executor
+        self.command_executor.register_command_handler(
+            RolloutToRolloutBroadcastCommand, self.broadcast_to_all_rollout_replica
+        )
+        self.command_executor.register_command_handler(
+            PolicyToRolloutUnicastCommand, self.policy_to_rollout_unicast
+        )
+        self.command_executor.register_command_handler(
+            BuildMeshCommand,
+            types.MethodType(vLLMRolloutWorker.build_global_mesh, self),
         )
 
     def init_scheduler(self):
@@ -806,7 +819,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             # TODO(zjx): make sure pause generation while weight synchronizating.
             await self.prepare_shard_infos_for_weight_sync_insts()
 
-    @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
     async def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         """
@@ -988,9 +1000,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
             self.state.set_weight_synced()
 
-    @RolloutWorkerBase.register_rollout_command_handler(
-        RolloutToRolloutBroadcastCommand
-    )
     async def broadcast_to_all_rollout_replica(
         self, broadcast_command: RolloutToRolloutBroadcastCommand
     ) -> None:
@@ -1128,16 +1137,8 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         current_command = dist_utils.broadcast_object_cpu(current_command)
 
         if current_command is not None:
-            handler = self.get_rollout_command_handler(type(current_command))
-            if handler is None:
-                raise Exception(
-                    f"No such command supoorted in rollout {current_command}"
-                )
             try:
-                if is_async_callable(handler):
-                    await handler(self, current_command)
-                else:
-                    handler(self, current_command)
+                await self.command_executor.async_execute_command(current_command)
                 logger.debug(
                     f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
                 )
