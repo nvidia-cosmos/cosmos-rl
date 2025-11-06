@@ -69,6 +69,8 @@ def main(
             filter_reward_fns=filter_reward_fns,
             val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
         )
         return
 

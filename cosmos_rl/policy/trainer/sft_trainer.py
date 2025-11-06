@@ -292,9 +292,9 @@ class SFTTrainer(Trainer):
         self,
         config: CosmosConfig,
         parallel_dims: ParallelDims,
-        dataset: Optional[Dataset] = None,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         data_packer: Optional[DataPacker] = None,
-        val_dataset: Optional[Dataset] = None,
+        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_data_packer: Optional[DataPacker] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
@@ -321,33 +321,55 @@ class SFTTrainer(Trainer):
             )
 
         self.train_step = 0
-
-        self.lr_schedulers = None
         self.start_epoch = 0
+        self.lr_schedulers = None
 
-        ckpt_total_steps = self.load_model()
+        self.ckpt_total_steps = self.load_model()
         self.model.train()
+
+        self.setup(
+            dataset=dataset,
+            val_dataset=val_dataset,
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
+            val_sampler=val_sampler,
+            val_batch_sampler=val_batch_sampler,
+        )
+
+    def setup(
+        self,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        data_packer: Optional[DataPacker] = None,
+        val_data_packer: Optional[DataPacker] = None,
+        sampler: Optional[Callable] = None,
+        batch_sampler: Optional[Callable] = None,
+        val_sampler: Optional[Callable] = None,
+        val_batch_sampler: Optional[Callable] = None,
+    ):
+        # setup data packer first
+        self.init_data_packer(
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+        )
 
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)
             dataset.setup(self.config, self.tokenizer)
-        if data_packer:
-            data_packer.setup(self.config, self.tokenizer)
-            self.data_packer = data_packer
 
         if isinstance(val_dataset, Callable):
             val_dataset = val_dataset(self.config)
             val_dataset.setup(self.config, self.tokenizer)
-        if val_data_packer:
-            val_data_packer.setup(self.config, self.tokenizer)
-            self.val_data_packer = val_data_packer
-        else:
+
+        if not self.val_data_packer:
             self.val_data_packer = self.data_packer
 
         # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
-            config,
+            self.config,
             tokenizer=self.tokenizer,
             data_packer=self.data_packer,
             user_provided_dataset=dataset,
@@ -361,7 +383,7 @@ class SFTTrainer(Trainer):
                     train_dataset,
                     num_replicas=self.dp_world_size,
                     rank=self.dp_rank,
-                    shuffle=config.train.train_policy.dataloader_shuffle,
+                    shuffle=self.config.train.train_policy.dataloader_shuffle,
                     drop_last=False,
                 )
             else:
@@ -371,14 +393,14 @@ class SFTTrainer(Trainer):
                 train_dataset,
                 num_replicas=self.dp_world_size,
                 rank=self.dp_rank,
-                shuffle=config.train.train_policy.dataloader_shuffle,
+                shuffle=self.config.train.train_policy.dataloader_shuffle,
                 drop_last=False,
             )
 
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
             batch_sampler = batch_sampler(
                 train_sampler,
-                batch_size=config.train.train_batch_per_replica,
+                batch_size=self.config.train.train_batch_per_replica,
                 drop_last=False,
             )
 
@@ -392,25 +414,25 @@ class SFTTrainer(Trainer):
                 )
                 data_loader = DataLoader(
                     train_dataset,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    num_workers=self.config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     batch_sampler=sampler_in_batch,
                     collate_fn=collate_fn,
                 )
             else:
                 data_loader = DataLoader(
                     train_dataset,
-                    batch_size=config.train.train_batch_per_replica,
+                    batch_size=self.config.train.train_batch_per_replica,
                     shuffle=False,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    num_workers=self.config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     sampler=sampler,
                     collate_fn=collate_fn,
                     drop_last=False,
                 )
             return data_loader
 
-        if config.train.resume and self.train_step > 0:
+        if self.config.train.resume and self.train_step > 0:
             """
             Note: Here we assume there is no data shuffling across epochs.
             Otherwise, we need to call `set_epoch` on the sampler after each epoch.
@@ -420,9 +442,9 @@ class SFTTrainer(Trainer):
                 get_train_data_loader(train_sampler, batch_sampler)
             )
             data_loader_bias = self.train_step % total_steps_per_epoch
-            data_loader_bias *= config.train.train_batch_per_replica
+            data_loader_bias *= self.config.train.train_batch_per_replica
             logger.info(
-                f"Resuming training from step {self.train_step}/{ckpt_total_steps}"
+                f"Resuming training from step {self.train_step}/{self.ckpt_total_steps}"
             )
             train_sampler = SkippingSampler(
                 train_sampler,
@@ -463,7 +485,7 @@ class SFTTrainer(Trainer):
                 shuffle=False,
                 drop_last=False,
             )
-        self.epoch = config.train.epoch
+        self.epoch = self.config.train.epoch
 
         assert (
             self.tokenizer.pad_token_id is not None
@@ -476,36 +498,36 @@ class SFTTrainer(Trainer):
             if isinstance(val_batch_sampler, Callable):
                 val_batch_sampler = val_batch_sampler(
                     val_sampler,
-                    batch_size=config.validation.batch_size
-                    or config.train.train_batch_per_replica,
+                    batch_size=self.config.validation.batch_size
+                    or self.config.train.train_batch_per_replica,
                     drop_last=False,
                 )
             self.val_data_loader = DataLoader(
                 val_dataset,
-                num_workers=config.train.train_policy.dataloader_num_workers,
-                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                num_workers=self.config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 batch_sampler=val_batch_sampler,
                 collate_fn=collate_fn,
             )
         else:
             self.val_data_loader = DataLoader(
                 val_dataset,
-                batch_size=config.validation.batch_size
-                or config.train.train_batch_per_replica,
-                num_workers=config.train.train_policy.dataloader_num_workers,
-                prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                batch_size=self.config.validation.batch_size
+                or self.config.train.train_batch_per_replica,
+                num_workers=self.config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 sampler=val_sampler,
                 collate_fn=collate_fn,
                 drop_last=False,
             )
 
         steps_by_dataset = (
-            ckpt_total_steps
-            if ckpt_total_steps > 0
+            self.ckpt_total_steps
+            if self.ckpt_total_steps > 0
             else len(self.train_data_loader) * self.epoch
         )
-        if config.train.max_num_steps is not None:
-            self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
+        if self.config.train.max_num_steps is not None:
+            self.total_steps = min(steps_by_dataset, self.config.train.max_num_steps)
         else:
             self.total_steps = steps_by_dataset
 

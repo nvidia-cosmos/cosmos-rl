@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import copy
-import torch
 import subprocess
 import atexit
 import sys
@@ -25,7 +24,7 @@ import os
 import math
 import threading
 import tempfile
-from typing import List, Dict, Tuple, Any, Optional, Callable
+from typing import List, Dict, Tuple, Optional, Callable
 from cosmos_rl.dispatcher.replica import Atom, Rollout
 from cosmos_rl.dispatcher.protocol import Role, MESH_NAMES
 from cosmos_rl.utils.logging import logger
@@ -36,12 +35,7 @@ from cosmos_rl.utils.wandb_logger import (
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.network_util as network_util
 import cosmos_rl.utils.constant as constant
-from cosmos_rl.dispatcher.data import (
-    CosmosDataset,
-    RLPayload,
-    CosmosValidationDataset,
-)
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import Dataset
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 from cosmos_rl.dispatcher.status import (
     PolicyStatusManager,
@@ -50,12 +44,9 @@ from cosmos_rl.dispatcher.status import (
 from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from transformers import AutoTokenizer
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
-from cosmos_rl.dispatcher.command import PolicyToRolloutUnicastCommand
-from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data import IdxAndRLPayload
-from itertools import islice
+from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 
 
 class Controller:
@@ -75,7 +66,6 @@ class Controller:
     def _init_status(self):
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
-        self.epoch = 1
         self.stat_prompt_tokens_count = 0
         self.stat_completion_tokens_count = 0
         self.stat_n_samples = 0
@@ -97,9 +87,7 @@ class Controller:
         redis_port: int,
         redis_logfile_path: str,
         dataset: Optional[Dataset] = None,
-        data_packer: Optional[DataPacker] = None,
         val_dataset: Optional[Dataset] = None,
-        val_data_packer: Optional[DataPacker] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
@@ -129,241 +117,19 @@ class Controller:
             )
 
         self.is_rl = task_type != "sft"
-
-        if dataset is not None and isinstance(dataset, Callable):
-            dataset = dataset(config)
-        if val_dataset is not None and isinstance(val_dataset, Callable):
-            val_dataset = val_dataset(config)
-
-        self.user_data_packer = data_packer
-        self.user_val_data_packer = val_data_packer
-        self.dataset = None
-        self.ckpt_extra_info = {}
         self.weight_version_to_prompt_num = {}  # Only for on-policy.
-        remain_samples_num = 0
 
-        if self.is_rl:
-            self.rollout_batch_size = (
-                config.train.train_policy.dataloader_batch_size
-                or config.rollout.batch_size
-            )
-            if dataset is not None:
-                assert isinstance(dataset, Dataset)
-                self.dataset = CosmosDataset(
-                    config=config, train_set=dataset, tokenizer=self.tokenizer
-                )
-                logger.info(
-                    "[Controller] Using provided dataset for training, dataset specification in the toml config will be ignored"
-                )
-            else:
-                self.dataset = CosmosDataset(config=config, tokenizer=self.tokenizer)
-
-            remain_samples_num = (
-                (
-                    len(self.dataset.train_set)
-                    * config.rollout.n_generation
-                    * config.train.epoch
-                )
-                if self.dataset is not None
-                else 0
-            )  # Total number of samples of policy training will consume.
-
-            if sampler is not None:
-                logger.info("[Controller] Using provided sampler for training")
-                if isinstance(sampler, Callable):
-                    train_sampler = sampler(
-                        self.dataset.train_set,
-                        num_replicas=1,
-                        rank=0,
-                        shuffle=config.train.train_policy.dataloader_shuffle,
-                        drop_last=False,
-                    )
-                else:
-                    train_sampler = sampler
-            else:
-                train_sampler = DistributedSampler(
-                    self.dataset.train_set,
-                    num_replicas=1,
-                    rank=0,
-                    shuffle=config.train.train_policy.dataloader_shuffle,
-                    drop_last=False,
-                )
-            if batch_sampler is not None and isinstance(batch_sampler, Callable):
-                batch_sampler = batch_sampler(
-                    train_sampler,
-                    batch_size=self.rollout_batch_size,
-                    drop_last=False,
-                )
-
-            if config.train.resume:
-                try:
-                    # If resuming, disable the weight sync check flag for rollout to compare the received weight with the reference weight.
-                    PolicyToRolloutUnicastCommand._do_weight_sync_check_flag = False
-                    self.ckpt_manager = CheckpointMananger(config)
-                    self.ckpt_extra_info = (
-                        self.ckpt_manager.load_extra_info_from_checkpoint()
-                    )
-                    remain_samples_num = self.ckpt_extra_info.get(
-                        "remain_samples_num", remain_samples_num
-                    )
-                    self.epoch = (
-                        config.train.epoch
-                        - (
-                            math.ceil(
-                                remain_samples_num
-                                / (
-                                    len(self.dataset.train_set)
-                                    * config.rollout.n_generation
-                                )
-                            )
-                        )
-                        + 1
-                    )
-                    logger.info(
-                        f"[Controller] Resuming from checkpoint, current epoch: {self.epoch}, remaining samples: {remain_samples_num}"
-                    )
-
-                    train_dataloader_bias = max(
-                        0,
-                        len(self.dataset.train_set)
-                        - (
-                            (
-                                math.ceil(
-                                    remain_samples_num / config.rollout.n_generation
-                                )
-                            )
-                            % len(self.dataset.train_set)
-                        ),
-                    )
-                    logger.info(
-                        f"[Controller] Loaded extra info from checkpoint: {self.ckpt_extra_info}"
-                    )
-                    from cosmos_rl.policy.trainer.sampler import SkippingSampler
-
-                    train_sampler = SkippingSampler(
-                        base_sampler=train_sampler,
-                        skip_samples=train_dataloader_bias
-                        // (
-                            len(list(islice(iter(train_sampler), 1))[0])
-                            if isinstance(list(islice(iter(train_sampler), 1))[0], list)
-                            else 1
-                        ),
-                    )
-
-                    if batch_sampler is not None:
-                        batch_sampler = SkippingSampler(
-                            base_sampler=batch_sampler,
-                            skip_samples=train_dataloader_bias
-                            // (
-                                len(list(islice(iter(batch_sampler), 1))[0])
-                                if isinstance(
-                                    list(islice(iter(batch_sampler), 1))[0], list
-                                )
-                                else 1
-                            ),
-                        )
-                except Exception as e:
-                    import traceback
-
-                    traceback.print_exc()
-                    logger.error(
-                        f"[Controller] Failed to load checkpoint extra info: {e}. Please check the checkpoint path and config."
-                    )
-            if batch_sampler is not None:
-                logger.info(
-                    "[Controller] Using custom batch Sampler that yields list of indices for training dataset."
-                )
-                self.train_dataloader = DataLoader(
-                    self.dataset.train_set,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                    collate_fn=RLPayload.collate_fn,
-                    batch_sampler=batch_sampler,
-                )
-            else:
-                self.train_dataloader = DataLoader(
-                    self.dataset.train_set,
-                    batch_size=self.rollout_batch_size,
-                    shuffle=False,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                    collate_fn=RLPayload.collate_fn,
-                    sampler=train_sampler,
-                )
-            self.train_dataloader_iter = iter(self.train_dataloader)
-
-            if config.validation.enable:
-                self.val_batch_size = (
-                    config.train.train_policy.dataloader_batch_size
-                    or config.validation.batch_size
-                    or self.rollout_batch_size
-                )
-                assert (
-                    self.val_batch_size > 0
-                ), "[Controller] val_batch_size should be greater than 0."
-                if val_dataset is not None:
-                    assert isinstance(val_dataset, Dataset)
-                    self.val_dataset = CosmosValidationDataset(
-                        config=config, val_set=val_dataset, tokenizer=self.tokenizer
-                    )
-                    logger.info(
-                        "[Controller] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
-                    )
-                else:
-                    self.val_dataset = CosmosValidationDataset(
-                        config=config, tokenizer=self.tokenizer
-                    )
-                if val_sampler is not None:
-                    logger.info("[Controller] Using provided sampler for validation")
-                    if isinstance(val_sampler, Callable):
-                        val_sampler = val_sampler(
-                            self.val_dataset.val_set,
-                            num_replicas=1,
-                            rank=0,
-                            shuffle=False,
-                            drop_last=False,
-                        )
-                if val_batch_sampler is not None:
-                    logger.info(
-                        "Using custom batch Sampler that yields list of indices for validation dataset."
-                    )
-                    if isinstance(val_batch_sampler, Callable):
-                        val_batch_sampler = val_batch_sampler(
-                            val_sampler
-                            if val_sampler is not None
-                            else DistributedSampler(
-                                self.val_dataset.val_set,
-                                num_replicas=1,
-                                rank=0,
-                                shuffle=False,
-                                drop_last=False,
-                            ),
-                            batch_size=self.val_batch_size,
-                            drop_last=False,
-                        )
-                    val_dataloader = DataLoader(
-                        self.val_dataset.val_set,
-                        num_workers=config.train.train_policy.dataloader_num_workers,
-                        prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                        collate_fn=RLPayload.collate_fn,
-                        batch_sampler=val_batch_sampler,
-                    )
-                else:
-                    val_dataloader = DataLoader(
-                        self.val_dataset.val_set,
-                        batch_size=self.val_batch_size,
-                        shuffle=False,
-                        num_workers=config.train.train_policy.dataloader_num_workers,
-                        prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
-                        collate_fn=RLPayload.collate_fn,
-                        sampler=val_sampler,
-                    )
-            else:
-                self.val_dataset = None
-                val_dataloader = None
-        else:
-            self.val_dataset = None
-            val_dataloader = None
+        self.data_fetcher = ControllerDataFetcher(
+            config=config,
+            dataset=dataset,
+            val_dataset=val_dataset,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
+            val_sampler=val_sampler,
+            val_batch_sampler=val_batch_sampler,
+            tokenizer=self.tokenizer,
+            is_rl=self.is_rl,
+        )
 
         redis_free_port = util.find_available_port(redis_port)
         self.config.redis = str(redis_free_port)
@@ -405,18 +171,16 @@ class Controller:
         self.policy_status_manager.setup(
             config,
             self.redis_controller,
-            remain_samples_num=remain_samples_num,
-            samples_per_epoch=len(self.dataset.train_set) * config.rollout.n_generation
+            data_fetcher=self.data_fetcher,
+            remain_samples_num=self.data_fetcher.remain_samples_num,
+            samples_per_epoch=len(self.data_fetcher.dataset.train_set)
+            * config.rollout.n_generation
             if self.is_rl
             else 0,
             tokenizer=self.tokenizer,
-            val_dataloader=val_dataloader,
-            current_step=self.ckpt_extra_info.get("step", 0),
+            current_step=self.data_fetcher.ckpt_extra_info.get("step", 0),
             max_num_steps=config.train.max_num_steps,
             custom_logger_fns=custom_logger_fns,
-            val_datasize=len(self.val_dataset.val_set)
-            if self.val_dataset is not None
-            else 0,
         )
         self.rollout_status_manager.setup(
             config, self.redis_controller, tokenizer=self.tokenizer
@@ -463,24 +227,7 @@ class Controller:
         n: int,
         validation_step: Optional[int] = None,
     ) -> Tuple[List[IdxAndRLPayload], bool]:
-        add_answer = (
-            self.config.rollout.multi_turn_config.enable
-            or not self.config.rollout.reference_answer_in_local
-        )
-
-        # query n prompts from the dataset [idx, payload]
-        prompt_id_and_payload_list: List[IdxAndRLPayload] = []
-        is_end = False
-
         is_validation = validation_step is not None
-        if is_validation:
-            iterator = self.policy_status_manager.validation_get_dataloader(
-                validation_step
-            )
-            batch_size = self.val_batch_size
-        else:
-            iterator = self.train_dataloader_iter
-            batch_size = self.rollout_batch_size
 
         if not is_validation:
             # Throttle the generation speed:
@@ -503,57 +250,6 @@ class Controller:
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                     )
 
-        def _next_payload(
-            iterator, add_answer: bool
-        ) -> tuple[List[int], List[RLPayload]]:
-            idxs, payloads = next(iterator)
-            assert len(idxs) <= batch_size
-            assert len(payloads) <= batch_size
-            assert len(idxs) == len(payloads)
-            updated_payloads: List[RLPayload] = []
-            for idx, payload in zip(idxs, payloads):
-                if add_answer:
-                    if is_validation:
-                        payload.reference_answer = (
-                            self.val_dataset.val_set.get_reference_answer(idx)
-                        )
-                    else:
-                        payload.reference_answer = (
-                            self.dataset.train_set.get_reference_answer(idx)
-                        )
-                updated_payloads.append(payload)
-            return idxs, updated_payloads
-
-        for _ in range(math.ceil(n / batch_size)):
-            payload: RLPayload | None = None
-            try:
-                idxs, payloads = _next_payload(iterator, add_answer)
-            except StopIteration:
-                if not is_validation:
-                    self.epoch += 1
-                    if self.epoch <= self.config.train.epoch:
-                        logger.info(f"[Controller] Epoch {self.epoch} start.")
-                        iterator = iter(self.train_dataloader)
-                        self.train_dataloader_iter = iterator
-
-                        idxs, payloads = _next_payload(iterator, add_answer)
-                    else:
-                        if self.epoch == self.config.train.epoch + 1:
-                            # We only log this all finished information once.
-                            logger.info(
-                                "[Controller] All epochs finished fetching rollout prompts, wait for rollouts generation and training to complete."
-                            )
-                        is_end = True
-                        break
-                else:
-                    is_end = True
-                    break
-            assert len(idxs) == len(payloads)
-            for idx, payload in zip(idxs, payloads):
-                idx = idx.item() if isinstance(idx, torch.Tensor) else idx
-                prompt_id_and_payload_list.append((idx, payload))
-
-        current_fetch_count = len(prompt_id_and_payload_list)
         if (
             (not is_validation)
             and self.config.train.train_policy.on_policy
@@ -573,6 +269,26 @@ class Controller:
                 num_of_valid_prompts_consumed // global_batch_size
             )
 
+            if self.config.train.train_policy.variant != "dapo":
+                # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
+                if (
+                    weight_version_for_current_batch
+                    not in self.weight_version_to_prompt_num
+                ):
+                    n = min(n, global_batch_size)
+                else:
+                    n = min(
+                        n,
+                        global_batch_size
+                        - self.weight_version_to_prompt_num[
+                            weight_version_for_current_batch
+                        ],
+                    )
+
+            prompt_id_and_payload_list, is_end = self.data_fetcher.get_batched_prompt(
+                n, validation_step
+            )
+            current_fetch_count = len(prompt_id_and_payload_list)
             # record the number of valid prompts for current weight version
             if (
                 weight_version_for_current_batch
@@ -608,20 +324,14 @@ class Controller:
                 ].weight_version = weight_version_for_current_batch
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
+            prompt_id_and_payload_list, is_end = self.data_fetcher.get_batched_prompt(
+                n, validation_step
+            )
+            current_fetch_count = len(prompt_id_and_payload_list)
             for i in range(current_fetch_count):
                 prompt_id_and_payload_list[i][1].weight_version = 0
 
         return prompt_id_and_payload_list, is_end
-
-    def query_reference_answer(
-        self, prompt_idx: int, dataset_type: str = "train"
-    ) -> Any:
-        if dataset_type == "train":
-            return self.dataset.train_set.get_reference_answer(prompt_idx)
-        elif dataset_type == "val":
-            return self.val_dataset.val_set.get_reference_answer(prompt_idx)
-        else:
-            raise ValueError(f"Unknown dataset type: {dataset_type}")
 
     async def set_profile(self, request: SetProfileRequest):
         replica = self.policy_status_manager[request.replica_name]

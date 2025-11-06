@@ -89,7 +89,10 @@ class TRTLLMRolloutWorkerBase(CommMixin):
         super().__init__(*args, **kwargs)
 
     def post_init(
-        self, cosmos_config: CosmosConfig, parallel_dims: ParallelDims, init_comm=True
+        self,
+        cosmos_config: CosmosConfig,
+        parallel_dims: ParallelDims,
+        init_comm=True,
     ):
         self.config = cosmos_config
         self.role = Role.ROLLOUT

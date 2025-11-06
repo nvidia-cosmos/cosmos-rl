@@ -26,6 +26,7 @@ from cosmos_rl.dispatcher.api.client import APIClient
 
 def main(*args, **kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+
     api_client = APIClient(role="POLICY")
     metadata = api_client.get_controller_metadata()
 
@@ -53,7 +54,14 @@ def main(*args, **kwargs):
         ):
             if policy_type == "grpo":
                 logger.info("Starting GRPO training...")
-                trainer = GRPOTrainer(config=cosmos_config, parallel_dims=parallel_dims)
+                trainer = GRPOTrainer(
+                    config=cosmos_config,
+                    parallel_dims=parallel_dims,
+                    dataset=kwargs.get("dataset", None),
+                    data_packer=kwargs.get("data_packer", None),
+                    val_dataset=kwargs.get("val_dataset", None),
+                    val_data_packer=kwargs.get("val_data_packer", None),
+                )
                 trainer.main_loop()
             elif policy_type == "sft":
                 custom_sft_dataset = kwargs.get("dataset")

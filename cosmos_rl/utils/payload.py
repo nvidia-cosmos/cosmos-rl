@@ -33,11 +33,6 @@ def extract_rollouts(
             == len(payload.advantages)
             == len(payload.n_ignore_prefix_tokens)
         ), "Length of completions, completed_conversations, rewards, advantages and n_ignore_prefix_tokens must be the same"
-        if len(prompt_idxs) != len(payloads):
-            prompt_idx = -1
-        else:
-            prompt_idx = prompt_idxs[idx]
-
         if payload.filter_rewards is None:
             payload.filter_rewards = [0.0] * len(payload.rewards)
         if payload.completions_token_length is None:
@@ -46,6 +41,7 @@ def extract_rollouts(
         rollouts = [
             Rollout(
                 prompt=payload.prompt,
+                prompt_idx=payload.prompt_idx,
                 conversation=payload.conversation,
                 completion=completion,
                 completed_conversation=completed_conversation,
@@ -53,7 +49,6 @@ def extract_rollouts(
                 reward=reward,
                 filter_reward=filter_reward,
                 advantage=advantage,
-                prompt_idx=prompt_idx,
                 n_ignore_prefix_tokens=n_ignore_prefix_tokens,
                 completion_token_length=completion_token_length,
             )
@@ -67,6 +62,9 @@ def extract_rollouts(
                 payload.completions_token_length,
             )
         ]
+        assert all(
+            rollout.prompt_idx >= 0 for rollout in rollouts
+        ), "All rollouts should have a valid prompt index"
         if payload.valid:
             valid_rollouts_list.append(rollouts)
         else:

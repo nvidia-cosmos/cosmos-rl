@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
+import time
 import threading
-from queue import Queue
+import torch
 import atexit
 import types
+
+from queue import Queue
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Optional, Callable, Union
 from functools import partial
@@ -29,6 +31,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import (
     COSMOS_ROLLOUT_STEP_INTERVAL,
     COSMOS_ROLLOUT_REPORT_INTERVAL,
+    COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK,
 )
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
@@ -52,6 +55,7 @@ from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
     WeightSyncInstructionsGroup,
 )
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -61,11 +65,11 @@ from cosmos_rl.dispatcher.data.schema import (
     ConversationType,
 )
 from cosmos_rl.rollout.schema import RolloutResult
-from torch.utils.data import Dataset
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
+from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
+
 from vllm import SamplingParams
-import time
-from cosmos_rl.utils.constant import COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+from torch.utils.data import Dataset
 
 
 """
@@ -122,7 +126,9 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     vLLMRolloutWorker should support scaling launch.
     """
 
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
+    def __init__(
+        self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs
+    ) -> None:
         super(vLLMRolloutWorker, self).__init__(config, parallel_dims)
 
         self.state = State()
@@ -181,6 +187,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             )
             model_type = constant.COSMOS_HF_MODEL_TYPES
         self.weight_mapper = WeightMapper.get_weight_mapper(model_type)(hf_config)
+
         self.model_config = hf_config
 
         atexit.register(self.handle_shutdown)
@@ -229,18 +236,48 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         self.reward_dispatcher = RewardDispatcher(
             payload_per_task=COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
         )
+        self.data_fetcher = None
+
+        self.setup(
+            dataset=kwargs.get("dataset"),
+            data_packer=kwargs.get("data_packer"),
+            reward_fns=kwargs.get("reward_fns"),
+            filter_reward_fns=kwargs.get("filter_reward_fns"),
+            val_dataset=kwargs.get("val_dataset"),
+            val_data_packer=kwargs.get("val_data_packer"),
+            val_reward_fns=kwargs.get("val_reward_fns"),
+        )
 
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        data_packer: Optional[DataPacker] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
+        val_data_packer: Optional[DataPacker] = None,
         val_reward_fns: Optional[List[Callable]] = None,
         num_workers: int = 8,
     ):
+        # setup data packer first
+        self.init_data_packer(
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+        )
+        # Set up data fetcher
+        self.data_fetcher = WorkerDataFetcher(
+            config=self.config,
+            dataset=dataset,
+            val_dataset=val_dataset,
+            data_packer=self.data_packer,
+            val_data_packer=self.val_data_packer,
+            tokenizer=self.tokenizer,
+            is_rl=True,
+        )
+
         self.reward_dispatcher.setup(
             config=self.config,
+            data_fetcher=self.data_fetcher,
             dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
@@ -823,6 +860,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     validation_queue.get()
                 )
                 payloads = [p for _, p in prompt_id_and_payload_list]
+
                 rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
                     payloads=payloads,
                     stream=self.inference_stream,
@@ -1209,6 +1247,31 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             if prompt_queue.empty():
                 # blocking request
                 payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
+                is_validation = kwargs.get("validation_step", None) is not None
+
+                if len(payloads) > 0:
+                    if self.config.train.local_dataset:
+                        for payload in payloads:
+                            payload[1]["prompt"] = (
+                                self.data_fetcher.get_payload_by_index(
+                                    payload[0],
+                                    is_validation=is_validation,
+                                )
+                            )
+                            payload[1]["conversation"] = (
+                                self.data_fetcher.get_payload_by_index(
+                                    payload[0],
+                                    is_validation=is_validation,
+                                    attr="conversation",
+                                )
+                            )
+                    payloads = [
+                        (payload[0], RLPayload.model_validate(payload[1]))
+                        for payload in payloads
+                    ]
+                    assert all(
+                        payload[1].prompt_idx >= 0 for payload in payloads
+                    ), "All payloads should have a valid prompt index"
                 prompts_and_is_end = (
                     payloads if len(payloads) > 0 else None,
                     is_end,
@@ -1218,9 +1281,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
         prompts, is_end = prompts_and_is_end
         if prompts is not None:
-            prompts = [
-                (prompt[0], RLPayload.model_validate(prompt[1])) for prompt in prompts
-            ]
             prompt_queue.put(prompts)
         return is_end
 
@@ -1323,6 +1383,10 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     ].completed_conversations = self.data_packer.get_rollout_output(
                         payloads[i].completed_conversations
                     )
+                    # when using local dataset, we don't need to send the prompt/conversation to the controller
+                    if self.config.train.local_dataset:
+                        payloads[i].prompt = None
+                        payloads[i].conversation = None
 
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,

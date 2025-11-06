@@ -608,6 +608,11 @@ class TrainingConfig(BaseModel):
         description="Random seed for training. If deterministic is set to True, will by default be set to 42.",
     )
 
+    local_dataset: Optional[bool] = Field(
+        default=True,
+        description="Whether to use local dataset to query sample. If set to True, will use the local dataset.",
+    )
+
     # --------- smoke-test helpers ---------
 
     max_num_steps: Optional[int] = Field(
@@ -947,11 +952,6 @@ class RolloutConfig(BaseModel):
     multi_turn_config: MultiTurnRolloutConfig = Field(
         default_factory=MultiTurnRolloutConfig,
         description="Configuration for multi-turn rollout.",
-    )
-
-    reference_answer_in_local: bool = Field(
-        default=False,
-        description="Whether to store the dataset in local rollout worker for fetching reference answer.",
     )
 
     @model_validator(mode="after")

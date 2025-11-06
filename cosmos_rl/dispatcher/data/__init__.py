@@ -39,8 +39,9 @@ class RLDataset(Dataset):
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
         prompt = self.dataset[idx]
         if isinstance(prompt, RLPayload):
+            prompt.prompt_idx = idx
             return idx, prompt
-        return idx, RLPayload(prompt=prompt)
+        return idx, RLPayload(prompt=prompt, prompt_idx=idx)
 
     def get_reference_answer(self, idx: int) -> Any:
         assert hasattr(
@@ -65,7 +66,7 @@ class RLInternalDataset(Dataset):
 
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
         prompt: str = self.dataset[idx][self.prompt_column]
-        return idx, RLPayload(prompt=prompt)
+        return idx, RLPayload(prompt=prompt, prompt_idx=idx)
 
     def get_reference_answer(self, idx: int) -> Any:
         ref = self.dataset[idx][self.response_column]

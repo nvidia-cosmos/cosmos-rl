@@ -16,6 +16,7 @@
 import os
 import torch
 import time
+from typing import Any
 from multiprocessing import shared_memory, Event as mp_Event
 import numpy as np
 import torch.distributed as dist
@@ -71,6 +72,7 @@ from cosmos_rl.dispatcher.data.packer import (
     DecoderOnlyLLMDataPacker,
 )
 import cosmos_rl.utils.distributed as dist_utils
+from cosmos_rl.policy.config import GrpoConfig
 import uuid
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
@@ -112,6 +114,9 @@ class TestDataset(Dataset):
         dataset_list = []
         for split_name in config.train.train_policy.dataset.split:
             dataset_list.append(dataset[split_name])
+        self.response_column = None
+        if isinstance(config.train.train_policy, GrpoConfig):
+            self.response_column = config.train.train_policy.response_column_name
         self.dataset = concatenate_datasets(dataset_list)
 
     def __getitem__(self, idx):
@@ -119,6 +124,33 @@ class TestDataset(Dataset):
 
     def __len__(self):
         return len(self.dataset)
+
+    def get_reference_answer(self, idx: int) -> Any:
+        if self.response_column is None:
+            raise ValueError(
+                "You are under SFT config, but trying to get reference answer for GRPO."
+            )
+        return self.dataset[idx][self.response_column]
+
+
+def load_simple_grpo_config():
+    config_name = "test_simple_grpo.toml"
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(cur_dir, "configs", config_name)
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+        config_dict["train"]["train_policy"]["dataset"]["name"] = os.path.join(
+            cur_dir, config_dict["train"]["train_policy"]["dataset"]["name"]
+        )
+        return config_dict
+
+
+def load_simple_sft_config():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(cur_dir, "configs", "test_simple_sft.toml")
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+        return config_dict
 
 
 class TestModel:
@@ -248,6 +280,10 @@ class TestPolicy:
         self.train_stream = torch.cuda.Stream()
         self.config = CosmosConfig()
         self.config.train.param_dtype = "float32"
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config.train.train_policy.dataset.name = os.path.join(
+            cur_dir, "data_fixtures", "test_dataset"
+        )
 
         self.prepare_trainable_params()
 
@@ -298,6 +334,11 @@ class TestRollout:
         self.quantization_type = None
         self.config = CosmosConfig()
         self.config.train.param_dtype = "float32"  # keep the same as policy above.
+
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config.train.train_policy.dataset.name = os.path.join(
+            cur_dir, "data_fixtures", "test_dataset"
+        )
 
         self.vllm_weight_inplace_view_map = compatibale_map
         self.recv_param_key_n_rank_list = compatibale_list
@@ -408,10 +449,7 @@ async def generate_send_recv_insts(model: TestModel, is_send: bool, global_rank:
         )
         for r_rank in range(r_world_size)
     ]
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(cur_dir, "configs", "test_simple_grpo.toml")
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_grpo_config()
     cosmos_config = CosmosConfig.from_dict(config_dict)
     cosmos_config.policy.parallelism = policy_parallelism_config
     cosmos_config.rollout.parallelism = rollout_parallelism_config
@@ -592,11 +630,7 @@ def policy_to_policy_sync_common(
         comm_idx = create_nccl_comm(nccl_uid, nccl_rank, nccl_size)
 
         # Construct the model and trainer
-        cur_dir = os.path.dirname(os.path.abspath(__file__))
-        config_path = os.path.join(cur_dir, "configs", "test_simple_grpo.toml")
-
-        with open(config_path, "r") as f:
-            config_dict = toml.load(f)
+        config_dict = load_simple_grpo_config()
 
         cosmos_config = CosmosConfig.from_dict(
             config_dict,
@@ -649,6 +683,8 @@ def policy_to_policy_sync_common(
         CommMixin.replica_name = policy_name
         CommMixin.shutdown_signal = threading.Event()
         GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = dummy
+        # Fake the dataset
+
         policy = GRPOTrainer(cosmos_config, parallel_dims)
         policy.model_load_from_hf()
         policy.replica_name = policy_name
@@ -975,13 +1011,7 @@ def run_dummy_rollout():
 
 def run_policy_parallelism_extract(rank, fsdp, tp, pp):
     cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_grpo.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1025,24 +1055,17 @@ def run_policy_parallelism_extract(rank, fsdp, tp, pp):
     local_shard_infos = mapper.prepare_local_shard_infos(hf_key_n_rank, rank)
     all_rank_local_shard_infos = dist_util.all_gather_object_cpu(local_shard_infos)
     if rank == 0:
-        name = config_path = os.path.join(
+        config_path = os.path.join(
             cur_dir, "data", f"test_policy_extract_pp_{pp}_fsdp_{fsdp}_tp_{tp}.npy"
         )
-        gt = np.load(name, allow_pickle=True)
+        gt = np.load(config_path, allow_pickle=True)
         np.testing.assert_array_equal(
             np.array(all_rank_local_shard_infos, dtype=object), gt
         )
 
 
 def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_grpo.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1088,10 +1111,11 @@ def run_rollout_parallelism_extract(rank, fsdp, tp, pp):
     )
     all_rank_local_shard_infos = dist_util.all_gather_object_cpu(local_shard_infos)
     if rank == 0:
-        name = config_path = os.path.join(
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(
             cur_dir, "data", f"test_rollout_extract_pp_{pp}_fsdp_{fsdp}_tp_{tp}.npy"
         )
-        gt = np.load(name, allow_pickle=True)
+        gt = np.load(config_path, allow_pickle=True)
         np.testing.assert_array_equal(
             np.array(all_rank_local_shard_infos, dtype=object), gt
         )
@@ -1221,10 +1245,7 @@ async def parallel_map_check():
     }
     r_data = msgpack.packb(r_body)
 
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(cur_dir, "configs", "test_simple_grpo.toml")
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_grpo_config()
     cosmos_config = CosmosConfig.from_dict(config_dict)
     cosmos_config.policy.parallelism = policy_parallelism_config
     cosmos_config.rollout.parallelism = rollout_parallelism_config
@@ -1429,14 +1450,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                     return losses
         return losses
 
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_sft.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1484,14 +1498,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
 
 
 def run_sft_validation():
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_sft.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1547,20 +1554,9 @@ def run_sft_validation():
 
 
 def run_reward_check():
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_grpo.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
-    )
-
-    config.train.train_policy.dataset.name = os.path.join(
-        cur_dir, config.train.train_policy.dataset.name
     )
     logger.info(f"Using model from {config.policy.model_name_or_path}")
     # config.rollout.n_generation = 2
@@ -1665,14 +1661,7 @@ def run_reward_check():
 
 
 def run_sft_custom_sampler():
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_sft.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
@@ -1883,21 +1872,11 @@ def run_sft_custom_sampler():
 
 
 def run_gspo_test():
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_grpo.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
     config.train.train_policy.variant = "gspo"
-    config.train.train_policy.dataset.name = os.path.join(
-        cur_dir, config.train.train_policy.dataset.name
-    )
     config.logging.logger = ["console"]
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
@@ -1933,10 +1912,9 @@ def run_gspo_test():
     dataset.setup(config=config, tokenizer=None)
     length = []
     for i in range(total_steps * trainer.replica_batch_for_this_step):
-        prompt = dataset[i % len(dataset)][config.train.train_policy.prompt_column_name]
-        completion = dataset[i % len(dataset)][
-            config.train.train_policy.response_column_name
-        ]
+        index = i % len(dataset)
+        prompt = dataset[index][config.train.train_policy.prompt_column_name]
+        completion = dataset[index][config.train.train_policy.response_column_name]
         completion_ids = trainer.tokenizer(
             completion, add_special_tokens=False
         ).input_ids
@@ -1948,7 +1926,10 @@ def run_gspo_test():
         ):
             length.append(len(completion_ids))
         rollout = Rollout(
-            prompt=prompt, completion=completion, advantage=0.05 * (i % 20)
+            prompt=prompt,
+            completion=completion,
+            advantage=0.05 * (i % 20),
+            prompt_idx=index,
         )
         trainer.data_queue.put(rollout)
 
@@ -1980,19 +1961,9 @@ def run_gspo_test():
 
 
 def run_reference_reset_test():
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_grpo.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
-    )
-    config.train.train_policy.dataset.name = os.path.join(
-        cur_dir, config.train.train_policy.dataset.name
     )
     config.logging.logger = ["console"]
     config.train.train_policy.kl_beta = 100
@@ -2034,11 +2005,12 @@ def run_reference_reset_test():
     dataset = TestDataset(config)
     dataset.setup(config=config, tokenizer=None)
     for i in range(total_steps * trainer.replica_batch_for_this_step):
-        prompt = dataset[i % len(dataset)][config.train.train_policy.prompt_column_name]
-        completion = dataset[i % len(dataset)][
-            config.train.train_policy.response_column_name
-        ]
-        rollout = Rollout(prompt=prompt, completion=completion, advantage=1.0)
+        index = i % len(dataset)
+        prompt = dataset[index][config.train.train_policy.prompt_column_name]
+        completion = dataset[index][config.train.train_policy.response_column_name]
+        rollout = Rollout(
+            prompt=prompt, completion=completion, advantage=1.0, prompt_idx=index
+        )
         trainer.data_queue.put(rollout)
 
     for i in range(total_steps):
@@ -2065,19 +2037,9 @@ def run_reference_reset_test():
 def run_dynamic_batchsize_test(
     max_token_len_per_mini_batch: int = 2048, batch_size_per_optimize: int = 2
 ):
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_grpo.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_grpo_config()
     config = CosmosConfig.from_dict(
         config_dict,
-    )
-    config.train.train_policy.dataset.name = os.path.join(
-        cur_dir, config.train.train_policy.dataset.name
     )
     config.logging.logger = ["console"]
     config.train.train_policy.batch_size_per_optimize = 16
@@ -2114,11 +2076,14 @@ def run_dynamic_batchsize_test(
     dataset = TestDataset(config)
     dataset.setup(config=config, tokenizer=None)
     for i in range(total_steps * trainer.replica_batch_for_this_step):
-        prompt = dataset[i % len(dataset)][config.train.train_policy.prompt_column_name]
+        index = i % len(dataset)
+        prompt = dataset[index][config.train.train_policy.prompt_column_name]
         completion = dataset[i % len(dataset)][
             config.train.train_policy.response_column_name
         ]
-        rollout = Rollout(prompt=prompt, completion=completion, advantage=1.0)
+        rollout = Rollout(
+            prompt=prompt, completion=completion, advantage=1.0, prompt_idx=index
+        )
         trainer.data_queue.put(rollout)
 
     def hooked_execute_all_reduce(self):
@@ -2201,14 +2166,7 @@ def run_dynamic_batchsize_test(
 
 
 def run_sft_ddp_load_check():
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(
-        cur_dir,
-        "configs",
-        "test_simple_sft.toml",
-    )
-    with open(config_path, "r") as f:
-        config_dict = toml.load(f)
+    config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )

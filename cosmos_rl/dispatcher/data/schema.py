@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from typing import List, Any, Dict, Optional, Tuple, Union
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
@@ -53,6 +53,10 @@ class RLPayload(BaseModel):
 
     prompt: Optional[Union[ConversationType, str]] = Field(
         default=None, description="The input prompt for the rollout."
+    )
+
+    prompt_idx: int = Field(
+        default=-1, description="The index of the prompt for the rollout."
     )
 
     conversation: Optional[ConversationType] = Field(
@@ -105,11 +109,6 @@ class RLPayload(BaseModel):
         default=None, description="The token lengths of each completion."
     )
 
-    @model_validator(mode="after")
-    def check_params_value(self):
-        assert self.prompt or self.conversation, "Must set prompt or conversation"
-        return self
-
     @staticmethod
     def collate_fn(
         batch: List["IdxAndRLPayload"],
@@ -133,6 +132,10 @@ class Rollout(BaseModel):
         default=None, description="The input prompt for the rollout."
     )
 
+    prompt_idx: int = Field(
+        default=-1, description="The index of the prompt for the rollout."
+    )
+
     conversation: Optional[ConversationType] = Field(
         default=None, description="The input conversation for the rollout."
     )
@@ -152,10 +155,6 @@ class Rollout(BaseModel):
     reward: float = Field(default=0.0, description="The reward for the rollout.")
 
     advantage: float = Field(default=0.0, description="The advantage for the rollout.")
-
-    prompt_idx: int = Field(
-        default=0, description="The index of the prompt for the rollout."
-    )
 
     n_ignore_prefix_tokens: int = 0
 
