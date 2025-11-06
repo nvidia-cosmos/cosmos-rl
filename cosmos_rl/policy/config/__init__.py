@@ -411,14 +411,16 @@ class GrpoConfig(BaseModel):
         description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
-    behav_imp_weight_cap: Optional[float] = Field(
-        default=None,
-        description="Clipping cap for behavior importance weights. Useful when decoupled loss is used to avoid large variance.",
-    )
-
+    # Refer to the decoupled objective concept from the AREAL paper: https://arxiv.org/abs/2505.24298.
     use_decoupled_loss: bool = Field(
         default=False,
         description="Whether to use decoupled loss. A decoupled loss separates the optimization of the behavior policy and the target policy, which can help to reduce the variance of the gradient estimate.",
+    )
+
+    # Related to the above decoupled loss to cap the behavior importance weights.
+    behav_imp_weight_cap: Optional[float] = Field(
+        default=None,
+        description="Clipping cap for behavior importance weights. Useful when decoupled loss is used to avoid large variance.",
     )
 
     rollout_as_token_ids: bool = Field(

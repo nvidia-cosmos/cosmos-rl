@@ -141,9 +141,13 @@ class TestCustomRolloutOutput(unittest.TestCase):
             )
         if payloads is not None:
             for i in range(len(payloads)):
-                (payloads[i].completions,)
-                (payloads[i].completed_conversations,)
-                _, _, _, _, _ = data_packer.get_rollout_output(
+                (
+                    payloads[i].completions,
+                    payloads[i].completed_conversations,
+                    _,
+                    _,
+                    _,
+                ) = data_packer.get_rollout_output(
                     payloads[i].completions,
                     payloads[i].completed_conversations,
                 )
