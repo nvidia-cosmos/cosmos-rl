@@ -56,13 +56,13 @@ class ModuleLike:
             else:
                 self._parameters[name] = value
 
-    def __getitem__(self, idx: int) -> "ModuleLike":
+    def __getitem__(self, idx: int | str) -> "ModuleLike":
         """
         Simulate the behavior like ModuleList. Return the sub-module.
         """
         assert isinstance(
-            idx, int
-        ), "For ModuleList, the index must be an integer, but got {type(idx)}"
+            idx, (int, str)
+        ), "For ModuleList, ModuleDict, the index must be an integer or string, but got {type(idx)}"
         idx_str = str(idx)
         if idx_str not in self._modules:
             raise IndexError(f"ModuleList index {idx} is out of range")
