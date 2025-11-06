@@ -75,6 +75,12 @@ class RolloutGroup:
         else:
             completed_conversations = [[]] * len(self.payload.completions)
 
+        if self.payload.completion_logprobs is None:
+            self.payload.completion_logprobs = [[]] * len(self.payload.completions)
+
+        if self.payload.completion_token_ids is None:
+            self.payload.completion_token_ids = [[]] * len(self.payload.completions)
+
         return [
             Rollout(
                 prompt=self.payload.prompt,
@@ -86,9 +92,16 @@ class RolloutGroup:
                 advantage=advantage,
                 prompt_idx=self.payload.prompt_idx,
                 filter_reward=reward[1],
+                completion_logprobs=logprobs,
+                completion_token_ids=token_ids,
             )
-            for completion, completed_conversation, reward, advantage in zip(
-                self.payload.completions, completed_conversations, rewards, advantages
+            for completion, completed_conversation, reward, advantage, logprobs, token_ids in zip(
+                self.payload.completions,
+                completed_conversations,
+                rewards,
+                advantages,
+                self.payload.completion_logprobs,
+                self.payload.completion_token_ids,
             )
         ]
 
@@ -326,7 +339,11 @@ class RewardCalculator:
         # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
         for rollouts_group in rollouts_list:
             rollout_tokens = [
-                self.tokenizer(rollout.completion, add_special_tokens=False).input_ids
+                rollout.completion_token_ids
+                if self.config.train.train_policy.rollout_as_token_ids
+                else self.tokenizer(
+                    rollout.completion, add_special_tokens=False
+                ).input_ids
                 for rollout in rollouts_group
             ]
             # Only filter_reward is considered for dynamic sampling
@@ -350,6 +367,8 @@ class RewardCalculator:
                     rewards = [rollouts_group[i].reward for i in rollout_indices]
                     if len(set(rewards)) > 1:
                         n_ignore_prefix_tokens = len(shared_prefix)
+                        if shared_prefix[-1] == self.tokenizer.eos_token_id:
+                            shared_prefix = shared_prefix[:-1]
                         prefix_str = self.tokenizer.decode(shared_prefix)
                         for rollout_index in rollout_indices:
                             # Only do this if shared_prefix != rollout.completion
@@ -381,6 +400,18 @@ class RewardCalculator:
                         completions_token_length=[
                             len(rollout_tokens[i]) for i in range(len(rollouts_group))
                         ],
+                        completion_logprobs=[
+                            rollout.completion_logprobs
+                            if rollout.completion_logprobs is not None
+                            else []
+                            for rollout in rollouts_group
+                        ],
+                        completion_token_ids=[
+                            rollout.completion_token_ids
+                            if rollout.completion_token_ids is not None
+                            else []
+                            for rollout in rollouts_group
+                        ],
                     )
                 )
             else:
@@ -406,6 +437,18 @@ class RewardCalculator:
                         valid=False,
                         completions_token_length=[
                             len(rollout_tokens[i]) for i in range(len(rollouts_group))
+                        ],
+                        completion_logprobs=[
+                            rollout.completion_logprobs
+                            if rollout.completion_logprobs is not None
+                            else []
+                            for rollout in rollouts_group
+                        ],
+                        completion_token_ids=[
+                            rollout.completion_token_ids
+                            if rollout.completion_token_ids is not None
+                            else []
+                            for rollout in rollouts_group
                         ],
                     )
                 )

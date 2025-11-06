@@ -98,6 +98,9 @@ def compute_loss(
     logprob_masks: torch.Tensor,  # of shape `[batch_size, max_len]`
     dp_group: Optional[torch.distributed.ProcessGroup] = None,
     ddp_comm: HighAvailabilitylNccl = None,
+    rollout_per_token_logps: Optional[
+        List[List[float]]
+    ] = None,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
     current_advantages = torch.masked_select(current_advantages, logprob_masks)
@@ -114,11 +117,23 @@ def compute_loss(
         ), "ref_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
             ref_per_token_logps.shape, current_token_logps.shape
         )
+    if rollout_per_token_logps is not None:
+        rollout_per_token_logps = torch.tensor(
+            np.concatenate(rollout_per_token_logps, axis=0),
+            device=current_token_logps.device,
+            dtype=current_token_logps.dtype,
+        ).detach()
+        assert (
+            rollout_per_token_logps.shape == current_token_logps.shape
+        ), "rollout_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
+            rollout_per_token_logps.shape, current_token_logps.shape
+        )
 
     shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
     bsz = shifted_length.shape[0]
     negative_approx_kl = current_token_logps - old_per_token_logps
 
+    # Compute importance ratio
     if config.train.train_policy.variant == "gspo":
         # For GSPO, we compute sequence-level importance ratios
         # but we need to maintain gradient flow through the token-level logprobs
@@ -183,6 +198,18 @@ def compute_loss(
             per_token_loss = torch.where(
                 current_advantages < 0, clip_losses2, clip_losses1
             )
+
+    if rollout_per_token_logps is not None:
+        # Compute behavior KL divergence and importance weight
+        behav_kl = old_per_token_logps - rollout_per_token_logps
+        behav_imp_weight = torch.exp(behav_kl)
+        behav_mask = (
+            (behav_imp_weight <= config.train.train_policy.behav_imp_weight_cap)
+            if config.train.train_policy.behav_imp_weight_cap is not None
+            else torch.ones_like(behav_imp_weight, dtype=torch.bool)
+        )
+        behav_imp_weight = torch.where(behav_mask, behav_imp_weight, 0.0)
+        per_token_loss = per_token_loss * behav_imp_weight
 
     # Compute the KL divergence between the model and the reference model
     if config.train.train_policy.kl_beta != 0.0:
@@ -1155,7 +1182,12 @@ class GRPOTrainer(Trainer):
         else:
             samples = [rollout.prompt for rollout in rollouts]
 
-        completions_list = [rollout.completion for rollout in rollouts]
+        completions_list = [
+            rollout.completion_token_ids
+            if self.config.train.train_policy.rollout_as_token_ids
+            else rollout.completion
+            for rollout in rollouts
+        ]
         advantages_list = [rollout.advantage for rollout in rollouts]
         # Optional Positive-NLL support: only compute flags when coefficient > 0
         pos_coef_global = self.config.train.train_policy.positive_nll_coef
@@ -1361,6 +1393,26 @@ class GRPOTrainer(Trainer):
                                         computed_max_len=computed_max_len,
                                     )
                                 )
+                                if self.config.train.train_policy.use_decoupled_loss:
+                                    rollout_logbprobs = []
+                                    assert len(mini_batch_indices) == len(
+                                        user_mini_batch["logprob_masks"]
+                                    )
+                                    for i in mini_batch_indices:
+                                        assert (
+                                            len(rollouts[i].completion_logprobs)
+                                            == len(completions_list[i])
+                                        ), f"Unexpected completion_logprobs length {len(rollouts[i].completion_logprobs)} vs completion length {len(completions_list[i])}"
+                                        # Skip the last token logprob which is for <eos> if needed
+                                        # Skip the n_ignore_prefix_tokens as they are not included in the loss calculation
+                                        rollout_logbprobs.append(
+                                            rollouts[i].completion_logprobs[
+                                                n_ignore_prefix_tokens_list[i] :
+                                            ]
+                                        )
+                                    user_mini_batch["rollout_logprobs"] = (
+                                        rollout_logbprobs
+                                    )
                                 packing_seq = self.config.train.sequence_packing
                                 if packing_seq:
                                     if self.parallel_dims.pp_enabled:
@@ -1684,6 +1736,9 @@ class GRPOTrainer(Trainer):
                                             if self.parallel_dims.dp_enabled
                                             else None,
                                             ddp_comm=self.inter_policy_nccl,
+                                            rollout_per_token_logps=user_mini_batch.get(
+                                                "rollout_logprobs", None
+                                            ),
                                         )
                                         if (
                                             self.config.train.train_policy.entropy_coeff
@@ -2017,6 +2072,7 @@ def _swizzle_pp_grpo_forward(
         if trainer.parallel_dims.dp_enabled
         else None,
         ddp_comm=trainer.inter_policy_nccl,
+        rollout_per_token_logps=user_input.get("rollout_logprobs", None),
     )
     if config.train.train_policy.entropy_coeff > 0.0:
         loss += (

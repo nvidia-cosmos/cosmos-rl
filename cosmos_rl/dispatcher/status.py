@@ -113,6 +113,7 @@ class PolicyStatusManager:
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
         self.consumed_samples_num = 0
+        self.samples_on_the_fly = 0
 
         self.status = {}
 
@@ -674,7 +675,12 @@ class PolicyStatusManager:
             rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
 
         for rollout in rollouts_to_put:
-            completion_tokens_count += len(self.tokenizer.encode(rollout.completion))
+            if self.config.train.train_policy.rollout_as_token_ids:
+                completion_tokens_count += len(rollout.completion_token_ids)
+            else:
+                completion_tokens_count += len(
+                    self.tokenizer.encode(rollout.completion)
+                )
             n_samples += 1
             self.put_rollout(rollout)
             if self.config.train.train_policy.on_policy:
@@ -703,6 +709,12 @@ class PolicyStatusManager:
             self.report_data_list = []
         self.report_data_list.append(report_data)
         if self.all_reduced():
+            self.samples_on_the_fly -= self.config.train.train_batch_per_replica * len(
+                self.get_all_atoms_arrived_replicas()
+            )
+            assert (
+                self.samples_on_the_fly >= 0
+            ), "samples_on_the_fly should not be negative"
             # All replicas have been reduced, trigger allreduce
             need_sync_weight = step % self.config.train.sync_weight_interval == 0
             # If the current step is the last step, we need to sync weight always to act as ending signal
@@ -992,13 +1004,14 @@ class PolicyStatusManager:
                 filter_rewards = []
                 for rollout in rollouts_of_this_step:
                     rewards.append(rollout.reward)
-                    advantages.extend(
-                        [rollout.advantage] * rollout.completion_token_length
+                    completion_length = (
+                        len(rollout.completion_token_ids)
+                        if self.config.train.train_policy.rollout_as_token_ids
+                        else len(self.tokenizer.encode(rollout.completion))
                     )
+                    advantages.extend([rollout.advantage] * completion_length)
                     filter_rewards.append(rollout.filter_reward)
-                    completion_lengths.append(
-                        len(self.tokenizer.encode(rollout.completion))
-                    )
+                    completion_lengths.append(completion_length)
                 report_data = {
                     "train/reward_mean": np.mean(rewards),
                     "train/reward_std": np.std(rewards),

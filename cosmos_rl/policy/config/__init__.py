@@ -371,7 +371,7 @@ class GrpoConfig(BaseModel):
     allowed_outdated_steps: int = Field(
         default=4,
         description="Allowed outdated-async steps for rollout engine. "
-        "If the number of left pending rollouts is larger than the `allowed_outdated_steps * n_policy_replicas * train_batch_per_replica`, "
+        "If the number of left uncompleted rollout samples is larger than the `(allowed_outdated_steps + 1) * n_policy_replicas * train_batch_per_replica`, "
         "then rollout engine traffic will be throttled. ",
     )
 
@@ -380,9 +380,9 @@ class GrpoConfig(BaseModel):
         description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
     )
 
-    no_outdated_rollout: bool = Field(
-        default=False,
-        description="Disable outdated rollout. If set to True, the rollout engine will stop generating rollouts if the weight outdated.",
+    outdated_rollout_fetch_batch_size: int = Field(
+        default=1,
+        description="Number of outdated rollouts to fetch. If set to 0, the rollout engine will stop generating rollouts if the weight is outdated.",
     )
 
     min_filter_prefix_tokens: Optional[int] = Field(
@@ -411,6 +411,21 @@ class GrpoConfig(BaseModel):
         description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
+    behav_imp_weight_cap: Optional[float] = Field(
+        default=None,
+        description="Clipping cap for behavior importance weights. Useful when decoupled loss is used to avoid large variance.",
+    )
+
+    use_decoupled_loss: bool = Field(
+        default=False,
+        description="Whether to use decoupled loss. A decoupled loss separates the optimization of the behavior policy and the target policy, which can help to reduce the variance of the gradient estimate.",
+    )
+
+    rollout_as_token_ids: bool = Field(
+        default=False,
+        description="Whether to use token ids for rollouts instead of text. This can save tokenization time during rollout generation.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
@@ -435,6 +450,12 @@ class GrpoConfig(BaseModel):
                 "dataloader_batch_size is not positive so disable it as None."
             )
             self.dataloader_batch_size = None
+        if self.use_decoupled_loss:
+            self.rollout_as_token_ids = True
+            logger.warning(
+                "Decoupled loss is enabled, so rollout_as_token_ids is set to True."
+            )
+
         return self
 
 

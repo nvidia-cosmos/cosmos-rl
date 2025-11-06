@@ -105,8 +105,12 @@ class RLPayload(BaseModel):
         default=None, description="The filter reward for each completion."
     )
 
-    completions_token_length: Optional[List[int]] = Field(
-        default=None, description="The token lengths of each completion."
+    completion_token_ids: Optional[List[List[int]]] = Field(
+        default=None, description="The token ids of each completion."
+    )
+
+    completion_logprobs: Optional[List[List[float]]] = Field(
+        default=None, description="The logprobs of each completion."
     )
 
     @staticmethod
@@ -162,6 +166,10 @@ class Rollout(BaseModel):
         default=0.0, description="The filter reward for the rollout."
     )
 
-    completion_token_length: int = Field(
-        default=0, description="The token length of the completion."
+    completion_token_ids: Optional[List[int]] = Field(
+        default=None, description="The token ids of each completion."
+    )
+
+    completion_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of each completion."
     )

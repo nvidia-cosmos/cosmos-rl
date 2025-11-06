@@ -93,7 +93,14 @@ class TestCustomRolloutOutput(unittest.TestCase):
                 rollout_output = self.kv_store.pop(id, None)
                 return rollout_output
 
-            def get_rollout_output(self, items):
+            def get_rollout_output(
+                self,
+                items,
+                completed_conversations=None,
+                logprobs=None,
+                token_ids=None,
+                **kwargs,
+            ):
                 uuids = []
                 if not items:
                     return items
@@ -103,7 +110,7 @@ class TestCustomRolloutOutput(unittest.TestCase):
                     id = uuid.uuid4()
                     self.kv_store[str(id)] = item
                     uuids.append(str(id))
-                return uuids
+                return uuids, completed_conversations, logprobs, token_ids, kwargs
 
         data_packer = TestDataPacker()
 
@@ -134,11 +141,11 @@ class TestCustomRolloutOutput(unittest.TestCase):
             )
         if payloads is not None:
             for i in range(len(payloads)):
-                payloads[i].completions = data_packer.get_rollout_output(
-                    payloads[i].completions
-                )
-                payloads[i].completed_conversations = data_packer.get_rollout_output(
-                    payloads[i].completed_conversations
+                (payloads[i].completions,)
+                (payloads[i].completed_conversations,)
+                _, _, _, _, _ = data_packer.get_rollout_output(
+                    payloads[i].completions,
+                    payloads[i].completed_conversations,
                 )
 
         valid_rollouts_list, invalid_rollouts_list = extract_rollouts(payloads, False)

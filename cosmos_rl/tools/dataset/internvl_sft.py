@@ -19,7 +19,7 @@ import torch
 import argparse
 from PIL import Image
 from datasets import load_dataset
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, Union
 from torch.utils.data import Dataset, ConcatDataset
 from cosmos_rl.utils.util import retry
 from cosmos_rl.launcher.worker_entry import main as launch_worker
@@ -357,7 +357,7 @@ class InternVL_DataPacker(DataPacker):
     def get_policy_input(
         self,
         sample: "InternVL_DataPacker.Payload",
-        rollout_output: Optional[str] = None,
+        rollout_output: Optional[Union[str, List[int]]] = None,
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
@@ -380,7 +380,13 @@ class InternVL_DataPacker(DataPacker):
         input_ids = x["input_ids"]
         completion_ids = []
         if rollout_output:
-            completion_ids = self.tokenizer(rollout_output).input_ids
+            rollout_as_token_ids = isinstance(rollout_output, list) and all(
+                isinstance(i, int) for i in rollout_output
+            )
+            if rollout_as_token_ids:
+                completion_ids = rollout_output
+            else:
+                completion_ids = self.tokenizer(rollout_output).input_ids
             return_dict["input_ids"] = input_ids + completion_ids
         else:
             return_dict["input_ids"] = input_ids
