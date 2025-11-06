@@ -1765,7 +1765,7 @@
 </tr>
 <tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/SubProfilerConfig</span></p></td>
 </tr>
-<tr class="row-even"><td rowspan="60"><ul class="simple">
+<tr class="row-even"><td rowspan="56"><ul class="simple">
 <li><p>RolloutConfig</p></li>
 </ul>
 </td>
@@ -1967,20 +1967,6 @@
 <td colspan="4"><p>Configuration for multi-turn rollout.</p></td>
 </tr>
 <tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/MultiTurnRolloutConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>reference_answer_in_local</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Reference Answer In Local</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to store the dataset in local rollout worker for fetching reference answer.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
 </tr>
 <tr class="row-even"><td rowspan="39"><ul class="simple">
 <li><p>RolloutParallelismConfig</p></li>
@@ -2485,7 +2471,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="189"><ul class="simple">
+<tr class="row-even"><td rowspan="194"><ul class="simple">
 <li><p>TrainingConfig</p></li>
 </ul>
 </td>
@@ -3108,144 +3094,208 @@
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
 <tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>local_dataset</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Local Dataset</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Whether to use local dataset to query sample. If set to True, will use the local dataset.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>True</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
 <li><p>max_num_steps</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Max Num Steps</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.</p></td>
+<tr class="row-even"><td colspan="4"><p>Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.</p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="2"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>sequence_packing</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Sequence Packing</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="53"><ul class="simple">
+<tr class="row-even"><td rowspan="53"><ul class="simple">
 <li><p>ValidationConfig</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>ValidationConfig</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>properties</p></td>
+<tr class="row-even"><td colspan="5"><p>properties</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>enable</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Enable</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Enable validation during training.</p></td>
+<tr class="row-even"><td colspan="4"><p>Enable validation during training.</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>freq</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Freq</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Validation frequency during training, in terms of training steps</p></td>
+<tr class="row-even"><td colspan="4"><p>Validation frequency during training, in terms of training steps</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>20</p></td>
 </tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
 <li><p>batch_size</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Batch Size</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Batch size for validation, will use the same batch size as training if not set.</p></td>
+<tr class="row-even"><td colspan="4"><p>Batch size for validation, will use the same batch size as training if not set.</p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="2"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="2"><ul class="simple">
+<tr class="row-even"><td rowspan="2"><ul class="simple">
 <li><p>dataset</p></li>
 </ul>
 </td>
 <td colspan="4"><p>Dataset configuration for validation. It includes dataset name, subset, revision and test split.</p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p><span class="xref std std-ref">#/$defs/DatasetConfig</span></p></td>
+<tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/DatasetConfig</span></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>temperature</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Temperature</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Temperature for sampling during validation.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Temperature for sampling during validation.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>number</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>0.0</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<tr class="row-even"><td rowspan="5"><ul class="simple">
 <li><p>top_p</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Top P</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Top-p for sampling during validation.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Top-p for sampling during validation.</p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="2"><p><em>number</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
 <li><p>top_k</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Top K</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Top-k for sampling during validation.</p></td>
+<tr class="row-even"><td colspan="4"><p>Top-k for sampling during validation.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>repetition_penalty</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Repetition Penalty</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Repetition penalty for sampling during validation.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>1.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>n_generation</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>N Generation</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>n parameter same like what in OpenAI chat API for validation.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>max_response_length</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Max Response Length</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Max output length of rollout generation during validation.</p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
+<td colspan="3"><p>None</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
@@ -3254,78 +3304,32 @@
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>repetition_penalty</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Repetition Penalty</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Repetition penalty for sampling during validation.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>n_generation</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>N Generation</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>n parameter same like what in OpenAI chat API for validation.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>max_response_length</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Max Response Length</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Max output length of rollout generation during validation.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="8"><ul class="simple">
+<tr class="row-odd"><td rowspan="8"><ul class="simple">
 <li><p>reward_function</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Reward Function</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Reward functions for the model. Currently support <cite>single_choice</cite>, <cite>boxed_math</cite>, and <cite>format</cite>. You can add weight to each reward function by passing a dict, e.g., {‘single_choice’: 0.9, ‘format’: 0.1}</p></td>
+<tr class="row-even"><td colspan="4"><p>Reward functions for the model. Currently support <cite>single_choice</cite>, <cite>boxed_math</cite>, and <cite>format</cite>. You can add weight to each reward function by passing a dict, e.g., {‘single_choice’: 0.9, ‘format’: 0.1}</p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><p>anyOf</p></td>
+<tr class="row-even"><td rowspan="5"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="2"><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="2"><p><em>array</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>items</p></td>
+<tr class="row-even"><td><p>items</p></td>
 <td><p>type</p></td>
 <td><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="2"><p><em>object</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>additionalProperties</p></td>
+<tr class="row-even"><td><p>additionalProperties</p></td>
 <td><p>type</p></td>
 <td><p><em>number</em></p></td>
 </tr>
