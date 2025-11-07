@@ -462,6 +462,9 @@ class PolicyStatusManager:
     ):
         sorted_valid_replicas = sorted(valid_replicas, key=lambda x: x.start_time)
 
+        if config.validation.enable and config.validation.val_before_train:
+            self.validation_activate_dataloader(validation_step=1)
+
         if (
             not self.policy_init_done
             and len(valid_replicas) >= config.policy.parallelism.n_init_replicas
@@ -576,12 +579,13 @@ class PolicyStatusManager:
             len(x) for x in self.val_report_data[validation_step]
         )
 
-        validation_finished = n_items_of_this_step == (
-            self.val_datasize or len(self.val_dataloader)
-        )
+        expected_items = self.val_datasize or len(self.val_dataloader)
+        validation_finished = n_items_of_this_step >= expected_items
 
         if self.activated_val_tqdm:
-            self.activated_val_tqdm.update(n_items_of_this_step)
+            # Set absolute position (not increment) since n_items_of_this_step is cumulative
+            self.activated_val_tqdm.n = n_items_of_this_step
+            self.activated_val_tqdm.refresh()
         else:
             logger.error("[Controller] Validation tqdm is not activated")
 
@@ -613,9 +617,22 @@ class PolicyStatusManager:
                         "val/rollout_count": len(rewards),
                         "val/step": validation_step,
                     }
-                    logger.info(
-                        f"[Controller] Validation finished, average reward: {avg_reward}, total rollouts: {len(rewards)}, max reward: {max_reward}, min reward: {min_reward}, std reward: {std_reward} at step {validation_step}"
-                    )
+                    
+                    # For VLA tasks with binary rewards (0.0/1.0), report success rate
+                    # Success rate = average reward * 100 (when reward is 0 or 1)
+                    if all(r in [0.0, 1.0] for r in rewards):
+                        success_rate = avg_reward * 100.0
+                        report_data["val/success_rate"] = success_rate
+                        logger.info(
+                            f"[Controller] Validation finished at step {validation_step}:\n"
+                            f"  Success Rate: {success_rate:.1f}% ({int(sum(rewards))}/{len(rewards)})\n"
+                            f"  Avg Reward: {avg_reward:.3f}, Std: {std_reward:.3f}, Max: {max_reward}, Min: {min_reward}\n"
+                            f"  Total Rollouts: {len(rewards)}"
+                        )
+                    else:
+                        logger.info(
+                            f"[Controller] Validation finished, average reward: {avg_reward}, total rollouts: {len(rewards)}, max reward: {max_reward}, min reward: {min_reward}, std reward: {std_reward} at step {validation_step}"
+                        )
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
                             data=report_data,
@@ -990,6 +1007,15 @@ class PolicyStatusManager:
                     "train/completion_length_max": np.max(completion_lengths),
                     "train/completion_length_min": np.min(completion_lengths),
                 }
+                
+                # For VLA tasks with binary rewards (0.0/1.0), report success rate
+                if all(r in [0.0, 1.0] for r in rewards):
+                    success_rate = np.mean(rewards) * 100.0
+                    report_data["train/success_rate"] = success_rate
+                    logger.info(
+                        f"[Controller] Training step {self.current_step}: Success Rate = {success_rate:.1f}% ({int(sum(rewards))}/{len(rewards)})"
+                    )
+                
                 self.train_report_data[self.current_step] = report_data
 
 

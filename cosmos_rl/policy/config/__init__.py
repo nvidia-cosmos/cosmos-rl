@@ -829,6 +829,10 @@ class ValidationConfig(BaseModel):
         default=False,
         description="Enable validation during training.",
     )
+    val_before_train: bool = Field(
+        default=False,
+        description="Enable validation before training starts (at step 0, after weight initialization).",
+    )
     freq: int = Field(
         default=20,
         description="Validation frequency during training, in terms of training steps",

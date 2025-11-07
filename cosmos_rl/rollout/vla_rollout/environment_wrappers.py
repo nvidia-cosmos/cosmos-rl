@@ -95,8 +95,6 @@ class LiberoEnvWrapper(BaseEnvWrapper):
         self.model_family = task_config.get('model_family', 'openvla')
         self.resolution = task_config.get('resolution', 256)
         
-        logger.info(f"Initializing LIBERO environment: {self.benchmark_name}, task {self.task_id}")
-    
     def initialize(self) -> Dict[str, Any]:
         """Initialize LIBERO environment"""
         with self.lock:

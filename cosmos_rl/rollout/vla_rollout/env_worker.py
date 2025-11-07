@@ -104,7 +104,6 @@ def libero_env_worker(
     valid_images = []
     if save_video and 'agentview_image' in obs:
         valid_images.append(obs['agentview_image'].copy())
-        logger.info(f"[Worker {task_suite} task {task_id}] Collected initial frame: shape={obs['agentview_image'].shape}, mean={obs['agentview_image'].mean():.2f}")
     
     # Send initial observation to main process
     output_queue.put({

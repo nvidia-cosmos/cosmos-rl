@@ -160,6 +160,6 @@ def save_rollout_video(
         video_writer.append_data(img)
     video_writer.close()
     
-    logger.info(f"Saved rollout MP4 at path {mp4_path}")
+    logger.debug(f"✅ Saved {len(rollout_images)} frames to: {mp4_path}")
     return mp4_path
 

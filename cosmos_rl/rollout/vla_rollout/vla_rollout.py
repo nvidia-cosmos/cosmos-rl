@@ -386,23 +386,12 @@ class VLARollout(RolloutBase):
         Returns:
             List of environment wrappers, one per payload in the same order
         """
-        logger.info(f"\n{'=' * 80}")
-        logger.info(f"Initializing environments for batch")
-        logger.info(f"  Number of payloads: {len(payloads)}")
-        logger.info(f"{'=' * 80}\n")
         
         # Create environments as a list to maintain 1-1 correspondence with payloads
         environments = []
         
         for i, payload in enumerate(payloads):
             task_config = self._extract_task_config_from_payload(payload)
-            
-            logger.info(f"[Payload {i}] Task config:")
-            logger.info(f"  - Task suite: {task_config['task_suite_name']}")
-            logger.info(f"  - Task ID: {task_config['task_id']}")
-            logger.info(f"  - Trial ID: {task_config['trial_id']}")
-            logger.info(f"  - Trial seed: {task_config['trial_seed']}")
-            logger.info(f"  - Max steps: {task_config['max_steps']}")
             
             # Create environment wrapper based on task suite
             trial_id = task_config.get('trial_id', 0)
@@ -420,9 +409,6 @@ class VLARollout(RolloutBase):
             # Add to list - each payload gets its own environment instance
             environments.append(env_wrapper)
         
-        logger.info(f"\n{'=' * 80}")
-        logger.info(f"✅ Created {len(environments)} environment wrappers")
-        logger.info(f"{'=' * 80}\n")
         return environments
     
     def _extract_task_config_from_payload(self, payload: RLPayload) -> Dict[str, Any]:
@@ -498,7 +484,7 @@ class VLARollout(RolloutBase):
         
         # Extract video generation flags from kwargs (matching SimpleVLA-RL pattern)
         # is_valid is True for validation runs (when we want to save videos)
-        is_valid = kwargs.get('save_videos', False)  # Can be set to True to enable video saving
+        is_valid = True #kwargs.get('save_videos', False)  # Can be set to True to enable video saving
         global_steps = kwargs.get('global_steps', 0)
         
         # Create environment wrappers for batch
@@ -674,9 +660,9 @@ class VLARollout(RolloutBase):
                 # Collect initial video frames
                 if is_valid:
                     valid_video[init_data['task_file_name']].extend(init_data['valid_images'])
-                    logger.info(f"Task {idx} collected {len(init_data['valid_images'])} initial frames for video '{init_data['task_file_name']}'")
+                    # logger.info(f"Task {idx} collected {len(init_data['valid_images'])} initial frames for video '{init_data['task_file_name']}'")
                     
-                logger.info(f"Task {idx} initialized: {task_descriptions[idx][:60]}")
+                # logger.info(f"Task {idx} initialized: {task_descriptions[idx][:60]}")
             except Exception as e:
                 logger.error(f"Failed to initialize task {idx}: {e}")
                 raise
@@ -694,7 +680,7 @@ class VLARollout(RolloutBase):
                 logger.info(f"[Step {step}] All environments completed")
                 break
             
-            logger.info(f"[Step {step}] Active: {len(active_indices)}/{batch_size}")
+            # logger.info(f"[Step {step}] Active: {len(active_indices)}/{batch_size}")
             
             # VLA model inference on all inputs
             current_inputs = inputs
@@ -769,9 +755,9 @@ class VLARollout(RolloutBase):
         
         # Save rollout videos
         if valid_video:
-            logger.info(f"Saving {len(valid_video)} rollout videos...")
-            for task_file, images in valid_video.items():
-                logger.info(f"  Video '{task_file}': {len(images)} frames")
+            # logger.info(f"Saving {len(valid_video)} rollout videos...")
+            # for task_file, images in valid_video.items():
+            #     logger.info(f"  Video '{task_file}': {len(images)} frames")
             
             experiment_name = getattr(self.config, 'experiment_name', 'vla_rollout')
             
@@ -787,7 +773,7 @@ class VLARollout(RolloutBase):
                             global_steps,
                             complete
                         )
-                        logger.info(f"  ✅ Saved {len(images)} frames to: {video_path}")
+                        
                     except Exception as e:
                         logger.warning(f"  ⚠️  Failed to save {task_file}: {e}")
                         import traceback
@@ -941,30 +927,56 @@ class VLARollout(RolloutBase):
         }
     
     def _create_rollout_result(self, payload: RLPayload, episode_data: Dict) -> RolloutResult:
-        """Create RolloutResult from episode data"""
+        """
+        Create RolloutResult from episode data
         
-        # Extract required fields for RolloutResult
-        completions = episode_data.get('responses', [''])
+        For VLA:
+        - responses are token IDs (List[torch.Tensor] or List[List[int]]) from generate_action_verl
+        - completions should be a SINGLE text string representing the episode outcome
+        - success is the completion status from environment
+        
+        IMPORTANT: For VLA, we should only have ONE completion per episode, not one per action step.
+        This ensures the validation count matches: N prompts → N rollouts (not N × steps).
+        """
+        
+        # For VLA, create a single completion representing the episode outcome
+        success = episode_data.get('success', False)
+        episode_length = episode_data.get('episode_length', 0)
+        responses_token_ids = episode_data.get('responses', [])
+        num_actions = len(responses_token_ids) if responses_token_ids else 0
+        
+        # Create a single completion string summarizing the episode
+        completions = [f"Task {'completed' if success else 'failed'} in {episode_length} steps ({num_actions} actions)"]
+        
+        # Extract rewards
         rewards = episode_data.get('rewards', [0.0])
         
-        # Create mock log probabilities (would come from actual model)
-        log_probs = [np.log(0.5)] * len(completions)  # Dummy log probs
+        # Create log probabilities (uniform for now, could be computed from model logits)
+        # One log prob per completion
+        log_probs = [[np.log(0.5)] * len(completions)]
+        
+        # Count tokens
+        total_tokens = sum(len(c.split()) for c in completions) if completions else 0
         
         result = RolloutResult(
             prompt=episode_data.get('instruction', ''),
             completions=completions,
-            log_probs=[log_probs],
-            input_tokens=100,  # Approximate
-            output_tokens=len(' '.join(completions).split()),
+            log_probs=log_probs,
+            input_tokens=100,  # Approximate (could be computed from input_ids)
+            output_tokens=total_tokens,
             
             # VLA-specific additional data
             rewards=rewards,
             episode_length=episode_data.get('episode_length', 0),
             environment_info={
                 'task_suite': self.task_suite,
-                'success': episode_data.get('success', False),
+                'success': episode_data.get('success', False),  # Completion status
                 'total_reward': episode_data.get('total_reward', 0.0),
                 'num_actions': len(episode_data.get('actions', [])),
+                'num_response_tokens': sum(
+                    len(r) if isinstance(r, (list, torch.Tensor)) else 1 
+                    for r in responses_token_ids
+                ),
                 'final_observation': episode_data.get('observations', [])[-1] if episode_data.get('observations') else None
             }
         )

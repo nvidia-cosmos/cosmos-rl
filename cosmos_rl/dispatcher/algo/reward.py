@@ -390,6 +390,7 @@ class Reward:
                 data_packer=self.data_packer,
                 config=self.config,
                 tokenizer=self.tokenizer,
+                metadata=kwargs.get('metadata', None),  # Pass metadata for VLA tasks
             )
             total_reward += weight * val
             filter_reward += filter * val

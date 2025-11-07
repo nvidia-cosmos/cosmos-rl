@@ -64,7 +64,7 @@ class RolloutGroup:
         ), "[RolloutGroup] Reference answer is not provided"
         rewards = [
             algo.compute_reward(
-                completion, self.reference_answer, prompt=self.payload.prompt
+                completion, self.reference_answer, prompt=self.payload.prompt, metadata=self.payload.metadata
             )
             for completion in self.payload.completions
         ]

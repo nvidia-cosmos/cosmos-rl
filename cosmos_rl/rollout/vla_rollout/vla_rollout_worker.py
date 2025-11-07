@@ -27,14 +27,21 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data import RLPayload, IdxAndRLPayload
-from cosmos_rl.dispatcher.command import Command, PolicyToRolloutUnicastCommand, RolloutToRolloutBroadcastCommand
+from cosmos_rl.dispatcher.command import Command, PolicyToRolloutUnicastCommand, RolloutToRolloutBroadcastCommand, BuildMeshCommand
+from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
 from cosmos_rl.utils.constant import COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
 import cosmos_rl.utils.distributed as dist_utils
+from cosmos_rl.utils.pynccl import create_nccl_uid, create_nccl_comm, nccl_broadcast
 
 from .vla_rollout import VLARollout
 from .environment_wrappers import LiberoEnvWrapper, RobotwinEnvWrapper
+from .vla_schema import (
+    VLAEpisodeMetadata,
+    compute_vla_reward,
+    create_vla_metadata_from_environment_info,
+)
 
 
 class VLARolloutWorker(RolloutWorkerBase):
@@ -64,6 +71,11 @@ class VLARolloutWorker(RolloutWorkerBase):
         self._prompt_queue: Queue[List[IdxAndRLPayload]] = Queue()
         self.current_weight_version = 0
         
+        # NCCL communicator infrastructure for r2r broadcast (borrowed from vLLM worker)
+        self.global_commnicator_idex = -1  # Index for the global NCCL communicator
+        self.rank_in_rollout_repicas = -1  # Rank within rollout replicas
+        self.replica_name_to_rank: Dict[str, int] = {}  # Mapping from replica name to rank
+        
         # Initialize VLA rollout engine
         self.rollout: VLARollout = VLARollout(self.config, self.tokenizer)
         
@@ -79,6 +91,10 @@ class VLARolloutWorker(RolloutWorkerBase):
             self.val_batch_size = None
             
         self.background_thread: Optional[threading.Thread] = None
+        
+        # Validation support
+        self.validation_flag = threading.Event()
+        self.current_step = 0
         
         # Reward dispatcher with VLA-specific payload processing
         self.reward_dispatcher = RewardDispatcher(
@@ -257,15 +273,26 @@ class VLARolloutWorker(RolloutWorkerBase):
         self.api_client.post_rollout_completion(response)
 
     def report_rollouts(self, block=False):
-        """Report rollouts to controller (borrowed from vLLM worker)"""
+        """
+        Report rollouts to controller (borrowed from vLLM worker).
+        
+        This method:
+        1. Dequeues processed payloads from reward dispatcher
+        2. Sends normal rollout results to controller via RolloutRequest
+        3. Returns validation payloads for special handling in do_validation
+        4. Supports blocking mode for validation to wait for all batches
+        
+        Returns:
+            tuple: (payloads, is_validation, step, empty)
+        """
         while True:
             payloads, is_validation, step, empty = (
                 self.reward_dispatcher.dequeue_rewards_cal()
             )
             if payloads is not None:
                 if is_validation:
+                    # Don't send validation results here - let do_validation handle them
                     break
-                from cosmos_rl.dispatcher.protocol import RolloutRequest
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,
                     prompt_idxs=[],
@@ -276,19 +303,159 @@ class VLARolloutWorker(RolloutWorkerBase):
             elif not block or empty:
                 break
         return payloads, is_validation, step, empty
+    
+    def do_validation(self):
+        """
+        Perform validation rollouts (adapted from vLLM worker for VLA tasks).
+        
+        This method orchestrates the validation process:
+        1. Request validation prompts in batches
+        2. Run VLA rollout generation on validation data
+        3. Collect results and send to reward dispatcher
+        4. Gather all batched results via report_rollouts
+        5. Send ValidationReportRequest to controller with final metrics
+        
+        The validation uses a separate queue to avoid mixing with training prompts.
+        """
+        logger.info(f"[VLA Rollout] Starting validation at step {self.current_step}")
+        
+        validation_queue = Queue()
+        prompt_idxs: List[int] = []
+        validation_payloads: List[RLPayload] = []
+        
+        # Fetch and process validation prompts in batches
+        while True:
+            is_end = self.request_new_prompts(
+                self.val_batch_size,
+                validation_queue,
+                validation_step=self.current_step,
+            )
+            
+            if not validation_queue.empty():
+                prompt_id_and_payload_list: List[IdxAndRLPayload] = (
+                    validation_queue.get()
+                )
+                payloads = [p for _, p in prompt_id_and_payload_list]
+                
+                logger.info(f"[VLA Rollout] Running validation on {len(payloads)} prompts")
+                
+                # Run VLA rollout generation (same as training but with validation data)
+                rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
+                    payloads=payloads
+                )
+                
+                if rollout_results:
+                    prompt_idxs.extend([idx for idx, _ in prompt_id_and_payload_list])
+                    # Attach completions and metadata to payloads (VLA generates action sequences)
+                    for p, rr in zip(payloads, rollout_results):
+                        p.completions = rr.completions
+                        # Attach VLA-specific metadata from environment_info
+                        # This is needed for the validation workaround to compute rewards
+                        if hasattr(rr, 'environment_info') and rr.environment_info:
+                            if not hasattr(p, 'metadata') or p.metadata is None:
+                                p.metadata = {}
+                            # Extract key environment results
+                            p.metadata.update({
+                                'success': rr.environment_info.get('success', False),
+                                'episode_length': rr.environment_info.get('episode_length', 0),
+                                'task_suite': rr.environment_info.get('task_suite', ''),
+                                'total_reward': rr.environment_info.get('total_reward', 0.0),
+                            })
+                        # Note: VLA doesn't use multi-turn conversations like text LLMs
+                    validation_payloads.extend(payloads)
+
+            if is_end:
+                break
+
+        # Clear the flag to indicate validation is done
+        self.validation_flag.clear()
+        logger.info(f"[VLA Rollout] Validation complete. Processed {len(validation_payloads)} payloads")
+        
+        # Only the last rank in pipeline parallelism should report
+        should_report = self.parallel_dims.tp_coord[0] == 0 and (
+            self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+        )
+
+        if should_report:
+            # VLA WORKAROUND: Bypass reward_calculator entirely for validation
+            # reward_calculator.py has too many LLM/VLM assumptions that don't apply to VLA:
+            # - Expects text completions with reference answers
+            # - GRPO advantage computation not needed for validation  
+            # - Token-level prefix detection irrelevant for environment tasks
+            # - Dynamic sampling based on filter_reward not applicable
+            #
+            # For VLA validation, we just need: environment success → binary reward (1.0/0.0)
+            logger.info(f"[VLA Workaround] Computing validation rewards directly (bypassing reward_calculator)")
+            
+            # Compute rewards directly from environment success
+            total_success = 0
+            total_episodes = 0
+            
+            for payload in validation_payloads:
+                # Extract success from metadata (if available)
+                success = False
+                if hasattr(payload, 'metadata') and payload.metadata:
+                    success = payload.metadata.get('success', False)
+                
+                # Compute binary reward: 1.0 for success, 0.0 for failure
+                reward = 1.0 if success else 0.0
+                
+                # Attach rewards and advantages to payload
+                # advantages = 0.0 since validation doesn't train
+                num_completions = len(payload.completions) if payload.completions else 1
+                payload.rewards = [reward] * num_completions
+                payload.advantages = [0.0] * num_completions
+                payload.valid = True
+                
+                # Initialize fields required by extract_rollouts
+                if not hasattr(payload, 'n_ignore_prefix_tokens') or payload.n_ignore_prefix_tokens is None:
+                    payload.n_ignore_prefix_tokens = [0] * num_completions
+                if not hasattr(payload, 'completed_conversations') or payload.completed_conversations is None:
+                    payload.completed_conversations = [[]] * num_completions
+                
+                total_success += int(success)
+                total_episodes += 1
+            
+            success_rate = (total_success / total_episodes * 100.0) if total_episodes > 0 else 0.0
+            logger.info(
+                f"[VLA Workaround] Computed validation rewards: "
+                f"{total_success}/{total_episodes} success ({success_rate:.1f}%)"
+            )
+            
+            # Send validation report directly to controller
+            # This bypasses reward_dispatcher.dequeue_rewards_cal() loop
+            response = ValidationReportRequest(
+                src_replica_name=self.replica_name,
+                validation_step=self.current_step,
+                prompt_idxs=[],
+                payloads=validation_payloads,
+                is_end=True,
+            )
+            logger.info(f"[VLA Workaround] Posting validation report: step={self.current_step}, payloads={len(validation_payloads)}")
+            self.api_client.post_validation_report(response)
+        
+        logger.info(f"[VLA Rollout] Validation reporting complete for step {self.current_step}")
 
     @torch.no_grad()
     def main_loop(self):
         """Main processing loop (adapted from vLLM worker for VLA rollouts)"""
         while not self.shutdown_signal.is_set():
             self.consume_command(cmd_pred=None)
-            # Note: VLA doesn't have validation flag like vLLM for now
-            # if self.validation_flag.is_set():
-            #     self.do_validation()
-
+            
             # If weight is not ready, nothing else to do.
             if not self.state.weight_synced():
                 continue
+
+            # Check if validation should be performed
+            logger.debug(f"[VLA Rollout] Main loop: validation_flag.is_set()={self.validation_flag.is_set()}")
+            if self.validation_flag.is_set():
+                logger.info(f"[VLA Rollout] 🎯 Validation flag is set, starting validation")
+                self.do_validation()
+            else:
+                continue
+                #self.shutdown_signal.set()
+
+
 
             # try fetching new prompts if no ending signal is set
             if not self.state.prompt_fetch_end():
@@ -356,6 +523,68 @@ class VLARolloutWorker(RolloutWorkerBase):
         logger.info(f"[VLA Rollout] Main loop of {self.replica_name} finished")
     
     # ==================== Command Handlers (simplified for VLA) ====================
+    
+    @RolloutWorkerBase.register_rollout_command_handler(BuildMeshCommand)
+    def build_global_mesh(self, build_mesh_command: BuildMeshCommand):
+        """
+        Build global NCCL mesh for rollout-to-rollout communication
+        
+        This is called when multiple rollout replicas are active and need to sync weights.
+        Creates NCCL communicator groups for efficient broadcast between replicas.
+        """
+        logger.info(f"[VLA Rollout] Building global mesh for {self.replica_name}")
+        
+        replica_name_to_rank = build_mesh_command.replica_name_to_rank
+        if self.replica_name not in replica_name_to_rank:
+            raise RuntimeError(
+                f"[VLA Rollout] Replica {self.replica_name} not found in registered replicas."
+            )
+        
+        self.rank_in_rollout_repicas = replica_name_to_rank[self.replica_name]
+        logger.info(f"[VLA Rollout] My rank in rollout replicas: {self.rank_in_rollout_repicas}")
+        
+        if len(replica_name_to_rank) == 1:
+            logger.info(f"[VLA Rollout] Only one rollout replica, no need to build mesh")
+            return
+        
+        # Generate unique key for NCCL group
+        # Creates separate NCCL groups per rank across replicas:
+        # group_0: [rank 0 in replica 0, rank 0 in replica 1, ...]
+        # group_1: [rank 1 in replica 0, rank 1 in replica 1, ...]
+        unique_rollout_group_key = self.get_group_unique_key(replica_name_to_rank)
+        logger.debug(f"[VLA Rollout] NCCL group key: {unique_rollout_group_key}")
+        
+        nccl_group_id = None
+        if self.rank_in_rollout_repicas == 0:
+            # Only replica_rank == 0 generates the NCCL ID and posts to controller
+            logger.info(f"[VLA Rollout] Rank 0 creating NCCL UID and posting to controller...")
+            nccl_group_id = create_nccl_uid()
+            self.api_client.post_nccl_comm_initiator(
+                unique_rollout_group_key, nccl_group_id
+            )
+            logger.info(f"[VLA Rollout] ✅ NCCL UID posted to controller")
+        else:
+            # Other replicas query the NCCL group ID from controller
+            logger.info(f"[VLA Rollout] Rank {self.rank_in_rollout_repicas} querying NCCL UID from controller...")
+            nccl_group_id = self.query_nccl_unique_id_from_controller(
+                unique_rollout_group_key
+            )
+            if nccl_group_id is None:
+                raise RuntimeError(
+                    "[VLA Rollout] Failed to query nccl group_id from controller!"
+                )
+            logger.info(f"[VLA Rollout] ✅ Got NCCL UID from controller")
+        
+        # Create NCCL communicator for global mesh
+        logger.info(f"[VLA Rollout] Creating NCCL communicator: rank={self.rank_in_rollout_repicas}, world_size={len(replica_name_to_rank)}")
+        self.global_commnicator_idex = create_nccl_comm(
+            nccl_group_id, self.rank_in_rollout_repicas, len(replica_name_to_rank)
+        )
+        
+        # Cache the replica name to rank mapping
+        self.replica_name_to_rank = replica_name_to_rank
+        
+        logger.info(f"[VLA Rollout] ✅ Global mesh built successfully (communicator index={self.global_commnicator_idex})")
     
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
     @torch.no_grad()
@@ -453,7 +682,52 @@ class VLARolloutWorker(RolloutWorkerBase):
         
         # Mark weight as synced
         self.state.set_weight_synced()
-        self.current_weight_version += 1
+        
+        # Update weight version and check for validation
+        current_step = command.weight_step if hasattr(command, 'weight_step') else self.current_weight_version + 1
+        
+        if hasattr(command, 'weight_step') and command.weight_step is not None:
+            self.current_weight_version = command.weight_step
+            logger.info(f"[VLA Rollout] Updated weight version to {current_step} (from command)")
+        else:
+            self.current_weight_version += 1
+            logger.info(f"[VLA Rollout] Updated weight version to {self.current_weight_version} (incremental)")
+            current_step = self.current_weight_version
+        
+        # Handle validation flag (if enabled) - IMPORTANT: Must check here too!
+        # If there's only 1 rollout replica, R2R broadcast won't happen, so we need to check validation here
+        total_steps = command.total_steps if hasattr(command, 'total_steps') else None
+        logger.info(f"[VLA Rollout] Validation check in P2R: current_step={current_step}, "
+                   f"validation.enable={self.config.validation.enable}, "
+                   f"validation.val_before_train={self.config.validation.val_before_train}, "
+                   f"validation.freq={self.config.validation.freq}, "
+                   f"total_steps={total_steps}")
+        
+        if current_step is not None and current_step > 0:
+            # Check if validation should be triggered
+            is_initial_validation = (current_step == 1 and self.config.validation.val_before_train)
+            is_periodic_validation = (current_step > 1 and current_step % self.config.validation.freq == 0)
+            is_final_validation = (total_steps is not None and current_step == total_steps)
+            
+            should_do_validation = self.config.validation.enable and (
+                is_initial_validation 
+                or is_periodic_validation
+                or is_final_validation
+            )
+            
+            logger.info(f"[VLA Rollout] should_do_validation={should_do_validation} "
+                       f"(val_before_train={is_initial_validation}, periodic={is_periodic_validation}, final={is_final_validation})")
+            
+            if should_do_validation:
+                self.current_step = current_step
+                # Set validation flag for main loop
+                if hasattr(self, 'validation_flag'):
+                    self.validation_flag.set()
+                    logger.info(f"[VLA Rollout] ✅ Validation flag SET for step {current_step} (via P2R)")
+                else:
+                    logger.warning(f"[VLA Rollout] ⚠️ validation_flag attribute not found!")
+        else:
+            logger.info(f"[VLA Rollout] Skipping validation check (current_step={current_step})")
         
         logger.info(f"[VLA Rollout] ✅ Weight sync completed, version: {self.current_weight_version}")
     
@@ -777,61 +1051,203 @@ class VLARolloutWorker(RolloutWorkerBase):
     @RolloutWorkerBase.register_rollout_command_handler(RolloutToRolloutBroadcastCommand)
     def broadcast_to_all_rollout_replica(self, broadcast_command: RolloutToRolloutBroadcastCommand):
         """
-        Simplified rollout-to-rollout broadcast for VLA models (adapted from vLLM worker)
+        Broadcast VLA model weights to all other rollout replicas via NCCL
+        
+        This happens after PolicyToRolloutUnicast updates weights in replica 0.
+        Replica 0 broadcasts to all other replicas for parallel rollout.
         """
-        logger.info(f"[VLA Rollout] Received broadcast command from {broadcast_command.src_replica_name}")
+        src_replica_name: str = broadcast_command.src_replica_name
+        dst_replica_names: List[str] = broadcast_command.dst_replica_names
         
-        # For VLA models, we'll implement simplified broadcast handling
-        # TODO: Implement actual VLA model weight broadcasting between replicas
+        logger.info(f"[VLA Rollout] Received R2R broadcast command from {src_replica_name} to {len(dst_replica_names)} replicas")
+        logger.info(f"[VLA Rollout] My replica: {self.replica_name}, trainable_only={broadcast_command.trainable_only}")
         
+        # Lazy initialize engine for non-src replicas  
+        # They don't receive P2R, so initialize with dummy weights for r2r broadcast
+        if self.replica_name != src_replica_name:
+            if not self.rollout.is_engine_initialized():
+                logger.info(f"[VLA Rollout] Non-src replica initializing engine with dummy weights...")
+                self.rollout.init_engine(
+                    quantization="none",
+                    seed=self.config.rollout.seed,
+                    load_format="dummy"
+                )
+                logger.info(f"[VLA Rollout] ✅ Engine initialized")
+        
+        # Only do broadcast if there are multiple replicas
+        if len(dst_replica_names) > 1:
+            self._prepare_trainable_params()
+            skipped_params_cnt = 0
+            transferred_params_cnt = 0
+            logger.info("[VLA Rollout] Starting broadcasting of parameters to all replicas...")
+            
+            # Create inference stream if not exists
+            if not hasattr(self, 'inference_stream'):
+                self.inference_stream = torch.cuda.Stream()
+            
+            with torch.cuda.stream(self.inference_stream):
+                assert (
+                    self.rank_in_rollout_repicas >= 0
+                ), "[VLA Rollout] rank_in_rollout_repicas should be set before broadcast (build_global_mesh not called?)"
+                assert (
+                    len(dst_replica_names) == len(self.replica_name_to_rank)
+                ), f"[VLA Rollout] dst replicas count {len(dst_replica_names)} must match replica_name_to_rank count {len(self.replica_name_to_rank)}"
+                
+                src_rank = self.replica_name_to_rank[src_replica_name]
+                logger.info(f"[VLA Rollout] Broadcasting from rank {src_rank} using communicator {self.global_commnicator_idex}")
+                
+                with torch.inference_mode():
+                    # Get all model parameters
+                    model_params = dict(self.rollout.module.named_parameters())
+                    
+                    for name, parameter in model_params.items():
+                        # Skip non-trainable params if trainable_only is set
+                        if (
+                            name not in self.trainable_params
+                            and broadcast_command.trainable_only
+                        ):
+                            logger.debug(f"[VLA Rollout] Skip {name} in R2R due to non-trainable")
+                            skipped_params_cnt += 1
+                            continue
+                        
+                        transferred_params_cnt += 1
+                        
+                        # Ensure parameter is contiguous for NCCL
+                        recv_tensor = parameter
+                        if not parameter.is_contiguous():
+                            recv_tensor = parameter.contiguous()
+                        
+                        # Broadcast parameter across all replicas
+                        nccl_broadcast(
+                            recv_tensor, src_rank, self.global_commnicator_idex
+                        )
+                        
+                        # Copy back if we made it contiguous
+                        if not parameter.is_contiguous():
+                            parameter.copy_(recv_tensor)
+                    
+                    # Mark weight as synced on first broadcast
+                    if not self.state.weight_synced():
+                        assert not broadcast_command.trainable_only, "[VLA Rollout] Trainable only must be False for first broadcast"
+                        self.state.set_weight_synced()
+            
+            logger.info(
+                f"[VLA Rollout] ✅ Finished broadcasting. Skipped {skipped_params_cnt} non-trainable params, transferred {transferred_params_cnt} params"
+            )
+        
+        # Update weight version
         current_step = broadcast_command.weight_step
         if current_step is not None:
             assert (
                 current_step >= self.current_weight_version
-            ), f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
+            ), f"current_step: {current_step} must be >= self.current_weight_version: {self.current_weight_version}"
             self.current_weight_version = current_step
+            logger.info(f"[VLA Rollout] Updated weight version to {current_step}")
+        elif self.current_weight_version == 0:
+            # Initial validation, set weight version to 1
+            self.current_weight_version = 1
+            current_step = 1
 
-        if not self.state.weight_synced():
-            self.state.set_weight_synced()
-
-        logger.info(f"[VLA Rollout] Broadcast handling completed for step {current_step}")
-
+        # Handle validation flag (if enabled)
+        logger.info(f"[VLA Rollout] Validation check: current_step={current_step}, "
+                   f"validation.enable={self.config.validation.enable}, "
+                   f"validation.val_before_train={self.config.validation.val_before_train}, "
+                   f"validation.freq={self.config.validation.freq}, "
+                   f"total_steps={broadcast_command.total_steps}")
+        
+        if current_step is not None and current_step > 0:
+            # Check if validation should be triggered
+            is_initial_validation = (current_step == 1 and self.config.validation.val_before_train)
+            is_periodic_validation = (current_step > 1 and current_step % self.config.validation.freq == 0)
+            is_final_validation = (current_step == broadcast_command.total_steps)
+            
+            should_do_validation = self.config.validation.enable and (
+                is_initial_validation 
+                or is_periodic_validation
+                or is_final_validation
+            )
+            
+            logger.info(f"[VLA Rollout] should_do_validation={should_do_validation} "
+                       f"(val_before_train={is_initial_validation}, periodic={is_periodic_validation}, final={is_final_validation})")
+            
+            if should_do_validation:
+                self.current_step = current_step
+                # Set validation flag for main loop
+                if hasattr(self, 'validation_flag'):
+                    self.validation_flag.set()
+                    logger.info(f"[VLA Rollout] ✅ Validation flag SET for step {current_step}")
+                else:
+                    logger.warning(f"[VLA Rollout] ⚠️ validation_flag attribute not found!")
+        else:
+            logger.info(f"[VLA Rollout] Skipping validation check (current_step={current_step})")
+        
+        # Handle shutdown signal
         if broadcast_command.replica_should_stop():
+            logger.info(f"[VLA Rollout] Shutdown signal received")
             self.shutdown_signal.set()
             self.shutdown_mp_signal.set()
     
+    def _prepare_trainable_params(self):
+        """
+        Prepare the list of trainable parameters for R2R broadcast
+        
+        Queries from controller on rank 0 and broadcasts to all ranks
+        """
+        if not hasattr(self, "trainable_params"):
+            if self.global_rank == 0:
+                logger.info(f"[VLA Rollout] Rank 0 fetching trainable params from controller...")
+                self.trainable_params = set(self.api_client.get_trainable_params())
+                logger.info(f"[VLA Rollout] Got {len(self.trainable_params)} trainable params")
+            else:
+                self.trainable_params = set()
+            
+            # Broadcast trainable params list to all ranks
+            self.trainable_params = dist_utils.broadcast_object_cpu(self.trainable_params)
+            logger.debug(f"[VLA Rollout] Rank {self.global_rank} has {len(self.trainable_params)} trainable params")
+    
     def _send_rollout_results(self, results: List[RolloutResult], prompt_id_and_payload_list: List[IdxAndRLPayload]):
-        """Send rollout results back to controller via reward dispatcher"""
+        """
+        Send rollout results back to controller via reward dispatcher.
+        
+        Converts RolloutResult objects to RLPayload objects with computed rewards.
+        Uses VLAEpisodeMetadata for clean, structured data handling.
+        """
         logger.debug(f"Sending {len(results)} VLA rollout results to controller")
         
         try:
-            # Convert RolloutResult objects to RLPayload objects for reward calculation
             result_payloads = []
             
             for result, idx_and_payload in zip(results, prompt_id_and_payload_list):
-                # Create modified payload with VLA results
+                # Unpack tuple: IdxAndRLPayload = Tuple[int, RLPayload]
+                prompt_idx, payload = idx_and_payload
+                
+                # Create structured VLA metadata from environment info
+                vla_metadata = create_vla_metadata_from_environment_info(
+                    environment_info=result.environment_info,
+                    prompt_idx=prompt_idx,
+                    temperature=self.temperature,
+                    n_generation=self.n_generation,
+                )
+                
+                # Create result payload for reward calculation
+                # Note: Rewards will be computed by the custom reward function (vla_reward_fn)
+                # using the metadata we provide here
                 result_payload = RLPayload(
                     prompt=result.prompt,
-                    conversation=getattr(idx_and_payload.payload, 'conversation', None),
-                    weight_version=idx_and_payload.payload.weight_version,
+                    conversation=getattr(payload, 'conversation', None),
+                    weight_version=payload.weight_version,
                     temperature=self.temperature,
                     
-                    # VLA-specific results
-                    completion=result.completions[0] if result.completions else "",
-                    log_prob=float(result.log_probs[0][0]) if result.log_probs and result.log_probs[0] else 0.0,
+                    # VLA-specific results (completions for n_generation support)
+                    completions=result.completions if result.completions else [""],
                     
-                    # Additional VLA metadata  
-                    metadata={
-                        'vla_episode_length': result.environment_info.get('episode_length', 0),
-                        'vla_success': result.environment_info.get('success', False),
-                        'vla_reward': result.environment_info.get('total_reward', 0.0),
-                        'task_suite': result.environment_info.get('task_suite', self.task_suite),
-                        'task_id': result.environment_info.get('task_id', 0),
-                        'trial_id': result.environment_info.get('trial_id', 0),
-                        'prompt_id': idx_and_payload.idx,
-                        'temperature': self.temperature,
-                        'n_generation': self.n_generation
-                    }
+                    # VLA metadata for custom reward function
+                    # The reward function will extract success/failure from this metadata
+                    metadata=vla_metadata.model_dump(),
+                    
+                    # VLA doesn't have reference answers (environment-based rewards)
+                    # The custom reward function (vla_reward_fn) will handle this
+                    reference_answer=None,
                 )
                 result_payloads.append(result_payload)
             

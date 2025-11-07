@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, List, Dict
-from torch.utils.data import Dataset, ConcatDataset
-from datasets import load_dataset
+from torch.utils.data import Dataset
+from typing import Optional, Any
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config
 from transformers import AutoTokenizer
@@ -68,7 +67,7 @@ class LIBERODataset(Dataset):
                     }
                     dataframes.append(data)
             self.dataframe = dataframes
-            print(f'dataset len: {len(self.dataframe)}')
+            print(f'dataset <{self.train_val}> len: {len(self.dataframe)}')
         else:
             raise ValueError
     
@@ -79,15 +78,48 @@ class LIBERODataset(Dataset):
         return self.dataframe[item]
 
 
+def vla_reward_fn(to_be_evaluated: str, reference: Optional[Any] = None, prompt=None, **kwargs) -> float:
+    """
+    Custom reward function for VLA tasks.
+    
+    For VLA, the reward is computed from environment success/failure stored in metadata.
+    The 'to_be_evaluated' is the completion string, but we extract the actual reward
+    from the metadata passed in kwargs.
+    
+    Args:
+        to_be_evaluated: The completion string (action sequence text)
+        reference: Not used for VLA (environment-based rewards)
+        prompt: The task prompt
+        **kwargs: Additional arguments, including 'metadata' with VLA episode info
+        
+    Returns:
+        Reward: 1.0 for success, 0.0 for failure
+    """
+    # Extract VLA metadata from kwargs
+    metadata = kwargs.get('metadata', {})
+    
+    # Get success status from metadata
+    success = metadata.get('success', False)
+    
+    # Binary reward: 1.0 for success, 0.0 for failure
+    reward = 1.0 if success else 0.0
+    
+    logger.debug(f"[VLA Reward] Task success={success}, reward={reward}")
+    
+    return reward
+
+
 if __name__ == "__main__":
 
     def get_dataset(config: CosmosConfig) -> Dataset:
-        return LIBERODataset(50, "train")
-    
+        return LIBERODataset(num_trials_per_task=50, train_val="train")
+
     def get_val_dataset(config: CosmosConfig) -> Dataset:
-        return LIBERODataset(50, "val")
+        return LIBERODataset(num_trials_per_task=50, train_val="val")
 
     launch_worker(
         dataset=get_dataset,
         val_dataset=get_val_dataset,
+        reward_fns=[vla_reward_fn],
+        val_reward_fns=[vla_reward_fn],
     )

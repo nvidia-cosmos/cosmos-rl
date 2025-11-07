@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel
 from cosmos_rl.dispatcher.data.schema import ConversationType
 
@@ -30,3 +30,11 @@ class RolloutResult(BaseModel):
 
     # The generated conversation history for the prompt.
     completed_conversations: Optional[List[ConversationType]] = None
+    
+    # VLA-specific fields (optional, used by VLA rollouts)
+    log_probs: Optional[List[List[float]]] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    rewards: Optional[List[float]] = None
+    episode_length: Optional[int] = None
+    environment_info: Optional[Dict[str, Any]] = None
