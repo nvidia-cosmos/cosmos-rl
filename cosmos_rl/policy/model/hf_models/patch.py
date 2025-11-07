@@ -39,19 +39,35 @@ def post_hf_models_patch(hf_config: AutoConfig, model: Any):
         print("Set img_context_token_id to 200021")
 
 
+# Get packed attention mask
+def get_packed_attention_mask(lengths, device):
+    # lengths: list of sequence lengths
+    L = sum(lengths)
+    mask = torch.zeros((L, L), dtype=torch.bool, device=device)
+    offset = 0
+    for length in lengths:
+        mask[offset : offset + length, offset : offset + length] = torch.tril(
+            torch.ones((length, length), dtype=torch.bool, device=device)
+        )
+        offset += length
+    return mask
+
+
 def sequence_packing_forward_patch(hf_config: AutoConfig, hfmodel):
     patch_success = False
-    if hf_config.model_type in SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS:
-        SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS[hf_config.model_type](hfmodel)
-        patch_success = True
-    else:
-        if not hfmodel.is_vlm:
-            SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS["llm"](hfmodel)
+    try:
+        if hf_config.model_type in SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS:
+            SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS[hf_config.model_type](hfmodel)
+            patch_success = True
         else:
-            logger.warning(
-                f"Failed to patch sequence packing forward for {hf_config.model_type}, supported models: {SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS.keys()}"
-            )
-
+            if not hfmodel.is_vlm:
+                SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS["llm"](hfmodel)
+            else:
+                logger.warning(
+                    f"Failed to patch sequence packing forward for {hf_config.model_type}, supported models: {SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS.keys()}"
+                )
+    except Exception as e:
+        logger.error(f"Failed to patch sequence packing forward: {e}")
     return patch_success
 
 
@@ -97,6 +113,26 @@ def sequence_packing_forward_qwen3_vl(model):
 
     # Replace the forward method
     model.language_model.forward = sequence_packing_forward_qwen3_vl_inner
+
+    def make_new_self_attn_forward(original_attn_forward):
+        def self_attn_forward(self, hidden_states, *args, **kwargs):
+            attention_mask = kwargs.get("attention_mask", None)
+            valid_input_len = kwargs.get("valid_input_len", None)
+            if attention_mask is None and valid_input_len is not None:
+                attention_mask = get_packed_attention_mask(
+                    valid_input_len.tolist(), hidden_states.device
+                )
+                kwargs["attention_mask"] = attention_mask
+            return original_attn_forward(hidden_states, *args, **kwargs)
+
+        return self_attn_forward
+
+    # Replace the self_attn.forward method
+    for layer in model.language_model.layers:
+        original_attn_forward = layer.self_attn.forward
+        layer.self_attn.forward = make_new_self_attn_forward(
+            original_attn_forward
+        ).__get__(layer.self_attn, type(layer.self_attn))
 
 
 def sequence_packing_forward_llm(model):
