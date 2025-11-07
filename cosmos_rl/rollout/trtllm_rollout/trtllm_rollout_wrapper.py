@@ -180,7 +180,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         self.reward_dispatcher.setup(
             config=self.config,
-            data_fetcher = self.data_fetcher,
+            data_fetcher=self.data_fetcher,
             dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
@@ -199,6 +199,23 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             if payloads is not None:
                 if is_validation:
                     break
+                for i in range(len(payloads)):
+                    (
+                        payloads[i].completions,
+                        payloads[i].completed_conversations,
+                        payloads[i].completion_logprobs,
+                        payloads[i].completion_token_ids,
+                        _,
+                    ) = self.data_packer.get_rollout_output(
+                        payloads[i].completions,
+                        payloads[i].completed_conversations,
+                        payloads[i].completion_logprobs,
+                        payloads[i].completion_token_ids,
+                    )
+                    # when using local dataset, we don't need to send the prompt/conversation to the controller
+                    if self.config.train.local_dataset:
+                        payloads[i].prompt = None
+                        payloads[i].conversation = None
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,
                     payloads=payloads,
@@ -218,10 +235,22 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         if prompt_queue.empty():
             payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
+            if self.config.train.local_dataset:
+                is_validation = kwargs.get("validation_step", None) is not None
+                for payload in payloads:
+                    payload["prompt"] = self.data_fetcher.get_payload_by_index(
+                        payload["prompt_idx"],
+                        is_validation=is_validation,
+                    )
+                    payload["conversation"] = self.data_fetcher.get_payload_by_index(
+                        payload["prompt_idx"],
+                        is_validation=is_validation,
+                        attr="conversation",
+                    )
             prompts = payloads if len(payloads) > 0 else None
 
         if prompts is not None:
-            prompts = [RLPayload.model_validate(prompt[1]) for prompt in prompts]
+            prompts = [RLPayload.model_validate(payload) for payload in prompts]
             prompt_queue.put(prompts)
         return is_end
 
@@ -281,7 +310,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     if not validation_queue.empty():
                         payloads_list: List[RLPayload] = validation_queue.get()
                         completions: List[List[str]] = self.rollout.rollout_generation(
-                            payloads_list=payloads_list,
+                            payloads=payloads_list,
                             data_packer=self.val_data_packer,
                             sampling_params=self.val_sampling_params,
                         )
@@ -397,13 +426,13 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         else:
                             prompt_indices_to_remove.append(i)
                 if len(prompt_indices_to_remove):
-                    prompts = [
+                    payloads = [
                         payload
                         for i, payload in enumerate(payloads)
                         if i not in prompt_indices_to_remove
                     ]
                     assert (
-                        len(prompts) == len(valid_completions)
+                        len(payloads) == len(valid_completions)
                     ), "[Rollout] len(prompts) must be the same as len(valid_completions) after removing empty completions"
 
                 logger.debug("[Rollout] generate end!")
@@ -412,8 +441,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
                 if should_report:
                     # only the first tp rank in the rollout replica will post the completion to the controller.
-                    payloads_list: List[RLPayload] = prompts
-
                     valid_payloads = []
                     for old_payload, completions in zip(payloads, valid_completions):
                         old_payload.completions = completions
@@ -443,9 +470,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 self.validation_event.set()
                 self.validation_step = inst.validation_step
             elif isinstance(inst, RolloutWrapperInstruction):
-                logger.info(
-                    f"[Rollout] Received rollout wrapper instruction of {self.replica_name}, setting rollout wrapper signal"
-                )
                 if not self.rollout_wrapper_event.is_set():
                     self.rollout_wrapper_event.set()
             else:
