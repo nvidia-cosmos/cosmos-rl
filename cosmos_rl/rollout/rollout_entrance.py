@@ -46,6 +46,7 @@ def run_rollout(*args, **kwargs):
         f"[Rollout] Loaded rollout configuration: {cosmos_rollout_config.rollout.model_dump()}"
     )
 
+    rollout_worker = None
     try:
         rollout_backend = cosmos_rollout_config.rollout.backend
         if rollout_backend == "vllm":
@@ -75,7 +76,9 @@ def run_rollout(*args, **kwargs):
 
         traceback.print_exc()
     finally:
-        del rollout_worker
+        if rollout_worker is not None:
+            del rollout_worker
+            rollout_worker = None
         destroy_distributed()
         logger.info("[Rollout] Destroy context of torch dist.")
 

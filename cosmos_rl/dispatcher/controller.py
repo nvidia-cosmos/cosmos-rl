@@ -45,7 +45,7 @@ from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
 from transformers import AutoTokenizer
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
-from cosmos_rl.dispatcher.data import IdxAndRLPayload
+from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 
 
@@ -226,7 +226,7 @@ class Controller:
         self,
         n: int,
         validation_step: Optional[int] = None,
-    ) -> Tuple[List[IdxAndRLPayload], bool]:
+    ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
 
         if not is_validation:
@@ -286,10 +286,10 @@ class Controller:
                         ],
                     )
 
-            prompt_id_and_payload_list, is_end = self.data_fetcher.get_batched_prompt(
+            payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n, validation_step
             )
-            current_fetch_count = len(prompt_id_and_payload_list)
+            current_fetch_count = len(payloads_list)
             # record the number of valid prompts for current weight version
             if (
                 weight_version_for_current_batch
@@ -320,22 +320,21 @@ class Controller:
             for i in range(current_fetch_count):
                 # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
                 # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
-                prompt_id_and_payload_list[i][
-                    1
-                ].weight_version = weight_version_for_current_batch
+                payloads_list[i].weight_version = weight_version_for_current_batch
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
-            prompt_id_and_payload_list, is_end = self.data_fetcher.get_batched_prompt(
+            payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n, validation_step
             )
-            current_fetch_count = len(prompt_id_and_payload_list)
+            current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
-                prompt_id_and_payload_list[i][1].weight_version = 0
+                payloads_list[i].weight_version = 0
+
         self.policy_status_manager.samples_on_the_fly += (
             current_fetch_count * self.config.rollout.n_generation
         )
 
-        return prompt_id_and_payload_list, is_end
+        return payloads_list, is_end
 
     async def set_profile(self, request: SetProfileRequest):
         replica = self.policy_status_manager[request.replica_name]

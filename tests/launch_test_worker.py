@@ -1644,13 +1644,11 @@ def run_reward_check():
     dataset.setup(tokenizer=rollout.tokenizer, config=config)
     for idx in range(len(dataset)):
         prompts = [
-            (
-                idx,
-                RLPayload(
-                    prompt=dataset[idx]["prompt"],
-                    reference_answer=dataset[idx]["result"],
-                ),
-            )
+            RLPayload(
+                prompt=dataset[idx]["prompt"],
+                prompt_idx=idx,
+                reference_answer=dataset[idx]["result"],
+            ),
         ]
         rollout._prompt_queue.put(prompts)
 

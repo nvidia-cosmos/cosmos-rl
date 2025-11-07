@@ -57,16 +57,13 @@ def local_mpi_size():
 
 
 def init_distributed_with_MPI():
+    if dist.is_initialized():
+        return
+
     # FIXME: (lms) Support multi-nodes.
     local_rank = mpi_rank()
     global_rank = global_mpi_rank()
     world_size = global_mpi_size()
-
-    if world_size == 1:
-        return
-
-    if dist.is_initialized():
-        return
 
     cosmos_world_size = os.environ.get("COSMOS_WORLD_SIZE", None)
     cosmos_local_world_size = os.environ.get("COSMOS_LOCAL_WORLD_SIZE", None)

@@ -228,14 +228,12 @@ class RewardCalculator:
         self,
         payloads: List[RLPayload],
         step: int,
-        prompt_idxs: List[int] = [],
     ) -> Tuple[List[RLPayload], bool, int]:
         """
         Compute rewards and advantages for the given payloads using validation reward function.
         Args:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             step (int): The weight step where the payloads are generated.
-            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
         Returns:
             Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
                 payloads: List of RLPayload with rewards and advantages
@@ -243,9 +241,9 @@ class RewardCalculator:
                 step: the weight step where the payloads are generated
         """
 
-        assert (
-            not self.config.train.local_dataset or len(prompt_idxs) == len(payloads)
-        ), "[Reward] prompt_idxs length should match payloads length when local_dataset is True"
+        assert all(
+            payload.prompt_idx >= 0 for payload in payloads
+        ), "[Reward] All payloads should have a valid prompt index"
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
                 prompt_idx=payload.prompt_idx,
@@ -254,9 +252,9 @@ class RewardCalculator:
                 is_end=True,
                 reference_answer=payload.reference_answer
                 if not self.config.train.local_dataset
-                else self.query_reference_answer(prompt_idxs[i], "val"),
+                else self.query_reference_answer(payload.prompt_idx, "val"),
             )
-            for i, payload in enumerate(payloads)
+            for _, payload in enumerate(payloads)
         ]
 
         rollouts_list: List[List[Rollout]] = [
@@ -294,7 +292,6 @@ class RewardCalculator:
         payloads: List[RLPayload],
         is_validation: bool,
         step: int,
-        prompt_idxs: List[int] = [],
     ) -> Tuple[List[RLPayload], bool, int]:
         """
         Compute rewards and advantages for the given payloads.
@@ -304,7 +301,6 @@ class RewardCalculator:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             is_validation (bool): Whether the payloads are from validation set.
             step (int): The weight step where the payloads are generated.
-            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
         Returns:
             Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
                 payloads: List of RLPayload with rewards and advantages
@@ -313,11 +309,11 @@ class RewardCalculator:
         """
 
         if is_validation:
-            return self.compute_validation_rewards(payloads, step, prompt_idxs)
+            return self.compute_validation_rewards(payloads, step)
 
-        assert (
-            not self.config.train.local_dataset or len(prompt_idxs) == len(payloads)
-        ), "[Reward] prompt_idxs length should match payloads length when local_dataset is True"
+        assert all(
+            payload.prompt_idx >= 0 for payload in payloads
+        ), "[Reward] All payloads should have a valid prompt index"
         # Placeholder for advantage computation logic
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
@@ -326,9 +322,9 @@ class RewardCalculator:
                 is_end=False,
                 reference_answer=payload.reference_answer
                 if not self.config.train.local_dataset
-                else self.query_reference_answer(prompt_idxs[i]),
+                else self.query_reference_answer(payload.prompt_idx),
             )
-            for i, payload in enumerate(payloads)
+            for _, payload in enumerate(payloads)
         ]
 
         rollouts_list: List[List[Rollout]] = [
@@ -536,14 +532,13 @@ class RewardDispatcher:
             self.executor = None
 
     @staticmethod
-    def compute_rewards(payloads, is_validation, step, prompt_idxs):
+    def compute_rewards(payloads, is_validation, step):
         """
         Static method to compute rewards using the singleton RewardCalculator instance.
         Args:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             is_validation (bool): Whether the payloads are from validation set.
             step (int): The weight step where the payloads are generated.
-            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
         Returns:
             Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
                 payloads: List of RLPayload with rewards and advantages
@@ -551,16 +546,13 @@ class RewardDispatcher:
                 step: the weight step where the payloads are generated
         """
         reward_calculator = RewardCalculator.get_instance()
-        return reward_calculator.compute_rewards(
-            payloads, is_validation, step, prompt_idxs
-        )
+        return reward_calculator.compute_rewards(payloads, is_validation, step)
 
     def enqueue_rewards_cal(
         self,
         payloads: List[RLPayload],
         is_validation: bool,
         step: int,
-        prompt_idxs: List[int] = [],
     ) -> None:
         """
         Enqueue the reward calculation task.
@@ -570,7 +562,6 @@ class RewardDispatcher:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             is_validation (bool): Whether the payloads are from validation set.
             step (int): The weight step where the payloads are generated.
-            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
         """
         for i in range(0, len(payloads), self.payload_per_task):
             self.task_queue.put(
@@ -579,7 +570,6 @@ class RewardDispatcher:
                     payloads[i : i + self.payload_per_task],
                     is_validation,
                     step,
-                    prompt_idxs[i : i + self.payload_per_task],
                 )
             )
 

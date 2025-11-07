@@ -18,14 +18,15 @@ from cosmos_rl.dispatcher.data.schema import Rollout, RLPayload
 
 
 def extract_rollouts(
-    payloads: List[RLPayload], is_end: bool, prompt_idxs: List[int] = []
+    payloads: List[RLPayload],
+    is_end: bool,
 ) -> Tuple[List[List[Rollout]], List[List[Rollout]]]:
     # Extract rollouts from payloads of request
     # Separate valid and invalid rollouts for Dynamic Sampling
     # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
     valid_rollouts_list: List[List[Rollout]] = []
     invalid_rollouts_list: List[List[Rollout]] = []
-    for idx, payload in enumerate(payloads):
+    for _, payload in enumerate(payloads):
         assert (
             len(payload.completions)
             == len(payload.completed_conversations)

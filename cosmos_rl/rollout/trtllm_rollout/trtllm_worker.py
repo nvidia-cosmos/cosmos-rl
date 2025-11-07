@@ -53,6 +53,7 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
     ValidationInstruction,
     ShutdownInstruction,
+    RolloutWrapperInstruction,
 )
 
 trtllm_version = tensorrt_llm.__version__
@@ -489,7 +490,9 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
             logger.info(
                 f"[Rollout] All {len(self.policy_to_rollout_recv_insts)} at step {command.weight_step} recv operations finished in {time_eclapsed:.3f} seconds with {total_bytes_received / (1024 * 1024)} MB received."
             )
-            self.cosmos_state.set_weight_synced()
+            if not self.cosmos_state.weight_synced():
+                self.cosmos_state.set_weight_synced()
+                self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
 
     @TRTLLMRolloutWorkerBase.register_rollout_command_handler(
         RolloutToRolloutBroadcastCommand, backend="trtllm"
@@ -507,6 +510,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if not self._engine_initialized:
             self.prepare_shard_infos_for_weight_sync_insts()
             self._engine_initialized = True
+            self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
 
         if len(dst_replica_names) > 1:
             # Only do broadcast if there are more than one rollout replicas.
@@ -532,6 +536,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
                 if not self.cosmos_state.weight_synced():
                     self.cosmos_state.set_weight_synced()
+                    self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
 
         current_step = broadcast_command.weight_step
         if current_step is not None and current_step > 0:
