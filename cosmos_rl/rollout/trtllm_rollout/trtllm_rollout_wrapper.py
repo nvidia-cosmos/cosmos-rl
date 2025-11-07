@@ -68,7 +68,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         self.post_init(config, None, init_comm=False)
         # only init some meta info.
         self.api_client = APIClient(self.role)
-        self.init_meta()  # This wrapper won't handle commands, it only handle prompt fetching and end signal.
 
         self.state = State()
 
