@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
 from cosmos_rl.utils.logging import logger
 
@@ -125,7 +125,7 @@ class TRTLLM_Rollout(RolloutBase):
 
     def rollout_generation(
         self,
-        prompt_id_and_payload_list: List[Tuple[int, RLPayload]],
+        payloads: List[RLPayload],
         data_packer: DataPacker,
         sampling_params: SamplingParams,
     ) -> List[List[str]]:
@@ -140,7 +140,6 @@ class TRTLLM_Rollout(RolloutBase):
         #   payload,
         #   ...
         # ]
-        payloads = [x[1] for x in prompt_id_and_payload_list]
 
         # Pack the payloads into prompts for vllm.
         prompts = [

@@ -73,7 +73,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         self.state = State()
 
         # init the prompt queue
-        self._prompt_queue: Queue[List[Tuple[int, str]]] = Queue()
+        self._prompt_queue: Queue[List[RLPayload]] = Queue()
 
         self.rollout = TRTLLM_Rollout(config, self.tokenizer)
         self.rollout.init_engine(seed=self.config.rollout.seed, load_format="auto")
@@ -199,7 +199,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     break
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,
-                    prompt_idxs=[],
                     payloads=payloads,
                     is_end=False,
                 )
@@ -220,9 +219,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             prompts = payloads if len(payloads) > 0 else None
 
         if prompts is not None:
-            prompts = [
-                (prompt[0], RLPayload.model_validate(prompt[1])) for prompt in prompts
-            ]
+            prompts = [RLPayload.model_validate(prompt[1]) for prompt in prompts]
             prompt_queue.put(prompts)
         return is_end
 
@@ -237,7 +234,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         ), f"Payloads must be empty and not for validation when sending end signal {is_validation}, {payloads}, {empty}"
         response = RolloutRequest(
             src_replica_name=self.replica_name,
-            prompt_idxs=[],
             payloads=[],
             completions=[],
             is_end=True,
@@ -269,7 +265,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 # validation
                 validation_queue = Queue()
                 validation_results = []
-                prompt_idxs: List[int] = []
                 prompt_payloads: List[Any] = []
                 while True:
                     is_end = self.request_new_prompts(
@@ -279,15 +274,14 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                     )
 
                     if not validation_queue.empty():
-                        prompts = validation_queue.get()
+                        payloads_list: List[RLPayload] = validation_queue.get()
                         completions: List[List[str]] = self.rollout.rollout_generation(
-                            prompt_id_and_payload_list=prompts,
+                            payloads_list=payloads_list,
                             data_packer=self.val_data_packer,
                             sampling_params=self.val_sampling_params,
                         )
                         if completions:
-                            prompt_idxs.extend([prompt[0] for prompt in prompts])
-                            prompt_payloads.extend([prompt[1] for prompt in prompts])
+                            prompt_payloads.extend(payloads_list)
                             validation_results.extend(completions)
 
                     if is_end:
@@ -301,7 +295,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         validation_payloads.append(old_payload)
 
                     self.reward_dispatcher.enqueue_rewards_cal(
-                        validation_payloads, True, self.validation_step, prompt_idxs
+                        validation_payloads, True, self.validation_step
                     )
                     payloads, is_validation, current_step, empty = self.report_rollouts(
                         block=True
@@ -318,7 +312,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                             response = ValidationReportRequest(
                                 src_replica_name=self.replica_name,
                                 validation_step=current_step,
-                                prompt_idxs=[],
                                 payloads=payloads,
                                 is_end=True,
                             )
@@ -357,11 +350,11 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 continue
             else:
                 logger.debug(f"[Rollout] Rollout Generation for {self.replica_name}")
-                prompts: List[Tuple[int, RLPayload]] = self._prompt_queue.get()
-                logger.debug(f"[Rollout] generate start for prompts: {prompts}")
+                payloads: List[RLPayload] = self._prompt_queue.get()
+                logger.debug(f"[Rollout] generate start for prompts: {payloads}")
 
                 completions: List[List[str]] = self.rollout.rollout_generation(
-                    prompt_id_and_payload_list=prompts,
+                    payloads=payloads,
                     data_packer=self.data_packer,
                     sampling_params=self.sampling_params,
                 )
@@ -374,7 +367,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 valid_completions: List[List[str]] = []
                 prompt_indices_to_remove: List[int] = []
                 if len(completions):
-                    batch_size = len(prompts)
+                    batch_size = len(payloads)
                     for i in range(batch_size):
                         completion = completions[i]
                         skip_output = False
@@ -400,8 +393,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                             prompt_indices_to_remove.append(i)
                 if len(prompt_indices_to_remove):
                     prompts = [
-                        prompt
-                        for i, prompt in enumerate(prompts)
+                        payload
+                        for i, payload in enumerate(payloads)
                         if i not in prompt_indices_to_remove
                     ]
                     assert (
@@ -414,8 +407,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
                 if should_report:
                     # only the first tp rank in the rollout replica will post the completion to the controller.
-                    prompt_idxs = [prompt[0] for prompt in prompts]
-                    payloads = [prompt[1] for prompt in prompts]
+                    payloads_list: List[RLPayload] = prompts
 
                     valid_payloads = []
                     for old_payload, completions in zip(payloads, valid_completions):
@@ -426,7 +418,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         valid_payloads,
                         False,
                         0,
-                        prompt_idxs,
                     )
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():

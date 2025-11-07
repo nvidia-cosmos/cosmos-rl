@@ -321,7 +321,6 @@ class ControllerDataFetcher(DataFetcherBase):
                             shuffle=False,
                             drop_last=False,
                         )
-                # FIXME: (lms) We should add a default val_sampler for else-branch?
 
                 if self.val_batch_sampler is not None:
                     logger.info(
@@ -377,13 +376,13 @@ class ControllerDataFetcher(DataFetcherBase):
 
     def get_batched_prompt(
         self, n: int, validation_step: Optional[int] = None
-    ) -> Tuple[bool, List[IdxAndRLPayload]]:
+    ) -> Tuple[bool, List[RLPayload]]:
         add_answer = (
             self.config.rollout.multi_turn_config.enable
             or not self.config.train.local_dataset
         )
         # query n prompts from the dataset [idx, payload]
-        prompt_id_and_payload_list: List[IdxAndRLPayload] = []
+        payloads_list: List[RLPayload] = []
         is_end = False
 
         is_validation = validation_step is not None
@@ -452,9 +451,9 @@ class ControllerDataFetcher(DataFetcherBase):
                         # For non-multi-turn rollout, we set reference answer to None.
                         payload.reference_answer = None
 
-                prompt_id_and_payload_list.append((idx, payload))
+                payloads_list.append(payload)
 
-        return prompt_id_and_payload_list, is_end
+        return payloads_list, is_end
 
     def validation_activate_dataloader(self, validation_step: int):
         if validation_step not in self.val_iters:
