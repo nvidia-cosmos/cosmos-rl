@@ -42,6 +42,7 @@ from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout import TRTLLM_Rollout
 from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
     ShutdownInstruction,
     ValidationInstruction,
+    RolloutWrapperInstruction,
 )
 
 from tensorrt_llm import SamplingParams
@@ -132,6 +133,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         self.validation_event = threading.Event()
 
         self.life_control_thread: Optional[threading.Thread] = None
+        self.rollout_wrapper_event = threading.Event()
 
         self.reward_dispatcher = RewardDispatcher(
             payload_per_task=COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
@@ -178,6 +180,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         self.reward_dispatcher.setup(
             config=self.config,
+            data_fetcher = self.data_fetcher,
             dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
@@ -246,6 +249,9 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             not self.rollout.rollout_config.multi_turn_config.enable
         ), "[Rollout] multi_turn_config.enable must be False for trtllm rollout."
         while (replica_name := self.cosmos_replica_name_queue.get()) is not None:
+            while not self.rollout_wrapper_event.is_set():
+                # this means that inside trtllmwoker, the weight is not synced yet.
+                pass
             # Main process will be blocked here until the trtllm worker has all done the registration.
             # So the worker processes has done the registration.
             logger.info(
@@ -436,6 +442,12 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             elif isinstance(inst, ValidationInstruction):
                 self.validation_event.set()
                 self.validation_step = inst.validation_step
+            elif isinstance(inst, RolloutWrapperInstruction):
+                logger.info(
+                    f"[Rollout] Received rollout wrapper instruction of {self.replica_name}, setting rollout wrapper signal"
+                )
+                if not self.rollout_wrapper_event.is_set():
+                    self.rollout_wrapper_event.set()
             else:
                 raise ValueError(f"[Rollout] Unknown instruction: {inst}")
 

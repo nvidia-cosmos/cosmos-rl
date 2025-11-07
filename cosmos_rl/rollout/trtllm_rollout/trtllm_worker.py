@@ -53,6 +53,7 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.rollout.trtllm_rollout.trtllm_common import (
     ValidationInstruction,
     ShutdownInstruction,
+    RolloutWrapperInstruction,
 )
 
 trtllm_version = tensorrt_llm.__version__
@@ -379,6 +380,8 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if not self._engine_initialized:
             self.prepare_shard_infos_for_weight_sync_insts()
             self._engine_initialized = True
+            self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
+            
 
         if command.dst_replica_name != self.replica_name:
             return
@@ -507,6 +510,7 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
         if not self._engine_initialized:
             self.prepare_shard_infos_for_weight_sync_insts()
             self._engine_initialized = True
+            self.cosmos_weight_sync_queue.put(RolloutWrapperInstruction())
 
         if len(dst_replica_names) > 1:
             # Only do broadcast if there are more than one rollout replicas.
