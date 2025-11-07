@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Union
 from torch.utils.data import Dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -104,7 +104,10 @@ class PostCompletionSampleDataPacker(DecoderOnlyLLMDataPacker):
         self.storage = SQLiteStorage("sample_data_post_completion_test.db")
 
     def get_policy_input(
-        self, item: Any, rollout_output: str, n_ignore_prefix_tokens: int = 0
+        self,
+        item: Any,
+        rollout_output: Union[str, List[int]],
+        n_ignore_prefix_tokens: int = 0,
     ) -> Any:
         """
         Process samples & rollout output before collating them into a mini-batch
@@ -123,79 +126,99 @@ class PostCompletionSampleDataPacker(DecoderOnlyLLMDataPacker):
         self.storage.delete_item(id)
         return super().get_policy_input(item, rollout_output, n_ignore_prefix_tokens)
 
-    def get_rollout_output(self, items: Optional[List[Any]]) -> Optional[List[Any]]:
+    def get_rollout_output(
+        self,
+        completions: Optional[List[Any]],
+        completed_conversations: Optional[List[Any]],
+        logprobs: Optional[List[Any]],
+        token_ids: Optional[List[Any]],
+        **kwargs,
+    ) -> Optional[List[Any]]:
         """
         Post-process to get the rollout outputs from the rollout engine
         For example, we can clean up the completions here.
         """
-        if items is None:
-            return None
-        assert isinstance(items, list)
-        if len(items) == 0:
-            return items
+        # Handle None or empty cases for completions and completed_conversations
+        if completions is None:
+            completions_uuids = None
+        assert isinstance(completions, list)
+        if completed_conversations is None:
+            completed_conversations_uuids = None
+        assert isinstance(completed_conversations, list)
 
-        if isinstance(items[0], str):
+        completions_uuids = []
+        # process completions for normal cases to store in SQLiteStorage and replace with UUIDs
+        if len(completions) > 0 and isinstance(completions[0], str):
             # first case : items should be List[str]
-            uuids = []
-            for item in items:
+            for item in completions:
                 assert isinstance(item, str)
                 if item == "":
-                    uuids.append(item)
+                    completions_uuids.append(item)
                 else:
                     id = uuid.uuid4()
                     self.storage.add_item(str(id), item)
-                    uuids.append(str(id))
-            return uuids
-        elif isinstance(items[0], ChatMessage) or isinstance(items[0], dict):
+                    completions_uuids.append(str(id))
+        elif len(completions) > 0 and (
+            isinstance(completions[0], ChatMessage) or isinstance(completions[0], dict)
+        ):
             # second case : items should be List[ChatMessage]
-            uuids = []
-            for item in items:
+            for item in completions:
                 if isinstance(item, dict):
                     assert "role" in item and "content" in item
                     if item["content"] == "":
                         # If actual content is empty, no need to store in SQLite
-                        uuids.append(item)
+                        completions_uuids.append(item)
                         continue
                 elif isinstance(item, ChatMessage):
                     if item.content == "":
                         # If actual content is empty, no need to store in SQLite
-                        uuids.append(item)
+                        completions_uuids.append(item)
                         continue
                 else:
                     raise ValueError("Invalid item type")
                 id = uuid.uuid4()
                 self.storage.add_item(str(id), item)
-                uuids.append(str(id))
-            return uuids
+                completions_uuids.append(str(id))
         else:
-            # second case : items should be List[ConversationType] in multi-turn setting
-            uuids = []
-            for item in items:
-                assert isinstance(item, list)
-                if len(item) == 0:
-                    # If actual content is empty, no need to store in SQLite
-                    uuids.append(item)
-                    continue
-                if all(
-                    isinstance(sub_item, ChatMessage) and sub_item.content == ""
-                    for sub_item in item
-                ) or all(
-                    isinstance(sub_item, dict) and sub_item["content"] == ""
-                    for sub_item in item
-                ):
-                    # If actual content is empty, no need to store in SQLite
-                    uuids.append(item)
-                    continue
-                # Check all sub_item are ChatMessage or dict
-                assert all(
-                    isinstance(sub_item, ChatMessage) or isinstance(sub_item, dict)
-                    for sub_item in item
-                )
-                # Store the actual content in SQLite and return the UUID
-                id = uuid.uuid4()
-                self.storage.add_item(str(id), item)
-                uuids.append(str(id))
-            return uuids
+            raise ValueError("Invalid item type in completions")
+
+        # process completed_conversations if multi-turn setting is enabled to store in SQLiteStorage and replace with UUIDs
+        completed_conversations_uuids = []
+        for item in completed_conversations:
+            assert isinstance(item, list)
+            if len(item) == 0:
+                # If actual content is empty, no need to store in SQLite
+                completed_conversations_uuids.append(item)
+                continue
+            if all(
+                isinstance(sub_item, ChatMessage) and sub_item.content == ""
+                for sub_item in item
+            ) or all(
+                isinstance(sub_item, dict) and sub_item["content"] == ""
+                for sub_item in item
+            ):
+                # If actual content is empty, no need to store in SQLite
+                completed_conversations_uuids.append(item)
+                continue
+            # Check all sub_item are ChatMessage or dict
+            assert all(
+                isinstance(sub_item, ChatMessage) or isinstance(sub_item, dict)
+                for sub_item in item
+            )
+            # Store the actual content in SQLite and return the UUID
+            id = uuid.uuid4()
+            self.storage.add_item(str(id), item)
+            completed_conversations_uuids.append(str(id))
+
+        # logprobs and token_ids not handled in this example, just return directly since normally they are None or empty if we do not enable decoupled_loss and enable rollout_as_token_ids.
+        # Or the logprobs and token ids can be combined with the completions as a whole for each item and stored them together in SQLite as well.
+        return (
+            completions_uuids,
+            completed_conversations_uuids,
+            logprobs,
+            token_ids,
+            kwargs,
+        )
 
 
 if __name__ == "__main__":

@@ -234,17 +234,18 @@ class Controller:
             # 1. Detect the current left pending rollouts in all policy replicas.
             # 2. Check the config.train.train_policy.allowed_outdated_steps.
             # 3. If the current pending rollouts is larger than the allowed outdated version count, reduce the number of prompts to generate.
-            current_pending_rollouts = (
-                self.policy_status_manager.total_pending_rollouts()
-            )
+            current_pending_rollouts = self.policy_status_manager.samples_on_the_fly
             if (
                 current_pending_rollouts
-                > self.config.train.train_policy.allowed_outdated_steps
+                > (self.config.train.train_policy.allowed_outdated_steps + 1)
                 * len(self.policy_status_manager)
                 * self.config.train.train_batch_per_replica
             ):
-                n = 0 if self.config.train.train_policy.no_outdated_rollout else 1
-                if not self.config.train.train_policy.no_outdated_rollout:
+                n = min(
+                    n,
+                    self.config.train.train_policy.outdated_rollout_fetch_batch_size,
+                )
+                if n > 0:
                     # Log only when n is reduced but not when set to 0 since 0 is logged too frequently
                     logger.warning(
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
@@ -330,6 +331,9 @@ class Controller:
             current_fetch_count = len(prompt_id_and_payload_list)
             for i in range(current_fetch_count):
                 prompt_id_and_payload_list[i][1].weight_version = 0
+        self.policy_status_manager.samples_on_the_fly += (
+            current_fetch_count * self.config.rollout.n_generation
+        )
 
         return prompt_id_and_payload_list, is_end
 

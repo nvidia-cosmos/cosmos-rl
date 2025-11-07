@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Union
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
@@ -204,7 +204,10 @@ class DemoDataPacker(DataPacker):
         return self.underlying_data_packer.rollout_collate_fn(items)
 
     def get_policy_input(
-        self, item: Any, rollout_output: str, n_ignore_prefix_tokens: int = 0
+        self,
+        item: Any,
+        rollout_output: Union[str, List[int]],
+        n_ignore_prefix_tokens: int = 0,
     ) -> Any:
         """
         Process samples & rollout output before collating them into a mini-batch

@@ -871,6 +871,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                     prompt_idxs.extend([idx for idx, _ in prompt_id_and_payload_list])
                     for p, rr in zip(payloads, rollout_results):
                         p.completions = rr.completions
+                        p.completion_logprobs = rr.completion_logprobs
+                        p.completion_token_ids = rr.completion_token_ids
                         if self.rollout.rollout_config.multi_turn_config.enable:
                             p.completed_conversations = rr.completed_conversations
                     validation_payloads.extend(payloads)
@@ -901,18 +903,23 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
                 if payloads is not None:
                     for i in range(len(payloads)):
-                        payloads[
-                            i
-                        ].completions = self.val_data_packer.get_rollout_output(
-                            payloads[i].completions
+                        (
+                            payloads[i].completions,
+                            payloads[i].completed_conversations,
+                            payloads[i].completion_logprobs,
+                            payloads[i].completion_token_ids,
+                            _,
+                        ) = self.val_data_packer.get_rollout_output(
+                            payloads[i].completions,
+                            payloads[i].completed_conversations,
+                            payloads[i].completion_logprobs,
+                            payloads[i].completion_token_ids,
                         )
-                        payloads[
-                            i
-                        ].completed_conversations = (
-                            self.val_data_packer.get_rollout_output(
-                                payloads[i].completed_conversations
+                        if self.config.train.train_policy.rollout_as_token_ids:
+                            payloads[i].completions = [""] * len(
+                                payloads[i].completions
                             )
-                        )
+
                     response = ValidationReportRequest(
                         src_replica_name=self.replica_name,
                         validation_step=current_step,
@@ -1375,18 +1382,24 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 if is_validation:
                     break
                 for i in range(len(payloads)):
-                    payloads[i].completions = self.data_packer.get_rollout_output(
-                        payloads[i].completions
-                    )
-                    payloads[
-                        i
-                    ].completed_conversations = self.data_packer.get_rollout_output(
-                        payloads[i].completed_conversations
+                    (
+                        payloads[i].completions,
+                        payloads[i].completed_conversations,
+                        payloads[i].completion_logprobs,
+                        payloads[i].completion_token_ids,
+                        _,
+                    ) = self.data_packer.get_rollout_output(
+                        payloads[i].completions,
+                        payloads[i].completed_conversations,
+                        payloads[i].completion_logprobs,
+                        payloads[i].completion_token_ids,
                     )
                     # when using local dataset, we don't need to send the prompt/conversation to the controller
                     if self.config.train.local_dataset:
                         payloads[i].prompt = None
                         payloads[i].conversation = None
+                    if self.config.train.train_policy.rollout_as_token_ids:
+                        payloads[i].completions = [""] * len(payloads[i].completions)
 
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,
@@ -1551,6 +1564,8 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                         valid_prompt_idxs.append(prompt_idx)
                         # update payload
                         old_payload.completions = result.completions
+                        old_payload.completion_logprobs = result.completion_logprobs
+                        old_payload.completion_token_ids = result.completion_token_ids
                         if self.rollout.rollout_config.multi_turn_config.enable:
                             old_payload.completed_conversations = (
                                 result.completed_conversations

@@ -2,7 +2,7 @@ import io
 import base64
 import torch
 from PIL import Image
-from typing import List, Any, Dict, Optional, Tuple
+from typing import List, Any, Dict, Optional, Tuple, Union
 from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 
@@ -620,7 +620,7 @@ class HFVLMDataPacker(DataPacker):
     def get_policy_input(
         self,
         sample: "HFVLMDataPacker.Payload",
-        rollout_output: Optional[str] = None,
+        rollout_output: Optional[Union[str, List[int]]] = None,
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
@@ -703,7 +703,15 @@ class HFVLMDataPacker(DataPacker):
         input_ids = x["input_ids"]
         completion_ids = []
         if rollout_output:
-            completion_ids = self.tokenizer(rollout_output).input_ids  # Don't pad yet
+            rollout_as_token_ids = isinstance(rollout_output, list) and all(
+                isinstance(i, int) for i in rollout_output
+            )
+            if rollout_as_token_ids:
+                completion_ids = rollout_output
+            else:
+                completion_ids = self.tokenizer(
+                    rollout_output
+                ).input_ids  # Don't pad yet
         return_dict["input_ids"] = input_ids + completion_ids
 
         return_dict["logprob_masks"] = (

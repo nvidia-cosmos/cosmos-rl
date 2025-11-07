@@ -59,14 +59,19 @@ class DecoderOnlyLLMDataPacker(DataPacker):
     def get_policy_input(
         self,
         sample: Union[str, ConversationType],
-        completion: str,
+        completion: Union[str, List[int]],
         n_ignore_prefix_tokens: int = 0,
     ) -> RLPolicyInput:
         """
         Default text policy input packer.
         Only support raw text input.
         """
-        assert isinstance(completion, str), "Completion should be a string"
+        rollout_as_token_ids = isinstance(completion, list) and all(
+            isinstance(c, int) for c in completion
+        )
+        assert (
+            isinstance(completion, str) or rollout_as_token_ids
+        ), "Completion should be a string or a list of token ids"
 
         if not self.config.rollout.multi_turn_config.enable:
             # Reuse the same logic as get_rollout_input to get raw text prompts
@@ -77,9 +82,12 @@ class DecoderOnlyLLMDataPacker(DataPacker):
                 prompt, add_special_tokens=False
             ).input_ids  # not padded yet
 
-            completion_ids = self.tokenizer(
-                completion, add_special_tokens=False
-            ).input_ids
+            if rollout_as_token_ids:
+                completion_ids = completion
+            else:
+                completion_ids = self.tokenizer(
+                    completion, add_special_tokens=False
+                ).input_ids
 
             return DecoderOnlyLLMDataPacker.RLPolicyInput(
                 input_ids=input_ids + completion_ids,

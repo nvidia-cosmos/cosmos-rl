@@ -142,17 +142,25 @@ class DataPacker(ABC):
         """
         return items
 
-    def get_rollout_output(self, items: List[Any]) -> List[Any]:
+    def get_rollout_output(
+        self,
+        completions: List[Any],
+        completed_conversations: List[Any],
+        logprobs: List[Any],
+        token_ids: List[Any],
+        **kwargs,
+    ) -> List[Any]:
         """
         Post-process to get the rollout outputs from the rollout engine
+        Include handling the completions, the completed_conversations for multi-turn case, the logprobs of completions, and the token ids of completions
         """
-        return items
+        return completions, completed_conversations, logprobs, token_ids, kwargs
 
     @abstractmethod
     def get_policy_input(
         self,
         sample: Any,
-        rollout_output: str,
+        rollout_output: Union[str, List[int]],
         n_ignore_prefix_tokens: int = 0,
     ) -> Any:
         """
