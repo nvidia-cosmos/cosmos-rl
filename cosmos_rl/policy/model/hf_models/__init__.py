@@ -117,6 +117,7 @@ class HFModel(BaseModel):
                     logger.warning(
                         f"Failed to patch sequence packing forward for {self.hf_config.model_type}"
                     )
+            kwargs_filtered["valid_input_len"] = kwargs["valid_input_len"]
 
         out = self.model(
             input_ids=input_ids,
