@@ -53,6 +53,19 @@ def get_packed_attention_mask(lengths, device):
     return mask
 
 
+def make_new_self_attn_forward(original_attn_forward):
+    def self_attn_forward(self, hidden_states, *args, **kwargs):
+        valid_input_len = kwargs.get("valid_input_len", None)
+        if valid_input_len is not None:
+            attention_mask = get_packed_attention_mask(
+                valid_input_len.tolist(), hidden_states.device
+            )
+            kwargs["attention_mask"] = attention_mask
+        return original_attn_forward(hidden_states, *args, **kwargs)
+
+    return self_attn_forward
+
+
 def sequence_packing_forward_patch(hf_config: AutoConfig, hfmodel):
     patch_success = False
     try:
@@ -122,18 +135,6 @@ def sequence_packing_forward_qwen3_vl_patch(model):
     # Replace the forward method
     model.language_model.forward = sequence_packing_forward_qwen3_vl_inner
 
-    def make_new_self_attn_forward(original_attn_forward):
-        def self_attn_forward(self, hidden_states, *args, **kwargs):
-            valid_input_len = kwargs.get("valid_input_len", None)
-            if valid_input_len is not None:
-                attention_mask = get_packed_attention_mask(
-                    valid_input_len.tolist(), hidden_states.device
-                )
-                kwargs["attention_mask"] = attention_mask
-            return original_attn_forward(hidden_states, *args, **kwargs)
-
-        return self_attn_forward
-
     # Replace the self_attn.forward method
     for layer in model.language_model.layers:
         original_attn_forward = layer.self_attn.forward
@@ -143,12 +144,43 @@ def sequence_packing_forward_qwen3_vl_patch(model):
 
 
 def sequence_packing_forward_llm_patch(model):
-    original_forward = model.language_model.forward
+    original_forward = model.model.forward
 
     def sequence_packing_forward_llm_inner(*args, **kwargs):
         valid_input_len = kwargs.get("valid_input_len", None)
         if valid_input_len is not None:
-            pass
+            input_ids = kwargs.get("input_ids", None)
+            inputs_embeds = kwargs.get("inputs_embeds", None)
+            position_ids = kwargs.get("position_ids", None)
+
+            batch_size = valid_input_len.shape[0]
+            input_ids_list = []
+            inputs_embeds_list = []
+            position_ids_list = []
+            for i in range(batch_size):
+                valid_len = valid_input_len[i].item()
+                if input_ids is not None:
+                    cur_input_ids = input_ids[i : i + 1, :valid_len].clone()
+                    input_ids_list.append(cur_input_ids)
+                if inputs_embeds is not None:
+                    cur_inputs_embeds = inputs_embeds[i : i + 1, :valid_len, :].clone()
+                    inputs_embeds_list.append(cur_inputs_embeds)
+                if position_ids is not None:
+                    cur_position_ids = position_ids[i : i + 1, :valid_len].clone()
+                    position_ids_list.append(cur_position_ids)
+
+            if len(input_ids_list) > 0:
+                kwargs["input_ids"] = torch.cat(input_ids_list, dim=1)
+            if len(inputs_embeds_list) > 0:
+                kwargs["inputs_embeds"] = torch.cat(inputs_embeds_list, dim=1)
+            if len(position_ids_list) > 0:
+                kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
+
+            del (
+                input_ids_list,
+                inputs_embeds_list,
+                position_ids_list,
+            )
         else:
             logger.warning(
                 "valid_input_len is not provided, skip sequence packing forward"
@@ -158,7 +190,16 @@ def sequence_packing_forward_llm_patch(model):
         return result
 
     # Replace the forward method
-    model.language_model.forward = sequence_packing_forward_llm_inner
+    model.model.forward = sequence_packing_forward_llm_inner
+
+    # Replace the self_attn.forward method
+    for layer in model.model.layers:
+        original_attn_forward = layer.self_attn.forward
+        layer.self_attn.forward = make_new_self_attn_forward(
+            original_attn_forward
+        ).__get__(layer.self_attn, type(layer.self_attn))
+
+    # Replace the forward method
 
 
 # In order to support sequence packing during forward passes, the forward method of the language model must be patched.

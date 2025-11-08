@@ -18,7 +18,7 @@ import os
 import sys
 import subprocess
 import torch
-from transformers import AutoProcessor
+from transformers import AutoProcessor, AutoModelForCausalLM
 
 try:
     from transformers import Qwen3VLForConditionalGeneration
@@ -159,7 +159,7 @@ class SeqPackingTest(unittest.TestCase):
         self.run_train_for_sequence_packing(1, 2, 2)
 
     def test_hfmodel_sequence_packing(self):
-        for model_id in ["Qwen/Qwen3-VL-8B-Instruct"]:
+        for model_id in ["Qwen/Qwen3-VL-8B-Instruct", "microsoft/phi-4"]:
             if model_id in ["Qwen/Qwen3-VL-8B-Instruct"]:
                 from cosmos_rl.policy.model.hf_models.patch import (
                     sequence_packing_forward_qwen3_vl_patch,
@@ -287,6 +287,129 @@ class SeqPackingTest(unittest.TestCase):
                     del single_output_max_index
                     del single_output_max_logit
                     torch.cuda.empty_cache()
+            elif model_id in ["microsoft/phi-4"]:
+                from cosmos_rl.policy.model.hf_models.patch import (
+                    sequence_packing_forward_llm_patch,
+                )
+
+                hf_processor = AutoProcessor.from_pretrained(
+                    model_id, trust_remote_code=True
+                )
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_id,
+                    dtype=torch.bfloat16,
+                    trust_remote_code=True,
+                    device_map="cuda:0",
+                ).eval()
+                # Patch the model for sequence packing forward
+                sequence_packing_forward_llm_patch(model)
+
+                conversation1 = [
+                    {
+                        "role": "system",
+                        "content": "You are a pirate chatbot who always responds in pirate speak!",
+                    },
+                    {"role": "user", "content": "Who are you?"},
+                ]
+
+                conversation2 = [
+                    {
+                        "role": "system",
+                        "content": "You are a Chinese-English translator!",
+                    },
+                    {"role": "user", "content": "你好，我是谁？"},
+                ]
+                input1_text = hf_processor.apply_chat_template(
+                    conversation1, tokenize=False
+                )
+                input1 = hf_processor(
+                    text=input1_text,
+                    return_tensors="pt",
+                ).to("cuda")
+                input1.pop("attention_mask")
+                input2_text = hf_processor.apply_chat_template(
+                    conversation2, tokenize=False
+                )
+                input2 = hf_processor(
+                    text=input2_text,
+                    return_tensors="pt",
+                ).to("cuda")
+                input2.pop("attention_mask")
+                for key, value in input1.items():
+                    print(f"input1 {key}: {value.shape}")
+
+                for key, value in input2.items():
+                    print(f"input2 {key}: {value.shape}")
+                input1_ids = input1["input_ids"]
+                input2_ids = input2["input_ids"]
+                input1_ids_len = input1_ids.shape[1]
+                input2_ids_len = input2_ids.shape[1]
+                if input1_ids_len < input2_ids_len:
+                    input1_ids = torch.cat(
+                        [
+                            input1_ids,
+                            torch.full(
+                                (1, input2_ids_len - input1_ids_len),
+                                hf_processor.pad_token_id,
+                                device=input1_ids.device,
+                            ),
+                        ],
+                        dim=1,
+                    )
+                elif input1_ids_len > input2_ids_len:
+                    input2_ids = torch.cat(
+                        [
+                            input2_ids,
+                            torch.full(
+                                (1, input1_ids_len - input2_ids_len),
+                                hf_processor.pad_token_id,
+                                device=input2_ids.device,
+                            ),
+                        ],
+                        dim=1,
+                    )
+                merged_input_ids = torch.cat([input1_ids, input2_ids], dim=0)
+                packed_inputs = {
+                    "input_ids": merged_input_ids,
+                    "valid_input_len": torch.tensor(
+                        [input1_ids_len, input2_ids_len],
+                        dtype=torch.int32,
+                        device=input1_ids.device,
+                    ),
+                }
+                packed_valid_input_len = packed_inputs["valid_input_len"]
+                accumulated_valid_input_len = torch.cumsum(
+                    packed_valid_input_len, dim=0
+                )
+                with torch.no_grad():
+                    packed_output = model(**packed_inputs).logits
+                    assert packed_output.shape[0] == 1
+                    assert (
+                        packed_output.shape[1] == accumulated_valid_input_len[-1].item()
+                    )
+                    conv2_output = packed_output[
+                        :,
+                        accumulated_valid_input_len[
+                            0
+                        ].item() : accumulated_valid_input_len[1].item(),
+                        :,
+                    ]
+                    single_output = model(**input2).logits
+                    assert single_output.shape == conv2_output.shape
+
+                    conv2_output_max_index = conv2_output[0, -1, :].argmax(dim=-1)
+                    single_output_max_index = single_output[0, -1, :].argmax(dim=-1)
+                    conv2_output_max_logit = conv2_output[0, -1, :].max(dim=-1).values
+                    single_output_max_logit = single_output[0, -1, :].max(dim=-1).values
+
+                    print(
+                        f"conv2_output_max_index: {conv2_output_max_index} | single_output_max_index: {single_output_max_index}"
+                    )
+                    print(
+                        f"conv2_output_max_logit: {conv2_output_max_logit} | single_output_max_logit: {single_output_max_logit}"
+                    )
+                    assert conv2_output_max_index == single_output_max_index
+                    assert conv2_output_max_logit == single_output_max_logit
 
 
 if __name__ == "__main__":
