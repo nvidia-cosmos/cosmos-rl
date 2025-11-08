@@ -82,7 +82,6 @@ def sequence_packing_forward_qwen3_vl(model):
             position_ids = kwargs.get("position_ids", None)
 
             batch_size = valid_input_len.shape[0]
-            cache_position_list = []
             inputs_embeds_list = []
             visual_pos_masks_list = []
             position_ids_list = []
@@ -90,9 +89,6 @@ def sequence_packing_forward_qwen3_vl(model):
                 valid_len = valid_input_len[i].item()
                 cur_inputs_embeds = inputs_embeds[i : i + 1, :valid_len, :].clone()
                 inputs_embeds_list.append(cur_inputs_embeds)
-                cache_position_list.append(
-                    torch.arange(0, valid_len, device=inputs_embeds.device)
-                )
 
                 if visual_pos_masks is not None:
                     cur_visual_mask = visual_pos_masks[i : i + 1, :valid_len].clone()
@@ -103,7 +99,6 @@ def sequence_packing_forward_qwen3_vl(model):
                     position_ids_list.append(cur_position_ids)
 
             kwargs["inputs_embeds"] = torch.cat(inputs_embeds_list, dim=1)
-            kwargs["cache_position"] = torch.cat(cache_position_list, dim=0)
             if len(visual_pos_masks_list) > 0:
                 kwargs["visual_pos_masks"] = torch.cat(visual_pos_masks_list, dim=1)
 
@@ -112,7 +107,6 @@ def sequence_packing_forward_qwen3_vl(model):
 
             del (
                 inputs_embeds_list,
-                cache_position_list,
                 visual_pos_masks_list,
                 position_ids_list,
             )
