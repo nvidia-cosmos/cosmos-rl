@@ -62,6 +62,7 @@ def sequence_packing_forward_patch(hf_config: AutoConfig, hfmodel):
         else:
             if not hfmodel.is_vlm:
                 SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS["llm"](hfmodel)
+                patch_success = True
             else:
                 logger.warning(
                     f"Failed to patch sequence packing forward for {hf_config.model_type}, supported models: {SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS.keys()}"
@@ -71,7 +72,7 @@ def sequence_packing_forward_patch(hf_config: AutoConfig, hfmodel):
     return patch_success
 
 
-def sequence_packing_forward_qwen3_vl(model):
+def sequence_packing_forward_qwen3_vl_patch(model):
     original_forward = model.language_model.forward
 
     def sequence_packing_forward_qwen3_vl_inner(*args, **kwargs):
@@ -141,7 +142,7 @@ def sequence_packing_forward_qwen3_vl(model):
         ).__get__(layer.self_attn, type(layer.self_attn))
 
 
-def sequence_packing_forward_llm(model):
+def sequence_packing_forward_llm_patch(model):
     original_forward = model.language_model.forward
 
     def sequence_packing_forward_llm_inner(*args, **kwargs):
@@ -163,6 +164,6 @@ def sequence_packing_forward_llm(model):
 # In order to support sequence packing during forward passes, the forward method of the language model must be patched.
 # The patching logic is model-dependent, with special handling required for Vision-Language Models (VLMs) and other architectures.
 SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS = {
-    "qwen3_vl": sequence_packing_forward_qwen3_vl,
-    "llm": sequence_packing_forward_llm,
+    "qwen3_vl": sequence_packing_forward_qwen3_vl_patch,
+    "llm": sequence_packing_forward_llm_patch,
 }

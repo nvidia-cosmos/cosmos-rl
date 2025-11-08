@@ -18,7 +18,7 @@ import os
 import sys
 import subprocess
 import torch
-from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+from transformers import AutoProcessor
 
 try:
     from transformers import Qwen3VLForConditionalGeneration
@@ -153,16 +153,16 @@ class SeqPackingTest(unittest.TestCase):
                 process.returncode == 0
             ), f"Process failed with code: {process.returncode}"
 
-    # def test_train_for_sequence_packing(self):
-    #     self.run_train_for_sequence_packing(4, 1, 1)
-    #     self.run_train_for_sequence_packing(2, 2, 1)
-    #     self.run_train_for_sequence_packing(1, 2, 2)
+    def test_train_for_sequence_packing(self):
+        self.run_train_for_sequence_packing(4, 1, 1)
+        self.run_train_for_sequence_packing(2, 2, 1)
+        self.run_train_for_sequence_packing(1, 2, 2)
 
     def test_hfmodel_sequence_packing(self):
         for model_id in ["Qwen/Qwen3-VL-8B-Instruct"]:
             if model_id in ["Qwen/Qwen3-VL-8B-Instruct"]:
                 from cosmos_rl.policy.model.hf_models.patch import (
-                    sequence_packing_forward_qwen3_vl,
+                    sequence_packing_forward_qwen3_vl_patch,
                 )
 
                 if (
@@ -178,7 +178,8 @@ class SeqPackingTest(unittest.TestCase):
                         trust_remote_code=True,
                         device_map="cuda:0",
                     ).eval()
-                    sequence_packing_forward_qwen3_vl(model)
+                    # Patch the model for sequence packing
+                    sequence_packing_forward_qwen3_vl_patch(model)
 
                     conversation1 = [
                         {"content": "Answer the questions.", "role": "system"},
