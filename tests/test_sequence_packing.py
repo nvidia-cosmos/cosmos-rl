@@ -159,7 +159,11 @@ class SeqPackingTest(unittest.TestCase):
         self.run_train_for_sequence_packing(1, 2, 2)
 
     def test_hfmodel_sequence_packing(self):
-        for model_id in ["Qwen/Qwen3-VL-8B-Instruct", "microsoft/phi-4"]:
+        for model_id in [
+            "Qwen/Qwen3-VL-8B-Instruct",
+            "microsoft/phi-4",
+            "google/gemma-3-1b-pt",
+        ]:
             if model_id in ["Qwen/Qwen3-VL-8B-Instruct"]:
                 from cosmos_rl.policy.model.hf_models.patch import (
                     sequence_packing_forward_qwen3_vl_patch,
@@ -287,7 +291,7 @@ class SeqPackingTest(unittest.TestCase):
                     del single_output_max_index
                     del single_output_max_logit
                     torch.cuda.empty_cache()
-            elif model_id in ["microsoft/phi-4"]:
+            elif model_id in ["microsoft/phi-4", "google/gemma-3-1b-pt"]:
                 from cosmos_rl.policy.model.hf_models.patch import (
                     sequence_packing_forward_llm_patch,
                 )
@@ -319,17 +323,34 @@ class SeqPackingTest(unittest.TestCase):
                     },
                     {"role": "user", "content": "你好，我是谁？"},
                 ]
-                input1_text = hf_processor.apply_chat_template(
-                    conversation1, tokenize=False
-                )
+                if model_id == "google/gemma-3-1b-pt":
+                    if isinstance(conversation1, list):
+                        input1_text = "\n".join(
+                            [
+                                f"{turn['role']}: {turn['content']}"
+                                for turn in conversation1
+                            ]
+                        )
+                    if isinstance(conversation2, list):
+                        input2_text = "\n".join(
+                            [
+                                f"{turn['role']}: {turn['content']}"
+                                for turn in conversation2
+                            ]
+                        )
+                else:
+                    input1_text = hf_processor.apply_chat_template(
+                        conversation1, tokenize=False
+                    )
+                    input2_text = hf_processor.apply_chat_template(
+                        conversation2, tokenize=False
+                    )
                 input1 = hf_processor(
                     text=input1_text,
                     return_tensors="pt",
                 ).to("cuda")
                 input1.pop("attention_mask")
-                input2_text = hf_processor.apply_chat_template(
-                    conversation2, tokenize=False
-                )
+
                 input2 = hf_processor(
                     text=input2_text,
                     return_tensors="pt",
