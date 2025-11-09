@@ -162,7 +162,7 @@ class SeqPackingTest(unittest.TestCase):
         for model_id in [
             "Qwen/Qwen3-VL-8B-Instruct",
             "microsoft/phi-4",
-            "google/gemma-3-1b-pt",
+            # "google/gemma-3-1b-pt", # Need access to it.
         ]:
             if model_id in ["Qwen/Qwen3-VL-8B-Instruct"]:
                 from cosmos_rl.policy.model.hf_models.patch import (
