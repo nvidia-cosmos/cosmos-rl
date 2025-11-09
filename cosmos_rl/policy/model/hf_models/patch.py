@@ -70,11 +70,13 @@ def sequence_packing_forward_patch(hf_config: AutoConfig, hfmodel):
     patch_success = False
     try:
         if hf_config.model_type in SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS:
-            SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS[hf_config.model_type](hfmodel)
+            SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS[hf_config.model_type](
+                hfmodel.model
+            )
             patch_success = True
         else:
             if not hfmodel.is_vlm:
-                SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS["llm"](hfmodel)
+                SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS["llm"](hfmodel.model)
                 patch_success = True
             else:
                 logger.warning(

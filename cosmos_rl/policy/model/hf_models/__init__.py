@@ -108,9 +108,7 @@ class HFModel(BaseModel):
 
         if "valid_input_len" in kwargs:
             if not self.sequence_packing_forward_patched:
-                patch_success = sequence_packing_forward_patch(
-                    self.hf_config, self.model
-                )
+                patch_success = sequence_packing_forward_patch(self.hf_config, self)
                 if patch_success:
                     self.sequence_packing_forward_patched = True
                 else:
