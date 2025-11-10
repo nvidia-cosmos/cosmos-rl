@@ -20,25 +20,21 @@ from strenum import StrEnum
 from abc import abstractmethod, ABC
 from typing import Union, List
 from functools import partial
-from torchao.float8 import convert_to_float8_training
-from torchao.float8 import Float8LinearConfig
-from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
+from .float4_linear_utils import convert_to_float4_training
+from .config import Float4LinearConfig
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import is_cuda_compatible, torch_version_at_least
 from cosmos_rl.utils.logging import logger
 
-MIN_TORCH_VERSION_FOR_FP8 = "2.7.0"
-IS_TORCH_COMPATIBLE_WITH_FP8 = torch_version_at_least(MIN_TORCH_VERSION_FOR_FP8)
+MIN_TORCH_VERSION_FOR_FP4 = "2.7.0"
+IS_TORCH_COMPATIBLE_WITH_FP4 = torch_version_at_least(MIN_TORCH_VERSION_FOR_FP4)
 
-if not IS_TORCH_COMPATIBLE_WITH_FP8:
+if not IS_TORCH_COMPATIBLE_WITH_FP4:
     logger.warning(
-        f"[FP8] FP8 is not supported for this version of PyTorch, minimum version required: {MIN_TORCH_VERSION_FOR_FP8}, but got: {torch.__version__}. FP8 setting will take no effect."
+        f"[FP4] FP4 is not supported for this version of PyTorch, minimum version required: {MIN_TORCH_VERSION_FOR_FP4}, but got: {torch.__version__}. FP4 setting will take no effect."
     )
-
-# Mainly refer to: https://github.com/pytorch/torchtitan/blob/main/docs/float8.md
-
 
 class ModelConverter(ABC):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
@@ -55,29 +51,29 @@ class ModelConverter(ABC):
         ...
 
 
-class FP8Recipe(StrEnum):
+class FP4Recipe(StrEnum):
     DYNAMIC_SCALING = "dynamic_scaling"
     DELAYED_SCALING = "delayed_scaling"
 
 
-def is_valid_fp8_recipe(value: str) -> bool:
-    return value in FP8Recipe.__members__.values()
+def is_valid_fp4_recipe(value: str) -> bool:
+    return value in FP4Recipe.__members__.values()
 
 
-class FP8QuantRecipe(StrEnum):
+class FP4QuantRecipe(StrEnum):
     ROWWISE = "rowwise"
     TENSORWISE = "tensorwise"
 
 
-def is_valid_fp8_quant_recipe(value: str) -> bool:
-    return value in FP8QuantRecipe.__members__.values()
+def is_valid_fp4_quant_recipe(value: str) -> bool:
+    return value in FP4QuantRecipe.__members__.values()
 
 
 # Refer to: https://github.com/pytorch/torchtitan/blob/e7c0cae934df78d6e9c2835f42ff1f757dc3fddc/torchtitan/components/quantization/utils.py#L10
 def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
     """
     Filter function to determine which modules should be converted.
-    For both Float8 and MXFP8, we only convert Linear modules
+    For both Float4 and MXFP4, we only convert Linear modules
     with dimensions divisible by 16 and not matching any filtered FQNs.
 
     Args:
@@ -102,80 +98,57 @@ def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
-class FP8ModelConverter(ModelConverter):
+class FP4ModelConverter(ModelConverter):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
         super().__init__(config, parallel_dims)
-        if not IS_TORCH_COMPATIBLE_WITH_FP8:
+        if not IS_TORCH_COMPATIBLE_WITH_FP4:
             return
 
         if not is_cuda_compatible(8, 9):
             raise RuntimeError(
-                "FP8 is only supported for device that has compute capability 8.9 or higher"
+                "NVFP4 is only supported for device that has compute capability 10.0 or higher"
             )
-        self.fp8_config = config.train.fp8
+        self.fp4_config = config.train.fp4
 
-        assert is_valid_fp8_quant_recipe(self.fp8_config.quant_recipe)
-        assert is_valid_fp8_recipe(self.fp8_config.fp8_recipe)
+        assert is_valid_fp4_quant_recipe(self.fp4_config.quant_recipe)
+        assert is_valid_fp4_recipe(self.fp4_config.fp4_recipe)
 
-        if self.fp8_config.fp8_recipe == FP8Recipe.DELAYED_SCALING:
-            raise NotImplementedError("[FP8] Delayed scaling is not supported yet.")
+        if self.fp4_config.fp4_recipe == FP4Recipe.DELAYED_SCALING:
+            raise NotImplementedError("[FP4] Delayed scaling is not supported yet.")
 
         self.precompute_scale = False
 
-        if self.fp8_config.quant_recipe == "rowwise":
+        if self.fp4_config.quant_recipe == "rowwise":
             # From torchtitan, it reports an issue that RMSNorm will cause NaN when rowwise quantization and torch.compile is enabled,
             # From that issue, it is recommended to set torch._inductor.config.emulate_precision_casts to True to avoid this.
             # Issue: https://github.com/pytorch/pytorch/issues/150859
             torch._inductor.config.emulate_precision_casts = True
-            self.ao_float8_config = Float8LinearConfig.from_recipe_name(
-                self.fp8_config.quant_recipe
+            self.nvfp4_config = Float4LinearConfig.from_recipe_name(
+                self.fp4_config.quant_recipe
             )
             logger.debug(
-                "[FP8] Set torch._inductor.config.emulate_precision_casts to True"
+                "[FP4] Set torch._inductor.config.emulate_precision_casts to True"
             )
-        elif self.fp8_config.quant_recipe == "tensorwise":
-            # For tensorwise, torchao supports that precompute scale and perform FSDP2 weight all-gather in FP8.
-            # this could save the bandwidth.
-            # self.precompute_scale = True
-            # TODO: (lms) WeightWithDynamicFloat8CastTensor is used in torchao, this could cause
-            # the weight sync got nullptr (WeightWithDynamicFloat8CastTensor is a wrapper).
-            #  Just disable the enable_fsdp_float8_all_gather and precompute_scale for now. Handle it later.
-            # enable_fsdp_float8_all_gather = (
-            #     parallel_dims.dp_shard_enabled
-            # )  # Unlike torchtitan, we enable it by default if in FSDP2.
+        elif self.fp4_config.quant_recipe == "tensorwise":
             self.precompute_scale = False
-            enable_fsdp_float8_all_gather = False
-            self.ao_float8_config = Float8LinearConfig(
-                enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
-                # It is recommended to set force_recompute_fp8_weight_in_bwd to True for FSDP2.
-                force_recompute_fp8_weight_in_bwd=True,
-            )
 
     def convert_model(self, model: torch.nn.Module) -> torch.nn.Module:
-        if not IS_TORCH_COMPATIBLE_WITH_FP8:
+        if not IS_TORCH_COMPATIBLE_WITH_FP4:
             return
 
-        if not self.fp8_config.enable_fp8:
+        if not self.fp4_config.enable_fp4:
             return
 
-        convert_to_float8_training(
+        convert_to_float4_training(
             model,
-            config=self.ao_float8_config,
+            config=self.nvfp4_config,
             module_filter_fn=partial(
                 module_filter_fn, filter_fqns=model.fqn_filter_for_quantization()
             ),
         )
 
     def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
-        if not IS_TORCH_COMPATIBLE_WITH_FP8:
-            return
-
-        if not self.fp8_config.enable_fp8:
-            return
-
-        if not self.precompute_scale:
-            return
-
-        models = [model] if isinstance(model, nn.Module) else model
-        for m in models:
-            precompute_float8_dynamic_scale_for_fsdp(m)
+        """
+        Not implemented yet.
+        """
+        return
