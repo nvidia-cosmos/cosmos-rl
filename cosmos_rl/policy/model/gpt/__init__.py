@@ -211,7 +211,9 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
-
+        def _lastdim_contig(t: torch.Tensor) -> torch.Tensor:
+            # FlashAttention requires stride(-1) == 1
+            return t if t.stride(-1) == 1 else t.contiguous()
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         if self.q_norm is not None:
@@ -228,6 +230,10 @@ class Attention(nn.Module):
 
         cos, sin = position_embeddings
         xq, xk = self.rope_func(xq, xk, cos, sin, unsqueeze_dim=2)
+
+        xq = _lastdim_contig(xq)
+        xk = _lastdim_contig(xk)
+        xv = _lastdim_contig(xv)
 
         input_dtype = xq.dtype
         if input_dtype == torch.float32:
@@ -246,6 +252,11 @@ class Attention(nn.Module):
             xq = xq.view(seqlen, -1, self.head_dim)
             xk = xk.view(seqlen, -1, self.head_dim)
             xv = xv.view(seqlen, -1, self.head_dim)
+
+            xq = _lastdim_contig(xq)
+            xk = _lastdim_contig(xk)
+            xv = _lastdim_contig(xv)
+
             output = self.attn_func_varlen(
                 xq,
                 xk,
@@ -760,7 +771,7 @@ class GPT(BaseModel):
         return model
 
     @classmethod
-    def fqn_filter_for_fp8(cls) -> List[str]:
+    def fqn_filter_for_quantization(cls) -> List[str]:
         return ["lm_head"]
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):

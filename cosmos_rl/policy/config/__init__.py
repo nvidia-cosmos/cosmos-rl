@@ -502,6 +502,18 @@ class FP8Config(BaseModel):
         choices=["rowwise", "tensorwise"],
     )
 
+class FP4Config(BaseModel):
+    enable_fp4: bool = Field(default=False, description="Whether to enable fp4.")
+    fp4_recipe: str = Field(
+        default="dynamic_scaling",
+        description="Recipe for weight scale calculation.",
+        choices=["dynamic_scaling", "delayed_scaling"],
+    )
+    quant_recipe: str = Field(
+        default="rowwise",
+        description="Quantization strategy for weight.",
+        choices=["rowwise", "tensorwise"],
+    )
 
 class TrainingConfig(BaseModel):
     train_policy: Union[SFTDataConfig, GrpoConfig] = Field(
@@ -592,6 +604,7 @@ class TrainingConfig(BaseModel):
     # --------- Engineering ---------
 
     fp8: FP8Config = Field(default_factory=FP8Config)
+    fp4: FP4Config = Field(default_factory=FP4Config)
     ckpt: CheckpointConfig = Field(default_factory=CheckpointConfig)
     resume: Union[bool, str] = Field(
         default=False,
