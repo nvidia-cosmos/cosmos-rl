@@ -60,8 +60,10 @@ class HFVLMDataPacker(DataPacker):
             config.policy.model_name_or_path, trust_remote_code=True
         )
 
-        image_token_id = getattr(hf_config, "image_token_id", None) or getattr(
-            hf_config.vision_config, "image_token_id", None
+        image_token_id = (
+            getattr(hf_config, "image_token_id", None)
+            or getattr(hf_config.vision_config, "image_token_id", None)
+            or getattr(hf_config, "img_context_token_id", None)
         )
         if image_token_id is None:
             image_token_id = getattr(hf_config, "image_token_index", None) or getattr(
@@ -69,7 +71,9 @@ class HFVLMDataPacker(DataPacker):
             )
         assert image_token_id is not None, f"Cannot find image token id in {hf_config=}"
         self.image_token_id = image_token_id
-        self.image_token = getattr(self.hf_processor, "image_token", None)
+        self.image_token = getattr(self.hf_processor, "image_token", None) or getattr(
+            hf_config, "img_context_token", None
+        )
 
         video_token_id = getattr(hf_config, "video_token_id", None) or getattr(
             hf_config.vision_config, "video_token_id", None
@@ -427,6 +431,11 @@ class HFVLMDataPacker(DataPacker):
         else:
             result_dict["batch_num_images"] = None
 
+        if "num_patches" in inputs:
+            result_dict["num_patches"] = inputs["num_patches"]
+        else:
+            result_dict["num_patches"] = None
+
         return result_dict
 
     def _collate_fn(
@@ -447,6 +456,7 @@ class HFVLMDataPacker(DataPacker):
         aspect_ratio_mask = [x["aspect_ratio_mask"] for x in processed_samples]
         image_sizes = [x["image_sizes"] for x in processed_samples]
         batch_num_images = [x["batch_num_images"] for x in processed_samples]
+        num_patches = [x["num_patches"] for x in processed_samples]
 
         if all([x is not None for x in pixel_values_videos]):
             assert all(
@@ -538,6 +548,12 @@ class HFVLMDataPacker(DataPacker):
             ), "batch_num_images should be None"
             batch_num_images = None
 
+        if all([x is not None for x in num_patches]):
+            num_patches = torch.cat(num_patches, dim=0)
+        else:
+            assert all([x is None for x in num_patches]), "num_patches should be None"
+            num_patches = None
+
         # Shape description:
         #
         # pixel_values_[videos/images]: (BATCH_SIZE, N_PATCH, HIDDEN_SIZE)
@@ -581,6 +597,9 @@ class HFVLMDataPacker(DataPacker):
 
         if batch_num_images is not None:
             batch["batch_num_images"] = batch_num_images
+
+        if num_patches is not None:
+            batch["num_patches"] = num_patches
 
         # Pad the input_ids, logprob_masks
         batch["input_ids"] = torch.tensor(
@@ -698,6 +717,11 @@ class HFVLMDataPacker(DataPacker):
             return_dict["batch_num_images"] = x["batch_num_images"]
         else:
             return_dict["batch_num_images"] = None
+
+        if "num_patches" in x:
+            return_dict["num_patches"] = x["num_patches"]
+        else:
+            return_dict["num_patches"] = None
 
         # Common fields
         input_ids = x["input_ids"]
