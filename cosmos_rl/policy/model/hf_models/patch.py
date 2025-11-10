@@ -53,14 +53,56 @@ def get_packed_attention_mask(lengths, device):
     return mask
 
 
+# Get packed sliding attention mask
+def get_packed_sliding_attention_mask(lengths, sliding_window, device):
+    # lengths: list of sequence lengths
+    L = sum(lengths)
+    mask = torch.zeros((1, 1, L, L), dtype=torch.bool, device=device)
+    cur = 0
+
+    for L in lengths:
+        start = cur
+        end = cur + L
+        for i in range(start, end):
+            valid_start = max(start, i - sliding_window + 1)
+            valid_end = i + 1
+            mask[0, 0, i, valid_start:valid_end] = True
+        cur = end
+    return mask
+
+
+# Get packed position ids
+# def get_packed_position_ids(lengths, device):
+#     # lengths: list of sequence lengths
+#     L = sum(lengths)
+#     position_ids = torch.zeros((1, L), dtype=torch.int, device=device)
+#     offset = 0
+#     for length in lengths:
+#         position_ids[0, offset : offset + length] = torch.arange(length, device=device)
+#         offset += length
+#     return position_ids
+
+
 def make_new_self_attn_forward(original_attn_forward):
     def self_attn_forward(self, hidden_states, *args, **kwargs):
         valid_input_len = kwargs.get("valid_input_len", None)
         if valid_input_len is not None:
-            attention_mask = get_packed_attention_mask(
-                valid_input_len.tolist(), hidden_states.device
-            )
+            if hasattr(self, "is_sliding") and self.is_sliding:
+                assert (
+                    hasattr(self, "sliding_window") and self.sliding_window is not None
+                ), "sliding_window must be set for sliding attention"
+                attention_mask = get_packed_sliding_attention_mask(
+                    valid_input_len.tolist(), self.sliding_window, hidden_states.device
+                )
+            else:
+                attention_mask = get_packed_attention_mask(
+                    valid_input_len.tolist(), hidden_states.device
+                )
             kwargs["attention_mask"] = attention_mask
+            # Added for models like gemma3-text
+            # position_ids = kwargs.get("position_ids", None)
+            # if position_ids is not None and position_ids.ndim == 2:
+            #     kwargs["position_ids"] = get_packed_position_ids(valid_input_len.tolist(), hidden_states.device)
         return original_attn_forward(hidden_states, *args, **kwargs)
 
     return self_attn_forward
@@ -152,36 +194,36 @@ def sequence_packing_forward_llm_patch(model):
         valid_input_len = kwargs.get("valid_input_len", None)
         if valid_input_len is not None:
             input_ids = kwargs.get("input_ids", None)
-            inputs_embeds = kwargs.get("inputs_embeds", None)
             position_ids = kwargs.get("position_ids", None)
+            cache_position = kwargs.get("cache_position", None)
 
             batch_size = valid_input_len.shape[0]
             input_ids_list = []
-            inputs_embeds_list = []
             position_ids_list = []
+            cache_position_list = []
             for i in range(batch_size):
                 valid_len = valid_input_len[i].item()
                 if input_ids is not None:
                     cur_input_ids = input_ids[i : i + 1, :valid_len].clone()
                     input_ids_list.append(cur_input_ids)
-                if inputs_embeds is not None:
-                    cur_inputs_embeds = inputs_embeds[i : i + 1, :valid_len, :].clone()
-                    inputs_embeds_list.append(cur_inputs_embeds)
                 if position_ids is not None:
                     cur_position_ids = position_ids[i : i + 1, :valid_len].clone()
                     position_ids_list.append(cur_position_ids)
+                if cache_position is not None:
+                    cur_cache_position = cache_position[i : i + 1, :valid_len].clone()
+                    cache_position_list.append(cur_cache_position)
 
             if len(input_ids_list) > 0:
                 kwargs["input_ids"] = torch.cat(input_ids_list, dim=1)
-            if len(inputs_embeds_list) > 0:
-                kwargs["inputs_embeds"] = torch.cat(inputs_embeds_list, dim=1)
             if len(position_ids_list) > 0:
                 kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
+            if len(cache_position_list) > 0:
+                kwargs["cache_position"] = torch.cat(cache_position_list, dim=1)
 
             del (
                 input_ids_list,
-                inputs_embeds_list,
                 position_ids_list,
+                cache_position_list,
             )
         else:
             logger.warning(
@@ -200,8 +242,6 @@ def sequence_packing_forward_llm_patch(model):
         layer.self_attn.forward = make_new_self_attn_forward(
             original_attn_forward
         ).__get__(layer.self_attn, type(layer.self_attn))
-
-    # Replace the forward method
 
 
 # In order to support sequence packing during forward passes, the forward method of the language model must be patched.
