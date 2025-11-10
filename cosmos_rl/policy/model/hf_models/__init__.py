@@ -197,9 +197,6 @@ class HFModel(BaseModel):
         # qwen2.5-vl
         elif hasattr(self.vision_config, "depth"):
             n_vision_layers = self.vision_config.depth
-        elif self.hf_config.model_type == "NemotronH_Nano_VL_V2":
-            # It's hardcoded for now
-            n_vision_layers = 32
         else:
             logger.warning(
                 f"Can not get num of vision model layers from {self.vision_config}."

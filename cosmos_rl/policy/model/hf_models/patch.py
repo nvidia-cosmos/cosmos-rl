@@ -25,6 +25,9 @@ def pre_hf_models_patch(hf_config: AutoConfig):
     ):
         hf_config.vision_config.drop_path_rate = 0.0
         print("Set drop_path_rate to 0.0")
+    elif hf_config.model_type == "NemotronH_Nano_VL_V2":
+        # It's hardcoded for now
+        hf_config.vision_config.num_hidden_layers = 32
 
 
 def post_hf_models_patch(hf_config: AutoConfig, model: Any):
