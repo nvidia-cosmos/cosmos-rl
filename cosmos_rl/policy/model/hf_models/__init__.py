@@ -146,14 +146,17 @@ class HFModel(BaseModel):
     @property
     def lm_layers(self):
         lm_layers = None
-        sub_lm_model = getattr(self.language_model, "model", None)
-        if sub_lm_model is None:
-            lm_layers = self.language_model.layers
-        else:
-            lm_layers = sub_lm_model.layers
+        for path in [
+            "layers",
+            "model.layers",
+            "backbone.layers",  # NemotronH_Nano_VL_V2
+        ]:
+            lm_layers = safe_deep_getattr(self.language_model, path, None)
+            if lm_layers is not None:
+                break
         assert (
             lm_layers is not None
-        ), f"Can not get lm layers from {self.language_model}"
+        ), f"Can not get lm layers from {self.language_model}."
         return lm_layers
 
     @property
@@ -167,6 +170,7 @@ class HFModel(BaseModel):
                 "model.layers",  # Llama4VisionModel
                 "encoder.layer",  # InternVLVisionModel(qwen)
                 "encoder.layers",  # InternVLVisionModel(gpt-oss)
+                "model.blocks",  # NemotronH_Nano_VL_V2
             ]:
                 vision_layers = safe_deep_getattr(self.vision_model, path, None)
                 if vision_layers is not None:
@@ -193,6 +197,9 @@ class HFModel(BaseModel):
         # qwen2.5-vl
         elif hasattr(self.vision_config, "depth"):
             n_vision_layers = self.vision_config.depth
+        elif self.hf_config.model_type == "NemotronH_Nano_VL_V2":
+            # It's hardcoded for now
+            n_vision_layers = 32
         else:
             logger.warning(
                 f"Can not get num of vision model layers from {self.vision_config}."
@@ -227,18 +234,22 @@ class HFModel(BaseModel):
             elif hasattr(self.model, "model"):
                 language_model = self.model.model
             else:
-                logger.warning(f"Can not get language model from {self.model}.")
+                raise ValueError(f"Can not get language model from {self.model}.")
         else:
             language_model = self.model
         return language_model
 
     @property
     def embed_tokens(self):
-        embed_tokens = getattr(self.language_model, "embed_tokens", None)
-        if embed_tokens is None:
-            embed_tokens = safe_deep_getattr(
-                self.language_model, "model.embed_tokens", None
-            )
+        embed_tokens = None
+        for path in [
+            "embed_tokens",
+            "model.embed_tokens",
+            "backbone.embeddings",  # NemotronH_Nano_VL_V2
+        ]:
+            embed_tokens = safe_deep_getattr(self.language_model, path, None)
+            if embed_tokens is not None:
+                break
         if embed_tokens is None:
             raise ValueError(f"Can not get embed tokens from {self.language_model}")
         return embed_tokens
@@ -602,6 +613,7 @@ class HFModel(BaseModel):
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
 
         for name, tensor in hf_state_dict.items():
+            tp_slice_dim = None
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, shared_weight = convert_weight_from_hf(
