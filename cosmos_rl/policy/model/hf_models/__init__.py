@@ -279,6 +279,13 @@ class HFModel(BaseModel):
         return multi_modal_projector
 
     @property
+    def tensor_names_to_skip(self):
+        filter_list = []
+        if self.hf_config.model_type == "NemotronH_Nano_VL_V2":
+            filter_list = ["vision_model.radio_model.summary_idxs"]
+        return filter_list
+
+    @property
     def delay_cp_slice_inputs(self):
         return self.is_vlm
 
@@ -506,6 +513,9 @@ class HFModel(BaseModel):
                 local_view = (
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
+                if dest_name in self.tensor_names_to_skip:
+                    logger.info(f"Skipping {dest_name} because it is in the skip list")
+                    continue
                 assert (
                     local_view.shape == shared_weight.shape
                 ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
@@ -620,6 +630,9 @@ class HFModel(BaseModel):
             target_tensor = self_state_dict[dest_name]
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+            if dest_name in self.tensor_names_to_skip:
+                logger.info(f"Skipping {dest_name} because it is in the skip list")
+                continue
             assert (
                 local_view.shape == shared_weight.shape
             ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
