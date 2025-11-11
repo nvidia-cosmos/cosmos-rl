@@ -62,6 +62,25 @@ class HFModel(BaseModel):
     def supported_model_types():
         return [COSMOS_HF_MODEL_TYPES]
 
+    @staticmethod
+    def check_dependency(model_type):
+        dependencies = {
+            "NemotronH_Nano_VL_V2": ["causal_conv1d", "mamba_ssm", "timm"],
+            "nemotron_h": ["causal_conv1d", "mamba_ssm"],
+        }
+        if model_type in dependencies:
+            missing = []
+            for dep in dependencies[model_type]:
+                try:
+                    __import__(dep)
+                except ImportError:
+                    missing.append(dep)
+            if missing:
+                raise ImportError(
+                    f"Missing dependencies: {', '.join(missing)}. "
+                    f"Please install them with `pip install {' '.join(missing)}`."
+                )
+
     def __init__(
         self, hf_config, model, model_class, is_vlm=False, need_dequantization=False
     ):
@@ -809,6 +828,8 @@ class HFModel(BaseModel):
             HFModel: HFModel model.
 
         """
+
+        cls.check_dependency(hf_config.model_type)
 
         if max_position_embeddings is not None:
             hf_config.max_position_embeddings = max_position_embeddings
