@@ -282,7 +282,11 @@ class HFModel(BaseModel):
     def tensor_names_to_skip(self):
         filter_list = []
         if self.hf_config.model_type == "NemotronH_Nano_VL_V2":
-            filter_list = ["vision_model.radio_model.summary_idxs"]
+            filter_list = [
+                "vision_model.radio_model.summary_idxs",
+                "vision_model.radio_model.input_conditioner.norm_mean",
+                "vision_model.radio_model.input_conditioner.norm_std",
+            ]
         return filter_list
 
     @property
@@ -498,6 +502,9 @@ class HFModel(BaseModel):
                     reserved[name] = ckpt_tensor
 
             for name in weights_of_ckpt.keys():
+                if name in self.tensor_names_to_skip:
+                    logger.info(f"Skipping {name} because it is in the skip list")
+                    continue
                 tensor = weights_of_ckpt[name]
                 tp_slice_dim = None
                 if self.tp_slice_dim_map is not None:
@@ -505,7 +512,6 @@ class HFModel(BaseModel):
                 dest_name, shared_weight = convert_weight_from_hf(
                     tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
                 )
-
                 target_tensor = self_state_dict[dest_name]
                 is_dist_tensor = isinstance(
                     target_tensor, torch.distributed.tensor.DTensor
@@ -513,9 +519,6 @@ class HFModel(BaseModel):
                 local_view = (
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
-                if dest_name in self.tensor_names_to_skip:
-                    logger.info(f"Skipping {dest_name} because it is in the skip list")
-                    continue
                 assert (
                     local_view.shape == shared_weight.shape
                 ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
@@ -620,6 +623,9 @@ class HFModel(BaseModel):
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
 
         for name, tensor in hf_state_dict.items():
+            if name in self.tensor_names_to_skip:
+                logger.info(f"Skipping {name} because it is in the skip list")
+                continue
             tp_slice_dim = None
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
@@ -630,9 +636,6 @@ class HFModel(BaseModel):
             target_tensor = self_state_dict[dest_name]
             is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
-            if dest_name in self.tensor_names_to_skip:
-                logger.info(f"Skipping {dest_name} because it is in the skip list")
-                continue
             assert (
                 local_view.shape == shared_weight.shape
             ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
