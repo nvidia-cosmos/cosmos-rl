@@ -16,6 +16,9 @@
 # Metropolis SGD Evaluation Configuration
 # For spatial reasoning tasks (warehouse/spatial-ai)
 
+# Number of GPUs (automatically configures parallelism)
+num_gpus = 1
+
 # Task configuration
 [task]
 type = "metropolis_sgd"  # Task type identifier

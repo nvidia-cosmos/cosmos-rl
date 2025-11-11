@@ -95,6 +95,12 @@ def parse_args():
         help="Device mapping strategy (auto, cpu, cuda, etc.)"
     )
     parser.add_argument(
+        "--num_gpus",
+        type=int,
+        default=None,
+        help="Number of GPUs to use for tensor parallelism (requires device_map='auto')"
+    )
+    parser.add_argument(
         "--type",
         type=str,
         default="video",
@@ -176,9 +182,41 @@ def main():
                 message=f"LoRA merging enabled. Using merged model: {model_path}"
             )
 
+        # Prepare model loading arguments
+        model_kwargs = {
+            "torch_dtype": args.torch_dtype,
+            "device_map": args.device_map,
+        }
+
+        # Add max_memory constraint if num_gpus is specified
+        if args.num_gpus is not None and args.num_gpus > 0:
+            import torch
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA is not available. Cannot use --num_gpus.")
+
+            num_available_gpus = torch.cuda.device_count()
+            if args.num_gpus > num_available_gpus:
+                s_logger.write(
+                    status_level=Status.FAILURE,
+                    message=f"Requested {args.num_gpus} GPUs but only {num_available_gpus} available"
+                )
+                raise ValueError(f"Requested {args.num_gpus} GPUs but only {num_available_gpus} available")
+
+            # Create max_memory dict to restrict to specified GPUs
+            max_memory = {i: "0GB" for i in range(num_available_gpus)}
+            for i in range(args.num_gpus):
+                max_memory[i] = torch.cuda.get_device_properties(i).total_memory
+            max_memory["cpu"] = "50GB"  # Allow CPU offloading if needed
+            model_kwargs["max_memory"] = max_memory
+
+            s_logger.write(
+                status_level=Status.SUCCESS,
+                message=f"Configuring model to use {args.num_gpus} GPU(s)"
+            )
+
         # Load model
         model = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_path, torch_dtype=args.torch_dtype, device_map=args.device_map
+            model_path, **model_kwargs
         )
         processor: transformers.Qwen2_5_VLProcessor = (
             transformers.AutoProcessor.from_pretrained(model_path)

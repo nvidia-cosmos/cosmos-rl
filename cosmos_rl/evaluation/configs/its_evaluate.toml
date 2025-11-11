@@ -16,6 +16,11 @@
 # ITS Evaluation Configuration for Cosmos-RL
 # This configuration combines inference and scoring into a single pipeline
 
+# Number of GPUs (automatically configures data or tensor parallelism)
+# num_gpus=8 with tp_size=1 (default) → launches 8 instances (data parallelism)
+# num_gpus=4 with tp_size=4 → launches 1 instance with model split (tensor parallelism)
+num_gpus = 1
+
 [dataset]
 annotation_path = "/cosmos-eval/examples/its/annotations.json"
 # media_dir = "/path/to/videos"  # Optional: specify if media files are in a different location
