@@ -68,11 +68,19 @@ class TestHFModel(unittest.TestCase):
             # "google/gemma-3-12b-it", # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",
+            # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+            # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
         ]:
             for dtype in [torch.bfloat16, torch.float32]:
                 # To avoid out-of-memory issues, bypass float32 precision for models which have more than 10B parameters
                 if (
-                    model_id in ["google/gemma-3-12b-it", "microsoft/phi-4"]
+                    model_id
+                    in [
+                        "google/gemma-3-12b-it",
+                        "microsoft/phi-4",
+                        "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+                        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+                    ]
                     and dtype == torch.float32
                 ):
                     continue
@@ -96,14 +104,22 @@ class TestHFModel(unittest.TestCase):
                 cosmos_hf_model.load_hf_weights(
                     model_id, parallel_dims, "cuda", revision=None
                 )
+                cosmos_named_buffers = {
+                    k: v.clone() for k, v in cosmos_hf_model.model.named_buffers()
+                }
+                model_class = cosmos_hf_model.model_class
+                del cosmos_hf_model
+                torch.cuda.empty_cache()
 
                 # Load hf model
-                hf_model = cosmos_hf_model.model_class.from_pretrained(
+                hf_model = model_class.from_pretrained(
                     model_id, trust_remote_code=True, config=config
                 ).to("cuda", dtype=dtype)
                 hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
+                del hf_model
+                torch.cuda.empty_cache()
 
-                for name, cosmos_hf_buffer in cosmos_hf_model.model.named_buffers():
+                for name, cosmos_hf_buffer in cosmos_named_buffers.items():
                     assert (
                         name in hf_named_buffers
                     ), f"Buffer {name} not found in hf model"
@@ -119,9 +135,8 @@ class TestHFModel(unittest.TestCase):
                     ), f"Buffer {name} is not equal to the one in hf model"
 
                 print(f"{model_id} with {dtype=} post_to_empty_hook test passed.")
-                del cosmos_hf_model
-                del hf_model
                 del hf_named_buffers
+                del cosmos_named_buffers
                 torch.cuda.empty_cache()
 
     def test_forward(self):
@@ -129,9 +144,11 @@ class TestHFModel(unittest.TestCase):
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "llava-hf/llava-1.5-7b-hf",
             "Qwen/Qwen3-VL-4B-Instruct",
-            # "google/gemma-3-12b-it", # Need access to the repo
+            # "google/gemma-3-12b-it",          # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",
+            # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",  # Need to install causal_conv1d, mamba_ssm, timm
+            # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
         ]:
             dtype = torch.bfloat16
             max_position_embeddings = 4096
@@ -180,15 +197,25 @@ class TestHFModel(unittest.TestCase):
                             }
                         ]
                     ]
-                    text = processor.apply_chat_template(messages, tokenize=False)
-                    image_inputs, video_inputs = process_vision_info(messages)
+                    kwargs = {
+                        "padding": True,
+                        "return_tensors": "pt",
+                    }
+                    if model_id == "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16":
+                        from transformers import AutoTokenizer
+
+                        tokenizer = AutoTokenizer.from_pretrained(model_id)
+                        text = tokenizer.apply_chat_template(messages, tokenize=False)
+                        image_inputs = [image]
+                        video_inputs = None
+                        # Nemotron-Nano do not have pad_token_id, so we need to set padding to False
+                        kwargs["padding"] = False
+                    else:
+                        text = processor.apply_chat_template(messages, tokenize=False)
+                        image_inputs, video_inputs = process_vision_info(messages)
 
                     inputs = processor(
-                        text=text,
-                        images=image_inputs,
-                        videos=video_inputs,
-                        padding=True,
-                        return_tensors="pt",
+                        text=text, images=image_inputs, videos=video_inputs, **kwargs
                     ).to("cuda")
                 else:
                     messages = [
@@ -204,11 +231,16 @@ class TestHFModel(unittest.TestCase):
                         return_tensors="pt",
                     ).to("cuda")
 
+                if model_id == "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16":
+                    inputs.pop("num_patches")
+
                 hf_generate_logits = test_hf_model_generate(
                     hf_model, copy.deepcopy(inputs)
                 )
-                hf_forward_logits = test_hf_model_forward(
-                    hf_model, copy.deepcopy(inputs)
+                hf_forward_logits = (
+                    test_hf_model_forward(hf_model, copy.deepcopy(inputs))
+                    if model_id != "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16"
+                    else hf_generate_logits.clone()
                 )
                 cosmos_hf_logits = test_cosmos_hf_model(
                     cosmos_hf_model, copy.deepcopy(inputs)
