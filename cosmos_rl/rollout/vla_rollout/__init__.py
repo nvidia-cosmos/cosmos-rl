@@ -22,13 +22,12 @@ integrating with cosmos-rl's distributed training infrastructure.
 
 from .vla_rollout_worker import VLARolloutWorker
 from .vla_rollout import VLARollout
-from .environment_wrappers import LiberoEnvWrapper, RobotwinEnvWrapper
 from .action_processing import VLAActionProcessor
+from .env_worker import EnvConfig
 
 __all__ = [
     "VLARolloutWorker",
     "VLARollout", 
-    "LiberoEnvWrapper",
-    "RobotwinEnvWrapper",
     "VLAActionProcessor",
+    "EnvConfig",
 ]

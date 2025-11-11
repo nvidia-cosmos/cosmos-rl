@@ -13,16 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import torch
 import numpy as np
-from typing import List, Dict, Optional, Any, Tuple
-from concurrent.futures import ThreadPoolExecutor, Future, as_completed
+from typing import List, Dict, Any, Tuple
+from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from collections import defaultdict
 import gc
 import traceback
-import time
 from multiprocessing import Process, Queue
 
 from cosmos_rl.rollout.rollout_base import RolloutBase
@@ -30,14 +28,12 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.schema import RLPayload
-from transformers import AutoTokenizer, AutoProcessor
+from transformers import AutoTokenizer
 
-from .environment_wrappers import LiberoEnvWrapper, RobotwinEnvWrapper
 from .action_processing import VLAActionProcessor
-from .utils import encode_observation, create_vla_prompt, compute_vla_reward
 from .vla_model_inference import VLAModelInference
 from .libero_utils import save_rollout_video
-from .env_worker import libero_env_worker, robotwin_env_worker
+from .env_worker import libero_env_worker, robotwin_env_worker, EnvConfig
 
 # Import VLA constants (will be set based on robot platform at module load time)
 try:
@@ -81,7 +77,7 @@ class VLARollout(RolloutBase):
         # VLA inference configuration (stored as instance variables)
         self.task_suite_name = self.task_suite
         self.vla_type = self.vla_config.vla_type
-        self.do_sample = False  # Default VLA sampling behavior
+        self.do_sample = True  # Enable sampling for stochastic GRPO rollouts
         self.temperature = config.rollout.sampling_config.temperature
         self.center_crop = self.vla_config.center_crop  # Default center crop
         self.use_proprio = False  # Default proprioception usage
@@ -99,9 +95,27 @@ class VLARollout(RolloutBase):
         self.env_pool = {}
         self.env_pool_lock = Lock()
         
+        # GRPO Streaming Queue: Leftover state persists across batches
+        self.leftover_payloads = []  # Payloads that didn't meet epsilon criteria
+        self.leftover_metadata = {}  # Track leftover_count, success_rate per payload_id
+        self.replacement_mapping = {}  # Maps exhausted payload_id -> replacement payload
+        self.MAX_LEFTOVER_ATTEMPTS = 2  # Max attempts before replacement
+        
+        # Sorted candidate pool for replacement selection
+        # Each entry: (hardness_score, leftover_count, success_rate, payload_id, payload)
+        # Sorted by hardness descending (hardest first)
+        self.candidate_pool = []  # List of successfully validated payloads
+        self.candidate_pool_lock = Lock()  # Thread-safe access
+        
+        # GRPO filtering mode: retry or discard
+        self.grpo_discard_mode = True #getattr(config.train.train_policy, 'grpo_discard_instead_of_retry', False)
+        
         logger.info(f"Initialized VLA rollout for task suite: {self.task_suite}")
+        logger.info(f"GRPO filtering mode: {'discard' if self.grpo_discard_mode else 'retry (leftover)'}")
         logger.info(f"Max steps per episode: {self.max_steps}")
+        logger.info(f"Sampling config: do_sample={self.do_sample}, temperature={self.temperature}")
         logger.info(f"Parallel environments: {self.num_envs}")
+        logger.info(f"GRPO Streaming Queue: enabled with max_leftover_attempts={self.MAX_LEFTOVER_ATTEMPTS}")
     
     
     def _get_max_steps_for_task(self, task_suite: str) -> int:
@@ -380,37 +394,6 @@ class VLARollout(RolloutBase):
         """Check if the VLA engine has been initialized"""
         return self.module is not None and self.processor is not None
     
-    def _initialize_environments_for_payloads(self, payloads: List[RLPayload]) -> List[Any]:
-        """Initialize environments based on task information from payloads
-        
-        Returns:
-            List of environment wrappers, one per payload in the same order
-        """
-        
-        # Create environments as a list to maintain 1-1 correspondence with payloads
-        environments = []
-        
-        for i, payload in enumerate(payloads):
-            task_config = self._extract_task_config_from_payload(payload)
-            
-            # Create environment wrapper based on task suite
-            trial_id = task_config.get('trial_id', 0)
-            if 'libero' in task_config['task_suite_name'].lower():
-                env_wrapper = LiberoEnvWrapper(task_config, trial_id=trial_id)
-            elif 'robotwin' in task_config['task_suite_name'].lower():
-                env_wrapper = RobotwinEnvWrapper(task_config, trial_id=trial_id)
-            else:
-                logger.warning(f"Unknown task suite {task_config['task_suite_name']}, using default LIBERO")
-                env_wrapper = LiberoEnvWrapper(task_config, trial_id=trial_id)
-            
-            # Note: Environment will be initialized later in _run_vla_episode_batch
-            # (we only create the wrapper here, not initialize yet)
-            
-            # Add to list - each payload gets its own environment instance
-            environments.append(env_wrapper)
-        
-        return environments
-    
     def _extract_task_config_from_payload(self, payload: RLPayload) -> Dict[str, Any]:
         """Extract task configuration from a single payload"""
         # Try to extract task info from payload metadata or prompt
@@ -444,75 +427,93 @@ class VLARollout(RolloutBase):
             **self.vla_config.env_config
         }
     
-    def rollout_generation(self, payloads: List[RLPayload], *args, **kwargs) -> List[RolloutResult]:
+    def _process_rollout_chunk(self, 
+                               rollout_tasks: List[Tuple[RLPayload, int]],
+                               is_validation: bool,
+                               global_steps: int,
+                               chunk_idx: int) -> List[RolloutResult]:
         """
-        Generate VLA rollouts by interacting with robotic environments
+        Process a chunk of rollout tasks (payload, gen_idx pairs)
         
-        This is the main entry point called by the rollout worker.
-        It processes RLPayload objects from the dispatcher and returns RolloutResult objects.
+        Each task creates exactly ONE environment config, ensuring we never exceed MAX_CHUNK_SIZE parallel envs.
+        Uses self.temperature for sampling control.
         
         Args:
-            payloads: List of RLPayload objects containing task instructions and prompts
+            rollout_tasks: List of (payload, gen_idx) tuples to process
+            is_validation: Whether this is validation (controls video saving)
+            global_steps: Current training step
+            chunk_idx: Index of this chunk (for logging)
             
         Returns:
-            List of RolloutResult containing trajectories and outcomes
+            List of RolloutResult objects (len = len(rollout_tasks))
         """
-        if not self.processor:
-            raise RuntimeError("VLA processor not initialized. Call init_engine() first.")
+        chunk_size = len(rollout_tasks)
         
-        logger.info(f"Starting VLA rollout generation for {len(payloads)} payloads")
-        
-        try:
-            # Initialize environments based on task information from payloads
-            environments = self._initialize_environments_for_payloads(payloads)
-            
-            # Process payloads in batch (matching SimpleVLA-RL approach)
-            results = self._process_payload_batch(payloads, environments, **kwargs)
-        except Exception as e:
-            logger.error(f"Error in batch rollout generation: {e}")
-            traceback.print_exc()
-            # Return failure results for all payloads
-            results = [self._create_failure_result(payload) for payload in payloads]
-        
-        logger.info(f"Generated {len(results)} VLA rollout results")
-        return results
-    
-    def _process_payload_batch(self, payloads: List[RLPayload], environments: List[Any], **kwargs) -> List[RolloutResult]:
-        """Process batch of payloads using parallel environments (matching SimpleVLA-RL)"""
-        batch_size = len(payloads)
-        logger.info(f"Processing VLA payload batch of size {batch_size}")
-        
-        # Extract video generation flags from kwargs (matching SimpleVLA-RL pattern)
-        # is_valid is True for validation runs (when we want to save videos)
-        is_valid = True #kwargs.get('save_videos', False)  # Can be set to True to enable video saving
-        global_steps = kwargs.get('global_steps', 0)
-        
-        # Create environment wrappers for batch
-        env_wrappers = []
+        # Create exactly one environment config per rollout task
+        env_configs = []
         instructions = []
         
-        for i, payload in enumerate(payloads):
-            # Get the corresponding environment for this payload (1-1 mapping)
-            env_wrapper = environments[i]
+        for payload, gen_idx in rollout_tasks:
+            instruction = self._extract_instruction_from_payload(payload)
+            task_config = self._extract_task_config_from_payload(payload)
             
-            env_wrappers.append(env_wrapper)
-            instructions.append(self._extract_instruction_from_payload(payload))
-        
-        try:
-            # Run batch episode (matching SimpleVLA-RL pattern)
-            batch_result = self._run_vla_episode_batch(
-                env_wrappers, instructions, batch_size,
-                is_valid=is_valid, global_steps=global_steps
+            # Create environment config for this rollout
+            # Use gen_idx to vary the trial_id for different random seeds
+            trial_id = task_config.get('trial_id', 0)
+            
+            env_config = EnvConfig(
+                task_suite=task_config['task_suite_name'],
+                task_id=task_config['task_id'],
+                trial_id=trial_id,
+                max_steps=task_config['max_steps'],
+                gen_idx=gen_idx,  # Track generation index for logging
+                resolution=256,
+                save_video=is_validation,
+                global_steps=global_steps,
+                extra_config=task_config.get('extra_config', None)
             )
             
-            # Convert batch result to individual RolloutResults
+            env_configs.append(env_config)
+            instructions.append(instruction)
+        
+        logger.debug(
+            f"[Chunk {chunk_idx}] Created {chunk_size} environment configs"
+        )
+        
+        try:
+            # Run parallel episodes for all environment configs in this chunk
+            # Note: Retry/failover is handled by GRPO filter at the group level
+            batch_result = self._run_parallel_episodes(
+                env_configs, 
+                instructions,
+                len(env_configs),
+                temperature=self.temperature,  # Use instance variable
+                is_valid=is_validation,
+                global_steps=global_steps
+            )
+            
+            # Extract results - one per rollout task
             results = []
-            for i, payload in enumerate(payloads):
+            for env_idx, (payload, gen_idx) in enumerate(rollout_tasks):
+                # Handle both tensor and scalar extraction
+                if 'complete' in batch_result:
+                    complete_val = batch_result['complete'][env_idx]
+                    success = complete_val.item() if hasattr(complete_val, 'item') else bool(complete_val)
+                else:
+                    success = False
+                
+                if 'finish_step' in batch_result:
+                    step_val = batch_result['finish_step'][env_idx]
+                    episode_length = step_val.item() if hasattr(step_val, 'item') else int(step_val)
+                else:
+                    episode_length = 0
+                
                 episode_data = {
-                    'instruction': instructions[i],
-                    'success': batch_result['complete'][i].item() if 'complete' in batch_result else False,
-                    'episode_length': batch_result['finish_step'][i].item() if 'finish_step' in batch_result else 0,
-                    'responses': [batch_result.get('responses', [[""]*batch_size])[j][i] for j in range(len(batch_result.get('responses', [[""]*batch_size])))]
+                    'instruction': instructions[env_idx],
+                    'success': success,
+                    'episode_length': episode_length,
+                    'responses': [batch_result.get('responses', [[""]*chunk_size])[j][env_idx] 
+                                 for j in range(len(batch_result.get('responses', [[""]*chunk_size])))]
                 }
                 
                 result = self._create_rollout_result(payload, episode_data)
@@ -521,36 +522,435 @@ class VLARollout(RolloutBase):
             return results
             
         except Exception as e:
-            logger.error(f"Error processing payload batch: {e}")
+            logger.error(f"[Chunk {chunk_idx}] Error processing chunk: {e}")
             traceback.print_exc()
-            # Return failure results
-            return [self._create_failure_result(payload) for payload in payloads]
-        
-        finally:
-            # Return environments to pool
-            for env_wrapper in env_wrappers:
-                self._return_environment_to_pool(env_wrapper)
+            # Return failure results for entire chunk
+            return [self._create_failure_result(payload) for payload, _ in rollout_tasks]
     
-    def _get_available_environment(self) -> Optional[Any]:
-        """Get an available environment from the pool"""
-        with self.env_pool_lock:
-            for env_id, env_info in self.env_pool.items():
-                if not env_info['in_use']:
-                    env_info['in_use'] = True
-                    env_info['last_used'] = time.time()
-                    return env_info['wrapper']
+    def _get_payload_task_info(self, payload: RLPayload) -> str:
+        """Extract task_id and trial_id from payload for logging"""
+        # Task info is stored directly in metadata, not nested under 'task_config'
+        if not hasattr(payload, 'metadata') or not payload.metadata:
+            return "task_id=?, trial_id=?"
         
-        # No available environment - this shouldn't happen with proper sizing
-        logger.warning("No available environment in pool")
-        return None
+        task_id = payload.metadata.get('task_id', '?')
+        trial_id = payload.metadata.get('trial_id', '?')
+        
+        # Convert tensors to Python values if needed
+        if hasattr(task_id, 'item'):
+            task_id = task_id.item()
+        if hasattr(trial_id, 'item'):
+            trial_id = trial_id.item()
+        
+        return f"task_id={task_id}, trial_id={trial_id}"
     
-    def _return_environment_to_pool(self, env_wrapper):
-        """Return environment to pool"""
-        with self.env_pool_lock:
-            for env_id, env_info in self.env_pool.items():
-                if env_info['wrapper'] == env_wrapper:
-                    env_info['in_use'] = False
-                    break
+    def _get_payload_id(self, payload: RLPayload) -> str:
+        """Get unique identifier for payload (for tracking across batches)"""
+        # Task info is stored directly in metadata, not nested under 'task_config'
+        if not hasattr(payload, 'metadata') or not payload.metadata:
+            return "unknown_unknown"
+        
+        task_id = payload.metadata.get('task_id', 'unknown')
+        trial_id = payload.metadata.get('trial_id', 'unknown')
+        
+        # Convert tensors to Python values if needed
+        if hasattr(task_id, 'item'):
+            task_id = task_id.item()
+        if hasattr(trial_id, 'item'):
+            trial_id = trial_id.item()
+        
+        # Use task_id + trial_id as unique identifier
+        return f"{task_id}_{trial_id}"
+    
+    def _add_to_candidate_pool(self, payload: RLPayload, payload_id: str, avg_success_rate: float, 
+                                leftover_count: int, replacement_usage_count: int, success_rate_history: list):
+        """Add or update a payload in the candidate pool for replacement selection
+        
+        The candidate pool is sorted by hardness score (descending).
+        Hardness = (1 - avg_success_rate) * 100 + leftover_count - (replacement_usage_count * 20)
+        
+        Key insight:
+        - Lower avg success rate = harder task (more valuable for training)
+        - Higher replacement_usage_count = already used many times (less valuable)
+        
+        Example scores:
+        - Task with 10% success, used 0 times: hardness = 90 + 0 - 0 = 90 (very hard, fresh)
+        - Task with 10% success, used 2 times: hardness = 90 + 0 - 40 = 50 (hard, but overused)
+        - Task with 50% success, used 0 times: hardness = 50 + 0 - 0 = 50 (medium, fresh)
+        
+        Within-batch diversity example (4 exhausted payloads in same batch):
+        1. Payload 0 exhausted → picks task_8_37 (hardness=90, usage=0)
+           → Increments usage to 1, re-adds to pool with hardness=70
+        2. Payload 1 exhausted → picks task_9_42 (hardness=85, usage=0) instead
+           → Increments usage to 1, re-adds to pool with hardness=65
+        3. Payload 2 exhausted → picks task_7_25 (hardness=80, usage=0)
+        4. Result: 3 different hard tasks used, not just one!
+        
+        This ensures diversity both across batches AND within the same batch.
+        """
+        with self.candidate_pool_lock:
+            # Remove existing entry for this payload_id if present
+            self.candidate_pool = [entry for entry in self.candidate_pool if entry[4] != payload_id]
+            
+            # Calculate hardness score
+            # Penalize replacement_usage heavily (×20) to diversify replacements
+            hardness = (1.0 - avg_success_rate) * 100 + leftover_count - (replacement_usage_count * 20)
+            
+            # Add new entry: (hardness, avg_success_rate, leftover_count, replacement_usage_count, payload_id, payload)
+            entry = (hardness, avg_success_rate, leftover_count, replacement_usage_count, payload_id, payload)
+            self.candidate_pool.append(entry)
+            
+            # Sort by hardness descending (hardest first)
+            self.candidate_pool.sort(key=lambda x: x[0], reverse=True)
+            
+            logger.debug(
+                f"[Candidate Pool] Added {payload_id} (hardness={hardness:.2f}, "
+                f"avg_rate={avg_success_rate:.2f} (history={[f'{r:.2f}' for r in success_rate_history]}), "
+                f"leftover={leftover_count}, replacement_usage={replacement_usage_count}), "
+                f"pool size={len(self.candidate_pool)}"
+            )
+    
+    def _get_hardest_candidate(self, exclude_id: str = None) -> tuple:
+        """Get the hardest candidate from the pool (excluding specified payload_id)
+        
+        Returns:
+            (hardness, avg_success_rate, leftover_count, replacement_usage_count, payload_id, payload) 
+            or None if pool empty
+        """
+        with self.candidate_pool_lock:
+            # Find first candidate not in exclusion list
+            for entry in self.candidate_pool:
+                payload_id = entry[4]  # Updated index after adding replacement_usage_count
+                if payload_id != exclude_id and payload_id not in self.replacement_mapping:
+                    return entry
+            return None
+    
+    def _check_grpo_group_valid(self, group_results: List[RolloutResult], 
+                                epsilon_low: float, epsilon_high: float) -> bool:
+        """Check if a GRPO group meets success rate criteria.
+        
+        Args:
+            group_results: List of RolloutResult for same task (n_generation rollouts)
+            epsilon_low: Minimum acceptable success rate (e.g., 0.2 = 20%)
+            epsilon_high: Maximum acceptable success rate (e.g., 0.28 = 28%)
+            
+        Returns:
+            True if group is valid (success rate in [epsilon_low, epsilon_high])
+        """
+        successes = sum(1 for r in group_results if r.environment_info.get('success', False))
+        success_rate = successes / len(group_results)
+        return epsilon_low <= success_rate <= epsilon_high
+    
+    def rollout_generation(self, payloads: List[RLPayload], 
+                          n_generation: int = 1,
+                          is_validation: bool = True,
+                          global_steps: int = 0,
+                          flush_leftovers: bool = False) -> List[RolloutResult]:
+        """
+        Generate VLA rollouts by interacting with robotic environments
+        
+        This is the main entry point called by the rollout worker.
+        It processes RLPayload objects from the dispatcher and returns RolloutResult objects.
+        
+        For GRPO-style training, this method uses a STREAMING QUEUE approach:
+        - Rollout each payload group once
+        - Payloads with success rate in [epsilon_low, epsilon_high] are accepted immediately
+        - Payloads outside range become "leftovers" and are carried to next iteration
+        - After MAX_LEFTOVER_ATTEMPTS (default 3), exhausted leftovers are replaced with HARDEST tasks
+        - Hardness = (1 - avg_success_rate) * 100 + leftover_count - replacement_usage_count * 20
+        - This avoids repeatedly using the same hard task and diversifies training data
+        - Creates a natural curriculum: easy tasks graduate fast, hard tasks get more attempts
+        
+        Uses self.temperature for sampling control (configured at initialization).
+        
+        Args:
+            payloads: List of RLPayload objects containing task instructions and prompts
+            n_generation: Number of rollouts per task (GRPO replication). Default 1 for validation.
+            is_validation: If True, save videos. If False (training), don't save videos.
+            global_steps: Current training step for logging/video naming.
+            
+        Returns:
+            List of RolloutResult containing trajectories and outcomes.
+            For training with n_generation > 1, returns n_generation results per input payload.
+        """
+        if not self.processor:
+            raise RuntimeError("VLA processor not initialized. Call init_engine() first.")
+        
+        # STREAMING QUEUE: Merge new payloads with leftovers from previous batch
+        if enable_grpo_filter := (not is_validation and n_generation > 1):
+            num_leftovers = len(self.leftover_payloads)
+            if num_leftovers > 0:
+                logger.info(
+                    f"[GRPO Streaming Queue] Merging {len(payloads)} new payloads "
+                    f"with {num_leftovers} leftovers from previous batch"
+                )
+                # Prepend leftovers so they get processed first
+                all_payloads = self.leftover_payloads + list(payloads)
+            else:
+                all_payloads = list(payloads)
+        else:
+            all_payloads = list(payloads)
+            num_leftovers = 0
+        
+        logger.info(
+            f"Starting VLA rollout generation: {len(all_payloads)} total payloads "
+            f"({len(payloads)} new, {num_leftovers} leftovers), "
+            f"n_generation={n_generation}, temperature={self.temperature}, "
+            f"is_validation={is_validation}"
+        )
+        
+        try:
+            # STREAMING QUEUE strategy with adaptive GRPO filtering
+            # For training (n_generation > 1):
+            #   1. Roll all payloads once
+            #   2. Accept valid ones (success rate in epsilon range)
+            #   3. Mark invalid ones as "leftovers" 
+            #   4. Carry leftovers to next iteration
+            #   5. After MAX attempts, replace with hardest tasks from valid set
+            #   6. Hardness = leftover_count * 10 + (1 - success_rate)
+            MAX_CHUNK_SIZE = 8  # Maximum parallel environments per chunk
+            
+            # Get GRPO filtering params (only for training)
+            epsilon_low = self.config.train.train_policy.epsilon_low if enable_grpo_filter else 0.0
+            epsilon_high = self.config.train.train_policy.epsilon_high if enable_grpo_filter else 1.0
+            
+            if enable_grpo_filter:
+                logger.info(
+                    f"[GRPO Streaming Queue] Filtering enabled: success_rate ∈ [{epsilon_low:.2f}, {epsilon_high:.2f}], "
+                    f"max leftover attempts={self.MAX_LEFTOVER_ATTEMPTS}, "
+                    f"hardness metric=(1-avg_success_rate)*100 + leftover_count - replacement_usage*20"
+                )
+            
+            # Initialize metadata for new payloads
+            for idx, payload in enumerate(all_payloads):
+                payload_id = self._get_payload_id(payload)
+                if payload_id not in self.leftover_metadata:
+                    self.leftover_metadata[payload_id] = {
+                        'leftover_count': 0,
+                        'success_rate_history': [],  # Track all success rates
+                        'avg_success_rate': 0.0,  # Average success rate across all attempts
+                        'replacement_usage_count': 0,  # How many times used as replacement
+                        'payload_idx': idx
+                    }
+            
+            # STREAMING QUEUE: One uniform generation per call, carry leftovers to next batch
+            # Create rollout tasks: all_payloads × n_generation
+            rollout_tasks = []
+            for payload_idx, payload in enumerate(all_payloads):
+                # Use replacement payload if this one was exhausted
+                payload_id = self._get_payload_id(payload)
+                actual_payload = self.replacement_mapping.get(payload_id, payload)
+                
+                for gen_idx in range(n_generation):
+                    rollout_tasks.append((payload_idx, actual_payload, gen_idx))
+            
+            total_tasks = len(rollout_tasks)
+            num_chunks = (total_tasks + MAX_CHUNK_SIZE - 1) // MAX_CHUNK_SIZE
+            
+            logger.info(
+                f"[GRPO Rollout] Rolling {len(all_payloads)} payloads × {n_generation} = {total_tasks} tasks "
+                f"→ {num_chunks} chunks"
+            )
+            
+            # Process chunks and collect results by payload
+            results_per_payload = {idx: [] for idx in range(len(all_payloads))}
+            
+            for chunk_idx in range(num_chunks):
+                chunk_start = chunk_idx * MAX_CHUNK_SIZE
+                chunk_end = min(chunk_start + MAX_CHUNK_SIZE, total_tasks)
+                chunk_tasks_with_idx = rollout_tasks[chunk_start:chunk_end]
+                
+                # Extract (payload, gen_idx) for processing
+                chunk_tasks = [(payload, gen_idx) for _, payload, gen_idx in chunk_tasks_with_idx]
+                
+                # Process this chunk
+                chunk_results = self._process_rollout_chunk(
+                    rollout_tasks=chunk_tasks,
+                    is_validation=is_validation,
+                    global_steps=global_steps,
+                    chunk_idx=chunk_idx
+                )
+                
+                # Group results by payload_idx
+                for (payload_idx, _, _), result in zip(chunk_tasks_with_idx, chunk_results):
+                    results_per_payload[payload_idx].append(result)
+            
+            # Check each payload's group and apply GRPO filtering
+            new_leftovers = []
+            num_exhausted_replaced = 0
+            valid_results = []  # Results to return (only for new payloads, not leftovers)
+            
+            for payload_idx, payload in enumerate(all_payloads):
+                group_results = results_per_payload[payload_idx]
+                task_info = self._get_payload_task_info(payload)
+                
+                # DEBUG: Check group size
+                if len(group_results) != n_generation:
+                    logger.error(
+                        f"[GRPO Filter BUG] Payload {payload_idx} [{task_info}]: Expected {n_generation} results, "
+                        f"got {len(group_results)}! This will cause incorrect filtering."
+                    )
+                
+                if enable_grpo_filter:
+                    payload_id = self._get_payload_id(payload)
+                    metadata = self.leftover_metadata[payload_id]
+                    
+                    is_valid = self._check_grpo_group_valid(group_results, epsilon_low, epsilon_high)
+                    successes = sum(1 for r in group_results if r.environment_info.get('success', False))
+                    success_rate = successes / len(group_results) if len(group_results) > 0 else 0.0
+                    
+                    # Add current success rate to history and calculate average
+                    metadata['success_rate_history'].append(success_rate)
+                    metadata['avg_success_rate'] = sum(metadata['success_rate_history']) / len(metadata['success_rate_history'])
+                    
+                    if is_valid:
+                        # Valid group - always accept and send results immediately
+                        # (Whether it's a new payload or a leftover that finally passed)
+                        valid_results.extend(group_results)
+                        
+                        # If this payload was replaced and now succeeded, clear the replacement
+                        if payload_id in self.replacement_mapping:
+                            replacement_id = self._get_payload_id(self.replacement_mapping[payload_id])
+                            logger.info(
+                                f"[GRPO Filter] Payload {payload_idx} [{task_info}, id={payload_id}]: "
+                                f"✅ REPLACEMENT {replacement_id} SUCCEEDED - clearing replacement mapping"
+                            )
+                            del self.replacement_mapping[payload_id]
+                        
+                        # Add to candidate pool for potential replacement use
+                        self._add_to_candidate_pool(
+                            payload, payload_id, 
+                            metadata['avg_success_rate'], 
+                            metadata['leftover_count'],
+                            metadata['replacement_usage_count'],
+                            metadata['success_rate_history']
+                        )
+                        
+                        logger.info(
+                            f"[GRPO Filter] Payload {payload_idx} [{task_info}, id={payload_id}]: ✅ VALID "
+                            f"(success={successes}/{len(group_results)}, rate={success_rate:.2f}, "
+                            f"avg_rate={metadata['avg_success_rate']:.2f}, leftover={metadata['leftover_count']})"
+                        )
+                    else:
+                        # Not valid - discard or mark as leftover based on mode
+                        if self.grpo_discard_mode:
+                            # Discard mode: skip this payload entirely, don't retry
+                            logger.info(
+                                f"[GRPO Filter] Payload {payload_idx} [{task_info}, id={payload_id}]: ❌ DISCARDED "
+                                f"(success={successes}/{len(group_results)}, rate={success_rate:.2f}, "
+                                f"avg_rate={metadata['avg_success_rate']:.2f}) - discard mode active"
+                            )
+                            # Don't add to new_leftovers, just skip
+                            continue
+                        
+                        # Retry mode (default): mark as leftover for next batch
+                        metadata['leftover_count'] += 1
+                        
+                        if metadata['leftover_count'] >= self.MAX_LEFTOVER_ATTEMPTS:
+                            # Exceeded max attempts - replace with hardest task for NEXT batch
+                            hardest_candidate = self._get_hardest_candidate(exclude_id=payload_id)
+                            
+                            if hardest_candidate:
+                                (hardness_score, replacement_avg_rate, repl_leftover_count, repl_usage_count,
+                                 replacement_id, replacement_payload) = hardest_candidate
+                                replacement_task_info = self._get_payload_task_info(replacement_payload)
+                                
+                                # Store replacement mapping (will be used in next batch)
+                                self.replacement_mapping[payload_id] = replacement_payload
+                                num_exhausted_replaced += 1
+                                
+                                # Increment replacement usage count for the selected task
+                                if replacement_id in self.leftover_metadata:
+                                    repl_metadata = self.leftover_metadata[replacement_id]
+                                    repl_metadata['replacement_usage_count'] += 1
+                                    
+                                    # CRITICAL: Update candidate pool with new usage count
+                                    # This recalculates hardness and re-sorts, so next exhausted payload
+                                    # won't pick the same task (lower hardness due to higher usage)
+                                    self._add_to_candidate_pool(
+                                        replacement_payload, 
+                                        replacement_id,
+                                        repl_metadata['avg_success_rate'],
+                                        repl_metadata['leftover_count'],
+                                        repl_metadata['replacement_usage_count'],  # Now incremented
+                                        repl_metadata['success_rate_history']
+                                    )
+                                
+                                logger.warning(
+                                    f"[GRPO Filter] Payload {payload_idx} [{task_info}, id={payload_id}]: "
+                                    f"⚠️ EXHAUSTED (attempts={metadata['leftover_count']}, "
+                                    f"rate={success_rate:.2f}, avg_rate={metadata['avg_success_rate']:.2f}) - "
+                                    f"will replace with HARDEST task {replacement_id} [{replacement_task_info}] "
+                                    f"(avg_rate={replacement_avg_rate:.2f}, leftover={repl_leftover_count}, "
+                                    f"usage={repl_usage_count}→{repl_usage_count+1}, hardness={hardness_score:.2f}→lower) in NEXT batch"
+                                )
+                                
+                                # Still add to leftovers (but will use replacement payload next time)
+                                new_leftovers.append(payload)
+                            else:
+                                logger.error(
+                                    f"[GRPO Filter] Payload {payload_idx} [{task_info}, id={payload_id}]: "
+                                    f"EXHAUSTED but candidate pool empty! Accepting results."
+                                )
+                                # Accept current results
+                                # In flush mode, return leftover results; otherwise skip them
+                                if flush_leftovers or payload_idx >= num_leftovers:
+                                    valid_results.extend(group_results)
+                        else:
+                            # Not exhausted yet - add to candidate pool and leftovers
+                            self._add_to_candidate_pool(
+                                payload, payload_id,
+                                metadata['avg_success_rate'],
+                                metadata['leftover_count'],
+                                metadata['replacement_usage_count'],
+                                metadata['success_rate_history']
+                            )
+                            new_leftovers.append(payload)
+                            
+                            logger.info(
+                                f"[GRPO Filter] Payload {payload_idx} [{task_info}, id={payload_id}]: ↻ LEFTOVER "
+                                f"(attempt {metadata['leftover_count']}/{self.MAX_LEFTOVER_ATTEMPTS}, "
+                                f"success={successes}/{len(group_results)}, rate={success_rate:.2f}, "
+                                f"avg_rate={metadata['avg_success_rate']:.2f}) - carry to next batch"
+                            )
+                else:
+                    # No filtering for validation - accept all results
+                    # In flush mode, return leftover results; otherwise skip them
+                    if flush_leftovers or payload_idx >= num_leftovers:
+                        valid_results.extend(group_results)
+            
+            # Use collected valid results
+            results = valid_results
+            
+            # Update leftover state for next batch
+            if enable_grpo_filter:
+                self.leftover_payloads = new_leftovers
+                
+                # Calculate stats
+                total_leftover_attempts = sum(meta['leftover_count'] for meta in self.leftover_metadata.values())
+                max_leftover_count = max((meta['leftover_count'] for meta in self.leftover_metadata.values()), default=0)
+                pool_size = len(self.candidate_pool)
+                
+                logger.info(
+                    f"[GRPO Filter] Batch complete: {len(all_payloads)} payloads "
+                    f"({len(payloads)} new, {num_leftovers} from prev batch), "
+                    f"{total_leftover_attempts} total leftover attempts, "
+                    f"max leftover count={max_leftover_count}, "
+                    f"{num_exhausted_replaced} exhausted to be replaced, "
+                    f"{len(new_leftovers)} leftovers → next batch, "
+                    f"candidate pool size={pool_size}"
+                )
+        except Exception as e:
+            logger.error(f"Error in batch rollout generation: {e}")
+            traceback.print_exc()
+            # Return failure results: n_generation failures per payload
+            results = []
+            for payload in payloads:
+                for _ in range(n_generation):
+                    results.append(self._create_failure_result(payload))
+        
+        logger.info(f"Generated {len(results)} VLA rollout results")
+        return results
     
     def _extract_instruction_from_payload(self, payload: RLPayload) -> str:
         """Extract task instruction from RLPayload"""
@@ -568,42 +968,215 @@ class VLARollout(RolloutBase):
         # Fallback to task-specific default instruction
         return f"Complete the {self.task_suite} task"
     
-    def _run_vla_episode_batch(self, env_wrappers: List, instructions: List[str], batch_size: int, 
-                               is_valid: bool = False, global_steps: int = 0) -> Dict:
+    def _run_episodes_with_retry(self, env_configs: List[EnvConfig], instructions: List[str],
+                                  temperature: float = 0.0, is_valid: bool = False, 
+                                  global_steps: int = 0, max_retries: int = 3) -> Dict:
         """
-        Run VLA episode batch with multiprocessing (matching SimpleVLA-RL pattern)
+        Run episodes with automatic retry for failed workers
         
+        Calls _run_parallel_episodes and retries any failed tasks.
+        Each retry runs a complete new episode from step 0.
+        
+        Args:
+            env_configs: List of environment configurations
+            instructions: List of task instructions
+            temperature: Sampling temperature
+            is_valid: Whether to save validation videos
+            global_steps: Current training step
+            max_retries: Maximum number of retry attempts per task
+        
+        Returns:
+            Batch result dictionary with all episodes completed
+        """
+        batch_size = len(env_configs)
+        logger.info(f"Running {batch_size} episodes with retry (max_retries={max_retries})")
+        
+        # Track which indices still need to be run
+        pending_configs = list(env_configs)
+        pending_instructions = list(instructions)
+        pending_indices = list(range(batch_size))  # Original indices
+        
+        # Store completed results
+        final_results = [None] * batch_size
+        retry_counts = [0] * batch_size
+        
+        attempt = 0
+        while pending_configs and attempt < max_retries:
+            attempt += 1
+            logger.info(f"Attempt {attempt}/{max_retries}: Running {len(pending_configs)} episodes")
+            
+            # Run pending episodes
+            batch_result = self._run_parallel_episodes(
+                pending_configs,
+                pending_instructions,
+                len(pending_configs),
+                temperature=temperature,
+                is_valid=is_valid,
+                global_steps=global_steps
+            )
+            
+            # Check results and separate success/failures
+            new_pending_configs = []
+            new_pending_instructions = []
+            new_pending_indices = []
+            
+            for i, orig_idx in enumerate(pending_indices):
+                # Extract result for this task (stored in batch_result)
+                # The result should indicate if it failed
+                if self._is_episode_failed(batch_result, i):
+                    # Retry this one
+                    retry_counts[orig_idx] += 1
+                    logger.warning(
+                        f"Task {orig_idx} [task_id={pending_configs[i].task_id}, "
+                        f"trial_id={pending_configs[i].trial_id}, gen={pending_configs[i].gen_idx}] "
+                        f"failed, retry {retry_counts[orig_idx]}/{max_retries}"
+                    )
+                    new_pending_configs.append(pending_configs[i])
+                    new_pending_instructions.append(pending_instructions[i])
+                    new_pending_indices.append(orig_idx)
+                else:
+                    # Success, store result
+                    final_results[orig_idx] = self._extract_single_result(batch_result, i)
+                    logger.debug(f"Task {orig_idx} completed successfully")
+            
+            pending_configs = new_pending_configs
+            pending_instructions = new_pending_instructions
+            pending_indices = new_pending_indices
+        
+        # Any remaining pending tasks have exhausted retries
+        if pending_configs:
+            logger.error(f"{len(pending_configs)} tasks failed after {max_retries} retries")
+            # Create failure results for these
+            for i, orig_idx in enumerate(pending_indices):
+                final_results[orig_idx] = self._create_failure_result_from_config(pending_configs[i])
+        
+        # Merge all results into a single batch result
+        merged_result = self._merge_episode_results(final_results, batch_size)
+        
+        total_retries = sum(retry_counts)
+        logger.info(f"Episode batch completed: {batch_size} tasks, {total_retries} total retries")
+        
+        return merged_result
+    
+    def _is_episode_failed(self, batch_result: Dict, index: int) -> bool:
+        """Check if episode at given index failed"""
+        # Check task_records in batch_result
+        if 'task_records' in batch_result and index < len(batch_result['task_records']):
+            return batch_result['task_records'][index].get('failed', False)
+        return False
+    
+    def _extract_single_result(self, batch_result: Dict, index: int) -> Dict:
+        """Extract result for a single episode from batch result"""
+        # Extract data for index from all lists in batch_result
+        single_result = {}
+        for key, value in batch_result.items():
+            if isinstance(value, list) and len(value) > index:
+                single_result[key] = value[index]
+            else:
+                single_result[key] = value
+        return single_result
+    
+    def _merge_episode_results(self, results: List[Dict], batch_size: int) -> Dict:
+        """Merge individual episode results into a batch result"""
+        # Reconstruct batch_result format from individual results
+        complete_list = []
+        finish_step_list = []
+        responses_list = []
+        task_records_list = []
+        
+        for result in results:
+            if result:
+                # Extract data from single result and convert to scalar
+                if 'complete' in result:
+                    val = result['complete']
+                    # Extract scalar from tensor if needed
+                    if torch.is_tensor(val):
+                        if val.numel() == 1:
+                            complete_list.append(val.item())
+                        else:
+                            # If it's already a batch, take first element
+                            complete_list.append(val[0].item() if val.numel() > 0 else False)
+                    else:
+                        complete_list.append(bool(val))
+                elif 'task_records' in result:
+                    complete_list.append(result['task_records'].get('complete', False))
+                else:
+                    complete_list.append(False)
+                    
+                if 'finish_step' in result:
+                    val = result['finish_step']
+                    if torch.is_tensor(val):
+                        if val.numel() == 1:
+                            finish_step_list.append(val.item())
+                        else:
+                            finish_step_list.append(val[0].item() if val.numel() > 0 else 0)
+                    else:
+                        finish_step_list.append(int(val))
+                elif 'task_records' in result:
+                    finish_step_list.append(result['task_records'].get('finish_step', 0))
+                else:
+                    finish_step_list.append(0)
+                    
+                responses_list.append(result.get('responses', [[]]))
+                if 'task_records' in result:
+                    task_records_list.append(result['task_records'])
+        
+        # Create tensors from lists
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        merged = {
+            'complete': torch.tensor(complete_list, dtype=torch.bool, device=device),
+            'finish_step': torch.tensor(finish_step_list, dtype=torch.long, device=device),
+            'responses': responses_list,
+            'task_records': task_records_list
+        }
+        
+        return merged
+    
+    def _create_failure_result_from_config(self, env_config: EnvConfig) -> Dict:
+        """Create a failure result from an environment config"""
+        return {
+            'complete': torch.tensor(False),
+            'finish_step': torch.tensor(0),
+            'responses': [[]],
+            'task_records': {
+                'active': False,
+                'complete': False,
+                'finish_step': 0,
+                'task_file_name': f'task_{env_config.task_id}_trial_{env_config.trial_id}_gen_{env_config.gen_idx}',
+                'failed': True
+            }
+        }
+    
+    def _run_parallel_episodes(self, env_configs: List[EnvConfig], instructions: List[str], batch_size: int, 
+                               temperature: float = 0.0, is_valid: bool = False, global_steps: int = 0) -> Dict:
+        """
+        Run multiple VLA episodes in parallel using multiprocessing
+        
+        This executes a chunk of parallel environments (not a full "batch").
         Uses separate processes for each environment to avoid shared OpenGL/MuJoCo state.
         
         Args:
-            env_wrappers: List of environment wrappers (contains task config info)
+            env_configs: List of environment configurations
             instructions: List of task instructions  
-            batch_size: Number of environments
+            batch_size: Number of parallel environments in this chunk
+            temperature: Sampling temperature for action generation
             is_valid: Whether to save validation videos
             global_steps: Current training step (for video naming)
         """
 
-        logger.info(f"Starting VLA episode batch with multiprocessing: {batch_size} tasks, max_steps={self.max_steps}, save_videos={is_valid}")
+        logger.info(f"Starting {batch_size} parallel VLA episodes: max_steps={self.max_steps}, temperature={temperature}, save_videos={is_valid}")
         
-        # Extract task information from env_wrappers
+        # Extract task information from env_configs
         task_suite_names = []
         task_ids = []
         trial_ids = []
+        gen_idxs = []
         
-        for env_wrapper in env_wrappers:
-            if isinstance(env_wrapper, LiberoEnvWrapper):
-                task_suite_names.append(env_wrapper.benchmark_name)
-                task_ids.append(env_wrapper.task_id)
-                trial_ids.append(env_wrapper.trial_id)
-            elif isinstance(env_wrapper, RobotwinEnvWrapper):
-                task_suite_names.append(env_wrapper.task_name)
-                task_ids.append(env_wrapper.task_id)
-                trial_ids.append(env_wrapper.trial_id)
-            else:
-                # Fallback
-                task_suite_names.append(self.task_suite)
-                task_ids.append(0)
-                trial_ids.append(0)
+        for env_config in env_configs:
+            task_suite_names.append(env_config.task_suite)
+            task_ids.append(env_config.task_id)
+            trial_ids.append(env_config.trial_id)
+            gen_idxs.append(env_config.gen_idx)
         
         # Spawn worker processes for each environment
         processes = []
@@ -654,15 +1227,14 @@ class VLARollout(RolloutBase):
                     "active": init_data['active'],
                     "complete": init_data['complete'],
                     "finish_step": init_data['finish_step'],
-                    "task_file_name": init_data['task_file_name']
+                    "task_file_name": init_data['task_file_name'],
+                    "failed": False  # Track if worker failed
                 })
                 
                 # Collect initial video frames
                 if is_valid:
                     valid_video[init_data['task_file_name']].extend(init_data['valid_images'])
-                    # logger.info(f"Task {idx} collected {len(init_data['valid_images'])} initial frames for video '{init_data['task_file_name']}'")
                     
-                # logger.info(f"Task {idx} initialized: {task_descriptions[idx][:60]}")
             except Exception as e:
                 logger.error(f"Failed to initialize task {idx}: {e}")
                 raise
@@ -679,8 +1251,6 @@ class VLARollout(RolloutBase):
             if not active_indices:
                 logger.info(f"[Step {step}] All environments completed")
                 break
-            
-            # logger.info(f"[Step {step}] Active: {len(active_indices)}/{batch_size}")
             
             # VLA model inference on all inputs
             current_inputs = inputs
@@ -725,11 +1295,26 @@ class VLARollout(RolloutBase):
                     
                     if not result['active']:
                         status = "✅ SUCCESS" if result['complete'] else "❌ FAILED"
-                        logger.info(f"Task {idx}: {status} (steps={result['finish_step']})")
+                        logger.info(f"Task {idx} [task_id={task_ids[idx]}, trial_id={trial_ids[idx]}, gen={gen_idxs[idx]}]: {status} (steps={result['finish_step']})")
                         
                 except Exception as e:
-                    logger.error(f"[Task {idx}] Error receiving result: {e}")
+                    error_type = type(e).__name__
+                    error_msg = str(e) if str(e) else "No error message"
+                    
+                    # Check if worker process is still alive
+                    process_alive = processes[idx].is_alive()
+                    exit_code = processes[idx].exitcode
+                    
+                    logger.error(
+                        f"[Task {idx}, task_id={task_ids[idx]}, trial_id={trial_ids[idx]}, gen={gen_idxs[idx]}] "
+                        f"Worker failure: {error_type}: {error_msg} "
+                        f"(worker_alive={process_alive}, exit_code={exit_code})"
+                    )
+                    
+                    # Mark as failed
                     task_records[idx]['active'] = False
+                    task_records[idx]['complete'] = False
+                    task_records[idx]['failed'] = True
             
             inputs = new_inputs
             step += NUM_ACTIONS_CHUNK
@@ -755,10 +1340,6 @@ class VLARollout(RolloutBase):
         
         # Save rollout videos
         if valid_video:
-            # logger.info(f"Saving {len(valid_video)} rollout videos...")
-            # for task_file, images in valid_video.items():
-            #     logger.info(f"  Video '{task_file}': {len(images)} frames")
-            
             experiment_name = getattr(self.config, 'experiment_name', 'vla_rollout')
             
             for task_file, images in valid_video.items():
@@ -773,13 +1354,10 @@ class VLARollout(RolloutBase):
                             global_steps,
                             complete
                         )
-                        
                     except Exception as e:
                         logger.warning(f"  ⚠️  Failed to save {task_file}: {e}")
                         import traceback
                         traceback.print_exc()
-        else:
-            logger.warning(f"⚠️  No video frames collected! is_valid={is_valid}")
         
         # Clear memory
         torch.cuda.empty_cache()
@@ -862,7 +1440,8 @@ class VLARollout(RolloutBase):
                 'attention_mask': torch.empty(batch_size, 0, dtype=torch.bool),
                 'pixel_values': torch.empty(batch_size, 0, 3, 224, 224),
                 'complete': torch.tensor([r['complete'] for r in task_records], dtype=torch.bool),
-                'finish_step': torch.tensor([r['finish_step'] for r in task_records], dtype=torch.long)
+                'finish_step': torch.tensor([r['finish_step'] for r in task_records], dtype=torch.long),
+                'task_records': task_records  # Include for retry wrapper
             }
         
         # Stack history data
@@ -884,47 +1463,9 @@ class VLARollout(RolloutBase):
         
         batch['complete'] = torch.tensor([r['complete'] for r in task_records], dtype=torch.bool, device=device)
         batch['finish_step'] = torch.tensor([r['finish_step'] for r in task_records], dtype=torch.long, device=device)
+        batch['task_records'] = task_records  # Include for retry wrapper
         
         return batch
-    
-    def _generate_vla_action(self, prompt: str, observation: Dict) -> Dict:
-        """Generate VLA action using actual model inference (matching SimpleVLA-RL)"""
-        
-        # This will be implemented with actual VLA model inference
-        # For now, return more realistic dummy actions based on SimpleVLA-RL patterns
-        
-        # Simulate the VLA model output format from SimpleVLA-RL
-        if hasattr(self, '_step_count'):
-            self._step_count += 1
-        else:
-            self._step_count = 0
-        
-        # More realistic action patterns based on task
-        if "pick" in prompt.lower() or "grasp" in prompt.lower():
-            # Picking motion: move down and close gripper
-            base_action = np.array([0.0, 0.0, -0.1, 0.0, 0.0, 0.0, -1.0])
-        elif "place" in prompt.lower() or "put" in prompt.lower():
-            # Placing motion: move up and open gripper  
-            base_action = np.array([0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 1.0])
-        else:
-            # General motion: small movements
-            base_action = np.array([0.05, 0.05, 0.02, 0.0, 0.0, 0.0, 0.0])
-        
-        # Add some controlled randomness
-        noise = np.random.normal(0, 0.02, size=6)
-        base_action[:6] += noise
-        
-        # Ensure action is in valid range [-1, 1]
-        base_action = np.clip(base_action, -1.0, 1.0)
-        
-        return {
-            'actions': base_action,
-            'response': f"<action>{base_action.tolist()}</action>",  # SimpleVLA-RL format
-            'logits': np.random.randn(7),
-            'input_ids': torch.randint(0, 1000, (1, 10)),  # Dummy tokens
-            'attention_mask': torch.ones(1, 10),
-            'pixel_values': torch.randn(1, 3, 224, 224),  # Dummy pixel values
-        }
     
     def _create_rollout_result(self, payload: RLPayload, episode_data: Dict) -> RolloutResult:
         """

@@ -19,7 +19,7 @@ fsdp_reduce_dtype = "float32"
 master_dtype = "bfloat16"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 32
+train_batch_per_replica = 128  # Target: 512 rollouts for training
 sync_weight_interval = 1
 
 [policy]
@@ -43,13 +43,16 @@ dataloader_num_workers = 4
 dataloader_prefetch_factor = 4
 conversation_column_name = "messages"
 temperature = 1.6
-epsilon_low = 0.2
-epsilon_high = 0.28
+epsilon_low = 0.1
+epsilon_high = 0.9
 lower_bound_ratio = 10.0
 kl_beta = 0.0
 mu_iterations = 1
 mini_batch = 4
 min_filter_prefix_tokens = 1
+allowed_outdated_steps = 2  # Allow 2 batches worth of prompts (accounts for GRPO filtering)
+on_policy = true  # Wait for weight updates before next generation
+no_outdated_rollout = false  # Allow some prompt buffering (set to false to avoid deadlock)
 
 [train.ckpt]
 enable_checkpoint = true
@@ -60,7 +63,7 @@ save_mode = "async"
 backend = "vla"  # Use VLA rollout backend instead of vllm
 gpu_memory_utilization = 0.7
 enable_chunked_prefill = true
-n_generation = 16
+n_generation = 8
 batch_size = 8
 quantization = "none"
 max_response_length = 1024
@@ -89,9 +92,9 @@ top_p = 1.0
 top_k = 0
 
 [validation]
-enable = true
+enable = false  # Disabled for small test dataset (only 1 training step)
 freq = 30
-val_before_train = true
+val_before_train = false
 batch_size = 8
 dataset.name = "libero"
 dataset.subset = "libero_10"

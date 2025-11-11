@@ -14,12 +14,14 @@
 # limitations under the License.
 
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Suppress warning when forking with tokenizers
+
 import threading
 import traceback
 import torch
 import time
 from typing import List, Dict, Any, Optional, Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 
 from cosmos_rl.rollout import RolloutWorkerBase, State
@@ -36,12 +38,7 @@ import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.utils.pynccl import create_nccl_uid, create_nccl_comm, nccl_broadcast
 
 from .vla_rollout import VLARollout
-from .environment_wrappers import LiberoEnvWrapper, RobotwinEnvWrapper
-from .vla_schema import (
-    VLAEpisodeMetadata,
-    compute_vla_reward,
-    create_vla_metadata_from_environment_info,
-)
+from .vla_schema import create_vla_metadata_from_environment_info
 
 
 class VLARolloutWorker(RolloutWorkerBase):
@@ -70,6 +67,9 @@ class VLARolloutWorker(RolloutWorkerBase):
         self._command_queue: Queue[Command] = Queue()
         self._prompt_queue: Queue[List[IdxAndRLPayload]] = Queue()
         self.current_weight_version = 0
+        
+        # Track leftover payloads for GRPO streaming queue
+        self._leftover_prompt_payload_list: List[IdxAndRLPayload] = []
         
         # NCCL communicator infrastructure for r2r broadcast (borrowed from vLLM worker)
         self.global_commnicator_idex = -1  # Index for the global NCCL communicator
@@ -339,9 +339,12 @@ class VLARolloutWorker(RolloutWorkerBase):
                 
                 logger.info(f"[VLA Rollout] Running validation on {len(payloads)} prompts")
                 
-                # Run VLA rollout generation (same as training but with validation data)
+                # Run VLA rollout generation for validation (greedy, no replication, save videos)
                 rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
-                    payloads=payloads
+                    payloads=payloads,
+                    n_generation=1,  # No replication for validation
+                    is_validation=True,  # Save videos for validation
+                    global_steps=self.current_step,
                 )
                 
                 if rollout_results:
@@ -451,9 +454,8 @@ class VLARolloutWorker(RolloutWorkerBase):
             if self.validation_flag.is_set():
                 logger.info(f"[VLA Rollout] 🎯 Validation flag is set, starting validation")
                 self.do_validation()
-            else:
+                # Continue to next iteration after validation
                 continue
-                #self.shutdown_signal.set()
 
 
 
@@ -469,6 +471,9 @@ class VLARolloutWorker(RolloutWorkerBase):
                     self.state.set_prompt_fetch_end()
                     # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
                     if self._prompt_queue.empty():
+                        # Flush any remaining leftovers before ending
+                        self._flush_remaining_leftovers()
+                        
                         self.state.set_prompt_consume_end()
                         if self.global_rank == 0:
                             self.send_end_signal()
@@ -494,29 +499,78 @@ class VLARolloutWorker(RolloutWorkerBase):
                     # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
                     continue
 
-                prompt_id_and_payload_list: List[IdxAndRLPayload] = (
+                new_prompt_id_and_payload_list: List[IdxAndRLPayload] = (
                     self._prompt_queue.get()
                 )
-                payloads: List[RLPayload] = [
-                    payload for _, payload in prompt_id_and_payload_list
+                new_payloads: List[RLPayload] = [
+                    payload for _, payload in new_prompt_id_and_payload_list
                 ]
+                
+                # Combine leftovers from previous batch with new payloads
+                # This mirrors what rollout_generation does internally
+                num_leftovers = len(self._leftover_prompt_payload_list)
+                combined_prompt_payload_list = self._leftover_prompt_payload_list + new_prompt_id_and_payload_list
+                
+                if num_leftovers > 0:
+                    logger.info(
+                        f"[GRPO Streaming Queue] Processing {len(new_payloads)} new payloads "
+                        f"+ {num_leftovers} leftovers from previous batch"
+                    )
 
-                # Use VLA rollout generation instead of vLLM
+                # Use VLA rollout generation for training (with GRPO-style replication)
                 rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
-                    payloads=payloads
+                    payloads=new_payloads,  # Only pass NEW payloads; engine merges with leftovers internally
+                    n_generation=self.config.rollout.n_generation,  # GRPO replication
+                    is_validation=False,  # No video saving for training
+                    global_steps=self.current_step,
                 )
 
                 if len(rollout_results) == 0:
                     continue
 
-                assert len(rollout_results) == len(
-                    payloads
-                ), f"Error: VLA returned {len(rollout_results)} for {len(payloads)}"
+                # With streaming queue GRPO filtering:
+                # - Results include BOTH valid leftovers AND valid new payloads
+                # - Results are ordered: leftover[0], leftover[1], ..., new[0], new[1], ...
+                n_gen = self.config.rollout.n_generation
+                total_input_payloads = num_leftovers + len(new_payloads)
+                expected_results = total_input_payloads * n_gen
+                num_valid_payloads = len(rollout_results) // n_gen if n_gen > 0 else 0
+                num_new_leftovers = total_input_payloads - num_valid_payloads
+                
+                if len(rollout_results) != expected_results:
+                    logger.info(
+                        f"[GRPO Streaming Queue] Got {len(rollout_results)} results from {len(new_payloads)} payloads "
+                        f"({num_valid_payloads} valid, {num_new_leftovers} leftovers → next batch)"
+                    )
+
+                # Update leftover tracking: extract payloads that became new leftovers
+                # Results come from first num_valid_payloads of combined_prompt_payload_list
+                # Remaining payloads are the new leftovers
+                self._leftover_prompt_payload_list = combined_prompt_payload_list[num_valid_payloads:]
+                
+                # Replicate prompt_id_and_payload_list to match actual results
+                # Use combined list (leftovers + new) for the first num_valid_payloads
+                if n_gen > 1:
+                    replicated_prompt_payload_list = []
+                    # Each valid payload contributes n_generation results in sequence
+                    for i in range(num_valid_payloads):
+                        idx_and_payload = combined_prompt_payload_list[i]
+                        for _ in range(n_gen):
+                            replicated_prompt_payload_list.append(idx_and_payload)
+                    logger.debug(
+                        f"[GRPO] Replicated prompt_payload_list: "
+                        f"{num_valid_payloads} valid payloads × {n_gen} = {len(replicated_prompt_payload_list)}"
+                    )
+                else:
+                    replicated_prompt_payload_list = combined_prompt_payload_list[:num_valid_payloads]
 
                 # Process and send results back to controller
-                self._send_rollout_results(rollout_results, prompt_id_and_payload_list)
+                self._send_rollout_results(rollout_results, replicated_prompt_payload_list)
 
             if self.state.prompt_fetch_end() and self._prompt_queue.empty():
+                # Flush any remaining leftovers before ending
+                self._flush_remaining_leftovers()
+                
                 self.state.set_prompt_consume_end()
                 if self.global_rank == 0:
                     self.send_end_signal()
@@ -1205,12 +1259,90 @@ class VLARolloutWorker(RolloutWorkerBase):
             self.trainable_params = dist_utils.broadcast_object_cpu(self.trainable_params)
             logger.debug(f"[VLA Rollout] Rank {self.global_rank} has {len(self.trainable_params)} trainable params")
     
+    def _flush_remaining_leftovers(self):
+        """
+        Flush any remaining leftovers from the streaming queue.
+        
+        Called when no more new batches are coming. Keeps rolling leftovers
+        until they become valid or we accept them after max attempts.
+        """
+        if not hasattr(self.rollout, 'leftover_payloads') or not self.rollout.leftover_payloads:
+            logger.info("[GRPO Streaming Queue] No leftovers to flush")
+            return
+        
+        num_leftovers = len(self.rollout.leftover_payloads)
+        logger.info(
+            f"[GRPO Streaming Queue] Flushing {num_leftovers} remaining leftovers "
+            f"(no more new batches)"
+        )
+        
+        # max_flush_iterations = 5  # Don't loop forever
+        n_gen = self.config.rollout.n_generation
+        iteration = 0
+        
+        # for iteration in range(1, max_flush_iterations + 1):
+        while True:
+            # Snapshot leftovers before processing (they'll be modified by rollout_generation)
+            leftovers_snapshot = list(self.rollout.leftover_payloads)
+            
+            if not leftovers_snapshot:
+                break  # No more leftovers to process
+            
+            # Simply call rollout_generation with empty payloads
+            # The streaming queue logic automatically processes leftovers
+            rollout_results = self.rollout.rollout_generation(
+                payloads=[],  # Empty list → only process leftovers
+                n_generation=n_gen,
+                is_validation=False,
+                global_steps=self.current_step,
+                flush_leftovers=True,  # Return results from processed leftovers
+            )
+            
+            if len(rollout_results) > 0:
+                # Build prompt_id_and_payload_list for valid results
+                # Results are ordered: leftover[0]'s n_gen results, then leftover[1]'s, etc.
+                num_valid = len(rollout_results) // n_gen
+                replicated_list = [
+                    (0, leftovers_snapshot[i // n_gen])  # prompt_idx=0 for flushing
+                    for i in range(len(rollout_results))
+                ]
+                
+                logger.info(
+                    f"[GRPO Streaming Queue] Flush iteration {iteration}: "
+                    f"Got {len(rollout_results)} results ({num_valid}/{len(leftovers_snapshot)} valid)"
+                )
+                
+                # Send results
+                self._send_rollout_results(rollout_results, replicated_list)
+
+            # Check if all leftovers are processed
+            if not self.rollout.leftover_payloads:
+                logger.info(
+                    f"[GRPO Streaming Queue] All leftovers flushed after {iteration} iterations"
+                )
+                # Clear worker's leftover tracking as well
+                self._leftover_prompt_payload_list = []
+                break
+
+            iteration += 1
+        else:
+            # Max iterations reached - accept remaining leftovers
+            remaining = len(self.rollout.leftover_payloads)
+            if remaining > 0:
+                logger.warning(
+                    f"[GRPO Streaming Queue] Max flush iterations reached. "
+                    f"Accepting {remaining} remaining leftovers as-is"
+                )
+                # One final call to force accept
+                # Note: The rollout class should have logic to accept exhausted payloads
+    
     def _send_rollout_results(self, results: List[RolloutResult], prompt_id_and_payload_list: List[IdxAndRLPayload]):
         """
-        Send rollout results back to controller via reward dispatcher.
+        Send rollout results back to controller.
         
-        Converts RolloutResult objects to RLPayload objects with computed rewards.
-        Uses VLAEpisodeMetadata for clean, structured data handling.
+        VLA WORKAROUND: Bypasses reward_calculator entirely and computes rewards directly.
+        reward_calculator.py has too many LLM/VLM assumptions that don't apply to VLA.
+        For VLA training, we compute: environment success → binary reward (1.0/0.0)
         """
         logger.debug(f"Sending {len(results)} VLA rollout results to controller")
         
@@ -1229,9 +1361,11 @@ class VLARolloutWorker(RolloutWorkerBase):
                     n_generation=self.n_generation,
                 )
                 
-                # Create result payload for reward calculation
-                # Note: Rewards will be computed by the custom reward function (vla_reward_fn)
-                # using the metadata we provide here
+                # Compute binary reward directly: 1.0 for success, 0.0 for failure
+                success = vla_metadata.success
+                reward = 1.0 if success else 0.0
+                
+                # Create result payload with pre-computed rewards
                 result_payload = RLPayload(
                     prompt=result.prompt,
                     conversation=getattr(payload, 'conversation', None),
@@ -1241,28 +1375,35 @@ class VLARolloutWorker(RolloutWorkerBase):
                     # VLA-specific results (completions for n_generation support)
                     completions=result.completions if result.completions else [""],
                     
-                    # VLA metadata for custom reward function
-                    # The reward function will extract success/failure from this metadata
+                    # VLA metadata
                     metadata=vla_metadata.model_dump(),
                     
-                    # VLA doesn't have reference answers (environment-based rewards)
-                    # The custom reward function (vla_reward_fn) will handle this
+                    # Pre-computed rewards and advantages (bypass reward_calculator)
+                    rewards=[reward],  # One reward per completion
+                    advantages=[reward],  # For GRPO, use reward as advantage
+                    valid=True,
+                    
+                    # Fields required by extract_rollouts
+                    n_ignore_prefix_tokens=[0],
+                    completed_conversations=[[]],
+                    
+                    # VLA doesn't have reference answers
                     reference_answer=None,
                 )
                 result_payloads.append(result_payload)
             
-            # Send to reward dispatcher for processing
-            # The reward dispatcher will compute final rewards and send to controller
+            # Send training results directly to controller (bypass reward_dispatcher)
             prompt_idxs = [int(payload.metadata.get('prompt_id', 0)) for payload in result_payloads]
             
-            self.reward_dispatcher.enqueue_rewards_cal(
-                payloads=result_payloads, 
-                is_validation=False, 
-                step=0,  # TODO: Get actual step from training
-                prompt_idxs=prompt_idxs
+            response = RolloutRequest(
+                src_replica_name=self.replica_name,
+                prompt_idxs=prompt_idxs,
+                payloads=result_payloads,
+                is_end=False,
             )
+            self.api_client.post_rollout_completion(response)
             
-            logger.info(f"Successfully queued {len(result_payloads)} VLA rollout results for reward calculation")
+            logger.info(f"[VLA Workaround] Sent {len(result_payloads)} training rollout results directly to controller")
             
         except Exception as e:
             logger.error(f"Error sending rollout results: {e}")

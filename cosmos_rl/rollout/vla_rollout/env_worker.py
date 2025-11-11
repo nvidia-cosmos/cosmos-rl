@@ -14,16 +14,37 @@
 # limitations under the License.
 
 """
-Environment worker process for LIBERO environments.
+Environment worker processes for VLA rollout.
 
-This module implements the multiprocessing pattern from SimpleVLA-RL to avoid
-shared OpenGL/MuJoCo state issues when running multiple LIBERO environments.
+Each worker runs in a separate process to avoid shared OpenGL/MuJoCo state.
+Includes EnvConfig dataclass for configuration.
 """
 
 import gc
 import torch
-from typing import Any, Dict
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 from cosmos_rl.utils.logging import logger
+
+
+@dataclass
+class EnvConfig:
+    """Configuration for environment worker process.
+    
+    This lightweight config replaces the heavy BaseEnvWrapper/LiberoEnvWrapper/RobotwinEnvWrapper
+    classes that were designed for threading but are unnecessary in a multiprocessing context.
+    """
+    task_suite: str
+    task_id: int
+    trial_id: int
+    max_steps: int
+    gen_idx: int = 0  # Generation index for GRPO (0 for validation, 0-N for training)
+    resolution: int = 256
+    save_video: bool = False
+    global_steps: int = 0
+    
+    # Task-specific extra configuration
+    extra_config: Optional[Dict] = None
 
 
 def libero_env_worker(

@@ -38,3 +38,6 @@ class RolloutResult(BaseModel):
     rewards: Optional[List[float]] = None
     episode_length: Optional[int] = None
     environment_info: Optional[Dict[str, Any]] = None
+    
+    # VLA trajectory data (for training)
+    vla_trajectory: Optional[Dict[str, Any]] = None  # Contains step-by-step data
