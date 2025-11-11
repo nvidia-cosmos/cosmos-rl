@@ -23,7 +23,7 @@ from transformers.utils import quantization_config as transformers_quantization_
 from functools import partial, cached_property
 from typing import Tuple, List, Optional, Callable
 
-from transformers import AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 from cosmos_rl.utils.util import (
     clear_weight_name,
     safe_deep_getattr,
@@ -357,8 +357,8 @@ class HFModel(BaseModel):
                     raise ValueError(f"Can not get num of llm layers from {config}")
             # Attempt to load partial model to extract all named buffers
             try:
-                if isinstance(self.model_class, AutoModel):
-                    hf_model = AutoModel.from_config(config)
+                if self.model_class in [AutoModelForCausalLM, AutoModel]:
+                    hf_model = self.model_class.from_config(config)
                 else:
                     hf_model = self.model_class._from_config(config)
                 hf_named_buffers = [name for name, _ in hf_model.named_buffers()]
@@ -460,7 +460,7 @@ class HFModel(BaseModel):
         embed_tokens_weight_key = None
         # Find the lm_head and embed_tokens weight keys in the state dict
         for k in self_state_dict.keys():
-            if "embed_tokens" in k:
+            if "embed_tokens" in k or "embeddings" in k:
                 embed_tokens_weight_key = k
                 if lm_head_weight_key is not None:
                     break
@@ -771,11 +771,11 @@ class HFModel(BaseModel):
             model_class = load_model_class_by_config(hf_config)
             model = model_class(hf_config)
         except Exception as e:
+            model_class = AutoModelForCausalLM if not is_vlm else AutoModel
             logger.warning(
-                f"Got error({e}) when loading {hf_config.model_type}, Using AutoModel instead."
+                f"Got error({e}) when loading {hf_config.model_type}, Using {model_class} instead."
             )
-            model_class = AutoModel
-            model = AutoModel.from_config(hf_config, trust_remote_code=True)
+            model = model_class.from_config(hf_config, trust_remote_code=True)
 
         post_hf_models_patch(hf_config, model)
 
