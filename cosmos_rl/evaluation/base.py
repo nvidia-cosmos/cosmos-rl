@@ -312,7 +312,8 @@ class BaseEvaluator(ABC):
 
         # Process in batches to send status callbacks during long generation
         # This prevents timeout for large datasets where generation can take >15 minutes
-        batch_size = 50  # Process 50 requests at a time
+        batch_size = self.eval_config.get("batch_size", 8)
+        log.info(f"Using batch size: {batch_size}")
         all_outputs = []
 
         for batch_idx in range(0, len(inputs), batch_size):

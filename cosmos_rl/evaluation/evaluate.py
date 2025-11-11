@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Cosmos-RL ITS Evaluation Script")
+    parser = argparse.ArgumentParser(description="Cosmos-RL Evaluation Script")
 
     parser.add_argument(
         "--config",
@@ -52,37 +52,6 @@ def parse_args():
         type=str,
         required=True,
         help="Path to evaluation configuration TOML file"
-    )
-    parser.add_argument(
-        "--model_name",
-        "-m",
-        type=str,
-        default=None,
-        help="Override model name from config"
-    )
-    parser.add_argument(
-        "--skip_saved",
-        action="store_true",
-        default=False,
-        help="Skip tasks for which results are already saved"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=-1,
-        help="Limit the number of tasks to evaluate (for debugging)"
-    )
-    parser.add_argument(
-        "--total_shard",
-        type=int,
-        default=1,
-        help="Total number of shards for distributed evaluation"
-    )
-    parser.add_argument(
-        "--shard_id",
-        type=int,
-        default=0,
-        help="Current shard ID (0-based)"
     )
 
     return parser.parse_args()
@@ -116,10 +85,25 @@ def run_evaluation(args):
         with open(config_path) as f:
             eval_config = toml.load(f)
 
-        # Override model name if provided
-        if args.model_name:
-            eval_config["model"]["model_name"] = args.model_name
-            logger.info(f"Overriding model name with: {args.model_name}")
+        # Configure GPU usage based on num_gpus
+        num_gpus = eval_config.get("num_gpus", 1)
+
+        # Default strategy: data parallelism (tp_size=1, total_shard=num_gpus)
+        # Unless tp_size is explicitly set in model config
+        if "model" not in eval_config:
+            eval_config["model"] = {}
+
+        tp_size = eval_config["model"].get("tp_size", 1)
+
+        # Calculate total_shard based on num_gpus and tp_size
+        # Formula: num_gpus = total_shard × tp_size
+        calculated_total_shard = num_gpus // tp_size
+
+        # Override total_shard in evaluation config if not explicitly set
+        if "evaluation" not in eval_config:
+            eval_config["evaluation"] = {}
+
+        eval_config["evaluation"]["total_shard"] = calculated_total_shard
 
         # Create results directory
         results_dir = eval_config.get("results_dir", "/results")
@@ -161,14 +145,21 @@ def run_evaluation(args):
         logger.info(f"Model: {eval_config.get('model', {}).get('model_name', 'unknown')}")
         logger.info(SEPARATOR)
 
+        # Get evaluation parameters from config
+        eval_params = eval_config.get("evaluation", {})
+        skip_saved = eval_params.get("skip_saved", False)
+        limit = eval_params.get("limit", -1)
+        total_shard = eval_params.get("total_shard", 1)
+        shard_id = eval_params.get("shard_id", 0)
+
         # Run evaluation pipeline (inference + scoring)
         logger.info("Starting evaluation pipeline...")
         results = evaluator.run_evaluation(
             results_dir=results_dir,
-            skip_saved=args.skip_saved,
-            limit=args.limit,
-            total_shard=args.total_shard,
-            shard_id=args.shard_id
+            skip_saved=skip_saved,
+            limit=limit,
+            total_shard=total_shard,
+            shard_id=shard_id
         )
 
         # Extract metrics

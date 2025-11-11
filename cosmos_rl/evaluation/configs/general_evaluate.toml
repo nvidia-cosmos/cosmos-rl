@@ -1,3 +1,6 @@
+# Number of GPUs (automatically configures parallelism)
+num_gpus = 1
+
 [task]
 type = "captioning"  # or "text"
 
