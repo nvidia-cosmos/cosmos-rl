@@ -26,7 +26,7 @@ jobs:
 
       - name: Build image
         run: |
-          docker build -t ${{ steps.vars.outputs.image_tag }} .
+          docker build -t ${{ steps.vars.outputs.image_tag }}  --no-cache --force-rm . 
 
       - name: Run tests
         id: tests
