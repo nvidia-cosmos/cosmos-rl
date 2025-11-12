@@ -22,6 +22,12 @@ from transformers import AutoConfig
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils import util
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.parallelism_registry import (
+    ParallelismStrategyRole,
+    register_parallelism_strategy,
+    get_policy_parallelism_strategy as get_policy_strategy,
+    get_rollout_parallelism_strategy as get_rollout_strategy,
+)
 
 
 class VLAWeightMapper(WeightMapper):
@@ -217,11 +223,14 @@ class VLAWeightMapper(WeightMapper):
             recv_key_n_rank_list.append(projector_params)
         if action_head_params:
             recv_key_n_rank_list.append(action_head_params)
-        
         logger.info(f"VLA rollout_prepare_recv: prepared {len(vllm_weight_inplace_view_map)} parameters "
                    f"in {len(recv_key_n_rank_list)} groups")
         
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
+    
+    @property
+    def packed_modules_mapping(self) -> Dict[str, List[str]]:
+        return {}
             
     def get_unsplited_weight_name(self, weight_name: str) -> str:
         """
@@ -359,3 +368,101 @@ class VLAWeightMapper(WeightMapper):
         else:
             # No split
             return -1
+    
+    def get_policy_parallelism_strategy(self):
+        """
+        Define parallelism strategies for VLA model components.
+        
+        All VLA components (vision_backbone, projector, language_model, action_head)
+        are now sharded uniformly by FSDP, so they're all in parallelism_info_for_params.
+        
+        We use automatic inference for all parameters - no special handling needed!
+        
+        Returns:
+            List containing the registered "openvla" strategy function
+        """
+        
+        # Register VLA policy parallelism strategy
+        @register_parallelism_strategy(
+            "openvla",
+            role=ParallelismStrategyRole.POLICY,
+            allow_override=True
+        )
+        def vla_policy_strategy(shape, dest_name, parallelism, hf_config):
+            """
+            Use automatic inference for all VLA parameters.
+            
+            All components are FSDP-sharded uniformly, so automatic inference
+            will correctly detect the sharding from parallelism_info_for_params.
+            
+            Args:
+                shape: Tensor shape (tuple of ints)
+                dest_name: Parameter name (str)
+                parallelism: ParallelDims configuration
+                hf_config: HuggingFace model config
+                
+            Returns:
+                Tuple of (None, None, None) to trigger automatic inference
+            """
+            # All parameters: use automatic inference
+            return None, None, None
+        
+        logger.info("[VLAWeightMapper] Registered policy parallelism strategy for P2R weight sync")
+        return [get_policy_strategy("openvla")]
+    
+    def get_rollout_parallelism_strategy(self):
+        """
+        Define parallelism strategies for VLA rollout workers.
+        
+        Rollout workers receive weights from policy workers via P2R sync.
+        Since all parameters are now uniformly sharded on policy side,
+        we use automatic inference for all parameters.
+        
+        Returns:
+            List of strategy functions for rollout recv instructions
+        """
+        
+        # Register VLA rollout parallelism strategy
+        @register_parallelism_strategy(
+            "openvla",
+            role=ParallelismStrategyRole.ROLLOUT,
+            allow_override=True
+        )
+        def vla_rollout_strategy(shape, dest_name, parallelism, hf_config):
+            """
+            Use automatic inference for all VLA parameters.
+            
+            Args:
+                shape: Tensor shape (tuple of ints)
+                dest_name: Parameter name (str)
+                parallelism: ParallelDims configuration
+                hf_config: HuggingFace model config
+                
+            Returns:
+                Tuple of (None, None, None) to trigger automatic inference
+            """
+            # All parameters: use automatic inference
+            return None, None, None
+        
+        logger.info("[VLAWeightMapper] Registered rollout parallelism strategy for P2R weight sync")
+        return [get_rollout_strategy("openvla")]
+    
+    def policy_decompose_param_1_to_n_for_sync(self, name):
+        """
+        Override to prevent parameter decomposition for weight sync.
+        
+        VLA models do NOT decompose parameters (like qkv -> q,k,v) for P2R weight sync.
+        All parameters are synced as complete tensors.
+        
+        Without this override, the base WeightMapper might try to decompose parameters
+        like 'vision_backbone.*.attn.qkv.weight', causing them to be skipped from
+        weight_sync_transforms and never synced to rollout workers.
+        
+        Args:
+            name: Parameter name
+            
+        Returns:
+            Empty list [] means no decomposition
+        """
+        # VLA models: no parameter decomposition for weight sync
+        return []

@@ -156,3 +156,7 @@ class Rollout(BaseModel):
     filter_reward: float = Field(
         default=0.0, description="The filter reward for the rollout."
     )
+    
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None, description="Additional metadata for the rollout (e.g., VLA trajectory data)."
+    )

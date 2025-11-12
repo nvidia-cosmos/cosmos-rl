@@ -3,14 +3,14 @@ redis = "12800"
 [train]
 resume = false
 epoch = 1
-output_dir = "./outputs/openvla-oft-vla-grpo"
+output_dir = "./outputs/vla-validation-4p4r"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 1e-6
 optm_impl = "fused"
 optm_weight_decay = 0.01
 optm_betas = [ 0.9, 0.999,]
-optm_warmup_steps = 20
+optm_warmup_steps = 5  # Short warmup for validation
 optm_grad_norm_clip = 1.0
 async_tp_enabled = false
 compile = false
@@ -19,7 +19,7 @@ fsdp_reduce_dtype = "float32"
 master_dtype = "bfloat16"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 64  # Target: 512 rollouts for training
+train_batch_per_replica = 8  # 8 episodes per policy worker
 sync_weight_interval = 1
 
 [policy]
@@ -28,9 +28,9 @@ model_max_length = 4096
 model_gradient_checkpointing = true
 
 [logging]
-logger = ['console', 'wandb']
-project_name = "cosmos-vla-rl"
-experiment_name = "openvla-oft-libero10-sft-traj1-vla-grpo"
+logger = ['console']  # Console only for validation (no wandb)
+project_name = "cosmos-vla-validation"
+experiment_name = "4p4r-validation-test"
 
 [train.train_policy]
 type = "grpo"
@@ -48,38 +48,41 @@ epsilon_high = 0.9
 lower_bound_ratio = 10.0
 kl_beta = 0.0
 mu_iterations = 1
-mini_batch = 1
+mini_batch = 1  # 4 episodes per mini-batch
 min_filter_prefix_tokens = 1
-allowed_outdated_steps = 2  # Allow 2 batches worth of prompts (accounts for GRPO filtering)
-on_policy = true  # Wait for weight updates before next generation
-no_outdated_rollout = false  # Allow some prompt buffering (set to false to avoid deadlock)
+allowed_outdated_steps = 2
+on_policy = true
+no_outdated_rollout = false
 
 [train.ckpt]
 enable_checkpoint = true
-save_freq = 30
+save_freq = 30  # Save after first step for validation
 save_mode = "async"
 
 [rollout]
-backend = "vla"  # Use VLA rollout backend instead of vllm
+backend = "vla"
 gpu_memory_utilization = 0.7
 enable_chunked_prefill = true
-n_generation = 8
+n_generation = 8  # GRPO: 8 rollouts per payload
 batch_size = 8
 quantization = "none"
 max_response_length = 1024
 enforce_eager = false
 
 [policy.parallelism]
-n_init_replicas = 1
-tp_size = 1
-cp_size = 1
-dp_shard_size = 4  # FSDP: Shard LLM across 4 GPUs (vision backbone replicated)
-pp_size = 1
-dp_replicate_size = 1
+n_init_replicas = 1  # Single replica (sharded across 4 GPUs via dp_shard_size)
+tp_size = 1  # No tensor parallelism
+cp_size = 1  # No context parallelism
+dp_shard_size = 4  # FSDP: Shard model across 4 GPUs (~34 GB per GPU instead of 75 GB)
+pp_size = 1  # No pipeline parallelism
+dp_replicate_size = 1  # Use 1 for now (can increase if DDP is enabled)
 cp_rotate_method = "allgather"
 
+# ============================================================================
+# Rollout Parallelism: 4 Workers
+# ============================================================================
 [rollout.parallelism]
-n_init_replicas = 1
+n_init_replicas = 4  # 4 rollout workers
 tp_size = 1
 cp_size = 1
 dp_shard_size = 1
@@ -92,7 +95,7 @@ top_p = 1.0
 top_k = 0
 
 [validation]
-enable = false  # Disabled for small test dataset (only 1 training step)
+enable = true
 freq = 30
 val_before_train = false
 batch_size = 8
@@ -100,11 +103,14 @@ dataset.name = "libero"
 dataset.subset = "libero_10"
 dataset.split = "val"
 
-# VLA-specific configuration
+# ============================================================================
+# VLA Configuration
+# ============================================================================
 [vla]
 vla_type = "openvla-oft"
 task_suite = "libero_10"
-num_parallel_envs = 4
+num_parallel_envs = 4  # 4 parallel environments per rollout worker
+traj_chunk_size = 16  # Split long trajectories to reduce memory
 action_dim = 7
 max_episode_length = 512
 image_size = 256

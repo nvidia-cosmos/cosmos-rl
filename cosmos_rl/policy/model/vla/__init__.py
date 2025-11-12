@@ -170,6 +170,134 @@ class VLAModel(BaseModel):
             logger.error(f"Input shapes: {[(k, v.shape if hasattr(v, 'shape') else type(v)) for k, v in model_inputs.items()]}")
             raise
     
+    def forward_with_trajectory_structure(
+        self,
+        input_ids: torch.Tensor,  # (batch, num_steps, seq_len)
+        pixel_values: torch.Tensor,  # (batch, num_steps, C, H, W)
+        attention_mask: torch.Tensor,  # (batch, num_steps, seq_len)
+        num_steps: torch.Tensor,  # (batch,) - actual steps per sample
+        position_ids: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        **kwargs
+    ):
+        """
+        Forward pass for VLA training with per-step trajectory structure.
+        
+        Implements SimpleVLA-RL's trajectory chunking:
+        1. Splits long trajectories into chunks (e.g., 60 → 4×15)
+        2. Processes each chunk separately to reduce memory
+        3. Concatenates results
+        
+        Args:
+            input_ids: (batch, num_steps, seq_len) - per-step input tokens
+            pixel_values: (batch, num_steps, C, H, W) - per-step images
+            attention_mask: (batch, num_steps, seq_len) - per-step masks
+            num_steps: (batch,) - actual number of steps per sample
+            
+        Returns:
+            Output with logits reshaped to (batch, num_steps, seq_len, vocab_size)
+        """
+        batch_size, max_steps, seq_len = input_ids.shape
+        _, _, C, H, W = pixel_values.shape
+        
+        # Get trajectory chunk size from config (default 16 to match SimpleVLA-RL)
+        traj_chunk_size = getattr(self.config, 'traj_chunk_size', 8)
+        
+        logger.debug(
+            f"[VLA Forward] Input shapes: input_ids={input_ids.shape}, "
+            f"pixel_values={pixel_values.shape}, traj_chunk_size={traj_chunk_size}"
+        )
+        
+        # If trajectory is short enough, process all at once
+        if max_steps <= traj_chunk_size:
+            # Reshape: (batch, steps, ...) → (batch*steps, ...)
+            input_ids_flat = input_ids.reshape(batch_size * max_steps, seq_len)
+            attention_mask_flat = attention_mask.reshape(batch_size * max_steps, seq_len)
+            pixel_values_flat = pixel_values.reshape(batch_size * max_steps, C, H, W)
+            
+            logger.debug(
+                f"[VLA Forward] Processing all {max_steps} steps at once (no chunking needed)"
+            )
+            
+            # Forward pass through model
+            outputs = self.forward(
+                input_ids=input_ids_flat,
+                pixel_values=pixel_values_flat,
+                attention_mask=attention_mask_flat,
+                position_ids=position_ids,
+                labels=labels,
+                **kwargs
+            )
+            
+            # Reshape back: (batch*steps, seq_len, vocab) → (batch, steps, seq_len, vocab)
+            vocab_size = outputs.logits.shape[-1]
+            logits_reshaped = outputs.logits.reshape(batch_size, max_steps, seq_len, vocab_size)
+        
+        else:
+            # Split trajectory into chunks (e.g., 60 → 4 chunks of 15)
+            num_chunks = (max_steps + traj_chunk_size - 1) // traj_chunk_size
+            
+            logger.info(
+                f"[VLA Forward] Chunking trajectory: {max_steps} steps → {num_chunks} chunks of ≤{traj_chunk_size} steps "
+                f"(memory optimization for long episodes)"
+            )
+            
+            chunk_logits = []
+            
+            for chunk_idx in range(num_chunks):
+                start_step = chunk_idx * traj_chunk_size
+                end_step = min((chunk_idx + 1) * traj_chunk_size, max_steps)
+                chunk_size = end_step - start_step
+                
+                # Extract chunk: (batch, chunk_size, ...)
+                input_ids_chunk = input_ids[:, start_step:end_step, :]
+                attention_mask_chunk = attention_mask[:, start_step:end_step, :]
+                pixel_values_chunk = pixel_values[:, start_step:end_step, :, :, :]
+                
+                # Reshape chunk: (batch, chunk_size, ...) → (batch*chunk_size, ...)
+                input_ids_flat = input_ids_chunk.reshape(batch_size * chunk_size, seq_len)
+                attention_mask_flat = attention_mask_chunk.reshape(batch_size * chunk_size, seq_len)
+                pixel_values_flat = pixel_values_chunk.reshape(batch_size * chunk_size, C, H, W)
+                
+                logger.debug(
+                    f"[VLA Forward] Chunk {chunk_idx+1}/{num_chunks}: steps [{start_step}, {end_step}), "
+                    f"pixel_values={pixel_values_flat.shape}"
+                )
+                
+                # Forward pass on this chunk
+                chunk_outputs = self.forward(
+                    input_ids=input_ids_flat,
+                    pixel_values=pixel_values_flat,
+                    attention_mask=attention_mask_flat,
+                    position_ids=position_ids,
+                    labels=labels,
+                    **kwargs
+                )
+                
+                # Reshape chunk logits: (batch*chunk_size, seq_len, vocab) → (batch, chunk_size, seq_len, vocab)
+                vocab_size = chunk_outputs.logits.shape[-1]
+                chunk_logits_reshaped = chunk_outputs.logits.reshape(
+                    batch_size, chunk_size, seq_len, vocab_size
+                )
+                chunk_logits.append(chunk_logits_reshaped)
+            
+            # Concatenate all chunks: list of (batch, chunk_size, seq_len, vocab) → (batch, max_steps, seq_len, vocab)
+            logits_reshaped = torch.cat(chunk_logits, dim=1)
+            logger.debug(
+                f"[VLA Forward] Concatenated {num_chunks} chunks → final shape {logits_reshaped.shape}"
+            )
+            
+            # Use the last chunk's outputs structure
+            outputs = chunk_outputs
+        
+        logger.debug(
+            f"[VLA Forward] Output logits shape: {logits_reshaped.shape}"
+        )
+        
+        # Create new output with reshaped logits
+        outputs.logits = logits_reshaped
+        return outputs
+    
     def generate(
         self,
         input_ids: torch.Tensor,
@@ -223,7 +351,7 @@ class VLAModel(BaseModel):
             max_position_embeddings: Override max position embeddings
             
         Returns:
-            VLAModel: VLA model instance
+            VLAModel: VLA model instance with weights loaded
         """
         logger.info(f"Creating VLA model from pretrained: {model_name_or_path}")
         
@@ -245,8 +373,11 @@ class VLAModel(BaseModel):
             hf_config=hf_config
         )
         
-        # Create model structure only (no weights loaded)
-        return cls.from_model_args(vla_args)
+        # Policy workers: Create on CUDA with random init (TIMM can't use meta device)
+        # Weights will be loaded later via load_hf_weights() after FSDP
+        vla_model = cls.from_model_args(vla_args, init_device="cuda")
+        
+        return vla_model
     
     @property  
     def parallelize_fn(self):
@@ -261,8 +392,32 @@ class VLAModel(BaseModel):
         logger.warning("Pipeline parallelism not yet implemented for VLA models")
     
     def post_to_empty_hook(self, cosmos_config):
-        """Post-processing hook after moving to empty device"""
-        pass
+        """Post-processing hook after moving to empty device
+        
+        Ensures all VLA parameters are trainable (unlike MoE models that freeze gate weights).
+        VLA models train vision_backbone, projector, language_model, and action_head.
+        
+        For rollout workers: weights will be synced via P2R
+        """
+        logger.info("🔧 VLA post_to_empty_hook called - checking parameter requires_grad status")
+        
+        # Count frozen vs trainable params BEFORE
+        frozen_before = sum(1 for _, p in self.model.named_parameters() if not p.requires_grad)
+        trainable_before = sum(1 for _, p in self.model.named_parameters() if p.requires_grad)
+        logger.info(f"Before unfreezing: {trainable_before} trainable, {frozen_before} frozen params")
+        
+        # Ensure all parameters are trainable (unfreeze everything)
+        # This is needed because checkpoint weights may have requires_grad=False
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                logger.debug(f"Unfreezing parameter: {name}")
+            param.requires_grad = True
+        
+        # Count again AFTER
+        frozen_after = sum(1 for _, p in self.model.named_parameters() if not p.requires_grad)
+        trainable_after = sum(1 for _, p in self.model.named_parameters() if p.requires_grad)
+        logger.info(f"After unfreezing: {trainable_after} trainable, {frozen_after} frozen params")
+        logger.info("✅ VLA post_to_empty_hook completed")
     
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         """Get position IDs for input"""
@@ -356,10 +511,11 @@ class VLAModel(BaseModel):
         except Exception as e:
             logger.warning(f"Failed to load VLA processor: {e}")
     
+    
     def load_hf_weights(
         self,
         model_name_or_path: str,
-        parallel_dims: ParallelDims,
+        parallel_dims: Optional[ParallelDims],
         device: torch.device,
         revision: Optional[str] = None,
     ):
@@ -371,7 +527,7 @@ class VLAModel(BaseModel):
         
         Args:
             model_name_or_path: Path to the HuggingFace model
-            parallel_dims: Parallel dimensions definition  
+            parallel_dims: Parallel dimensions definition (optional, not used for loading)
             device: Target device
             revision: Model revision/branch
         """
@@ -430,24 +586,62 @@ class VLAModel(BaseModel):
                 else:
                     raise FileNotFoundError(f"No safetensors or pytorch_model.bin found in {model_path}")
             
-            # Load state dict into model (handles distributed tensors automatically)
-            missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+            # Load state dict into model using FSDP-compatible method
+            # Following HFModel's pattern: use weight converter to shard tensors
+            from cosmos_rl.policy.model.vla.weight_converter import convert_weight_from_hf
             
-            # Verify vision backbone was loaded
-            vision_backbone_keys = [k for k in state_dict.keys() if 'vision_backbone' in k]
-            logger.info(f"✅ Loaded VLA weights from {model_name_or_path}")
-            logger.info(f"   Total parameters in checkpoint: {len(state_dict)}")
-            logger.info(f"   Vision backbone parameters: {len(vision_backbone_keys)}")
-            if vision_backbone_keys:
-                logger.info(f"   First 5 vision params: {vision_backbone_keys[:5]}")
+            logger.info("Loading weights with FSDP-compatible method...")
+            
+            with torch.no_grad():
+                model_state_dict = self.model.state_dict()
+                missing_keys = []
+                loaded_keys = []
+                
+                for name, checkpoint_tensor in state_dict.items():
+                    if name in model_state_dict:
+                        target_param = model_state_dict[name]
+                        
+                        # Check if parameter is a DTensor (FSDP-wrapped)
+                        is_dist_tensor = isinstance(target_param, torch.distributed.tensor.DTensor)
+                        
+                        # Get local view of the parameter
+                        local_view = target_param.to_local() if is_dist_tensor else target_param
+                        
+                        # All parameters are FSDP-sharded uniformly, so always use weight converter
+                        _, checkpoint_shard = convert_weight_from_hf(
+                            checkpoint_tensor, 
+                            name, 
+                            parallel_dims
+                        )
+                        
+                        # Copy sharded checkpoint to local view
+                        try:
+                            local_view.data.copy_(checkpoint_shard.to(device))
+                            loaded_keys.append(name)
+                        except Exception as copy_error:
+                            logger.warning(f"Failed to copy {name}: {copy_error} (local shape={local_view.shape}, shard shape={checkpoint_shard.shape})")
+                            missing_keys.append(name)
+                    else:
+                        missing_keys.append(name)
+                
+                unexpected_keys = [k for k in state_dict.keys() if k not in model_state_dict]
+                logger.info(f"✅ Successfully loaded {len(loaded_keys)}/{len(state_dict)} parameters")
+            
+            # Check requires_grad status after loading
+            frozen_count = sum(1 for _, p in self.model.named_parameters() if not p.requires_grad)
+            trainable_count = sum(1 for _, p in self.model.named_parameters() if p.requires_grad)
+            logger.info(f"After load_hf_weights: {trainable_count} trainable, {frozen_count} frozen params")
+            if frozen_count > 0:
+                logger.warning(f"⚠️  Found {frozen_count} frozen parameters after weight loading - these will be unfrozen in post_to_empty_hook")
+                # Sample some frozen vision backbone params
+                frozen_vb_params = [name for name, p in self.model.named_parameters() 
+                                   if not p.requires_grad and 'vision_backbone' in name]
+                if frozen_vb_params:
+                    logger.warning(f"   Sample frozen vision_backbone params: {frozen_vb_params[:5]}")
             
             if missing_keys:
                 logger.warning(f"⚠️  {len(missing_keys)} missing keys in checkpoint")
                 logger.warning(f"   First 10: {missing_keys[:10]}")
-                vision_missing = [k for k in missing_keys if 'vision_backbone' in k]
-                if vision_missing:
-                    logger.error(f"   ❌ Vision backbone missing: {len(vision_missing)} parameters!")
-                    logger.error(f"   This will cause verification failure!")
             if unexpected_keys:
                 logger.warning(f"⚠️  {len(unexpected_keys)} unexpected keys in checkpoint")
                 logger.warning(f"   First 10: {unexpected_keys[:10]}")

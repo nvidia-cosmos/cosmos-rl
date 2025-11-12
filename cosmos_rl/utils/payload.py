@@ -48,6 +48,7 @@ def extract_rollouts(
                 advantage=advantage,
                 prompt_idx=prompt_idx,
                 n_ignore_prefix_tokens=n_ignore_prefix_tokens,
+                metadata=payload.metadata,  # Pass metadata through for VLA trajectory data
             )
             for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens in zip(
                 payload.completions,

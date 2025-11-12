@@ -18,6 +18,7 @@ from cosmos_rl.dispatcher.data.schema import RLPayload
 from typing import Any, Dict, List
 import torch
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.trajectory_buffer import load_trajectory_from_buffer
 
 
 class VLADataPacker(DataPacker):
@@ -109,61 +110,121 @@ class VLADataPacker(DataPacker):
         - This allows training only the LLM's action prediction while vision features flow through
         
         Args:
-            sample: The prompt (empty string for VLA) or metadata
+            sample: For VLA, this is the full Rollout object with metadata containing trajectory
             rollout_output: Text summary like "Task completed in 10 steps"
             n_ignore_prefix_tokens: Number of prefix tokens to ignore
             
         Returns:
             RLPolicyInput object with input_ids and logprob_masks
         """
-        # TODO: Get actual trajectory data (action tokens, observations) from rollout
-        # Currently, VLA rollout only stores metadata, not the full trajectory
-        # This needs to be implemented in vla_rollout.py to store and transfer trajectory data
+        # Extract trajectory data from Rollout metadata (if available)
+        from cosmos_rl.dispatcher.data.schema import Rollout
         
-        # For now, create a plausible structure that allows GRPO training to run
-        # This demonstrates the correct format even with dummy data
+        trajectory = None
+        if isinstance(sample, Rollout) and sample.metadata:
+            # Check if we have a trajectory_id (new filesystem buffer approach)
+            trajectory_id = sample.metadata.get('trajectory_id')
+            if trajectory_id:
+                # Load full trajectory data (including pixel_values) from filesystem
+                try:
+                    trajectory = load_trajectory_from_buffer(
+                        trajectory_id, 
+                        remove_after_load=False  # Don't remove yet, training uses it multiple times
+                    )
+                    logger.info(f"[VLA Policy Input] Loaded trajectory {trajectory_id} from filesystem buffer")
+                except Exception as e:
+                    logger.error(f"[VLA Policy Input] Failed to load trajectory {trajectory_id}: {e}")
+                    trajectory = None
+            else:
+                # Fallback: old approach where trajectory was embedded in metadata
+                trajectory = sample.metadata.get('trajectory')
         
-        # VLA sequence structure (like SimpleVLA-RL):
-        # [vision_placeholder_tokens] + [text_prompt_tokens] + [action_tokens] + [stop_token]
-        #  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^    ^^^^^^^^^^^^^^^
-        #              Context (mask=0)                        Trained (mask=1)
-        
-        # Typical VLA dimensions (OpenVLA):
-        # - Vision: ~256 patches × 2 (DinoSiglip) = ~512 tokens
-        # - Prompt: ~50-100 tokens for task description  
-        # - Actions: 7 dims × 8 chunks = 56 action tokens per episode
-        
-        # Create dummy sequence (TODO: replace with real trajectory data)
-        num_vision_tokens = 512  # Vision encoder output tokens
-        num_prompt_tokens = 50   # Task description tokens
-        num_action_tokens = 56   # Action tokens to train on (7 dims × 8 chunks)
-        
-        total_length = num_vision_tokens + num_prompt_tokens + num_action_tokens + 1  # +1 for stop token
-        
-        # Create input_ids (dummy for now - TODO: get from trajectory)
-        input_ids = [1] * total_length  # All set to 1 as placeholder
-        
-        # Create logprob_masks: 1 for action tokens only, 0 for everything else
-        logprob_masks = [0] * (num_vision_tokens + num_prompt_tokens)  # Context tokens
-        logprob_masks += [1] * num_action_tokens  # Action tokens (TRAIN ON THESE)
-        logprob_masks += [0]  # Stop token (don't train on this)
-        
-        assert len(input_ids) == len(logprob_masks), f"Length mismatch: {len(input_ids)} vs {len(logprob_masks)}"
-        
-        logger.debug(
-            f"[VLA Policy Input] Created sequence: "
-            f"total={total_length}, vision={num_vision_tokens}, "
-            f"prompt={num_prompt_tokens}, actions={num_action_tokens}, "
-            f"trainable_tokens={sum(logprob_masks)}"
-        )
+        if trajectory and trajectory.get('input_ids') and trajectory.get('responses'):
+            # *** REAL TRAJECTORY DATA AVAILABLE ***
+            logger.info(f"[VLA Policy Input] Using REAL trajectory data from rollout")
+            
+            # VLA structure: Keep per-step organization for proper batching
+            # Each step has: input_ids (prompt), responses (action tokens), pixel_values (image)
+            input_ids_list = trajectory['input_ids']
+            responses_list = trajectory['responses']
+            pixel_values_list = trajectory.get('pixel_values', [])
+            
+            # Build per-step data structure (matches SimpleVLA-RL)
+            per_step_data = []
+            
+            for step_idx, (step_ids, step_responses) in enumerate(zip(input_ids_list, responses_list)):
+                # Convert prompt tokens to tensor
+                if isinstance(step_ids, torch.Tensor):
+                    prompt_tokens = step_ids
+                elif isinstance(step_ids, list):
+                    prompt_tokens = torch.tensor(step_ids, dtype=torch.long)
+                else:
+                    continue
+                
+                # Convert response tokens to tensor
+                if isinstance(step_responses, torch.Tensor):
+                    # Flatten if multi-dimensional: (8 actions, 7 tokens) → [56 tokens]
+                    response_tokens = step_responses.flatten()
+                    if step_idx == 0:  # Log first step for debugging
+                        logger.info(f"[VLA Policy Input] Step 0: responses shape {step_responses.shape} → flattened to {response_tokens.shape[0]} tokens")
+                elif isinstance(step_responses, list):
+                    # Flatten nested lists
+                    flat_responses = []
+                    if step_responses and isinstance(step_responses[0], (list, torch.Tensor)):
+                        for r in step_responses:
+                            if isinstance(r, torch.Tensor):
+                                flat_responses.extend(r.flatten().tolist())
+                            elif isinstance(r, list):
+                                flat_responses.extend(r)
+                    else:
+                        flat_responses = step_responses
+                    response_tokens = torch.tensor(flat_responses, dtype=torch.long)
+                else:
+                    response_tokens = torch.tensor([], dtype=torch.long)
+                
+                # CRITICAL: Concatenate prompt + responses for THIS STEP ONLY
+                # This creates the full sequence for this timestep
+                full_sequence = torch.cat([prompt_tokens, response_tokens])
+                
+                # Create attention mask (all 1s for actual tokens)
+                attention_mask = torch.ones_like(full_sequence)
+                
+                # Create logprob mask: 0 for prompt (don't train), 1 for actions (train)
+                logprob_mask = torch.cat([
+                    torch.zeros(len(prompt_tokens), dtype=torch.long),
+                    torch.ones(len(response_tokens), dtype=torch.long)
+                ])
+                
+                per_step_data.append({
+                    'input_ids': full_sequence,
+                    'attention_mask': attention_mask,
+                    'logprob_mask': logprob_mask,
+                })
+                
+                if step_idx == 0:  # Log first step
+                    logger.info(
+                        f"[VLA Policy Input] Step 0: prompt={len(prompt_tokens)}, "
+                        f"actions={len(response_tokens)}, total={len(full_sequence)}"
+                    )
+            
+            num_steps = len(per_step_data)
+            total_tokens = sum(len(s['input_ids']) for s in per_step_data)
+            total_action_tokens = sum(s['logprob_mask'].sum().item() for s in per_step_data)
+            
+            logger.info(
+                f"[VLA Policy Input] Trajectory: {num_steps} steps, "
+                f"total_tokens={total_tokens}, action_tokens={total_action_tokens}, "
+                f"trainable_ratio={total_action_tokens/total_tokens:.2%}"
+            )
         
         class RLPolicyInput:
-            """Mimics the structure expected by GRPO trainer"""
-            def __init__(self, input_ids, logprob_masks):
-                self.input_ids = input_ids
-                self.logprob_masks = logprob_masks
+            """Per-step structured input for VLA training"""
+            def __init__(self, per_step_data, pixel_values):
+                self.per_step_data = per_step_data  # List of dicts, one per step
+                self.pixel_values = pixel_values  # List of tensors, one per step
+                self.num_steps = len(per_step_data)
         
-        return RLPolicyInput(input_ids, logprob_masks)
+        return RLPolicyInput(per_step_data, pixel_values_list)
     
     def policy_compute_max_len(self, processed_samples: List[Any]) -> int:
         """
@@ -183,51 +244,113 @@ class VLADataPacker(DataPacker):
         computed_max_len: int,
     ) -> Dict[str, Any]:
         """
-        Collate VLA samples for policy training.
+        Collate VLA samples for policy training with per-step structure.
         
-        Similar to DecoderOnlyLLMDataPacker, but adapted for VLA sequences:
-        - Pads sequences to computed_max_len
-        - Returns input_ids and logprob_masks tensors
+        This creates (batch, num_steps, seq_len) tensors to match SimpleVLA-RL format.
         
         Args:
-            processed_samples: List of RLPolicyInput objects from get_policy_input
-            computed_max_len: Maximum sequence length for padding
+            processed_samples: List of RLPolicyInput objects with per_step_data
+            computed_max_len: Maximum sequence length per step for padding
             
         Returns:
-            Dict with 'input_ids' and 'logprob_masks' tensors
+            Dict with tensors shaped (batch, num_steps, ...) for per-step processing
         """
-        input_ids = [x.input_ids for x in processed_samples]
-        logprob_masks = [x.logprob_masks for x in processed_samples]
+        batch_size = len(processed_samples)
         
-        assert len(input_ids) == len(logprob_masks), \
-            f"Mismatch: {len(input_ids)} input_ids vs {len(logprob_masks)} logprob_masks"
+        # VLA: With mini_batch=1, process actual episode length (no cross-episode padding)
+        # For mini_batch>1, pad to max_steps (but sorting minimizes this)
+        max_steps = max(s.num_steps for s in processed_samples)
         
         device = torch.cuda.current_device()
-        pad_token_id = 0  # VLA models typically use 0 for padding
+        pad_token_id = 0
         
-        # Pad sequences to computed_max_len
-        collated_dict = {}
-        collated_dict["input_ids"] = torch.tensor(
-            [
-                x[:computed_max_len] + [pad_token_id] * max(0, computed_max_len - len(x))
-                for x in input_ids
-            ],
-            dtype=torch.long,
-        ).to(device)
+        if batch_size == 1:
+            logger.debug(
+                f"[VLA Collate] Processing single episode: "
+                f"num_steps={max_steps}, max_len_per_step={computed_max_len} "
+                f"(no cross-episode padding)"
+            )
+        else:
+            logger.debug(
+                f"[VLA Collate] Batching {batch_size} samples, "
+                f"max_steps={max_steps}, max_len_per_step={computed_max_len}"
+            )
         
-        collated_dict["logprob_masks"] = torch.tensor(
-            [
-                x[:computed_max_len] + [0] * max(0, computed_max_len - len(x))
-                for x in logprob_masks
-            ],
-            dtype=torch.long,
-        ).to(device)
+        # Initialize batch lists
+        batch_input_ids = []
+        batch_attention_masks = []
+        batch_logprob_masks = []
+        batch_pixel_values = []
+        actual_num_steps = []
         
-        logger.debug(
-            f"[VLA Collate] Batched {len(processed_samples)} samples, "
-            f"max_len={computed_max_len}, "
-            f"input_ids shape={collated_dict['input_ids'].shape}, "
-            f"trainable_ratio={collated_dict['logprob_masks'].float().mean():.2%}"
+        for sample in processed_samples:
+            # Stack this sample's steps: (num_steps, seq_len)
+            step_input_ids = []
+            step_attention_masks = []
+            step_logprob_masks = []
+            
+            for step_data in sample.per_step_data:
+                # Pad/truncate each step's sequence to computed_max_len
+                ids = step_data['input_ids'][:computed_max_len].cpu()  # Ensure CPU
+                mask = step_data['attention_mask'][:computed_max_len].cpu()
+                logprob_mask = step_data['logprob_mask'][:computed_max_len].cpu()
+                
+                # Pad if shorter than computed_max_len (keep on CPU)
+                if len(ids) < computed_max_len:
+                    pad_len = computed_max_len - len(ids)
+                    ids = torch.cat([ids, torch.full((pad_len,), pad_token_id, dtype=torch.long, device='cpu')])
+                    mask = torch.cat([mask, torch.zeros(pad_len, dtype=torch.long, device='cpu')])
+                    logprob_mask = torch.cat([logprob_mask, torch.zeros(pad_len, dtype=torch.long, device='cpu')])
+                
+                step_input_ids.append(ids)
+                step_attention_masks.append(mask)
+                step_logprob_masks.append(logprob_mask)
+            
+            # Pad to max_steps if this sample has fewer steps (keep on CPU)
+            actual_num_steps.append(len(sample.per_step_data))
+            while len(step_input_ids) < max_steps:
+                step_input_ids.append(torch.full((computed_max_len,), pad_token_id, dtype=torch.long, device='cpu'))
+                step_attention_masks.append(torch.zeros(computed_max_len, dtype=torch.long, device='cpu'))
+                step_logprob_masks.append(torch.zeros(computed_max_len, dtype=torch.long, device='cpu'))
+            
+            # Stack: (num_steps, seq_len)
+            batch_input_ids.append(torch.stack(step_input_ids))
+            batch_attention_masks.append(torch.stack(step_attention_masks))
+            batch_logprob_masks.append(torch.stack(step_logprob_masks))
+            
+            # Stack pixel_values: (num_steps, C, H, W) - keep on CPU for now
+            step_pixel_values = []
+            for pv in sample.pixel_values[:max_steps]:
+                if isinstance(pv, torch.Tensor):
+                    step_pixel_values.append(pv.cpu())  # Ensure CPU
+                else:
+                    # Fallback: create dummy pixel values on CPU
+                    step_pixel_values.append(torch.zeros(6, 224, 224, device='cpu'))
+            
+            # Pad pixel_values to max_steps (keep on CPU)
+            while len(step_pixel_values) < max_steps:
+                step_pixel_values.append(torch.zeros(6, 224, 224, device='cpu'))
+            
+            batch_pixel_values.append(torch.stack(step_pixel_values))
+        
+        # Final batch shapes: (batch, num_steps, seq_len) and (batch, num_steps, C, H, W)
+        collated_dict = {
+            'input_ids': torch.stack(batch_input_ids).to(device),  # (batch, steps, seq_len)
+            'attention_mask': torch.stack(batch_attention_masks).to(device),
+            'logprob_masks': torch.stack(batch_logprob_masks).to(device),
+            'pixel_values': torch.stack(batch_pixel_values).to(device),  # (batch, steps, C, H, W)
+            'num_steps': torch.tensor(actual_num_steps, dtype=torch.long).to(device),
+        }
+        
+        # Calculate trainable ratio
+        total_tokens = collated_dict['logprob_masks'].numel()
+        trainable_tokens = collated_dict['logprob_masks'].sum().item()
+        
+        logger.info(
+            f"[VLA Collate] Batch created: "
+            f"input_ids={collated_dict['input_ids'].shape}, "
+            f"pixel_values={collated_dict['pixel_values'].shape}, "
+            f"trainable_ratio={trainable_tokens/total_tokens:.2%}"
         )
         
         return collated_dict

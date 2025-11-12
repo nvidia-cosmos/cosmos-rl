@@ -1312,9 +1312,14 @@ class GRPOTrainer(Trainer):
         n_ignore_prefix_tokens_list = [
             rollout.n_ignore_prefix_tokens for rollout in rollouts
         ]
+        
+        # For VLA models with metadata, pass the full rollout object for trajectory access
+        # Otherwise, use the original samples (prompt or conversation)
+        use_full_rollout = hasattr(self.config, 'vla') and self.config.vla is not None
+        
         processed_samples: List[Any] = [
             self.data_packer.get_policy_input(
-                samples[i],
+                rollouts[i] if use_full_rollout else samples[i],
                 completions_list[i],
                 n_ignore_prefix_tokens_list[i],
             )
@@ -1699,7 +1704,32 @@ class GRPOTrainer(Trainer):
                                         )
                                 else:
                                     with self.act_offloading_ctx_manager:
-                                        raw_logits = self.model(**user_mini_batch)
+                                        # Check if this is VLA training with per-step structure
+                                        is_vla_per_step = (hasattr(self.config, 'vla') and self.config.vla is not None and 
+                                            'num_steps' in user_mini_batch and user_mini_batch['input_ids'].ndim == 3)
+                                        
+                                        if is_vla_per_step:
+                                            # VLA training: use per-step forward with reshape
+                                            logger.debug(f"[GRPO Train] Using VLA per-step forward: input_ids shape={user_mini_batch['input_ids'].shape}")
+                                            raw_logits = self.model.forward_with_trajectory_structure(**user_mini_batch)
+                                            
+                                            # Flatten per-step structure for loss computation
+                                            # Logits: (batch, steps, seq_len, vocab) → (batch, steps*seq_len, vocab)
+                                            if hasattr(raw_logits, 'logits') and raw_logits.logits.ndim == 4:
+                                                batch, steps, seq_len, vocab = raw_logits.logits.shape
+                                                raw_logits.logits = raw_logits.logits.reshape(batch, steps * seq_len, vocab)
+                                                logger.debug(f"[GRPO Train] Flattened logits to {raw_logits.logits.shape}")
+                                                
+                                                # Also flatten input_ids and logprob_masks to match
+                                                if user_mini_batch['input_ids'].ndim == 3:
+                                                    user_mini_batch['input_ids'] = user_mini_batch['input_ids'].reshape(batch, steps * seq_len)
+                                                if user_mini_batch.get('logprob_masks') is not None and user_mini_batch['logprob_masks'].ndim == 3:
+                                                    user_mini_batch['logprob_masks'] = user_mini_batch['logprob_masks'].reshape(batch, steps * seq_len)
+                                                if user_mini_batch.get('attention_mask') is not None and user_mini_batch['attention_mask'].ndim == 3:
+                                                    user_mini_batch['attention_mask'] = user_mini_batch['attention_mask'].reshape(batch, steps * seq_len)
+                                        else:
+                                            # Regular LLM training or VLA without per-step structure
+                                            raw_logits = self.model(**user_mini_batch)
 
                                     if self.parallel_dims.cp_enabled:
                                         # reset the position ids and input ids

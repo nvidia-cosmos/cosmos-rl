@@ -23,17 +23,38 @@ in the cosmos-rl framework.
 
 import torch
 import torch.nn as nn
-from typing import Dict, Any, Optional, Union, Callable
+from typing import Dict, Optional, Callable, Union
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     RowwiseParallel, 
     PrepareModuleInput,
-    SequenceParallel,
 )
-from torch.distributed._tensor import Shard, Replicate
 
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.util import str2torch_dtype
+
+
+def apply_ddp(
+    model: nn.Module,
+    dp_mesh: DeviceMesh,
+    enable_compile: bool,
+    enable_compiled_autograd: bool,
+):
+    """Apply DDP to the model"""
+    from torch.distributed._composable.replicate import replicate
+    
+    if enable_compile:
+        if enable_compiled_autograd:
+            torch._dynamo.config.optimize_ddp = (
+                "python_reducer_without_compiled_forward"
+            )
+        else:
+            torch._dynamo.config.optimize_ddp = "ddp_optimizer"
+
+    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+    logger.info("Applied DDP to the model")
 
 
 def get_vla_tp_parallelize_plan(
@@ -146,115 +167,53 @@ def apply_vla_tensor_parallelism(
         raise
 
 
-def get_vla_fsdp_wrap_policy(
+def apply_vla_fsdp(
     model: nn.Module,
-    parallel_dims: ParallelDims,
-    **kwargs  
-) -> Optional[Callable]:
+    dp_mesh: DeviceMesh,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+    pp_enabled: bool,
+    cpu_offload: bool = False,
+    reshard_after_forward_policy: str = "default",
+):
     """
-    Get FSDP wrap policy for VLA models
+    Apply FSDP to VLA model with selective sharding strategy:
+    - Replicate vision backbone (small, ~400M params)
+    - Shard language model (large, ~7B params)
+    - Replicate projector and action head (tiny)
     
-    VLA models benefit from wrapping at the transformer block level
-    to balance memory usage and communication overhead.
-    
-    Args:
-        model: VLA model instance  
-        parallel_dims: Parallelization configuration
-        
-    Returns:
-        FSDP wrap policy function or None
+    This balances memory efficiency with communication overhead.
     """
+    from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
+    from torch.distributed._composable.fsdp import fully_shard
     
-    if parallel_dims.dp_shard <= 1:
-        return None
-        
-    try:
-        from torch.distributed.fsdp import ModuleWrapPolicy
-        from functools import partial
-        
-        # Modules to wrap with FSDP
-        wrap_modules = set()
-        
-        # Language model transformer blocks
-        if hasattr(model, 'language_model'):
-            # Try to find transformer blocks
-            for name, module in model.named_modules():
-                if ('layers' in name and 
-                    ('TransformerBlock' in str(type(module)) or 
-                     'Block' in str(type(module)) or
-                     'Layer' in str(type(module)))):
-                    wrap_modules.add(type(module))
-                    
-        # Vision backbone blocks (if large enough)
-        if hasattr(model, 'vision_backbone'):
-            for name, module in model.named_modules():
-                if ('vision_backbone' in name and 
-                    'Block' in str(type(module))):
-                    wrap_modules.add(type(module))
-        
-        if wrap_modules:
-            logger.info(f"FSDP wrap policy will wrap: {wrap_modules}")
-            return ModuleWrapPolicy(wrap_modules)
-        else:
-            logger.warning("No suitable modules found for FSDP wrapping")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Failed to create FSDP wrap policy: {e}")
-        return None
-
-
-def apply_vla_data_parallelism(
-    model: nn.Module,
-    parallel_dims: ParallelDims,
-    **kwargs
-) -> nn.Module:
-    """
-    Apply FSDP data parallelism to VLA model
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if cpu_offload:
+        fsdp_config["offload_policy"] = CPUOffloadPolicy()
     
-    Args:
-        model: VLA model to parallelize
-        parallel_dims: Parallelization configuration
-        
-    Returns:
-        FSDP wrapped model
-    """
+    n_layers = 0  # Track number of sharded layers
     
-    if parallel_dims.dp_shard <= 1:
-        logger.info("DP size <= 1, skipping data parallelism") 
-        return model
-        
-    try:
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
-        
-        # Get wrap policy
-        auto_wrap_policy = get_vla_fsdp_wrap_policy(model, parallel_dims, **kwargs)
-        
-        # Mixed precision policy
-        mixed_precision = MixedPrecision(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32,
-            buffer_dtype=torch.bfloat16,
-        )
-        
-        # Apply FSDP
-        model = FSDP(
-            model,
-            process_group=parallel_dims.dp_mesh,
-            auto_wrap_policy=auto_wrap_policy,
-            mixed_precision=mixed_precision,
-            sharding_strategy=ShardingStrategy.FULL_SHARD,
-            use_orig_params=True,
-            device_id=torch.cuda.current_device(),
-        )
-        
-        logger.info(f"Applied FSDP to VLA model with DP size {parallel_dims.dp_shard}")
-        return model
-        
-    except Exception as e:
-        logger.error(f"Failed to apply FSDP to VLA model: {e}")
-        raise
+    # VLAModel wraps the actual model in self.model
+    actual_model = model.model if hasattr(model, 'model') else model
+    
+    # Count layers for logging
+    if hasattr(actual_model, 'language_model') and actual_model.language_model is not None:
+        llm = actual_model.language_model
+        if hasattr(llm, 'model') and hasattr(llm.model, 'layers'):
+            n_layers = len(llm.model.layers)
+            logger.info(f"Language model has {n_layers} transformer layers (will be sharded by top-level FSDP)")
+    
+    # Apply top-level FSDP to shard ALL parameters uniformly
+    # This includes vision_backbone, projector, action_head, and language_model
+    # All parameters will be in parallelism_info_for_params for P2R sync
+    fully_shard(
+        model,
+        **fsdp_config,
+        reshard_after_forward=not pp_enabled,
+    )
+    
+    logger.info(f"VLA FSDP applied: All components (vision backbone, projector, language model, action head) sharded by FSDP")
 
 
 def parallelize_vla_model(
@@ -268,8 +227,14 @@ def parallelize_vla_model(
     
     Order of operations:
     1. Tensor Parallelism (within node)
-    2. Data Parallelism (across nodes)  
-    3. Pipeline Parallelism (future)
+    2. Data Parallelism (FSDP - selective sharding)
+    3. DDP (if no FSDP)
+    4. Pipeline Parallelism (future)
+    
+    VLA-specific strategy:
+    - Language model (7B): FSDP sharded across GPUs
+    - Vision backbone (400M): Replicated (no sharding)
+    - Projector/Action head: Replicated (tiny)
     
     Args:
         model: VLA model to parallelize
@@ -280,26 +245,63 @@ def parallelize_vla_model(
     Returns:
         Tuple of (pp_scheduler, pp_scheduler_val) for pipeline parallelism
     """
-    
     logger.info("Starting VLA model parallelization")
     logger.info(f"Parallel dimensions: TP={parallel_dims.tp}, "
-                f"DP={parallel_dims.dp_shard}, PP={parallel_dims.pp}")
+                f"DP_shard={parallel_dims.dp_shard}, "
+                f"DP_replicate={parallel_dims.dp_replicate}, "
+                f"PP={parallel_dims.pp}")
+    
+    # Get world mesh
+    world_mesh = parallel_dims.mesh
     
     # Step 1: Apply Tensor Parallelism
     if parallel_dims.tp > 1:
         model = apply_vla_tensor_parallelism(model, parallel_dims)
+        logger.info("Applied tensor parallelism to VLA model")
     
-    # Step 2: Apply Data Parallelism  
-    if parallel_dims.dp_shard > 1:
-        model = apply_vla_data_parallelism(model, parallel_dims)
+    # Step 2: Apply Data Parallelism
+    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+        # Apply FSDP or HSDP with selective sharding
+        if parallel_dims.dp_replicate_enabled:
+            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+        else:
+            dp_mesh_dim_names = ("dp_shard_cp",)
+        
+        apply_vla_fsdp(
+            model,
+            world_mesh[tuple(dp_mesh_dim_names)],
+            param_dtype=str2torch_dtype(config.train.param_dtype),
+            reduce_dtype=str2torch_dtype(config.train.fsdp_reduce_dtype),
+            pp_enabled=parallel_dims.pp_enabled,
+            cpu_offload=config.train.fsdp_offload,
+            reshard_after_forward_policy=config.train.fsdp_reshard_after_forward,
+        )
+        
+        if parallel_dims.dp_replicate_enabled:
+            logger.info("Applied HSDP to VLA model")
+        else:
+            logger.info("Applied FSDP to VLA model")
+        
+        if config.train.fsdp_offload:
+            logger.info("Applied CPU offloading to VLA model")
+            
+    elif parallel_dims.dp_replicate_enabled:
+        # Apply DDP (no sharding, full replication)
+        if world_mesh.ndim > 1:
+            raise RuntimeError("DDP has not supported > 1D parallelism")
+        
+        apply_ddp(
+            model,
+            world_mesh,
+            enable_compile=config.train.compile,
+            enable_compiled_autograd=config.train.compile,
+        )
+        logger.info("Applied DDP to VLA model (full replication)")
     
     # Step 3: Pipeline Parallelism (TODO: future implementation)
     if parallel_dims.pp > 1:
         logger.warning("Pipeline parallelism not yet implemented for VLA models")
-        # TODO: Implement pipeline parallelism for VLA models
-        # For now, return None schedulers
         return None, None
     else:
-        # No pipeline parallelism - return None schedulers
         return None, None
 

@@ -38,7 +38,7 @@ import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.utils.pynccl import create_nccl_uid, create_nccl_comm, nccl_broadcast
 
 from .vla_rollout import VLARollout
-from .vla_schema import create_vla_metadata_from_environment_info
+from cosmos_rl.utils.trajectory_buffer import save_trajectory_to_buffer, get_trajectory_buffer
 
 
 class VLARolloutWorker(RolloutWorkerBase):
@@ -70,6 +70,10 @@ class VLARolloutWorker(RolloutWorkerBase):
         
         # Track leftover payloads for GRPO streaming queue
         self._leftover_prompt_payload_list: List[IdxAndRLPayload] = []
+        
+        # Trajectory buffer for filesystem-based storage
+        self._trajectory_buffer = get_trajectory_buffer()
+        self._rollout_count = 0  # Track rollouts for periodic cleanup
         
         # NCCL communicator infrastructure for r2r broadcast (borrowed from vLLM worker)
         self.global_commnicator_idex = -1  # Index for the global NCCL communicator
@@ -566,6 +570,14 @@ class VLARolloutWorker(RolloutWorkerBase):
 
                 # Process and send results back to controller
                 self._send_rollout_results(rollout_results, replicated_prompt_payload_list)
+                
+                # Periodic cleanup of old trajectory files (every 100 rollouts)
+                self._rollout_count += len(rollout_results)
+                if self._rollout_count >= 1024:
+                    self._trajectory_buffer.cleanup_old_trajectories(max_age_seconds=3600)  # Remove files older than 1 hour
+                    stats = self._trajectory_buffer.get_buffer_stats()
+                    logger.info(f"[TrajectoryBuffer] Stats: {stats['num_files']} files, {stats['total_size_mb']:.1f} MB")
+                    self._rollout_count = 0
 
             if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                 # Flush any remaining leftovers before ending
@@ -824,6 +836,25 @@ class VLARolloutWorker(RolloutWorkerBase):
         total_bytes_received = 0
         transferred_params = 0
         skipped_params = 0
+
+        def recv_tensor_creator(vllm_tensor_view: torch.Tensor):
+            recv_tensor = None
+            inplace = True
+
+            if vllm_tensor_view.is_contiguous():
+                recv_tensor = vllm_tensor_view
+            else:
+                # new a temp tensor
+                recv_tensor = torch.empty_like(vllm_tensor_view).contiguous()
+                inplace = False
+
+            # if vllm_tensor_view.dtype != target_dtype:
+            #     recv_tensor = recv_tensor.to(target_dtype)
+            #     inplace = False
+            # Hold these recv_tensor, in case of buffer reusing by torch
+            # self.total_temp_tensor_pool.append(recv_tensor)
+
+            return recv_tensor, inplace
         
         # Create inference stream for async communication
         if not hasattr(self, 'inference_stream'):
@@ -857,28 +888,27 @@ class VLARolloutWorker(RolloutWorkerBase):
                         
                         if r_rank != self.global_rank:
                             continue  # This instruction is for a different rollout rank
-                        
+
                         # For VLA models (no model parallelism), we expect full tensors
                         # The slice strategy should be empty or indicate full tensor
                         recv_tensor = target_param.data if target_param.data.is_contiguous() else target_param.data.contiguous()
                         
+                        tensor_split_strategys = inst.slice_strategy
+                        # assert r_rank == global_rank_of_rollout
+                        vllm_tensor_view = recv_tensor.cosmos_slice(tensor_split_strategys)
+                        recv_tensor, inplace = recv_tensor_creator(vllm_tensor_view)
+
+                        # TODO: need none-inplace support
+                        assert inplace, "recv_tensor_creator should return inplace tensor"
                         logger.debug(
-                            f"[VLA Rollout] Receiving {param_name} from policy rank {p_rank}, "
-                            f"shape {recv_tensor.shape}, dtype {recv_tensor.dtype}"
+                            f"[Rollout] Recving tensor {param_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {recv_tensor.shape} with dtype {vllm_tensor_view.dtype}."
                         )
-                        
-                        # Receive from the correct policy rank
-                        nccl_recv(
-                            recv_tensor,
-                            p_rank,  # Receive from this policy rank
-                            communicator_index,
-                            stream=self.inference_stream
-                        )
-                        
-                        # Copy back if we created a contiguous copy
-                        if recv_tensor is not target_param.data:
-                            target_param.data.copy_(recv_tensor)
-                        
+                        nccl_recv(recv_tensor, p_rank, communicator_index)
+                        # inplace copy
+                        # if not inplace:
+                        #     all_tensor_views_to_copy.append(
+                        #         (vllm_tensor_view, recv_tensor, inst_dest_name)
+                        #     )
                         total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
             
             # Synchronize to ensure all receives complete
@@ -1046,11 +1076,6 @@ class VLARolloutWorker(RolloutWorkerBase):
         
         for param_name in trainable_params:
             if param_name not in model_params:
-                continue
-            
-            # Skip vision backbone parameters - they're loaded directly from checkpoint, not synced via NCCL
-            if param_name.startswith("vision_backbone"):
-                logger.debug(f"[VLA Rollout] Skipping vision_backbone parameter {param_name} (loaded from checkpoint)")
                 continue
             
             if param_name not in reference_weights:
@@ -1343,29 +1368,89 @@ class VLARolloutWorker(RolloutWorkerBase):
         VLA WORKAROUND: Bypasses reward_calculator entirely and computes rewards directly.
         reward_calculator.py has too many LLM/VLM assumptions that don't apply to VLA.
         For VLA training, we compute: environment success → binary reward (1.0/0.0)
+        
+        **GRPO Group Normalization**: Following SimpleVLA-RL's approach, advantages are normalized
+        within each task group (prompt_idx), not globally. This ensures fair learning signals
+        across tasks of varying difficulty.
         """
         logger.debug(f"Sending {len(results)} VLA rollout results to controller")
         
         try:
-            result_payloads = []
+            # Step 1: Extract rewards and group by prompt_idx (task)
+            from collections import defaultdict
+            import numpy as np
             
-            for result, idx_and_payload in zip(results, prompt_id_and_payload_list):
+            rewards_by_task = defaultdict(list)  # prompt_idx -> list of rewards
+            result_info = []  # [(result, idx_and_payload, reward, result_idx), ...]
+            
+            for result_idx, (result, idx_and_payload) in enumerate(zip(results, prompt_id_and_payload_list)):
                 # Unpack tuple: IdxAndRLPayload = Tuple[int, RLPayload]
                 prompt_idx, payload = idx_and_payload
                 
-                # Create structured VLA metadata from environment info
-                vla_metadata = create_vla_metadata_from_environment_info(
-                    environment_info=result.environment_info,
-                    prompt_idx=prompt_idx,
-                    temperature=self.temperature,
-                    n_generation=self.n_generation,
-                )
-                
-                # Compute binary reward directly: 1.0 for success, 0.0 for failure
-                success = vla_metadata.success
+                # Extract success directly from environment_info
+                env_info = result.environment_info or {}
+                success = env_info.get('success', False)
                 reward = 1.0 if success else 0.0
                 
-                # Create result payload with pre-computed rewards
+                rewards_by_task[prompt_idx].append(reward)
+                result_info.append((result, idx_and_payload, reward, result_idx))
+            
+            # Step 2: Compute group-based advantages (SimpleVLA-RL style)
+            # For each task: advantage = (reward - group_mean) / (group_std + epsilon)
+            advantages_flat = []
+            epsilon = 1e-6
+            
+            for result, idx_and_payload, reward, result_idx in result_info:
+                prompt_idx, payload = idx_and_payload
+                task_rewards = np.array(rewards_by_task[prompt_idx], dtype=np.float32)
+                
+                # Group normalization (per-task)
+                if len(task_rewards) > 1:
+                    group_mean = task_rewards.mean()
+                    group_std = task_rewards.std()
+                    advantage = (reward - group_mean) / (group_std + epsilon)
+                else:
+                    # Single rollout per task: advantage = 0 (matches SimpleVLA-RL)
+                    advantage = 0.0
+                
+                advantages_flat.append(advantage)
+            
+            # Step 3: Build result payloads with normalized advantages
+            result_payloads = []
+            
+            for (result, idx_and_payload, reward, result_idx), advantage in zip(result_info, advantages_flat):
+                prompt_idx, payload = idx_and_payload
+                
+                # Extract environment info for this result
+                env_info = result.environment_info or {}
+                success = env_info.get('success', False)
+                
+                # Build metadata dict directly (avoid intermediate VLAEpisodeMetadata object)
+                metadata_dict = {
+                    'success': success,
+                    'task_suite': env_info.get('task_suite', ''),
+                    'num_actions': env_info.get('num_actions', 0),
+                    'prompt_id': prompt_idx,
+                    'temperature': self.temperature,
+                    'n_generation': self.n_generation,
+                }
+                
+                # Add trajectory data if available (from dedicated vla_trajectory field)
+                if hasattr(result, 'vla_trajectory') and result.vla_trajectory:
+                    # Save full trajectory (including pixel_values) to filesystem
+                    trajectory_id = save_trajectory_to_buffer(result.vla_trajectory)
+                    
+                    # Only send the small trajectory_id via HTTP (not the actual data!)
+                    metadata_dict['trajectory_id'] = trajectory_id
+                    
+                    # Optionally include lightweight metadata for debugging
+                    metadata_dict['trajectory_stats'] = {
+                        'num_steps': len(result.vla_trajectory.get('input_ids', [])),
+                        'has_pixel_values': 'pixel_values' in result.vla_trajectory,
+                        'has_responses': 'responses' in result.vla_trajectory,
+                    }
+                
+                # Create result payload with pre-computed rewards and NORMALIZED advantages
                 result_payload = RLPayload(
                     prompt=result.prompt,
                     conversation=getattr(payload, 'conversation', None),
@@ -1375,12 +1460,12 @@ class VLARolloutWorker(RolloutWorkerBase):
                     # VLA-specific results (completions for n_generation support)
                     completions=result.completions if result.completions else [""],
                     
-                    # VLA metadata
-                    metadata=vla_metadata.model_dump(),
+                    # VLA metadata (includes trajectory data for training)
+                    metadata=metadata_dict,
                     
                     # Pre-computed rewards and advantages (bypass reward_calculator)
                     rewards=[reward],  # One reward per completion
-                    advantages=[reward],  # For GRPO, use reward as advantage
+                    advantages=[float(advantage)],  # **GROUP-NORMALIZED** advantage (SimpleVLA-RL style)
                     valid=True,
                     
                     # Fields required by extract_rollouts
@@ -1391,6 +1476,15 @@ class VLARolloutWorker(RolloutWorkerBase):
                     reference_answer=None,
                 )
                 result_payloads.append(result_payload)
+            
+            # Log group normalization statistics
+            num_tasks = len(rewards_by_task)
+            rollouts_per_task = [len(rewards) for rewards in rewards_by_task.values()]
+            logger.info(
+                f"[GRPO Group Normalization] Processed {len(results)} rollouts from {num_tasks} tasks "
+                f"(avg {np.mean(rollouts_per_task):.1f} rollouts/task, "
+                f"range [{min(rollouts_per_task)}, {max(rollouts_per_task)}])"
+            )
             
             # Send training results directly to controller (bypass reward_dispatcher)
             prompt_idxs = [int(payload.metadata.get('prompt_id', 0)) for payload in result_payloads]

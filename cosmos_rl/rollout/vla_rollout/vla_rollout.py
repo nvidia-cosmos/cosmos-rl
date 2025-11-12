@@ -91,10 +91,6 @@ class VLARollout(RolloutBase):
         self.env_thread_pool = ThreadPoolExecutor(max_workers=self.num_envs * 2)
         self.env_lock = Lock()
         
-        # Environment pool - maintain persistent environments for efficiency
-        self.env_pool = {}
-        self.env_pool_lock = Lock()
-        
         # GRPO Streaming Queue: Leftover state persists across batches
         self.leftover_payloads = []  # Payloads that didn't meet epsilon criteria
         self.leftover_metadata = {}  # Track leftover_count, success_rate per payload_id
@@ -239,11 +235,11 @@ class VLARollout(RolloutBase):
         logger.info("Initializing VLA model on CUDA (TIMM meta tensor incompatibility)")
         vla_model = VLAModel(vla_args, init_device="cuda")
         
-        # Load frozen vision backbone weights directly from checkpoint
-        # These weights are never updated during training, so no need to sync via NCCL
-        logger.info(f"Loading frozen vision backbone weights from {model_path}...")
-        self._load_frozen_vision_backbone_weights(vla_model.model, model_path)
-        logger.info("✅ Frozen vision backbone weights loaded")
+        # NOTE: Vision backbone weights will be synced via P2R NCCL
+        # The vision backbone IS trainable (not frozen) and will receive updates from policy workers
+        # All weights (vision_backbone + projector + language_model + action_head) initialized randomly
+        # and will be synced from policy worker via NCCL on first P2R weight sync
+        logger.info("✅ VLA model structure created with random weights (P2R sync will provide actual weights)")
         
         # Save both the wrapper and inner module
         self.vla_model = vla_model  # Keep wrapper for weight_sync_transforms
@@ -256,9 +252,9 @@ class VLARollout(RolloutBase):
         self.hf_config = vla_config  # Save for shard info generation
         
         device = torch.device(f"cuda:{torch.cuda.current_device()}")
-        logger.info(f"✅ VLA model structure created (device: {device})")
-        logger.info(f"   Trainable weights initialized randomly (will be synced from policy via NCCL)")
-        logger.info(f"   Frozen vision backbone loaded from checkpoint")
+        logger.info(f"✅ VLA model structure initialized on {device}")
+        logger.info(f"   ALL weights (vision_backbone + projector + LLM + action_head) will be synced via P2R NCCL")
+        logger.info(f"   Vision backbone IS trainable (not frozen)")
         logger.info(f"   Model has norm_stats: {hasattr(self.module, 'norm_stats')}")
         if hasattr(self.module, 'norm_stats'):
             logger.info(f"   norm_stats keys: {list(self.module.norm_stats.keys())}")
@@ -317,78 +313,24 @@ class VLARollout(RolloutBase):
         if hasattr(self.module, 'norm_stats'):
             logger.info(f"   norm_stats keys: {list(self.module.norm_stats.keys())}")
     
+    # DEPRECATED: No longer needed - vision backbone weights are synced via P2R NCCL
     def _load_frozen_vision_backbone_weights(self, model, model_path: str):
         """
-        Load frozen vision backbone weights directly from HuggingFace checkpoint
+        [DEPRECATED] Previously loaded vision backbone weights assuming they were frozen.
         
-        These weights are frozen during training, so we load them once from the checkpoint
-        instead of syncing them via NCCL from the policy worker.
+        This method is no longer used because:
+        1. Vision backbone IS trainable (not frozen)
+        2. All VLA weights (vision_backbone + projector + LLM + action_head) are synced via P2R NCCL
+        3. The VLAWeightMapper now defines parallelism strategies for complete P2R weight sync
         
-        Args:
-            model: The VLA model (OpenVLAForActionPrediction)
-            model_path: Path to HuggingFace checkpoint
+        Historical context:
+        - Originally assumed vision backbone was frozen during training
+        - Loaded vision backbone weights once from checkpoint to avoid NCCL sync
+        - This was incorrect - vision backbone should be trained and synced like other components
         """
-        import torch
-        from safetensors import safe_open
-        from pathlib import Path
-        from huggingface_hub import snapshot_download
-        
-        try:
-            # Resolve model path
-            path = Path(model_path)
-            if not path.exists():
-                logger.info(f"Downloading model from HuggingFace Hub: {model_path}")
-                path = Path(snapshot_download(repo_id=model_path))
-            
-            # Load vision backbone weights from checkpoint
-            device = torch.device(f"cuda:{torch.cuda.current_device()}")
-            vision_backbone_weights = {}
-            
-            # Try safetensors first
-            safetensor_files = list(path.glob("*.safetensors"))
-            if safetensor_files:
-                for st_file in safetensor_files:
-                    with safe_open(st_file, framework="pt", device=str(device)) as f:
-                        for key in f.keys():
-                            if key.startswith("vision_backbone"):
-                                vision_backbone_weights[key] = f.get_tensor(key)
-            else:
-                # Fallback to pytorch checkpoints
-                pt_files = list(path.glob("pytorch_model*.bin"))
-                if pt_files:
-                    for pt_file in pt_files:
-                        state_dict = torch.load(pt_file, map_location=device)
-                        for key, value in state_dict.items():
-                            if key.startswith("vision_backbone"):
-                                vision_backbone_weights[key] = value
-                else:
-                    raise FileNotFoundError(f"No safetensors or pytorch_model.bin found in {path}")
-            
-            if not vision_backbone_weights:
-                logger.error("❌ CRITICAL: No vision_backbone weights found in checkpoint!")
-                logger.error(f"   This means vision backbone has RANDOM TIMM weights!")
-                logger.error(f"   Checkpoint path: {path}")
-                logger.error(f"   Files found: safetensors={len(safetensor_files)}, pytorch={len(pt_files) if 'pt_files' in locals() else 0}")
-                logger.error(f"   Model will have INCORRECT vision features!")
-                # Don't return - raise an error to fail fast
-                raise RuntimeError(f"Vision backbone weights not found in checkpoint {model_path}")
-            
-            # Load the weights into model
-            missing_keys, unexpected_keys = model.load_state_dict(vision_backbone_weights, strict=False)
-            
-            logger.info(f"✅ Loaded {len(vision_backbone_weights)} vision backbone parameters")
-            
-            # Warn if any vision_backbone keys are missing
-            if missing_keys:
-                missing_vision = [k for k in missing_keys if k.startswith("vision_backbone")]
-                if missing_vision:
-                    logger.warning(f"⚠️  Missing {len(missing_vision)} vision backbone keys: {missing_vision[:5]}")
-            
-        except Exception as e:
-            logger.error(f"Failed to load frozen vision backbone weights: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
+        logger.warning("[DEPRECATED] _load_frozen_vision_backbone_weights called but no longer used")
+        logger.warning("   Vision backbone weights will be synced via P2R NCCL instead")
+        return  # Early return - don't load anything
     
     def is_engine_initialized(self) -> bool:
         """Check if the VLA engine has been initialized"""
@@ -508,15 +450,117 @@ class VLARollout(RolloutBase):
                 else:
                     episode_length = 0
                 
-                episode_data = {
-                    'instruction': instructions[env_idx],
-                    'success': success,
-                    'episode_length': episode_length,
-                    'responses': [batch_result.get('responses', [[""]*chunk_size])[j][env_idx] 
-                                 for j in range(len(batch_result.get('responses', [[""]*chunk_size])))]
+                # Extract trajectory data for this environment
+                # IMPORTANT: episode_length is in INDIVIDUAL ACTION STEPS (e.g., 236 actions)
+                # But trajectory data is organized in ACTION CHUNKS (8 actions per chunk)
+                # So: num_chunks_needed = ceil(episode_length / 8)
+                import math
+                action_chunk_size = 8  # Each chunk generates 8 actions
+                num_chunks_needed = math.ceil(episode_length / action_chunk_size) if episode_length > 0 else 0
+                
+                trajectory_data = {
+                    'input_ids': [],
+                    'attention_mask': [],
+                    'pixel_values': [],
+                    'responses': [],  # Action token IDs
                 }
                 
-                result = self._create_rollout_result(payload, episode_data)
+                # Collect trajectory from batch_result, but ONLY up to num_chunks_needed
+                # Keep tensors as-is for efficient filesystem serialization (will be pickled)
+                if 'input_ids' in batch_result and batch_result['input_ids'] is not None:
+                    # Only iterate up to num_chunks_needed (not episode_length!)
+                    for chunk_idx, step_input_ids in enumerate(batch_result['input_ids']):
+                        if chunk_idx >= num_chunks_needed:
+                            break  # Stop at actual number of chunks needed
+                        if isinstance(step_input_ids, torch.Tensor):
+                            ids = step_input_ids[env_idx].clone()  # Clone to avoid shared storage
+                        elif isinstance(step_input_ids, list):
+                            ids = step_input_ids[env_idx]
+                        else:
+                            ids = step_input_ids
+                        trajectory_data['input_ids'].append(ids)
+                
+                if 'attention_mask' in batch_result and batch_result['attention_mask'] is not None:
+                    for chunk_idx, step_attention_mask in enumerate(batch_result['attention_mask']):
+                        if chunk_idx >= num_chunks_needed:
+                            break
+                        if isinstance(step_attention_mask, torch.Tensor):
+                            mask = step_attention_mask[env_idx].clone()  # Clone to avoid shared storage
+                        elif isinstance(step_attention_mask, list):
+                            mask = step_attention_mask[env_idx]
+                        else:
+                            mask = step_attention_mask
+                        trajectory_data['attention_mask'].append(mask)
+                
+                # Collect pixel_values - will be stored to filesystem buffer (not sent via HTTP)
+                if 'pixel_values' in batch_result and batch_result['pixel_values'] is not None:
+                    for chunk_idx, step_pixel_values in enumerate(batch_result['pixel_values']):
+                        if chunk_idx >= num_chunks_needed:
+                            break
+                        # CRITICAL: Must extract ONLY this environment's pixel_values, not all 8!
+                        # step_pixel_values shape: (batch_size=8, channels, H, W)
+                        if isinstance(step_pixel_values, torch.Tensor):
+                            # Debug: log shape BEFORE extraction
+                            if env_idx == 0 and chunk_idx == 0:
+                                logger.warning(f"[DEBUG] BEFORE extraction: step_pixel_values.shape={step_pixel_values.shape}, dtype={step_pixel_values.dtype}, storage_size={step_pixel_values.storage().size()}")
+                            
+                            # CRITICAL FIX: Clone the tensor to avoid sharing storage with the full batch!
+                            # When you slice a tensor (step_pixel_values[env_idx]), PyTorch creates a view
+                            # that shares the underlying storage with the original tensor. This means
+                            # pickle will serialize the ENTIRE underlying storage (all 8 envs) even though
+                            # we only reference 1/8 of it!
+                            pix_vals = step_pixel_values[env_idx].clone()  # Clone to get independent storage
+                            
+                            # Debug: log shape AFTER extraction and memory size
+                            if env_idx == 0 and chunk_idx == 0:
+                                mem_mb = pix_vals.element_size() * pix_vals.nelement() / (1024 * 1024)
+                                storage_mb = pix_vals.storage().size() * pix_vals.element_size() / (1024 * 1024)
+                                logger.warning(f"[DEBUG] AFTER extraction: pix_vals.shape={pix_vals.shape}, dtype={pix_vals.dtype}, mem={mem_mb:.2f} MB, storage={storage_mb:.2f} MB")
+                            
+                            trajectory_data['pixel_values'].append(pix_vals)
+                        elif isinstance(step_pixel_values, list):
+                            pix_vals = step_pixel_values[env_idx]  # Extract one env from list
+                            trajectory_data['pixel_values'].append(pix_vals)
+                        else:
+                            # Fallback: log warning if unexpected type
+                            logger.warning(f"Unexpected pixel_values type: {type(step_pixel_values)}, storing as-is")
+                            trajectory_data['pixel_values'].append(step_pixel_values)
+                
+                if 'responses' in batch_result and batch_result['responses'] is not None:
+                    for chunk_idx, step_responses in enumerate(batch_result['responses']):
+                        if chunk_idx >= num_chunks_needed:
+                            break
+                        if isinstance(step_responses, torch.Tensor):
+                            resp = step_responses[env_idx].clone()  # Clone to avoid shared storage
+                        elif isinstance(step_responses, list):
+                            resp = step_responses[env_idx]
+                        else:
+                            resp = step_responses
+                        trajectory_data['responses'].append(resp)
+                
+                # Create RolloutResult directly (avoid intermediate episode_data dict)
+                num_actions = len(trajectory_data['responses'])
+                completion_text = f"Task {'completed' if success else 'failed'} in {episode_length} steps ({num_actions} actions)"
+                
+                result = RolloutResult(
+                    prompt=instructions[env_idx],
+                    completions=[completion_text],
+                    log_probs=[[np.log(0.5)]],  # Single log prob for single completion
+                    input_tokens=100,  # Approximate
+                    output_tokens=len(completion_text.split()),
+                    
+                    # VLA-specific fields
+                    rewards=[1.0 if success else 0.0],  # Binary reward based on success
+                    episode_length=episode_length,
+                    environment_info={
+                        'task_suite': self.task_suite,
+                        'success': success,
+                        'num_actions': num_actions,
+                    },
+                    
+                    # Trajectory data for training (stored as-is, no conversion)
+                    vla_trajectory=trajectory_data
+                )
                 results.append(result)
             
             return results
@@ -1396,40 +1440,6 @@ class VLARollout(RolloutBase):
                 'full_image': img
             }
     
-    def _generate_dummy_batch_actions(self, inputs: List[Dict], task_descriptions: List[str]) -> Dict:
-        """Generate dummy batch actions when model inference is not available"""
-        batch_size = len(inputs)
-        
-        actions = []
-        responses = []
-        
-        for i in range(batch_size):
-            task_desc = task_descriptions[i].lower()
-            
-            # Generate task-specific actions
-            if "pick" in task_desc or "grasp" in task_desc:
-                action = np.array([0.0, 0.0, -0.05, 0.0, 0.0, 0.0, -1.0])  # Move down and close
-            elif "place" in task_desc or "put" in task_desc:
-                action = np.array([0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 1.0])   # Move up and open
-            else:
-                action = np.array([0.02, 0.02, 0.01, 0.0, 0.0, 0.0, 0.0])  # Small movement
-            
-            # Add noise
-            noise = np.random.normal(0, 0.01, size=6)
-            action[:6] += noise
-            action = np.clip(action, -1.0, 1.0)
-            
-            actions.append(action)
-            responses.append(f"<action>{action.tolist()}</action>")
-        
-        return {
-            "action": np.array(actions),
-            "responses": responses,
-            "input_ids": torch.randint(0, 1000, (batch_size, 10)),
-            "attention_mask": torch.ones(batch_size, 10),
-            "pixel_values": torch.randn(batch_size, 3, 224, 224)
-        }
-    
     def _prepare_output_batch(self, vla_history: List[Dict], task_records: List[Dict], batch_size: int) -> Dict:
         """Prepare output batch matching SimpleVLA-RL format"""
         if not vla_history:
@@ -1467,63 +1477,6 @@ class VLARollout(RolloutBase):
         
         return batch
     
-    def _create_rollout_result(self, payload: RLPayload, episode_data: Dict) -> RolloutResult:
-        """
-        Create RolloutResult from episode data
-        
-        For VLA:
-        - responses are token IDs (List[torch.Tensor] or List[List[int]]) from generate_action_verl
-        - completions should be a SINGLE text string representing the episode outcome
-        - success is the completion status from environment
-        
-        IMPORTANT: For VLA, we should only have ONE completion per episode, not one per action step.
-        This ensures the validation count matches: N prompts → N rollouts (not N × steps).
-        """
-        
-        # For VLA, create a single completion representing the episode outcome
-        success = episode_data.get('success', False)
-        episode_length = episode_data.get('episode_length', 0)
-        responses_token_ids = episode_data.get('responses', [])
-        num_actions = len(responses_token_ids) if responses_token_ids else 0
-        
-        # Create a single completion string summarizing the episode
-        completions = [f"Task {'completed' if success else 'failed'} in {episode_length} steps ({num_actions} actions)"]
-        
-        # Extract rewards
-        rewards = episode_data.get('rewards', [0.0])
-        
-        # Create log probabilities (uniform for now, could be computed from model logits)
-        # One log prob per completion
-        log_probs = [[np.log(0.5)] * len(completions)]
-        
-        # Count tokens
-        total_tokens = sum(len(c.split()) for c in completions) if completions else 0
-        
-        result = RolloutResult(
-            prompt=episode_data.get('instruction', ''),
-            completions=completions,
-            log_probs=log_probs,
-            input_tokens=100,  # Approximate (could be computed from input_ids)
-            output_tokens=total_tokens,
-            
-            # VLA-specific additional data
-            rewards=rewards,
-            episode_length=episode_data.get('episode_length', 0),
-            environment_info={
-                'task_suite': self.task_suite,
-                'success': episode_data.get('success', False),  # Completion status
-                'total_reward': episode_data.get('total_reward', 0.0),
-                'num_actions': len(episode_data.get('actions', [])),
-                'num_response_tokens': sum(
-                    len(r) if isinstance(r, (list, torch.Tensor)) else 1 
-                    for r in responses_token_ids
-                ),
-                'final_observation': episode_data.get('observations', [])[-1] if episode_data.get('observations') else None
-            }
-        )
-        
-        return result
-    
     def _create_failure_result(self, payload: RLPayload) -> RolloutResult:
         """Create failure result for error cases"""
         
@@ -1545,24 +1498,3 @@ class VLARollout(RolloutBase):
             }
         )
     
-    def cleanup(self):
-        """Cleanup resources"""
-        logger.info("Cleaning up VLA rollout resources")
-        
-        # Close all environments in pool
-        with self.env_pool_lock:
-            for env_id, env_info in self.env_pool.items():
-                try:
-                    env_info['wrapper'].close()
-                except Exception as e:
-                    logger.error(f"Error closing environment {env_id}: {e}")
-        
-        # Shutdown thread pool
-        if hasattr(self, 'env_thread_pool'):
-            self.env_thread_pool.shutdown(wait=True)
-        
-        # Clear GPU memory
-        torch.cuda.empty_cache()
-        gc.collect()
-        
-        logger.info("VLA rollout cleanup completed")
