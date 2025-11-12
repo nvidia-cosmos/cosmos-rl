@@ -108,7 +108,11 @@ class MockAPIClient(APIClient):
                 dat = next(self.data_iter)
                 conversation = dat["conversation"]
                 prompt = self.data_packer.get_rollout_input(conversation)
-                payload = RLPayload(prompt=prompt, conversation=conversation)
+                payload = RLPayload(
+                    prompt=prompt,
+                    conversation=conversation,
+                    reference_answer="#### 123",
+                )
                 batch.append((i, payload))
             return batch
 
@@ -323,10 +327,7 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         worker.work()
 
         self.assertIsNotNone(worker.api_client.rollout_completion_response)
-        self.assertEqual(worker.api_client.rollout_completion_response.is_end, True)
-        self.assertTrue(
-            len(worker.api_client.rollout_completion_response.completions) > 0
-        )
+        self.assertTrue(len(worker.api_client.rollout_completion_response.payloads) > 0)
 
         # clean the test environment
         worker.handle_shutdown()
