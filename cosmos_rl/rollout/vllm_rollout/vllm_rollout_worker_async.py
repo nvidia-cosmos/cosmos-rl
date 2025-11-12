@@ -37,6 +37,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout_async import vLLMRolloutAsync
 from cosmos_rl.rollout.rollout_task_scheduler import (
     RolloutTaskScheduler,
+    RolloutTask,
     CompletedRollout,
 )
 from cosmos_rl.dispatcher.protocol import ValidationReportRequest
@@ -53,12 +54,11 @@ import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
     ConversationType,
-    IdxAndRLPayload,
 )
 from torch.utils.data import Dataset
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
 from cosmos_rl.utils.command_executor import CommandExecutor
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams, RequestOutputKind
 
 from .vllm_rollout_worker import vLLMRolloutWorker
 
@@ -245,6 +245,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             stop_token_ids=self.rollout.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
+            output_kind=RequestOutputKind.FINAL_ONLY,
         )
         self.sampling_params = SamplingParams(
             n=self.config.rollout.n_generation,
@@ -257,10 +258,10 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             stop_token_ids=self.rollout.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
+            output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
         # Holding temp tensors created in `recv_tensor_creator`. Do not remove this, or
-        self.total_temp_tensor_pool = []
         self.misc_params = set()
         self.validation_flag = threading.Event()
         self.reward_dispatcher = RewardDispatcher()
@@ -271,6 +272,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
         # setup the command executor
         self.command_executor = CommandExecutor()
+
+        # TODO(zjx): below variables need remove after refactor.
+        self.temp_recv_tensor_queue = Queue()
 
     def setup(
         self,
@@ -324,7 +328,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         self.scheduler = RolloutTaskScheduler(
             rollout_engine=self.rollout,
             data_packer=self.data_packer,
-            sampling_params=self.sampling_params,
             max_concurrent_requests=max_concurrent_requests,
             stream=self.inference_stream,
             check_interval=0.1,
@@ -910,7 +913,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             pending_completions = []
             pending_groups = 0
 
-            def flush_completions(pending_bytes, pending_completions):
+            async def flush_completions(pending_bytes, pending_completions):
                 recv_ready = torch.cuda.Event()
                 recv_ready.record()
                 copy_stream.wait_event(recv_ready)
@@ -919,7 +922,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                         f"Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024}"
                     )
                     for completion in pending_completions:
-                        completion()
+                        await completion()
                     pending_bytes[0] = 0
                     pending_completions.clear()
 
@@ -937,7 +940,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                     bytes_received,
                     completion_fn,
                     skipped_cnt,
-                ) = self.recv_weight_shard(
+                ) = await self.recv_weight_shard(
                     self.global_rank,
                     insts_group,
                     communicator_index,
@@ -972,12 +975,12 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                 pending_groups += 1
                 if pending_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
                     pynccl.nccl_group_end(communicator_index)
-                    flush_completions(pending_bytes, pending_completions)
+                    await flush_completions(pending_bytes, pending_completions)
                     pynccl.nccl_group_start(communicator_index)
                     pending_groups = 0
 
             pynccl.nccl_group_end(communicator_index)
-            flush_completions(pending_bytes, pending_completions)
+            await flush_completions(pending_bytes, pending_completions)
 
             with torch.cuda.stream(copy_stream):
                 copy_finished = torch.cuda.Event()
@@ -1095,7 +1098,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             self.shutdown_signal.set()
             self.shutdown_mp_signal.set()
 
-    def request_new_prompts(self, batch_size: int, **kwargs):
+    def request_new_prompts(
+        self, batch_size: int, validation_step: Optional[int] = None, **kwargs
+    ):
         """
         Request new prompts from the controller for both training and validation.
         """
@@ -1103,7 +1108,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         if self.global_rank == 0:
             if self.scheduler.task_queue.empty():
                 # blocking request
-                payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
+                payloads, is_end = self.api_client.get_next_prompt(
+                    batch_size, validation_step=validation_step, **kwargs
+                )
                 prompts_and_is_end = (
                     payloads if len(payloads) > 0 else None,
                     is_end,
@@ -1113,10 +1120,20 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
         prompts, is_end = prompts_and_is_end
         if prompts is not None:
-            prompts: List[IdxAndRLPayload] = [
-                (prompt[0], RLPayload.model_validate(prompt[1])) for prompt in prompts
+            sp = (
+                self.sampling_params
+                if validation_step is None
+                else self.validation_sampling_params
+            )
+            tasks = [
+                RolloutTask(
+                    idx=prompt[0],
+                    payload=RLPayload.model_validate(prompt[1]),
+                    sampling_params=sp,
+                )
+                for prompt in prompts
             ]
-            self.scheduler.put_rollout_batch(prompts)
+            self.scheduler.put_rollout_batch(tasks)
         return is_end
 
     async def consume_one_command(
@@ -1313,6 +1330,8 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
     async def main_loop_async(self):
         """Main loop with async scheduler integration (coroutine version)."""
+
+        await self.lazy_initialize_rollout_engine(load_format="auto")
 
         while not self.shutdown_signal.is_set():
             # Sync consume command

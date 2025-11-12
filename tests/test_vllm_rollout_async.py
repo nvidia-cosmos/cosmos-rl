@@ -24,8 +24,7 @@ from typing import Optional, Tuple, List, Any, Dict
 
 import datasets
 from transformers import AutoTokenizer
-from vllm import SamplingParams
-
+from vllm.sampling_params import SamplingParams, RequestOutputKind
 
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -71,6 +70,8 @@ class MockAPIClient(APIClient):
         )["train"]
         self.data_iter = iter(self.dataset)
         self.cur_epoch = 0
+
+        self.rollout_completion_response: RolloutRequest = None
 
     def post_rollout_shard_info(
         self,
@@ -122,6 +123,7 @@ class MockAPIClient(APIClient):
 
     def post_rollout_completion(self, response: RolloutRequest):
         logger.info(f"[MockAPIClient] Post rollout completion: {response}")
+        self.rollout_completion_response = response
 
     def post_validation_report(self, report: ValidationReportRequest):
         logger.info(f"[MockAPIClient] Post validation report: {report}")
@@ -150,14 +152,16 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         os.environ.update(self.old_env)
         destroy_distributed()
 
-    def get_rollout_engine_and_data_packer(
+    async def get_rollout_engine_and_data_packer(
         self, config: CosmosConfig
     ) -> Tuple[vLLMRolloutAsync, DataPacker]:
         # initialize tokenizer
         tokenizer = AutoTokenizer.from_pretrained(config.policy.model_name_or_path)
         # initialize rollout engine
         rollout_engine = vLLMRolloutAsync(config, tokenizer)
-        rollout_engine.init_engine(quantization="none", seed=42, load_format="auto")
+        await rollout_engine.init_engine(
+            quantization="none", seed=42, load_format="auto"
+        )
 
         # create data packer
         data_packer = DecoderOnlyLLMDataPacker()
@@ -171,10 +175,6 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         # force try tp1, pp1
         cosmos_config.rollout.parallelism.tp_size = 1
 
-        rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(
-            cosmos_config
-        )
-
         payloads = [
             RLPayload(prompt="What is 2+2?", weight_version=0),
             # RLPayload(prompt="Explain AI in one sentence.", weight_version=0),
@@ -185,23 +185,28 @@ class TestVLLMRolloutAsync(unittest.TestCase):
             top_p=0.95,
             max_tokens=128,
             n=2,  # 2 responses for each prompt
+            output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
-        results = asyncio.run(
-            rollout_engine.rollout_generation(
+        async def test_helper():
+            rollout_engine, data_packer = await self.get_rollout_engine_and_data_packer(
+                cosmos_config
+            )
+            results = await rollout_engine.rollout_generation(
                 payloads=payloads,
                 stream=None,
                 data_packer=data_packer,
                 sampling_params=sampling_params,
             )
-        )
+            rollout_engine.get_engine().shutdown()
+            return results
 
-        rollout_engine.get_engine().shutdown()
+        results = asyncio.run(test_helper())
 
         # check results
         self.assertEqual(len(results), len(payloads))
         for i, result in enumerate(results):
-            print(f"Result {i}: {result}")
+            self.assertEqual(len(result.completions), sampling_params.n)
 
     def test_async_rollout_multi_turn_generate(self):
         """Test async rollout multi turn."""
@@ -212,10 +217,6 @@ class TestVLLMRolloutAsync(unittest.TestCase):
 
         # force try tp1, pp1
         cosmos_config.rollout.parallelism.tp_size = 1
-
-        rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(
-            cosmos_config
-        )
 
         payloads = [
             RLPayload(
@@ -231,16 +232,20 @@ class TestVLLMRolloutAsync(unittest.TestCase):
             n=2,  # 2 responses for each prompt
         )
 
-        results = asyncio.run(
-            rollout_engine.rollout_generation(
+        async def test_helper():
+            rollout_engine, data_packer = await self.get_rollout_engine_and_data_packer(
+                cosmos_config
+            )
+            results = await rollout_engine.rollout_generation(
                 payloads=payloads,
                 stream=None,
                 data_packer=data_packer,
                 sampling_params=sampling_params,
             )
-        )
+            rollout_engine.get_engine().shutdown()
+            return results
 
-        rollout_engine.get_engine().shutdown()
+        results = asyncio.run(test_helper())
 
         # check results
         self.assertEqual(len(results), len(payloads))
@@ -251,15 +256,20 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         """Test async rollout get underlying model state dict."""
         cosmos_config = getMockConfig()
         cosmos_config.rollout.parallelism.tp_size = 1
-        rollout_engine, _ = self.get_rollout_engine_and_data_packer(cosmos_config)
-        state_dict = asyncio.run(rollout_engine.get_underlying_model_state_dict())
-        print(f"State dict: {state_dict}")
 
-        self.assertIn("model.layers.0.self_attn.q_proj.weight", state_dict)
-        self.assertGreater(
-            state_dict["model.layers.0.self_attn.q_proj.weight"].sum(), 0
-        )
-        rollout_engine.shutdown()
+        async def test_helper():
+            rollout_engine, _ = await self.get_rollout_engine_and_data_packer(
+                cosmos_config
+            )
+            state_dict = await rollout_engine.get_underlying_model_state_dict()
+            print(f"State dict: {state_dict}")
+            self.assertIn("model.layers.0.self_attn.q_proj.weight", state_dict)
+            self.assertGreater(
+                state_dict["model.layers.0.self_attn.q_proj.weight"].sum(), 0
+            )
+            rollout_engine.shutdown()
+
+        asyncio.run(test_helper())
 
 
 class TestVLLMRolloutWorkerAsync(unittest.TestCase):
@@ -308,11 +318,15 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         worker.shutdown_mp_signal = threading.Event()
         worker.heartbeat_thread = None
         # Skip weight sync preparation in test since we don't need it
-        worker.lazy_initialize_rollout_engine(load_format="auto")
-
         worker.state.set_weight_synced()
         worker.setup()
         worker.work()
+
+        self.assertIsNotNone(worker.api_client.rollout_completion_response)
+        self.assertEqual(worker.api_client.rollout_completion_response.is_end, True)
+        self.assertTrue(
+            len(worker.api_client.rollout_completion_response.completions) > 0
+        )
 
         # clean the test environment
         worker.handle_shutdown()
