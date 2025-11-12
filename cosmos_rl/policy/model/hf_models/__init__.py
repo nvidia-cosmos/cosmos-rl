@@ -109,7 +109,10 @@ class HFModel(BaseModel):
 
     @cached_property
     def model_forward_valid_kwargs(self):
-        sig = inspect.signature(self.model.forward)
+        if self.hf_config.model_type == "NemotronH_Nano_VL_V2":
+            sig = inspect.signature(self.model.generate)
+        else:
+            sig = inspect.signature(self.model.forward)
         return sig.parameters.keys()
 
     def forward(
