@@ -29,6 +29,8 @@ def pre_hf_models_patch(hf_config: AutoConfig):
     elif hf_config.model_type == "NemotronH_Nano_VL_V2":
         # It's hardcoded for now
         hf_config.vision_config.num_hidden_layers = 32
+        # Set video pruning rate to 0 for training
+        hf_config.video_pruning_rate = 0.0
 
 
 def post_hf_models_patch(hf_config: AutoConfig, model: Any):
@@ -40,8 +42,6 @@ def post_hf_models_patch(hf_config: AutoConfig, model: Any):
         model.img_context_token_id = 200021
         print("Set img_context_token_id to 200021")
     elif hf_config.model_type == "NemotronH_Nano_VL_V2":
-        # Set video pruning rate to 0 for training
-        model.video_pruning_rate = 0.0
 
         def patch_forward(self, **kwargs) -> torch.LongTensor:
             pixel_values = kwargs.get("pixel_values", None)
@@ -72,10 +72,10 @@ def post_hf_models_patch(hf_config: AutoConfig, model: Any):
                         inputs_embeds.device, inputs_embeds.dtype
                     )
                 if video_vit_embeds is not None:
-                    if B > 1:
-                        raise NotImplementedError(
-                            "Video is not supported for batch size > 1"
-                        )
+                    # if B > 1:
+                    #     raise NotImplementedError(
+                    #         "Video is not supported for batch size > 1"
+                    #     )
                     video_mask = input_ids_copy == self.video_context_token_id
                     assert video_mask.sum() != 0
                     inputs_embeds[video_mask] = video_vit_embeds.reshape(-1, C).to(
