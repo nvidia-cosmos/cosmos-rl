@@ -20,7 +20,7 @@ ARG PYTHON_VERSION=3.12
 
 ENV TZ=Etc/UTC
 
-RUN apt-get update -y && apt-get upgrade -y
+RUN apt-get update -y
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-unauthenticated \
     curl git gpg lsb-release tzdata wget
