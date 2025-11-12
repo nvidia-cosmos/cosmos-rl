@@ -65,11 +65,11 @@ class TestHFModel(unittest.TestCase):
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "llava-hf/llava-1.5-7b-hf",
             "Qwen/Qwen3-VL-4B-Instruct",
-            # "google/gemma-3-12b-it", # Need access to the repo
+            # "google/gemma-3-12b-it",              # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",
-            # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
-            # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+            # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",          # Need to install causal_conv1d, mamba_ssm
+            # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", # Need to install causal_conv1d, mamba_ssm, timm
         ]:
             for dtype in [torch.bfloat16, torch.float32]:
                 # To avoid out-of-memory issues, bypass float32 precision for models which have more than 10B parameters
@@ -144,11 +144,11 @@ class TestHFModel(unittest.TestCase):
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "llava-hf/llava-1.5-7b-hf",
             "Qwen/Qwen3-VL-4B-Instruct",
-            # "google/gemma-3-12b-it",          # Need access to the repo
+            # "google/gemma-3-12b-it",              # Need access to the repo
             # "mistralai/Mistral-7B-Instruct-v0.3", # Need access to the repo
             "microsoft/phi-4",
-            # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",  # Need to install causal_conv1d, mamba_ssm, timm
-            # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+            # "nvidia/NVIDIA-Nemotron-Nano-9B-v2",          # Need to install causal_conv1d, mamba_ssm
+            # "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", # Need to install causal_conv1d, mamba_ssm, timm
         ]:
             dtype = torch.bfloat16
             max_position_embeddings = 4096
@@ -170,10 +170,16 @@ class TestHFModel(unittest.TestCase):
             cosmos_hf_model.load_hf_weights(
                 model_id, parallel_dims, "cuda", revision=None
             )
+            cosmos_hf_model.eval()
 
-            hf_model = cosmos_hf_model.model_class.from_pretrained(
-                model_id, trust_remote_code=True, config=config
-            ).to("cuda", dtype=dtype)
+            hf_model = (
+                cosmos_hf_model.model_class.from_pretrained(
+                    model_id, trust_remote_code=True, config=config
+                )
+                .to("cuda", dtype=dtype)
+                .eval()
+            )
+
             processor = AutoProcessor.from_pretrained(
                 model_id, trust_remote_code=True, use_fast=True
             )
@@ -232,15 +238,19 @@ class TestHFModel(unittest.TestCase):
                     ).to("cuda")
 
                 if model_id == "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16":
+                    from cosmos_rl.policy.model.hf_models.patch import (
+                        post_hf_models_patch,
+                    )
+
+                    post_hf_models_patch(config, hf_model)
+                    # num_patches is not needed for forward/generate
                     inputs.pop("num_patches")
 
                 hf_generate_logits = test_hf_model_generate(
                     hf_model, copy.deepcopy(inputs)
                 )
-                hf_forward_logits = (
-                    test_hf_model_forward(hf_model, copy.deepcopy(inputs))
-                    if model_id != "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16"
-                    else hf_generate_logits.clone()
+                hf_forward_logits = test_hf_model_forward(
+                    hf_model, copy.deepcopy(inputs)
                 )
                 cosmos_hf_logits = test_cosmos_hf_model(
                     cosmos_hf_model, copy.deepcopy(inputs)
