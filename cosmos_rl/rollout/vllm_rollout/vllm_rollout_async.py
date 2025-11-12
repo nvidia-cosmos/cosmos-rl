@@ -21,7 +21,7 @@ from typing import List, Optional, Dict, Tuple
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.v1.engine.async_llm import AsyncLLM as AsyncLLMEngine, AsyncEngineArgs
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams, RequestOutputKind
 from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
@@ -92,6 +92,8 @@ class vLLMRolloutAsync(RolloutBase):
         model_path = policy_config.model_name_or_path
 
         self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
+        self.underlying_model = None
+        self.underlying_model_state_dict = None
 
         hf_config_path = self.config.policy.model_name_or_path
         try:
@@ -215,6 +217,12 @@ class vLLMRolloutAsync(RolloutBase):
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
 
+        # Here is a problem in vllm, when output_kind is not FINAL_ONLY, the count of result.outputs may not equal to the sampling_params.n
+        # a valid solution is to set output_kind to FINAL_ONLY.
+        assert (
+            sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
+        ), "vLLM async rollout must set output_kind to FINAL_ONLY."
+
         # TODO(zjx): should remove if vllm support putting multiple prompts in one call
         assert (
             len(payloads) == 1
@@ -248,7 +256,7 @@ class vLLMRolloutAsync(RolloutBase):
                         response.append(
                             RolloutResult(
                                 prompt=payloads[0].prompt,
-                                completions=[result.outputs[0].text],
+                                completions=[out.text for out in result.outputs],
                             )
                         )
                         break
@@ -376,8 +384,12 @@ class vLLMRolloutAsync(RolloutBase):
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
+        if self.underlying_model is not None:
+            return self.underlying_model
+
         state_dict = await self.get_underlying_model_state_dict()
-        return ModuleLike(state_dict)
+        self.underlying_model = ModuleLike(state_dict)
+        return self.underlying_model
 
     async def get_underlying_model_state_dict(self) -> Dict[str, torch.Tensor]:
         """
@@ -388,11 +400,18 @@ class vLLMRolloutAsync(RolloutBase):
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
 
+        if self.underlying_model_state_dict is not None:
+            return self.underlying_model_state_dict
+
+        # Note: state dict rather than serialize the whole model, have two benefits:
+        # 1. Avoid unexpected object behavior when serializing the whole model.
+        # 2. Avoid call `forward()` in the worker process, which is not safe.
         named_tensors_ipc = await self.rollout_engine.collective_rpc(
             "get_state_dict_ipc"
         )
         sd_ipc_worker0 = named_tensors_ipc[0]
-        return named_tensors_from_serialize(sd_ipc_worker0)
+        self.underlying_model_state_dict = named_tensors_from_serialize(sd_ipc_worker0)
+        return self.underlying_model_state_dict
 
     def get_engine(self):
         if not self._engine_initialized:

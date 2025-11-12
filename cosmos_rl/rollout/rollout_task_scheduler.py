@@ -23,11 +23,20 @@ from contextlib import contextmanager
 import time
 
 from vllm import SamplingParams
-from cosmos_rl.dispatcher.data import RLPayload, IdxAndRLPayload
+from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.utils.logging import logger
+
+
+@dataclass
+class RolloutTask:
+    """Represents a rollout task to be executed."""
+
+    idx: int
+    payload: RLPayload
+    sampling_params: SamplingParams
 
 
 @dataclass
@@ -70,16 +79,15 @@ class RolloutTaskScheduler:
     scheduler = RolloutTaskScheduler(
         rollout_engine=rollout_engine,
         data_packer=data_packer,
-        sampling_params=sampling_params,
         max_concurrent_requests=10
     )
 
     # Start the background worker thread
     scheduler.start()
 
-    # Put payloads into scheduler
-    scheduler.put_rollout(payload1)
-    scheduler.put_rollout(payload2)
+    # Put payloads into scheduler with sampling parameters
+    scheduler.put_rollout(payload1, sampling_params1)
+    scheduler.put_rollout(payload2, sampling_params2)
 
     # Get completed results (non-blocking)
     completed = scheduler.get(block=False)
@@ -133,7 +141,6 @@ class RolloutTaskScheduler:
         self,
         rollout_engine: RolloutBase,
         data_packer: DataPacker,
-        sampling_params: SamplingParams,
         max_concurrent_requests: int = 10,
         stream: Optional[torch.cuda.Stream] = None,
         check_interval: float = 0.1,
@@ -144,14 +151,12 @@ class RolloutTaskScheduler:
         Args:
             rollout_engine: The rollout engine implementing RolloutBase interface
             data_packer: Data packer for processing payloads
-            sampling_params: Sampling parameters for generation
             max_concurrent_requests: Maximum number of concurrent generation requests
             stream: CUDA stream for generation (optional)
             check_interval: Interval (in seconds) to check task_queue when empty
         """
         self.rollout_engine = rollout_engine
         self.data_packer = data_packer
-        self.sampling_params = sampling_params
         self.max_concurrent_requests = max_concurrent_requests
         self.stream = stream
         self.check_interval = check_interval
@@ -175,60 +180,62 @@ class RolloutTaskScheduler:
             f"[RolloutTaskScheduler] Initialized with max_concurrent_requests={max_concurrent_requests}"
         )
 
-    def put_rollout(self, payload: IdxAndRLPayload):
+    def put_rollout(self, task: RolloutTask):
         """
         Put a single payload into the task queue for processing.
 
         Args:
-            payload: The RLPayload to process
+            payload: The RLPayload to process (tuple of idx and RLPayload)
+            sampling_params: Sampling parameters for this specific generation
         """
-        self.task_queue.put(payload)
+        self.task_queue.put(task)
         self.total_submitted += 1
         logger.debug(
             f"[RolloutTaskScheduler] Added payload to task queue "
             f"(total submitted: {self.total_submitted})"
         )
 
-    def put_rollout_batch(self, payloads: List[IdxAndRLPayload]):
+    def put_rollout_batch(self, tasks: List[RolloutTask]):
         """
         Put multiple payloads into the task queue for processing.
 
         Args:
-            payloads: List of RLPayloads to process
+            payloads: List of RLPayloads to process (each is a tuple of idx and RLPayload)
+            sampling_params: Sampling parameters to use for all payloads in this batch
         """
-        for payload in payloads:
-            self.task_queue.put(payload)
-        self.total_submitted += len(payloads)
+        for task in tasks:
+            self.task_queue.put(task)
+        self.total_submitted += len(tasks)
         logger.debug(
-            f"[RolloutTaskScheduler] Added {len(payloads)} payloads to task queue "
+            f"[RolloutTaskScheduler] Added {len(tasks)} tasks to task queue "
             f"(total submitted: {self.total_submitted})"
         )
 
-    async def _generate_single(
-        self, payload: IdxAndRLPayload
-    ) -> Optional[CompletedRollout]:
+    async def _generate_single(self, task: RolloutTask) -> Optional[CompletedRollout]:
         """
-        Generate completion for a single payload asynchronously.
+        Generate completion for a single task asynchronously.
 
         Args:
-            payload: The RLPayload to generate from
+            task: The RolloutTask containing payload and sampling parameters
 
         Returns:
             CompletedRollout object containing the payload and result
         """
         try:
-            idx, rawPayload = payload
             # Call rollout engine's async generation method
             results = await self.rollout_engine.rollout_generation(
-                payloads=[rawPayload],
+                payloads=[task.payload],
                 stream=self.stream,
                 data_packer=self.data_packer,
-                sampling_params=self.sampling_params,
+                sampling_params=task.sampling_params,
             )
 
             if results and len(results) > 0:
+                # because we only put one payload into the rollout engine, so the results is a list with one element
                 result = results[0]
-                completed = CompletedRollout(idx=idx, payload=rawPayload, result=result)
+                completed = CompletedRollout(
+                    idx=task.idx, payload=task.payload, result=result
+                )
 
                 # Put the completed result into the queue
                 self.complete_queue.put(completed)
@@ -284,11 +291,11 @@ class RolloutTaskScheduler:
                     and not self.task_queue.empty()
                 ):
                     try:
-                        # Get payload from task queue (non-blocking)
-                        payload = self.task_queue.get_nowait()
+                        # Get rollout task from task queue (non-blocking)
+                        rollout_task = self.task_queue.get_nowait()
 
                         # Create and start a new generation task
-                        task = asyncio.create_task(self._generate_single(payload))
+                        task = asyncio.create_task(self._generate_single(rollout_task))
                         self.active_tasks.add(task)
 
                         logger.debug(
@@ -637,5 +644,5 @@ class RolloutTaskScheduler:
         if self.task_queue.empty():
             return (False, 0)
 
-        payload: RLPayload = self.task_queue.queue[0][1]
-        return (True, payload.weight_version)
+        rollout_task: RolloutTask = self.task_queue.queue[0]
+        return (True, rollout_task.payload.weight_version)
