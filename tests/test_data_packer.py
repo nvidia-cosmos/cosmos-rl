@@ -23,7 +23,7 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.policy.model.hf_models import HFModel
 from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
 from cosmos_rl.policy.model.qwen3_vl_moe import Qwen3VLMoeModel
-from cosmos_rl.dispatcher.data.packer import DataPacker, DecoderOnlyLLMDataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker, DecoderOnlyLLMDataPacker
 from cosmos_rl.dispatcher.data.packer.deepseek_data_packer import DeepSeek_DataPacker
 from cosmos_rl.dispatcher.data.packer.qwen2_5_vlm_data_packer import (
     Qwen2_5_VLM_DataPacker,
@@ -74,7 +74,9 @@ class TestDataPacker(unittest.TestCase):
             is_vlm = getattr(hf_config, "vision_config", None) is not None
 
             try:
-                data_packer = DataPacker.get_default_data_packer(hf_config.model_type)
+                data_packer = BaseDataPacker.get_default_data_packer(
+                    hf_config.model_type
+                )
             except ValueError:
                 data_packer = (
                     DecoderOnlyLLMDataPacker() if not is_vlm else HFVLMDataPacker()

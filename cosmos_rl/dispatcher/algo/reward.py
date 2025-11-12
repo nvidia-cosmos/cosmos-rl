@@ -23,7 +23,7 @@ from typing import Union, Callable, Tuple
 from cosmos_rl.utils.constant import RewardFn
 from cosmos_rl.utils.logging import logger
 from typing import Dict, Optional, List
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 
 math_comparer = math_metric(
     gold_extraction_target=(LatexExtractionConfig(),),
@@ -301,7 +301,7 @@ class Reward:
         reward_function: Optional[Dict[str, float]] = None,
         explicit_reward_fn: Optional[List[Callable]] = None,
         explicit_filter_reward_fn: Optional[List[Callable]] = None,
-        data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
     ):
         self.config = config
         self.tokenizer = tokenier

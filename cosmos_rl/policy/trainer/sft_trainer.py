@@ -37,7 +37,7 @@ import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.cache as cache
 from datasets import concatenate_datasets
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import os
 from typing import Optional, Dict, Any, Callable, Union
 from tqdm import tqdm
@@ -121,9 +121,9 @@ def collate_fn(
 
 def construct_dataset(
     cosmos_config: CosmosConfig,
-    data_packer: DataPacker,
+    data_packer: BaseDataPacker,
     user_provided_dataset: Optional[Dataset] = None,
-    val_data_packer: Optional[DataPacker] = None,
+    val_data_packer: Optional[BaseDataPacker] = None,
     user_provided_val_dataset: Optional[Dataset] = None,
 ):
     config = cosmos_config.train.train_policy
@@ -230,7 +230,7 @@ class SFTDataset(Dataset):
         self,
         config: SFTDataConfig,
         dataset: Dataset,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         is_user_dataset: bool = False,
     ):
         self.config = config
@@ -287,9 +287,9 @@ class SFTTrainer(Trainer):
         config: CosmosConfig,
         parallel_dims: ParallelDims,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
@@ -336,8 +336,8 @@ class SFTTrainer(Trainer):
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
@@ -352,11 +352,11 @@ class SFTTrainer(Trainer):
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)
-            util.call_dataset_setup(dataset, self.config)
+            util.call_setup(dataset, self.config)
 
         if isinstance(val_dataset, Callable):
             val_dataset = val_dataset(self.config)
-            util.call_dataset_setup(val_dataset, self.config)
+            util.call_setup(val_dataset, self.config)
 
         if not self.val_data_packer:
             self.val_data_packer = self.data_packer

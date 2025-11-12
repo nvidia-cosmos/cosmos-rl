@@ -24,7 +24,7 @@ from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
-from cosmos_rl.dispatcher.data.packer.base import ChatDataPacker
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 IGNORE_LABEL_ID = -100
 
@@ -50,7 +50,7 @@ def decode_base64_to_image(image_inputs: List[str]) -> List[str]:
     return new_image_inputs
 
 
-class Qwen3_VL_DataPacker(ChatDataPacker):
+class Qwen3_VL_DataPacker(DataPacker):
     """
     Data protocol & processing logic for the Qwen3.5 VLMs for SFT and RL training.
     """

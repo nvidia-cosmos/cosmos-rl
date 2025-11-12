@@ -52,7 +52,7 @@ from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
 )
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 
 
@@ -153,11 +153,11 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         val_reward_fns: Optional[List[Callable]] = None,
         num_workers: int = 8,
     ):

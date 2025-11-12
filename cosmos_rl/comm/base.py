@@ -27,7 +27,7 @@ from cosmos_rl.dispatcher.command import (
     RolloutCommandRegistry,
     Command,
 )
-from cosmos_rl.dispatcher.data.packer import DataPacker, DecoderOnlyLLMDataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker, DecoderOnlyLLMDataPacker
 from cosmos_rl.dispatcher.data.packer import (
     HFVLMDataPacker,
 )
@@ -89,8 +89,8 @@ class CommMixin:
 
     def init_data_packer(
         self,
-        data_packer: Optional[DataPacker] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
     ):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
@@ -100,13 +100,13 @@ class CommMixin:
 
         if data_packer:
             assert isinstance(
-                data_packer, DataPacker
-            ), "data_packer must be a DataPacker instance"
+                data_packer, BaseDataPacker
+            ), "data_packer must be a BaseDataPacker instance"
             self.data_packer = data_packer
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
             try:
-                self.data_packer = DataPacker.get_default_data_packer(model_type)
+                self.data_packer = BaseDataPacker.get_default_data_packer(model_type)
                 logger.info(f"Using default data packer: {self.data_packer}")
             except ValueError:
                 self.data_packer = (
@@ -116,19 +116,21 @@ class CommMixin:
                     f"No default data packer found for {model_type}, using {type(self.data_packer).__name__} as default"
                 )
 
-        self.data_packer.setup(self.config)
+        util.call_setup(self.data_packer, self.config)
 
         if val_data_packer:
             assert isinstance(
-                val_data_packer, DataPacker
-            ), "val_data_packer must be a DataPacker instance"
+                val_data_packer, BaseDataPacker
+            ), "val_data_packer must be a BaseDataPacker instance"
             self.val_data_packer = val_data_packer
             logger.info(
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )
         else:
             try:
-                self.val_data_packer = DataPacker.get_default_data_packer(model_type)
+                self.val_data_packer = BaseDataPacker.get_default_data_packer(
+                    model_type
+                )
                 logger.info(
                     f"Using default validation data packer: {self.val_data_packer}"
                 )
@@ -140,7 +142,7 @@ class CommMixin:
                     f"No default validation data packer found for {model_type}, using {type(self.val_data_packer).__name__} as default"
                 )
 
-        self.val_data_packer.setup(self.config)
+        util.call_setup(self.val_data_packer, self.config)
 
     def register_to_controller(self):
         if hasattr(self, "_is_registered"):

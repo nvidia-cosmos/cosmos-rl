@@ -1,4 +1,4 @@
-from cosmos_rl.dispatcher.data.packer.base import ChatDataPacker
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from typing import List, Any, Dict, Union
 import torch
 import copy
@@ -10,7 +10,7 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 IGNORE_LABEL_ID = -100
 
 
-class DecoderOnlyLLMDataPacker(ChatDataPacker):
+class DecoderOnlyLLMDataPacker(DataPacker):
     """
     Data protocol & processing logic for the decoder only LLM for SFT and RL training.
     """

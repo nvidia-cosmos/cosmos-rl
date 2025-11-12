@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 from torch.utils.data import Dataset
 
-from cosmos_rl.utils.util import call_dataset_setup
+from cosmos_rl.utils.util import call_setup
 
 
 class _DatasetWithoutSetup(Dataset):
@@ -69,25 +69,25 @@ class TestallDatasetSetup(unittest.TestCase):
 
     def test_no_setup_attribute_short_circuits(self):
         dataset = _DatasetWithoutSetup()
-        call_dataset_setup(dataset, self.config)
+        call_setup(dataset, self.config)
         self.mock_from_pretrained.assert_not_called()
 
     def test_new_signature_invokes_setup_with_config_only(self):
         dataset = _NewStyleDataset()
-        call_dataset_setup(dataset, self.config)
+        call_setup(dataset, self.config)
         self.assertIs(dataset.seen_config, self.config)
         self.mock_from_pretrained.assert_not_called()
 
     def test_old_signature_warns_and_injects_tokenizer(self):
         dataset = _OldStyleDataset()
         with self.assertWarns(DeprecationWarning):
-            call_dataset_setup(dataset, self.config)
+            call_setup(dataset, self.config)
         self.assertEqual(dataset.calls, [(self.config, self.fake_tokenizer)])
 
     def test_invalid_signature_raises_type_error(self):
         dataset = _InvalidSignatureDataset()
         with self.assertRaises(TypeError):
-            call_dataset_setup(dataset, self.config)
+            call_setup(dataset, self.config)
 
 
 if __name__ == "__main__":

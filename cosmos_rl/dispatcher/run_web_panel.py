@@ -74,7 +74,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
-from cosmos_rl.dispatcher.data.packer.base import DataPacker, worker_entry_parser
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker, worker_entry_parser
 from cosmos_rl.utils.payload import extract_rollouts
 from fastapi.responses import Response
 from fastapi import Request
@@ -516,12 +516,12 @@ def _serialize_replicas(replicas: Dict[str, Replica]) -> List[Dict]:
 
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-    data_packer: Optional[DataPacker] = None,
+    data_packer: Optional[BaseDataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
     filter_reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
-    val_data_packer: Optional[DataPacker] = None,
+    val_data_packer: Optional[BaseDataPacker] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
     sampler: Optional[Callable] = None,
     batch_sampler: Optional[Callable] = None,
@@ -611,8 +611,8 @@ def main(
 
         if data_packer is not None:
             assert isinstance(
-                data_packer, DataPacker
-            ), "data_packer should be a DataPacker instance"
+                data_packer, BaseDataPacker
+            ), "data_packer should be a BaseDataPacker instance"
         controller.setup(
             loaded_config,
             redis_port=args.redis_port,

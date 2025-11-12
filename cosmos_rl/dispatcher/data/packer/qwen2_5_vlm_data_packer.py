@@ -1,4 +1,4 @@
-from cosmos_rl.dispatcher.data.packer.base import ChatDataPacker
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
 from typing import List, Any, Dict, Optional, Tuple, Union
 import torch
 from cosmos_rl.utils.util import retry
@@ -12,7 +12,7 @@ import copy
 IGNORE_LABEL_ID = -100
 
 
-class Qwen2_5_VLM_DataPacker(ChatDataPacker):
+class Qwen2_5_VLM_DataPacker(DataPacker):
     """
     Data protocol & processing logic for the Qwen2.5 VLM for SFT and RL training.
     """

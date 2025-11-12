@@ -52,14 +52,14 @@ def worker_entry_parser() -> argparse.ArgumentParser:
     return parser
 
 
-class DataPacker(ABC):
-    _MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY: Dict[str, Type["DataPacker"]] = {}
+class BaseDataPacker(ABC):
+    _MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY: Dict[str, Type["BaseDataPacker"]] = {}
 
     @classmethod
     def register(
         cls,
         model_types: Union[str, List[str]],
-        default_data_packer_cls: Type["DataPacker"],
+        default_data_packer_cls: Type["BaseDataPacker"],
         *,
         allow_override: bool = False,
     ):
@@ -71,20 +71,22 @@ class DataPacker(ABC):
         for model_type in model_types:
             if (
                 not allow_override
-                and model_type in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY
-                and DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]
+                and model_type in BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY
+                and BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]
                 != default_data_packer_cls
             ):
-                raise ValueError(f"DataPacker for {model_type} is already registered")
-            DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type] = (
+                raise ValueError(
+                    f"BaseDataPacker for {model_type} is already registered"
+                )
+            BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type] = (
                 default_data_packer_cls
             )
 
     @classmethod
-    def get_default_data_packer(cls, model_type: str) -> Type["DataPacker"]:
-        if model_type not in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY:
-            raise ValueError(f"DataPacker for {model_type} is not registered")
-        return DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]()
+    def get_default_data_packer(cls, model_type: str) -> Type["BaseDataPacker"]:
+        if model_type not in BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY:
+            raise ValueError(f"BaseDataPacker for {model_type} is not registered")
+        return BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]()
 
     def __init__(self, tool_agent: Optional[ToolAgent] = None, *args, **kwargs):
         self.tool_agent = tool_agent
@@ -199,8 +201,9 @@ class DataPacker(ABC):
         pass
 
 
-class ChatDataPacker(DataPacker, ABC):
+class DataPacker(BaseDataPacker, ABC):
     """
+    A subclass of BaseDataPacker that relies on a tokenizer.
     This is where dataset item is transformed into the format required by the rollout engine (e.g. vllm)
     for example:
         - `str` is needed for language model

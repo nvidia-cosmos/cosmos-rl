@@ -29,7 +29,7 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.utils.tools_use import ToolParser
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
@@ -216,7 +216,7 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
         n_to_batch: bool = False,
     ) -> List[RolloutResult]:
@@ -306,7 +306,7 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
@@ -412,7 +412,7 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
         n_to_batch: bool = False,
     ) -> List[RolloutResult]:

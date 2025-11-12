@@ -264,8 +264,8 @@ Here we just reuse the pre-defined LLM data packer to demonstrate how to pass yo
             This method is optional and get called by launcher after being mounted
             `config`: config;
             '''
-            super().setup(config, tokenizer, *args, **kwargs)
-            self.underlying_data_packer.setup(config, tokenizer, *args, **kwargs)
+            super().setup(config, *args, **kwargs)
+            self.underlying_data_packer.setup(config, *args, **kwargs)
 
         def get_rollout_input(self, item: Any) -> Any:
             '''

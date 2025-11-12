@@ -22,7 +22,7 @@ from abc import ABC
 import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data import (
     CosmosDataset,
@@ -43,8 +43,8 @@ class DataFetcherBase(ABC):
     def __init__(
         self,
         config: Config,
-        data_packer: DataPacker,
-        val_data_packer: DataPacker,
+        data_packer: BaseDataPacker,
+        val_data_packer: BaseDataPacker,
         dataset: Optional[Callable[[Config], Dataset]] = None,
         val_dataset: Optional[Callable[[Config], Dataset]] = None,
         is_rl: bool = True,
@@ -479,8 +479,8 @@ class WorkerDataFetcher(DataFetcherBase):
     def __init__(
         self,
         config: Config,
-        data_packer: DataPacker,
-        val_data_packer: DataPacker,
+        data_packer: BaseDataPacker,
+        val_data_packer: BaseDataPacker,
         dataset: Optional[Callable[[Config], Dataset]] = None,
         val_dataset: Optional[Callable[[Config], Dataset]] = None,
         is_rl: bool = True,

@@ -19,7 +19,7 @@ from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )
 import torch
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from torch.utils.data import Dataset
 from typing import Union, Callable, Optional
 import inspect
@@ -369,8 +369,8 @@ class GRPOTrainer(Trainer):
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
     ):
         # setup data packer first
         self.init_data_packer(

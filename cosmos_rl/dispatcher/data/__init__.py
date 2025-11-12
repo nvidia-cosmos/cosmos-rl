@@ -18,7 +18,7 @@ from datasets import concatenate_datasets
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.util import load_data_from_disk_or_hf
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.util import call_dataset_setup
+from cosmos_rl.utils.util import call_setup
 from typing import Optional, Any
 
 from .schema import RLPayload, IdxAndRLPayload
@@ -30,7 +30,7 @@ from .schema import RLPayload, IdxAndRLPayload
 class RLDataset(Dataset):
     def __init__(self, dataset: Any, config: CosmosConfig):
         self.dataset = dataset
-        call_dataset_setup(self.dataset, config)
+        call_setup(self.dataset, config)
 
     def __len__(self):
         return len(self.dataset)

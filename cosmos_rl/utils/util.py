@@ -39,7 +39,7 @@ from collections import OrderedDict
 from functools import wraps
 from msgpack import ExtType
 from tqdm import tqdm
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, Union
 import torch
 import pynvml
 from contextlib import contextmanager
@@ -1253,18 +1253,23 @@ def setup_tokenizer(model_name_or_path: str) -> AutoTokenizer:
     return tokenizer
 
 
-def call_dataset_setup(dataset: torch.utils.data.Dataset, config: CosmosConfig):
+def call_setup(
+    dataset_or_datapacker: Union[
+        torch.utils.data.Dataset, "cosmos_rl.dispatcher.data.packer.base.BaseDataPacker"  # noqa: F821
+    ],
+    config: CosmosConfig,
+):
     """
-    As part of decoupling tokenizer from the main training logic, we are changing the signature of `setup` used in custom datasets
-    This method, calls the dataset.setup compatibly across the old and new signatures
+    As part of decoupling tokenizer from the main training logic, we are changing the signature of `setup` used in Dataset and DataPacker class.
+    This method, calls the dataset.setup or data_packer.setup compatibly across the old and new signatures.
 
-    Old signatures: setup(self, config, tokenizer)
-    New signatures: setup(self, config)
+    Old signatures: setup(self, config, tokenizer, *args, **kwargs)
+    New signatures: setup(self, config, *args, **kwargs)
     """
-    if not hasattr(dataset, "setup"):
+    if not hasattr(dataset_or_datapacker, "setup"):
         return
 
-    setup_fn = dataset.setup
+    setup_fn = dataset_or_datapacker.setup
     sig = inspect.signature(setup_fn)
 
     # "setup" is a function of the class, only consider params that aren't "self"
@@ -1280,7 +1285,7 @@ def call_dataset_setup(dataset: torch.utils.data.Dataset, config: CosmosConfig):
         setup_fn(config)
     elif n_required == 2:
         warnings.warn(
-            f"{dataset.__class__.__name__}.setup(self, config, tokenizer) is deprecated. "
+            f"{dataset_or_datapacker.__class__.__name__}.setup(self, config, tokenizer) is deprecated. "
             "Please update to setup(self, config) and instantiate tokenizer if needed in the funciton implementaion.",
             DeprecationWarning,
             stacklevel=2,
@@ -1288,6 +1293,6 @@ def call_dataset_setup(dataset: torch.utils.data.Dataset, config: CosmosConfig):
         setup_fn(config, setup_tokenizer(config.policy.model_name_or_path))
     else:
         raise TypeError(
-            f"{dataset.__class__.__name__}.setup() must accept either "
+            f"{dataset_or_datapacker.__class__.__name__}.setup() must accept either "
             f"(self, config) or (self, config, tokenizer), but signature was: {sig}"
         )
