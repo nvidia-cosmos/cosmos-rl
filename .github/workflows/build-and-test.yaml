@@ -24,9 +24,16 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check
+        run: |
+          df -h
+          nvidia-smi
+          docker --version
+          sleep inf
+
       - name: Build image
         run: |
-          docker build -t ${{ steps.vars.outputs.image_tag }} .
+          docker build -t ${{ steps.vars.outputs.image_tag }} . 
 
       - name: Run tests
         id: tests
