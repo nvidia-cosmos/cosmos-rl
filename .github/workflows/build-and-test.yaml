@@ -75,6 +75,7 @@ jobs:
           ${DOCKER_RUN} python tests/test_activation_offload.py
           ${DOCKER_RUN} python tests/test_policy_variant.py
           ${DOCKER_RUN} python tests/test_deepep.py
+          ${DOCKER_RUN} python tests/test_vllm_rollout_async.py
 
       - name: Cleanup
         if: always()
