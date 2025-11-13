@@ -867,6 +867,13 @@ class MultiTurnRolloutConfig(BaseModel):
         return self
 
 
+class RolloutAsyncConfig(BaseModel):
+    max_concurrent_requests: int = Field(
+        default=10,
+        description="Maximum number of concurrent requests for rollout engine.",
+    )
+
+
 class ValidationConfig(BaseModel):
     enable: bool = Field(
         default=False,
@@ -968,13 +975,18 @@ class RolloutConfig(BaseModel):
 
     backend: str = Field(
         default="vllm",
-        description="Backend for rollout. Currently support `vllm` and `trtllm`.",
-        choices=["vllm", "trtllm"],
+        description="Backend for rollout. Currently support `vllm`, `vllm_async` and `trtllm`.",
+        choices=["vllm", "vllm_async", "trtllm"],
     )
 
     multi_turn_config: MultiTurnRolloutConfig = Field(
         default_factory=MultiTurnRolloutConfig,
         description="Configuration for multi-turn rollout.",
+    )
+
+    async_config: RolloutAsyncConfig = Field(
+        default_factory=RolloutAsyncConfig,
+        description="Configuration for async rollout.",
     )
 
     @model_validator(mode="after")
