@@ -60,8 +60,10 @@ class HFVLMDataPacker(DataPacker):
             config.policy.model_name_or_path, trust_remote_code=True
         )
 
-        image_token_id = getattr(hf_config, "image_token_id", None) or getattr(
-            hf_config.vision_config, "image_token_id", None
+        image_token_id = (
+            getattr(hf_config, "image_token_id", None)
+            or getattr(hf_config.vision_config, "image_token_id", None)
+            or getattr(hf_config, "img_context_token_id", None)
         )
         if image_token_id is None:
             image_token_id = getattr(hf_config, "image_token_index", None) or getattr(
@@ -69,7 +71,9 @@ class HFVLMDataPacker(DataPacker):
             )
         assert image_token_id is not None, f"Cannot find image token id in {hf_config=}"
         self.image_token_id = image_token_id
-        self.image_token = getattr(self.hf_processor, "image_token", None)
+        self.image_token = getattr(self.hf_processor, "image_token", None) or getattr(
+            hf_config, "img_context_token", None
+        )
 
         video_token_id = getattr(hf_config, "video_token_id", None) or getattr(
             hf_config.vision_config, "video_token_id", None

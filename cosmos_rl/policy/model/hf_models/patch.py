@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch
 from transformers import AutoConfig
 from typing import Any
 
@@ -25,6 +26,11 @@ def pre_hf_models_patch(hf_config: AutoConfig):
     ):
         hf_config.vision_config.drop_path_rate = 0.0
         print("Set drop_path_rate to 0.0")
+    elif hf_config.model_type == "NemotronH_Nano_VL_V2":
+        # It's hardcoded for now
+        hf_config.vision_config.num_hidden_layers = 32
+        # Set video pruning rate to 0 for training
+        hf_config.video_pruning_rate = 0.0
 
 
 def post_hf_models_patch(hf_config: AutoConfig, model: Any):
@@ -35,3 +41,55 @@ def post_hf_models_patch(hf_config: AutoConfig, model: Any):
     ):
         model.img_context_token_id = 200021
         print("Set img_context_token_id to 200021")
+    elif hf_config.model_type == "NemotronH_Nano_VL_V2":
+
+        def patch_forward(self, **kwargs) -> torch.LongTensor:
+            pixel_values = kwargs.get("pixel_values", None)
+            pixel_values_videos = kwargs.get("pixel_values_videos", None)
+            input_ids = kwargs.get("input_ids", None)
+            attention_mask = kwargs.get("attention_mask", None)
+            assert self.img_context_token_id is not None
+            if pixel_values is not None or pixel_values_videos is not None:
+                image_vit_embeds, video_vit_embeds = None, None
+                if pixel_values is not None:
+                    pixel_values = pixel_values.to(
+                        dtype=self.vision_model.config.torch_dtype
+                    )
+                    image_vit_embeds = self.extract_feature(pixel_values)
+                if pixel_values_videos is not None:
+                    pixel_values_videos = pixel_values_videos.to(
+                        dtype=self.vision_model.config.torch_dtype
+                    )
+                    video_vit_embeds = self.extract_feature(pixel_values_videos)
+                inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+                B, N, C = inputs_embeds.shape
+                inputs_embeds = inputs_embeds.reshape(B * N, C)
+                input_ids_copy = input_ids.reshape(B * N)
+                if image_vit_embeds is not None:
+                    image_mask = input_ids_copy == self.img_context_token_id
+                    assert image_mask.sum() != 0
+                    inputs_embeds[image_mask] = image_vit_embeds.reshape(-1, C).to(
+                        inputs_embeds.device, inputs_embeds.dtype
+                    )
+                if video_vit_embeds is not None:
+                    # if B > 1:
+                    #     raise NotImplementedError(
+                    #         "Video is not supported for batch size > 1"
+                    #     )
+                    video_mask = input_ids_copy == self.video_context_token_id
+                    assert video_mask.sum() != 0
+                    inputs_embeds[video_mask] = video_vit_embeds.reshape(-1, C).to(
+                        inputs_embeds.device, inputs_embeds.dtype
+                    )
+                inputs_embeds = inputs_embeds.reshape(B, N, C)
+            else:
+                inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+
+            outputs = self.language_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+            return outputs
+
+        model.forward = patch_forward.__get__(model, type(model))
