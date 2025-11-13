@@ -502,6 +502,7 @@ class FP8Config(BaseModel):
         choices=["rowwise", "tensorwise"],
     )
 
+
 class FP4Config(BaseModel):
     enable_fp4: bool = Field(default=False, description="Whether to enable fp4.")
     fp4_recipe: str = Field(
@@ -514,6 +515,7 @@ class FP4Config(BaseModel):
         description="Quantization strategy for weight.",
         choices=["rowwise", "tensorwise"],
     )
+
 
 class TrainingConfig(BaseModel):
     train_policy: Union[SFTDataConfig, GrpoConfig] = Field(

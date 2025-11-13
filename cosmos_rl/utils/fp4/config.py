@@ -1,10 +1,10 @@
 import enum
-import torch
 from typing import Optional, Union
 from dataclasses import dataclass
 import transformer_engine_torch as tex
 
 te_dtype = tex.DType.kFloat4E2M1
+
 
 class ScalingType(enum.Enum):
     DYNAMIC = "dynamic"
@@ -18,6 +18,7 @@ class ScalingType(enum.Enum):
         else:
             assert self is ScalingType.DISABLED
             return "dis"
+
 
 class ScalingGranularity(enum.Enum):
     """
@@ -37,30 +38,35 @@ class ScalingGranularity(enum.Enum):
             assert self is ScalingGranularity.AXISWISE
             return "axs"
 
+
 @dataclass(frozen=True)
 class CastConfig:
     """
     Configuration for casting a tensor to float4
     """
+
     scaling_type: ScalingType = ScalingType.DYNAMIC
     scaling_granularity: ScalingGranularity = ScalingGranularity.TENSORWISE
     target_dtype: Optional[tex.DType] = None
-    
+
     def short_str(self):
-        dtype_name = (self.target_dtype.name if self.target_dtype is not None else te_dtype.name)
+        dtype_name = (
+            self.target_dtype.name if self.target_dtype is not None else te_dtype.name
+        )
         return f"{self.scaling_type.short_str()}_{self.scaling_granularity.short_str()}_{dtype_name}"
-    
+
     def __post_init__(self):
         if self.scaling_granularity is ScalingGranularity.AXISWISE:
-            assert self.scaling_type is ScalingType.DYNAMIC, (
-                "only dynamic scaling is supported for axiswise scaling granularity"
-            )
+            assert (
+                self.scaling_type is ScalingType.DYNAMIC
+            ), "only dynamic scaling is supported for axiswise scaling granularity"
 
 
 class Float4LinearRecipeName(enum.Enum):
     """
     Recipe name for float4 linear
     """
+
     # Default, dynamic per-tensor scaling with the cuBLAS tensorwise kernel
     TENSORWISE = "tensorwise"
     # Dynamic rowwise scaling with the CUTLASS rowwise kernel
@@ -89,12 +95,20 @@ class Float4LinearConfig:
 
     def __post_init__(self):
         if self.cast_config_input_for_grad_weight is None:
-            object.__setattr__(self, "cast_config_input_for_grad_weight", self.cast_config_input)
+            object.__setattr__(
+                self, "cast_config_input_for_grad_weight", self.cast_config_input
+            )
         if self.cast_config_weight_for_grad_input is None:
-            object.__setattr__(self, "cast_config_weight_for_grad_input", self.cast_config_weight)
+            object.__setattr__(
+                self, "cast_config_weight_for_grad_input", self.cast_config_weight
+            )
         if self.cast_config_grad_output_for_grad_weight is None:
-            object.__setattr__(self, "cast_config_grad_output_for_grad_weight", self.cast_config_grad_output)
-    
+            object.__setattr__(
+                self,
+                "cast_config_grad_output_for_grad_weight",
+                self.cast_config_grad_output,
+            )
+
         cc_i = self.cast_config_input
         cc_w = self.cast_config_weight
         cc_go = self.cast_config_grad_output
@@ -102,14 +116,16 @@ class Float4LinearConfig:
         cc_w_gi = self.cast_config_weight_for_grad_input
         cc_go_gw = self.cast_config_grad_output_for_grad_weight
 
-        for  cc1, cc2, gemm_name in (
+        for cc1, cc2, gemm_name in (
             (cc_i, cc_w, "output"),
             (cc_go, cc_w_gi, "grad_input"),
             (cc_i_gw, cc_go_gw, "grad_weight"),
         ):
             is_disabled_1 = cc1.scaling_type is ScalingType.DISABLED
             is_disabled_2 = cc2.scaling_type is ScalingType.DISABLED
-            assert is_disabled_1 == is_disabled_2, f"scaling type of {gemm_name} must be the same, got {cc1.scaling_type} and {cc2.scaling_type}"
+            assert (
+                is_disabled_1 == is_disabled_2
+            ), f"scaling type of {gemm_name} must be the same, got {cc1.scaling_type} and {cc2.scaling_type}"
 
         for cc1, cc2, operand_name, default_dtype in [
             (cc_i, cc_i_gw, "input", te_dtype),
@@ -120,31 +136,44 @@ class Float4LinearConfig:
                 object.__setattr__(cc1, "target_dtype", default_dtype)
             if cc2.target_dtype is None:
                 object.__setattr__(cc2, "target_dtype", default_dtype)
-            assert cc1.target_dtype == cc2.target_dtype, f"{operand_name} must be cast to the same dtype, got {cc1.target_dtype} and {cc2.target_dtype}"
-
+            assert (
+                cc1.target_dtype == cc2.target_dtype
+            ), f"{operand_name} must be cast to the same dtype, got {cc1.target_dtype} and {cc2.target_dtype}"
 
     @staticmethod
     def from_recipe_name(
-        recipe_name: Union[Float4LinearRecipeName, str]
+        recipe_name: Union[Float4LinearRecipeName, str],
     ) -> "Float4LinearConfig":
         """
         Input: `Float4LinearRecipeName` value, or a string representing the recipe name
         Output: `Float4LinearConfig`
         """
-        if type(recipe_name) == str:
+        if isinstance(recipe_name, str):
             valid_names = [n.value for n in Float4LinearRecipeName]
-            assert recipe_name in valid_names, (
-                f"recipe name {recipe_name} is not valid, must be one of {valid_names}"
-            )
+            assert (
+                recipe_name in valid_names
+            ), f"recipe name {recipe_name} is not valid, must be one of {valid_names}"
             recipe_name = Float4LinearRecipeName(recipe_name)
 
         if recipe_name is Float4LinearRecipeName.TENSORWISE:
             return Float4LinearConfig()
 
         elif recipe_name is Float4LinearRecipeName.ROWWISE:
-            cc_i = CastConfig(scaling_type=ScalingType.DYNAMIC, scaling_granularity=ScalingGranularity.AXISWISE, target_dtype=te_dtype)
-            cc_w = CastConfig(scaling_type=ScalingType.DYNAMIC, scaling_granularity=ScalingGranularity.AXISWISE, target_dtype=te_dtype)
-            cc_go = CastConfig(scaling_type=ScalingType.DYNAMIC, scaling_granularity=ScalingGranularity.AXISWISE, target_dtype=te_dtype)
+            cc_i = CastConfig(
+                scaling_type=ScalingType.DYNAMIC,
+                scaling_granularity=ScalingGranularity.AXISWISE,
+                target_dtype=te_dtype,
+            )
+            cc_w = CastConfig(
+                scaling_type=ScalingType.DYNAMIC,
+                scaling_granularity=ScalingGranularity.AXISWISE,
+                target_dtype=te_dtype,
+            )
+            cc_go = CastConfig(
+                scaling_type=ScalingType.DYNAMIC,
+                scaling_granularity=ScalingGranularity.AXISWISE,
+                target_dtype=te_dtype,
+            )
 
             return Float4LinearConfig(
                 cast_config_input=cc_i,
@@ -156,11 +185,15 @@ class Float4LinearConfig:
             cc_i = CastConfig(scaling_granularity=ScalingGranularity.AXISWISE)
             cc_w = CastConfig(scaling_granularity=ScalingGranularity.AXISWISE)
 
-            cc_go = CastConfig(scaling_granularity=ScalingGranularity.AXISWISE, target_dtype=te_dtype)
+            cc_go = CastConfig(
+                scaling_granularity=ScalingGranularity.AXISWISE, target_dtype=te_dtype
+            )
             cc_w_gi = CastConfig(scaling_granularity=ScalingGranularity.TENSORWISE)
 
             cc_i_gw = CastConfig(scaling_type=ScalingType.DISABLED)
-            cc_go_gw = CastConfig(scaling_type=ScalingType.DISABLED, target_dtype=te_dtype)
+            cc_go_gw = CastConfig(
+                scaling_type=ScalingType.DISABLED, target_dtype=te_dtype
+            )
 
             return Float4LinearConfig(
                 cast_config_input=cc_i,
@@ -173,4 +206,3 @@ class Float4LinearConfig:
 
         else:
             raise ValueError(f"recipe name {recipe_name} is not valid")
-            

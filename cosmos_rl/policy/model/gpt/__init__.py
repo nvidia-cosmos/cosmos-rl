@@ -211,9 +211,11 @@ class Attention(nn.Module):
             torch.Tensor: Output tensor after attention.
 
         """
+
         def _lastdim_contig(t: torch.Tensor) -> torch.Tensor:
             # FlashAttention requires stride(-1) == 1
             return t if t.stride(-1) == 1 else t.contiguous()
+
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         if self.q_norm is not None:
