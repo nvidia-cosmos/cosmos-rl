@@ -9,9 +9,9 @@ from .config import Float4LinearConfig, ScalingType
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-from cosmos_rl.utils.logging import logger
 
 te_dtype = tex.DType.kFloat4E2M1
+
 
 class matmul_with_hp_or_float4_args(torch.autograd.Function):
     """
@@ -26,12 +26,18 @@ class matmul_with_hp_or_float4_args(torch.autograd.Function):
         ctx,
         input_hp: torch.Tensor,
         weight_hp_t: torch.Tensor,
-        enable_input_quantization: bool, input_target_dtype: int,
-        enable_weight_quantization: bool, weight_target_dtype: int,
-        enable_grad_output_dim0_quantization: bool, grad_output_dim0_target_dtype: int,
-        enable_weight_t_dim0_quantization: bool, weight_t_dim0_target_dtype: int,
-        enable_grad_output_dim1_quantization: bool, grad_output_dim1_target_dtype: int,
-        enable_input_t_dim1_quantization: bool, input_t_dim1_target_dtype: int,
+        enable_input_quantization: bool,
+        input_target_dtype: int,
+        enable_weight_quantization: bool,
+        weight_target_dtype: int,
+        enable_grad_output_dim0_quantization: bool,
+        grad_output_dim0_target_dtype: int,
+        enable_weight_t_dim0_quantization: bool,
+        weight_t_dim0_target_dtype: int,
+        enable_grad_output_dim1_quantization: bool,
+        grad_output_dim1_target_dtype: int,
+        enable_input_t_dim1_quantization: bool,
+        input_t_dim1_target_dtype: int,
     ):
         ctx.save_for_backward(input_hp, weight_hp_t)
 
@@ -58,8 +64,12 @@ class matmul_with_hp_or_float4_args(torch.autograd.Function):
                 with_rht=False,
                 with_post_rht_amax=False,
             )
-            input_maybe_fp4 = input_quantizer.make_empty(input_hp_reshaped.shape, dtype=torch.bfloat16, requires_grad=False)
-            input_maybe_fp4 = input_quantizer.update_quantized(input_hp_reshaped, input_maybe_fp4)
+            input_maybe_fp4 = input_quantizer.make_empty(
+                input_hp_reshaped.shape, dtype=torch.bfloat16, requires_grad=False
+            )
+            input_maybe_fp4 = input_quantizer.update_quantized(
+                input_hp_reshaped, input_maybe_fp4
+            )
 
         if enable_weight_quantization:
             weight_maybe_fp4_t = weight_hp_t
@@ -73,9 +83,15 @@ class matmul_with_hp_or_float4_args(torch.autograd.Function):
                 with_rht=False,
                 with_post_rht_amax=False,
             )
-            weight_maybe_fp4_t = weight_quantizer.make_empty(weight_hp_t.shape, dtype=torch.bfloat16, requires_grad=False)
-            weight_maybe_fp4_t = weight_quantizer.update_quantized(weight_hp_t, weight_maybe_fp4_t)
-        workspace = torch.empty(64 * 4096 * 4096, dtype=torch.uint8, device=input_maybe_fp4.device)
+            weight_maybe_fp4_t = weight_quantizer.make_empty(
+                weight_hp_t.shape, dtype=torch.bfloat16, requires_grad=False
+            )
+            weight_maybe_fp4_t = weight_quantizer.update_quantized(
+                weight_hp_t, weight_maybe_fp4_t
+            )
+        workspace = torch.empty(
+            64 * 4096 * 4096, dtype=torch.uint8, device=input_maybe_fp4.device
+        )
         res_bits = tex.generic_gemm(
             input_maybe_fp4,
             True,
@@ -94,7 +110,9 @@ class matmul_with_hp_or_float4_args(torch.autograd.Function):
             False,
             False,
         )[0]
-        res_bits = res_bits.t().reshape(*original_input_hp_shape[:-1], res_bits.t().shape[-1])
+        res_bits = res_bits.t().reshape(
+            *original_input_hp_shape[:-1], res_bits.t().shape[-1]
+        )
         return res_bits
 
     @staticmethod
@@ -117,8 +135,12 @@ class matmul_with_hp_or_float4_args(torch.autograd.Function):
                 with_rht=False,
                 with_post_rht_amax=False,
             )
-            grad_output_maybe_fp4_dim0 = grad_output_dim0_quantizer.make_empty(grad_output_reshaped.shape, dtype=torch.bfloat16)
-            grad_output_maybe_fp4_dim0 = grad_output_dim0_quantizer.update_quantized(grad_output_reshaped, grad_output_maybe_fp4_dim0)
+            grad_output_maybe_fp4_dim0 = grad_output_dim0_quantizer.make_empty(
+                grad_output_reshaped.shape, dtype=torch.bfloat16
+            )
+            grad_output_maybe_fp4_dim0 = grad_output_dim0_quantizer.update_quantized(
+                grad_output_reshaped, grad_output_maybe_fp4_dim0
+            )
 
         if ctx.enable_weight_t_dim0_quantization:
             weight_t_maybe_fp4_dim0 = weight_hp_t
@@ -133,10 +155,18 @@ class matmul_with_hp_or_float4_args(torch.autograd.Function):
                 with_post_rht_amax=False,
                 with_2d_quantization=True,
             )
-            weight_t_maybe_fp4_dim0 = weight_hp_t_quantizer.make_empty(weight_hp_t.shape, dtype=torch.bfloat16)
-            weight_t_maybe_fp4_dim0 = weight_hp_t_quantizer.update_quantized(weight_hp_t, weight_t_maybe_fp4_dim0)
+            weight_t_maybe_fp4_dim0 = weight_hp_t_quantizer.make_empty(
+                weight_hp_t.shape, dtype=torch.bfloat16
+            )
+            weight_t_maybe_fp4_dim0 = weight_hp_t_quantizer.update_quantized(
+                weight_hp_t, weight_t_maybe_fp4_dim0
+            )
 
-        workspace = torch.empty(64 * 4096 * 4096, dtype=torch.uint8, device=grad_output_maybe_fp4_dim0.device)
+        workspace = torch.empty(
+            64 * 4096 * 4096,
+            dtype=torch.uint8,
+            device=grad_output_maybe_fp4_dim0.device,
+        )
         grad_input = tex.generic_gemm(
             grad_output_maybe_fp4_dim0,
             True,
@@ -155,38 +185,58 @@ class matmul_with_hp_or_float4_args(torch.autograd.Function):
             False,
             False,
         )[0]
-        grad_input = grad_input.t().reshape(*grad_output_orig_shape[:-1], grad_input.t().shape[-1])
+        grad_input = grad_input.t().reshape(
+            *grad_output_orig_shape[:-1], grad_input.t().shape[-1]
+        )
         #
         # calculate grad_weight
         #
         # dY and X must be [M, N] and [M, K] exactly, contiguous on the last dim
 
-        grad_output_reshaped = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()  # (M, N)
-        input_hp_reshaped    = input_hp.reshape(-1, input_hp.shape[-1]).contiguous()        # (M, K)
+        grad_output_reshaped = grad_output.reshape(
+            -1, grad_output.shape[-1]
+        ).contiguous()  # (M, N)
+        input_hp_reshaped = input_hp.reshape(
+            -1, input_hp.shape[-1]
+        ).contiguous()  # (M, K)
 
         if ctx.enable_grad_output_dim1_quantization:
             grad_output_maybe_fp4_dim1 = grad_output_reshaped
         else:
             grad_output_dim1_quantizer = NVFP4Quantizer(
                 fp4_dtype=ctx.grad_output_dim1_target_dtype,
-                rowwise=False, columnwise=True,
-                with_amax_reduction=False, amax_reduction_group=None,
-                with_rht=False, with_post_rht_amax=False,
+                rowwise=False,
+                columnwise=True,
+                with_amax_reduction=False,
+                amax_reduction_group=None,
+                with_rht=False,
+                with_post_rht_amax=False,
             )
-            grad_output_maybe_fp4_dim1 = grad_output_dim1_quantizer.make_empty(grad_output_reshaped.shape, dtype=torch.bfloat16)
-            grad_output_maybe_fp4_dim1 = grad_output_dim1_quantizer.update_quantized(grad_output_reshaped, grad_output_maybe_fp4_dim1)
+            grad_output_maybe_fp4_dim1 = grad_output_dim1_quantizer.make_empty(
+                grad_output_reshaped.shape, dtype=torch.bfloat16
+            )
+            grad_output_maybe_fp4_dim1 = grad_output_dim1_quantizer.update_quantized(
+                grad_output_reshaped, grad_output_maybe_fp4_dim1
+            )
 
         if ctx.enable_input_t_dim1_quantization:
             input_maybe_fp4_dim1 = input_hp_reshaped
         else:
             input_hp_quantizer = NVFP4Quantizer(
                 fp4_dtype=ctx.input_t_dim1_target_dtype,
-                rowwise=False, columnwise=True,   # NOTE: rowwise here
-                with_amax_reduction=False, amax_reduction_group=None,
-                with_rht=False, with_post_rht_amax=False,
+                rowwise=False,
+                columnwise=True,  # NOTE: rowwise here
+                with_amax_reduction=False,
+                amax_reduction_group=None,
+                with_rht=False,
+                with_post_rht_amax=False,
             )
-            input_maybe_fp4_dim1 = input_hp_quantizer.make_empty(input_hp_reshaped.shape, dtype=torch.bfloat16)
-            input_maybe_fp4_dim1 = input_hp_quantizer.update_quantized(input_hp_reshaped, input_maybe_fp4_dim1)        
+            input_maybe_fp4_dim1 = input_hp_quantizer.make_empty(
+                input_hp_reshaped.shape, dtype=torch.bfloat16
+            )
+            input_maybe_fp4_dim1 = input_hp_quantizer.update_quantized(
+                input_hp_reshaped, input_maybe_fp4_dim1
+            )
 
         grad_weight = tex.generic_gemm(
             input_maybe_fp4_dim1,
@@ -207,7 +257,22 @@ class matmul_with_hp_or_float4_args(torch.autograd.Function):
             False,
         )[0]
 
-        return grad_input, grad_weight.t(), None, None, None, None, None, None, None, None, None, None, None, None
+        return (
+            grad_input,
+            grad_weight.t(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 class Float4Linear(torch.nn.Linear):
@@ -229,18 +294,41 @@ class Float4Linear(torch.nn.Linear):
         super().__init__(*args, **kwargs)
 
         # Defines the scaling behavior of input, weight, grad_output
-        self._enable_input_quantization = config.cast_config_input.scaling_type is not ScalingType.DISABLED
+        self._enable_input_quantization = (
+            config.cast_config_input.scaling_type is not ScalingType.DISABLED
+        )
         self._input_target_dtype = int(config.cast_config_input.target_dtype)
-        self._enable_weight_quantization = config.cast_config_weight.scaling_type is not ScalingType.DISABLED
+        self._enable_weight_quantization = (
+            config.cast_config_weight.scaling_type is not ScalingType.DISABLED
+        )
         self._weight_target_dtype = int(config.cast_config_weight.target_dtype)
-        self._enable_grad_output_dim0_quantization = config.cast_config_grad_output.scaling_type is not ScalingType.DISABLED
-        self._grad_output_dim0_target_dtype = int(config.cast_config_grad_output.target_dtype)
-        self._enable_weight_t_dim0_quantization = config.cast_config_weight_for_grad_input.scaling_type is not ScalingType.DISABLED
-        self._weight_t_dim0_target_dtype = int(config.cast_config_weight_for_grad_input.target_dtype)
-        self._enable_grad_output_dim1_quantization = config.cast_config_grad_output_for_grad_weight.scaling_type is not ScalingType.DISABLED
-        self._grad_output_dim1_target_dtype = int(config.cast_config_grad_output_for_grad_weight.target_dtype)
-        self._enable_input_t_dim1_quantization = config.cast_config_input_for_grad_weight.scaling_type is not ScalingType.DISABLED
-        self._input_t_dim1_target_dtype = int(config.cast_config_input_for_grad_weight.target_dtype)
+        self._enable_grad_output_dim0_quantization = (
+            config.cast_config_grad_output.scaling_type is not ScalingType.DISABLED
+        )
+        self._grad_output_dim0_target_dtype = int(
+            config.cast_config_grad_output.target_dtype
+        )
+        self._enable_weight_t_dim0_quantization = (
+            config.cast_config_weight_for_grad_input.scaling_type
+            is not ScalingType.DISABLED
+        )
+        self._weight_t_dim0_target_dtype = int(
+            config.cast_config_weight_for_grad_input.target_dtype
+        )
+        self._enable_grad_output_dim1_quantization = (
+            config.cast_config_grad_output_for_grad_weight.scaling_type
+            is not ScalingType.DISABLED
+        )
+        self._grad_output_dim1_target_dtype = int(
+            config.cast_config_grad_output_for_grad_weight.target_dtype
+        )
+        self._enable_input_t_dim1_quantization = (
+            config.cast_config_input_for_grad_weight.scaling_type
+            is not ScalingType.DISABLED
+        )
+        self._input_t_dim1_target_dtype = int(
+            config.cast_config_input_for_grad_weight.target_dtype
+        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Duplicate the autocast logic for F.linear, so that the output
@@ -254,12 +342,18 @@ class Float4Linear(torch.nn.Linear):
         output = matmul_with_hp_or_float4_args.apply(
             input,
             self.weight.t(),
-            self._enable_input_quantization, self._input_target_dtype,
-            self._enable_weight_quantization, self._weight_target_dtype,
-            self._enable_grad_output_dim0_quantization, self._grad_output_dim0_target_dtype,
-            self._enable_weight_t_dim0_quantization, self._weight_t_dim0_target_dtype,
-            self._enable_grad_output_dim1_quantization, self._grad_output_dim1_target_dtype,
-            self._enable_input_t_dim1_quantization, self._input_t_dim1_target_dtype,
+            self._enable_input_quantization,
+            self._input_target_dtype,
+            self._enable_weight_quantization,
+            self._weight_target_dtype,
+            self._enable_grad_output_dim0_quantization,
+            self._grad_output_dim0_target_dtype,
+            self._enable_weight_t_dim0_quantization,
+            self._weight_t_dim0_target_dtype,
+            self._enable_grad_output_dim1_quantization,
+            self._grad_output_dim1_target_dtype,
+            self._enable_input_t_dim1_quantization,
+            self._input_t_dim1_target_dtype,
         )
 
         if self.bias is not None:
@@ -281,7 +375,7 @@ class Float4Linear(torch.nn.Linear):
                 f"go_gw:{c.cast_config_grad_output_for_grad_weight.short_str()}"
             )
         cast_config_str = ",".join(parts)
-        s = f'{super().extra_repr()}, cast_configs={cast_config_str}'
+        s = f"{super().extra_repr()}, cast_configs={cast_config_str}"
         return s
 
     @classmethod

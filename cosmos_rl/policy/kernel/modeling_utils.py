@@ -26,6 +26,7 @@ def decide_fa_version():
         return 3
     return 2
 
+
 def lastdim_contig(x: torch.Tensor) -> torch.Tensor:
     return x if x is None or x.stride(-1) == 1 else x.contiguous()
 
@@ -79,20 +80,43 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
         else:
             from flash_attn import flash_attn_func, flash_attn_varlen_func
         logger.info(f"[Cosmos-RL] Using FlashAttention-{self.fa_version}.")
+
         def _flash_attn_func(q, k, v, *args, **kwargs):
             if enable_fp4:
                 q = lastdim_contig(q)
                 k = lastdim_contig(k)
                 v = lastdim_contig(v)
             return flash_attn_func(q, k, v, *args, **kwargs)
-        def _flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, *args, **kwargs):
+
+        def _flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            *args,
+            **kwargs,
+        ):
             if enable_fp4:
                 q = lastdim_contig(q)
                 k = lastdim_contig(k)
                 v = lastdim_contig(v)
                 cu_seqlens_q = cu_seqlens_q.to(torch.int32).contiguous()
                 cu_seqlens_k = cu_seqlens_k.to(torch.int32).contiguous()
-            return flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, *args, **kwargs)
+            return flash_attn_varlen_func(
+                q,
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                *args,
+                **kwargs,
+            )
+
         self.flash_attn_func = _flash_attn_func
         self.flash_attn_varlen_func = _flash_attn_varlen_func
         from flash_attn.layers.rotary import apply_rotary_emb as ori_apply_rotary_emb
@@ -107,9 +131,15 @@ class FlashAttnMeta(metaclass=FlashAttnMetaSingleton):
             self.flash_attn_varlen_func, deterministic=deterministic
         )
 
+
 def init_flash_attn_meta(
-    deterministic: bool = False, compile: bool = True, fa_version: Optional[int] = None, enable_fp4: bool = False
+    deterministic: bool = False,
+    compile: bool = True,
+    fa_version: Optional[int] = None,
+    enable_fp4: bool = False,
 ):
     FlashAttnMeta(
-        torch_compile=compile, user_specified_fa_version=fa_version, enable_fp4=enable_fp4
+        torch_compile=compile,
+        user_specified_fa_version=fa_version,
+        enable_fp4=enable_fp4,
     ).set_deterministic(deterministic)

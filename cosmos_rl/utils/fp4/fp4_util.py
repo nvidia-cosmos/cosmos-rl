@@ -36,6 +36,7 @@ if not IS_TORCH_COMPATIBLE_WITH_FP4:
         f"[FP4] FP4 is not supported for this version of PyTorch, minimum version required: {MIN_TORCH_VERSION_FOR_FP4}, but got: {torch.__version__}. FP4 setting will take no effect."
     )
 
+
 class ModelConverter(ABC):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
         self.config = config

@@ -461,6 +461,7 @@ class DeepseekV3MoEModel(BaseModel):
                 f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
             )
 
+
 def _init_weights(module):
     std = 0.02
 
