@@ -17,8 +17,8 @@ import io
 import base64
 import torch
 from PIL import Image
-from typing import List, Any, Dict, Optional, Tuple
-from transformers import AutoTokenizer, AutoProcessor, AutoConfig
+from typing import List, Any, Dict, Optional, Tuple, Union
+from transformers import AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 
 from cosmos_rl.utils.util import retry
@@ -65,8 +65,8 @@ class Qwen3_VL_DataPacker(DataPacker):
             self.input_ids = input_ids
             self.logprob_masks = logprob_masks
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        super().setup(config, tokenizer, *args, **kwargs)
+    def setup(self, config: Config, *args, **kwargs):
+        super().setup(config, *args, **kwargs)
         self.hf_processor = retry(AutoProcessor.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
         )
@@ -675,7 +675,7 @@ class Qwen3_VL_DataPacker(DataPacker):
     def get_policy_input(
         self,
         sample: "Qwen3_VL_DataPacker.Payload",
-        rollout_output: Optional[str] = None,
+        rollout_output: Optional[Union[str, List[int]]] = None,
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
@@ -721,7 +721,15 @@ class Qwen3_VL_DataPacker(DataPacker):
         input_ids = x["input_ids"]
         completion_ids = []
         if rollout_output:
-            completion_ids = self.tokenizer(rollout_output).input_ids  # Don't pad yet
+            rollout_as_token_ids = isinstance(rollout_output, list) and all(
+                isinstance(i, int) for i in rollout_output
+            )
+            if rollout_as_token_ids:
+                completion_ids = rollout_output
+            else:
+                completion_ids = self.tokenizer(
+                    rollout_output
+                ).input_ids  # Don't pad yet
             # recompute position_ids
             # position_ids: (3, 1, seq_len)
             position_ids, _ = self._get_rope_index(
@@ -775,7 +783,6 @@ class Qwen3_VL_DataPacker(DataPacker):
         self,
         processed_samples: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         # Reuse the RL collate minibatch function

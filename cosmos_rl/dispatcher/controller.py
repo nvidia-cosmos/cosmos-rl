@@ -43,9 +43,8 @@ from cosmos_rl.dispatcher.status import (
 )
 from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
-from transformers import AutoTokenizer
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
-from cosmos_rl.dispatcher.data import IdxAndRLPayload
+from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 
 
@@ -101,10 +100,6 @@ class Controller:
 
         self.config = config
         task_type = config.train.train_policy.type
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            config.policy.model_name_or_path,
-            trust_remote_code=True,
-        )
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config
         )
@@ -127,7 +122,6 @@ class Controller:
             batch_sampler=batch_sampler,
             val_sampler=val_sampler,
             val_batch_sampler=val_batch_sampler,
-            tokenizer=self.tokenizer,
             is_rl=self.is_rl,
         )
 
@@ -177,14 +171,14 @@ class Controller:
             * config.rollout.n_generation
             if self.is_rl
             else 0,
-            tokenizer=self.tokenizer,
+            tokenizer=util.setup_tokenizer(config.policy.model_name_or_path)
+            if self.is_rl
+            else None,
             current_step=self.data_fetcher.ckpt_extra_info.get("step", 0),
             max_num_steps=config.train.max_num_steps,
             custom_logger_fns=custom_logger_fns,
         )
-        self.rollout_status_manager.setup(
-            config, self.redis_controller, tokenizer=self.tokenizer
-        )
+        self.rollout_status_manager.setup(config, self.redis_controller)
 
         # Register the exit function to be called when the program exits
         def exit_server(redis_server_proc, redis_free_port):
@@ -226,7 +220,7 @@ class Controller:
         self,
         n: int,
         validation_step: Optional[int] = None,
-    ) -> Tuple[List[IdxAndRLPayload], bool]:
+    ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
 
         if not is_validation:
@@ -234,17 +228,18 @@ class Controller:
             # 1. Detect the current left pending rollouts in all policy replicas.
             # 2. Check the config.train.train_policy.allowed_outdated_steps.
             # 3. If the current pending rollouts is larger than the allowed outdated version count, reduce the number of prompts to generate.
-            current_pending_rollouts = (
-                self.policy_status_manager.total_pending_rollouts()
-            )
+            current_pending_rollouts = self.policy_status_manager.samples_on_the_fly
             if (
                 current_pending_rollouts
-                > self.config.train.train_policy.allowed_outdated_steps
+                > (self.config.train.train_policy.allowed_outdated_steps + 1)
                 * len(self.policy_status_manager)
                 * self.config.train.train_batch_per_replica
             ):
-                n = 0 if self.config.train.train_policy.no_outdated_rollout else 1
-                if not self.config.train.train_policy.no_outdated_rollout:
+                n = min(
+                    n,
+                    self.config.train.train_policy.outdated_rollout_fetch_batch_size,
+                )
+                if n > 0:
                     # Log only when n is reduced but not when set to 0 since 0 is logged too frequently
                     logger.warning(
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
@@ -285,10 +280,10 @@ class Controller:
                         ],
                     )
 
-            prompt_id_and_payload_list, is_end = self.data_fetcher.get_batched_prompt(
+            payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n, validation_step
             )
-            current_fetch_count = len(prompt_id_and_payload_list)
+            current_fetch_count = len(payloads_list)
             # record the number of valid prompts for current weight version
             if (
                 weight_version_for_current_batch
@@ -319,19 +314,21 @@ class Controller:
             for i in range(current_fetch_count):
                 # get_batched_prompt is called in single thread, so we use `consumed_samples_num` to calculate the weight version.
                 # This could ensure that each step of policy will get enough prompts to generae rollouts needed.
-                prompt_id_and_payload_list[i][
-                    1
-                ].weight_version = weight_version_for_current_batch
+                payloads_list[i].weight_version = weight_version_for_current_batch
             # logger.info(f"[Controller] Fully Synchronized mode is enabled, weight_versions: {weight_versions}, train_batch_per_replica: {self.config.train.train_batch_per_replica}, policy_replicas: {len(self.policy_status_manager)}")
         else:
-            prompt_id_and_payload_list, is_end = self.data_fetcher.get_batched_prompt(
+            payloads_list, is_end = self.data_fetcher.get_batched_prompt(
                 n, validation_step
             )
-            current_fetch_count = len(prompt_id_and_payload_list)
+            current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
-                prompt_id_and_payload_list[i][1].weight_version = 0
+                payloads_list[i].weight_version = 0
 
-        return prompt_id_and_payload_list, is_end
+        self.policy_status_manager.samples_on_the_fly += (
+            current_fetch_count * self.config.rollout.n_generation
+        )
+
+        return payloads_list, is_end
 
     async def set_profile(self, request: SetProfileRequest):
         replica = self.policy_status_manager[request.replica_name]

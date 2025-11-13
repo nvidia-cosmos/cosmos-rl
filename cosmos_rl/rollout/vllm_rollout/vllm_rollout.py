@@ -20,7 +20,7 @@ import vllm
 import torch
 import copy
 from typing import List, Optional, Dict
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
 from vllm import SamplingParams
@@ -29,7 +29,7 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.utils.tools_use import ToolParser
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
@@ -74,16 +74,15 @@ def update_conversation_wth_rollout_result(
 
 
 class vLLMRollout(RolloutBase):
-    def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
+    def __init__(self, config: Config, **kwargs):
         """Rollout with vLLM as the backend.
 
         Args:
             config: Cosmos Config.
-            tokenizer: Tokenizer of the model.
             hf_config_path: huggingface config file path.
             model_hf_config: the huggingface config to initiallize the generating model in vllm
         """
-        super().__init__(config, tokenizer)
+        super().__init__(config)
         policy_config = self.config.policy
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
@@ -200,12 +199,24 @@ class vLLMRollout(RolloutBase):
                 with set_current_vllm_config(vllm_config):
                     apply_fp8_linear_patch(self.get_underlying_model())
 
+    @staticmethod
+    def parse_logprobs(logprobs: List[dict]) -> List[float]:
+        if logprobs is None:
+            return []
+        ret_logprobs = []
+        ret_token_ids = []
+        for logp in logprobs:
+            assert len(logp) == 1, "[Rollout] logprobs length should be 1."
+            ret_logprobs.append(list(logp.values())[0].logprob)
+            ret_token_ids.append(list(logp.keys())[0])
+        return ret_logprobs, ret_token_ids
+
     @torch.no_grad()
     def rollout_generation_single_turn(
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
         n_to_batch: bool = False,
     ) -> List[RolloutResult]:
@@ -254,6 +265,22 @@ class vLLMRollout(RolloutBase):
             )
             for i in range(0, len(results), n_repeats):
                 outputs = results[i : i + n_repeats]
+                logprobs = []
+                token_ids = []
+                # collect logprobs
+                for output in outputs:
+                    for j in range(len(output.outputs)):
+                        if self.config.train.train_policy.rollout_as_token_ids:
+                            logprob, token_id = self.parse_logprobs(
+                                output.outputs[j].logprobs
+                            )
+                            if not self.config.train.train_policy.use_decoupled_loss:
+                                logprob = []
+                        else:
+                            logprob = []
+                            token_id = []
+                        logprobs.append(logprob)
+                        token_ids.append(token_id)
                 response.append(
                     RolloutResult(
                         prompt=payloads[i].prompt,
@@ -262,6 +289,8 @@ class vLLMRollout(RolloutBase):
                             for output in outputs
                             for j in range(len(output.outputs))
                         ],
+                        completion_logprobs=logprobs,
+                        completion_token_ids=token_ids,
                     )
                 )
         except Exception as e:
@@ -277,7 +306,7 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
@@ -311,6 +340,20 @@ class vLLMRollout(RolloutBase):
                 # TODO(zjx): support multi-path conversations search for multi-turn rollout generation
                 # extend the conversation with the rollout result
                 responses = [output.text for output in results[0].outputs]
+                # Get token IDs (list of ints)
+
+                # Manually decode to string
+                logprobs = []
+                token_ids = []
+                if self.config.train.train_policy.rollout_as_token_ids:
+                    assert (
+                        len(results[0].outputs) == 1
+                    ), "Expected single output for token ID extraction"
+                    for output in results[0].outputs:
+                        logprob, token_ids = self.parse_logprobs(output.logprobs)
+                        if self.config.train.train_policy.use_decoupled_loss:
+                            logprobs = logprob
+
                 current_conversation = data_packer.extend_conversation(
                     current_conversation,
                     responses,
@@ -332,7 +375,7 @@ class vLLMRollout(RolloutBase):
 
             # return the last assistant message as the completion to compute the reward in controller
             completion = current_conversation[-1].content
-            return current_conversation, completion
+            return current_conversation, completion, logprobs, token_ids
 
         n_generation = sampling_params.n
         sampling_params = copy.deepcopy(sampling_params)
@@ -341,18 +384,25 @@ class vLLMRollout(RolloutBase):
         for payload in payloads:
             conversations = []
             completions = []
+            logprobs_list = []
+            token_ids_list = []
             for _ in range(n_generation):
-                new_conversation, completion = generation_multi_turn_for_one_payload(
-                    copy.deepcopy(payload.conversation)
+                new_conversation, completion, logprobs, token_ids = (
+                    generation_multi_turn_for_one_payload(
+                        copy.deepcopy(payload.conversation)
+                    )
                 )
                 conversations.append(new_conversation)
                 completions.append(completion)
-
+                logprobs_list.append(logprobs)
+                token_ids_list.append(token_ids)
             response.append(
                 RolloutResult(
                     conversation=payload.conversation,
                     completions=completions,
                     completed_conversations=conversations,
+                    completion_logprobs=logprobs_list,
+                    completion_token_ids=token_ids_list,
                 )
             )
 
@@ -362,7 +412,7 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
         n_to_batch: bool = False,
     ) -> List[RolloutResult]:

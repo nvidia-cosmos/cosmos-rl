@@ -21,10 +21,9 @@ from concurrent.futures import ProcessPoolExecutor
 from torch.utils.data import Dataset
 from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
 from cosmos_rl.dispatcher.algo.reward import Reward
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.constant as constant
-from transformers import AutoTokenizer
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from queue import Queue
@@ -75,6 +74,12 @@ class RolloutGroup:
         else:
             completed_conversations = [[]] * len(self.payload.completions)
 
+        if self.payload.completion_logprobs is None:
+            self.payload.completion_logprobs = [[]] * len(self.payload.completions)
+
+        if self.payload.completion_token_ids is None:
+            self.payload.completion_token_ids = [[]] * len(self.payload.completions)
+
         return [
             Rollout(
                 prompt=self.payload.prompt,
@@ -86,9 +91,16 @@ class RolloutGroup:
                 advantage=advantage,
                 prompt_idx=self.payload.prompt_idx,
                 filter_reward=reward[1],
+                completion_logprobs=logprobs,
+                completion_token_ids=token_ids,
             )
-            for completion, completed_conversation, reward, advantage in zip(
-                self.payload.completions, completed_conversations, rewards, advantages
+            for completion, completed_conversation, reward, advantage, logprobs, token_ids in zip(
+                self.payload.completions,
+                completed_conversations,
+                rewards,
+                advantages,
+                self.payload.completion_logprobs,
+                self.payload.completion_token_ids,
             )
         ]
 
@@ -138,8 +150,8 @@ class RewardCalculator:
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_reward_fns: Optional[List[Callable]] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         data_fetcher: Optional[DataFetcherBase] = None,
     ) -> None:
         """
@@ -151,13 +163,11 @@ class RewardCalculator:
             filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
             val_dataset (Optional[Dataset]): The validation dataset.
             val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
-            data_packer (Optional[DataPacker]): The data packer for processing the payloads.
-            val_data_packer (Optional[DataPacker]): The data packer for processing the validation payloads.
+            data_packer (Optional[BaseDataPacker]): The data packer for processing the payloads.
+            val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
         """
         self.config = config
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            self.config.policy.model_name_or_path
-        )
+        self.tokenizer = util.setup_tokenizer(self.config.policy.model_name_or_path)
         self.data_fetcher = data_fetcher
 
         self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
@@ -215,14 +225,12 @@ class RewardCalculator:
         self,
         payloads: List[RLPayload],
         step: int,
-        prompt_idxs: List[int] = [],
     ) -> Tuple[List[RLPayload], bool, int]:
         """
         Compute rewards and advantages for the given payloads using validation reward function.
         Args:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             step (int): The weight step where the payloads are generated.
-            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
         Returns:
             Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
                 payloads: List of RLPayload with rewards and advantages
@@ -230,9 +238,9 @@ class RewardCalculator:
                 step: the weight step where the payloads are generated
         """
 
-        assert (
-            not self.config.train.local_dataset or len(prompt_idxs) == len(payloads)
-        ), "[Reward] prompt_idxs length should match payloads length when local_dataset is True"
+        assert all(
+            payload.prompt_idx >= 0 for payload in payloads
+        ), "[Reward] All payloads should have a valid prompt index"
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
                 prompt_idx=payload.prompt_idx,
@@ -241,9 +249,9 @@ class RewardCalculator:
                 is_end=True,
                 reference_answer=payload.reference_answer
                 if not self.config.train.local_dataset
-                else self.query_reference_answer(prompt_idxs[i], "val"),
+                else self.query_reference_answer(payload.prompt_idx, "val"),
             )
-            for i, payload in enumerate(payloads)
+            for _, payload in enumerate(payloads)
         ]
 
         rollouts_list: List[List[Rollout]] = [
@@ -281,7 +289,6 @@ class RewardCalculator:
         payloads: List[RLPayload],
         is_validation: bool,
         step: int,
-        prompt_idxs: List[int] = [],
     ) -> Tuple[List[RLPayload], bool, int]:
         """
         Compute rewards and advantages for the given payloads.
@@ -291,7 +298,6 @@ class RewardCalculator:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             is_validation (bool): Whether the payloads are from validation set.
             step (int): The weight step where the payloads are generated.
-            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
         Returns:
             Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
                 payloads: List of RLPayload with rewards and advantages
@@ -300,11 +306,11 @@ class RewardCalculator:
         """
 
         if is_validation:
-            return self.compute_validation_rewards(payloads, step, prompt_idxs)
+            return self.compute_validation_rewards(payloads, step)
 
-        assert (
-            not self.config.train.local_dataset or len(prompt_idxs) == len(payloads)
-        ), "[Reward] prompt_idxs length should match payloads length when local_dataset is True"
+        assert all(
+            payload.prompt_idx >= 0 for payload in payloads
+        ), "[Reward] All payloads should have a valid prompt index"
         # Placeholder for advantage computation logic
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
@@ -313,9 +319,9 @@ class RewardCalculator:
                 is_end=False,
                 reference_answer=payload.reference_answer
                 if not self.config.train.local_dataset
-                else self.query_reference_answer(prompt_idxs[i]),
+                else self.query_reference_answer(payload.prompt_idx),
             )
-            for i, payload in enumerate(payloads)
+            for _, payload in enumerate(payloads)
         ]
 
         rollouts_list: List[List[Rollout]] = [
@@ -326,7 +332,11 @@ class RewardCalculator:
         # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
         for rollouts_group in rollouts_list:
             rollout_tokens = [
-                self.tokenizer(rollout.completion, add_special_tokens=False).input_ids
+                rollout.completion_token_ids
+                if self.config.train.train_policy.rollout_as_token_ids
+                else self.tokenizer(
+                    rollout.completion, add_special_tokens=False
+                ).input_ids
                 for rollout in rollouts_group
             ]
             # Only filter_reward is considered for dynamic sampling
@@ -350,6 +360,8 @@ class RewardCalculator:
                     rewards = [rollouts_group[i].reward for i in rollout_indices]
                     if len(set(rewards)) > 1:
                         n_ignore_prefix_tokens = len(shared_prefix)
+                        if shared_prefix[-1] == self.tokenizer.eos_token_id:
+                            shared_prefix = shared_prefix[:-1]
                         prefix_str = self.tokenizer.decode(shared_prefix)
                         for rollout_index in rollout_indices:
                             # Only do this if shared_prefix != rollout.completion
@@ -381,6 +393,18 @@ class RewardCalculator:
                         completions_token_length=[
                             len(rollout_tokens[i]) for i in range(len(rollouts_group))
                         ],
+                        completion_logprobs=[
+                            rollout.completion_logprobs
+                            if rollout.completion_logprobs is not None
+                            else []
+                            for rollout in rollouts_group
+                        ],
+                        completion_token_ids=[
+                            rollout.completion_token_ids
+                            if rollout.completion_token_ids is not None
+                            else []
+                            for rollout in rollouts_group
+                        ],
                     )
                 )
             else:
@@ -406,6 +430,18 @@ class RewardCalculator:
                         valid=False,
                         completions_token_length=[
                             len(rollout_tokens[i]) for i in range(len(rollouts_group))
+                        ],
+                        completion_logprobs=[
+                            rollout.completion_logprobs
+                            if rollout.completion_logprobs is not None
+                            else []
+                            for rollout in rollouts_group
+                        ],
+                        completion_token_ids=[
+                            rollout.completion_token_ids
+                            if rollout.completion_token_ids is not None
+                            else []
+                            for rollout in rollouts_group
                         ],
                     )
                 )
@@ -433,8 +469,8 @@ class RewardDispatcher:
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         num_workers: int = 8,
     ) -> None:
         """
@@ -446,8 +482,8 @@ class RewardDispatcher:
             filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
             val_dataset (Optional[Dataset]): The validation dataset.
             val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
-            data_packer (Optional[DataPacker]): The data packer for processing the payloads.
-            val_data_packer (Optional[DataPacker]): The data packer for processing the validation payloads.
+            data_packer (Optional[BaseDataPacker]): The data packer for processing the payloads.
+            val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
             num_workers (int): The number of worker processes for parallel reward calculation.
         """
 
@@ -493,14 +529,13 @@ class RewardDispatcher:
             self.executor = None
 
     @staticmethod
-    def compute_rewards(payloads, is_validation, step, prompt_idxs):
+    def compute_rewards(payloads, is_validation, step):
         """
         Static method to compute rewards using the singleton RewardCalculator instance.
         Args:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             is_validation (bool): Whether the payloads are from validation set.
             step (int): The weight step where the payloads are generated.
-            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
         Returns:
             Tuple[List[RLPayload], bool, int]: (payloads, is_validation, step)
                 payloads: List of RLPayload with rewards and advantages
@@ -508,16 +543,13 @@ class RewardDispatcher:
                 step: the weight step where the payloads are generated
         """
         reward_calculator = RewardCalculator.get_instance()
-        return reward_calculator.compute_rewards(
-            payloads, is_validation, step, prompt_idxs
-        )
+        return reward_calculator.compute_rewards(payloads, is_validation, step)
 
     def enqueue_rewards_cal(
         self,
         payloads: List[RLPayload],
         is_validation: bool,
         step: int,
-        prompt_idxs: List[int] = [],
     ) -> None:
         """
         Enqueue the reward calculation task.
@@ -527,7 +559,6 @@ class RewardDispatcher:
             payloads (List[RLPayload]): List of RLPayload to compute rewards for.
             is_validation (bool): Whether the payloads are from validation set.
             step (int): The weight step where the payloads are generated.
-            prompt_idxs (List[int]): List of prompt indices corresponding to the payloads.
         """
         for i in range(0, len(payloads), self.payload_per_task):
             self.task_queue.put(
@@ -536,7 +567,6 @@ class RewardDispatcher:
                     payloads[i : i + self.payload_per_task],
                     is_validation,
                     step,
-                    prompt_idxs[i : i + self.payload_per_task],
                 )
             )
 

@@ -14,26 +14,25 @@
 # limitations under the License.
 
 
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Union
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
-from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.utils.modelscope import modelscope_load_dataset
 from cosmos_rl.utils.logging import logger
+import cosmos_rl.utils.util as util
 
 
 class MathDataset(Dataset):
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
-        `tokenizer`: tokenizer;
         """
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
         modelscope_dataset_if_enabled = modelscope_load_dataset(
             config.train.train_policy.dataset.name, subset_name="default", split="train"
         )
@@ -83,7 +82,7 @@ class MathValDataset(MathDataset):
     It should be used in the launcher to evaluate the model during training.
     """
 
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, *args, **kwargs):
         if not config.validation.enable:
             logger.warning(
                 "Validation is not enabled in the config. Skipping setup for MathValDataset."
@@ -91,7 +90,7 @@ class MathValDataset(MathDataset):
             return
 
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
 
         self.dataset = load_dataset(
             config.validation.dataset.name, config.validation.dataset.subset
@@ -330,14 +329,13 @@ class MathDataPacker(DataPacker):
         # Check source code of DecoderOnlyLLMDataPacker to see how it's implemented
         self.underlying_data_packer = DecoderOnlyLLMDataPacker()
 
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
-        `tokenizer`: tokenizer;
         """
-        super().setup(config, tokenizer, *args, **kwargs)
-        self.underlying_data_packer.setup(config, tokenizer, *args, **kwargs)
+        super().setup(config, *args, **kwargs)
+        self.underlying_data_packer.setup(config, *args, **kwargs)
 
     def get_rollout_input(self, item: Any) -> Any:
         """
@@ -352,7 +350,10 @@ class MathDataPacker(DataPacker):
         return self.underlying_data_packer.rollout_collate_fn(items)
 
     def get_policy_input(
-        self, item: Any, rollout_output: str, n_ignore_prefix_tokens: int = 0
+        self,
+        item: Any,
+        rollout_output: Union[str, List[int]],
+        n_ignore_prefix_tokens: int = 0,
     ) -> Any:
         """
         Process samples & rollout output before collating them into a mini-batch

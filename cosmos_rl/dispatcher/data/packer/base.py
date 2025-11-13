@@ -15,8 +15,8 @@
 
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Type, Union, Optional
-from transformers import AutoTokenizer
 from cosmos_rl.policy.config import Config
+import cosmos_rl.utils.util as util
 from cosmos_rl.utils.tools_use.tool_agent import ToolAgent
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
@@ -52,24 +52,14 @@ def worker_entry_parser() -> argparse.ArgumentParser:
     return parser
 
 
-class DataPacker(ABC):
-    _MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY: Dict[str, Type["DataPacker"]] = {}
-
-    """
-    This is where dataset item is transformed into the format required by the rollout engine (e.g. vllm)
-    for example:
-        - `str` is needed for language model
-        - {
-            "prompt": prompt,
-            "multi_modal_data": {"video": ...},
-          } for multi-modal model
-    """
+class BaseDataPacker(ABC):
+    _MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY: Dict[str, Type["BaseDataPacker"]] = {}
 
     @classmethod
     def register(
         cls,
         model_types: Union[str, List[str]],
-        default_data_packer_cls: Type["DataPacker"],
+        default_data_packer_cls: Type["BaseDataPacker"],
         *,
         allow_override: bool = False,
     ):
@@ -81,53 +71,32 @@ class DataPacker(ABC):
         for model_type in model_types:
             if (
                 not allow_override
-                and model_type in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY
-                and DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]
+                and model_type in BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY
+                and BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]
                 != default_data_packer_cls
             ):
-                raise ValueError(f"DataPacker for {model_type} is already registered")
-            DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type] = (
+                raise ValueError(
+                    f"BaseDataPacker for {model_type} is already registered"
+                )
+            BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type] = (
                 default_data_packer_cls
             )
 
     @classmethod
-    def get_default_data_packer(cls, model_type: str) -> Type["DataPacker"]:
-        if model_type not in DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY:
-            raise ValueError(f"DataPacker for {model_type} is not registered")
-        return DataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]()
+    def get_default_data_packer(cls, model_type: str) -> Type["BaseDataPacker"]:
+        if model_type not in BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY:
+            raise ValueError(f"BaseDataPacker for {model_type} is not registered")
+        return BaseDataPacker._MODEL_TO_DEFAULT_DATA_PACKER_REGISTRY[model_type]()
 
     def __init__(self, tool_agent: Optional[ToolAgent] = None, *args, **kwargs):
         self.tool_agent = tool_agent
 
-    def setup(
-        self,
-        config: Config,
-        tokenizer: AutoTokenizer,
-        *args,
-        **kwargs,
-    ):
+    def setup(self, config: Config, *args, **kwargs):
         """
         Called by launcher after being mounted
         """
         assert config is not None, "config should be set"
-        assert tokenizer is not None, "tokenizer should be set"
         self.config = config
-        self.tokenizer = tokenizer
-        if not self.config.rollout.multi_turn_config.enable:
-            self.tool_agent = None
-
-        self.custom_chat_template = None
-        if self.config.rollout.multi_turn_config.custom_chat_template_path:
-            try:
-                with open(
-                    self.config.rollout.multi_turn_config.custom_chat_template_path, "r"
-                ) as f:
-                    self.custom_chat_template = f.read()
-            except FileNotFoundError:
-                logger.warning(
-                    f"Custom chat template file not found: {self.config.rollout.multi_turn_config.custom_chat_template_path}, use model default template instead."
-                )
-                self.custom_chat_template = None
 
     @abstractmethod
     def get_rollout_input(self, item: Any) -> Any:
@@ -142,17 +111,25 @@ class DataPacker(ABC):
         """
         return items
 
-    def get_rollout_output(self, items: List[Any]) -> List[Any]:
+    def get_rollout_output(
+        self,
+        completions: List[Any],
+        completed_conversations: List[Any],
+        logprobs: List[Any],
+        token_ids: List[Any],
+        **kwargs,
+    ) -> List[Any]:
         """
         Post-process to get the rollout outputs from the rollout engine
+        Include handling the completions, the completed_conversations for multi-turn case, the logprobs of completions, and the token ids of completions
         """
-        return items
+        return completions, completed_conversations, logprobs, token_ids, kwargs
 
     @abstractmethod
     def get_policy_input(
         self,
         sample: Any,
-        rollout_output: str,
+        rollout_output: Union[str, List[int]],
         n_ignore_prefix_tokens: int = 0,
     ) -> Any:
         """
@@ -199,7 +176,6 @@ class DataPacker(ABC):
         self,
         sub_batch: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         """
@@ -220,3 +196,48 @@ class DataPacker(ABC):
         """
         # By default, we always add response as assistant message
         return add_assistant_message(conversation, "" if responses else responses[0])
+
+    def save_state(self, dest_path: str) -> None:
+        pass
+
+
+class DataPacker(BaseDataPacker, ABC):
+    """
+    A subclass of BaseDataPacker that relies on a tokenizer.
+    This is where dataset item is transformed into the format required by the rollout engine (e.g. vllm)
+    for example:
+        - `str` is needed for language model
+        - {
+            "prompt": prompt,
+            "multi_modal_data": {"video": ...},
+          } for multi-modal model
+    """
+
+    def setup(self, config: Config, *args, **kwargs):
+        super().setup(config, *args, **kwargs)
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
+
+        if not self.config.rollout.multi_turn_config.enable:
+            self.tool_agent = None
+
+        self.custom_chat_template = None
+        if self.config.rollout.multi_turn_config.custom_chat_template_path:
+            try:
+                with open(
+                    self.config.rollout.multi_turn_config.custom_chat_template_path, "r"
+                ) as f:
+                    self.custom_chat_template = f.read()
+            except FileNotFoundError:
+                logger.warning(
+                    f"Custom chat template file not found: {self.config.rollout.multi_turn_config.custom_chat_template_path}, use model default template instead."
+                )
+                self.custom_chat_template = None
+
+    @property
+    def pad_token_id(self) -> int:
+        return self.tokenizer.pad_token_id
+
+    def save_state(self, dst_path: str) -> None:
+        self.tokenizer.save_pretrained(dst_path)
+        if hasattr(self, "hf_processor"):
+            self.hf_processor.save_pretrained(dst_path)

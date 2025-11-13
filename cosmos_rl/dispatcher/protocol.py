@@ -64,14 +64,12 @@ class WeightReadyRequest(BaseModel):
 class ValidationReportRequest(BaseModel):
     src_replica_name: str
     validation_step: int
-    prompt_idxs: List[int]
     payloads: List[RLPayload]
     is_end: bool = False
 
 
 class RolloutRequest(BaseModel):
     src_replica_name: str
-    prompt_idxs: List[int]
     payloads: List[RLPayload]
     is_end: bool = False
 

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
 from cosmos_rl.utils.logging import logger
 
@@ -32,9 +32,8 @@ from tensorrt_llm.llmapi.llm_args import KvCacheConfig
 from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.util as util
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 
-from transformers import AutoTokenizer
 from transformers import AutoConfig
 from transformers import GenerationConfig
 from cosmos_rl.dispatcher.data.schema import (
@@ -43,8 +42,8 @@ from cosmos_rl.dispatcher.data.schema import (
 
 
 class TRTLLM_Rollout(RolloutBase):
-    def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
-        super().__init__(config, tokenizer)
+    def __init__(self, config: Config, **kwargs):
+        super().__init__(config)
         self.rollout_config = self.config.rollout
 
         hf_config_path = self.config.policy.model_name_or_path
@@ -125,8 +124,8 @@ class TRTLLM_Rollout(RolloutBase):
 
     def rollout_generation(
         self,
-        prompt_id_and_payload_list: List[Tuple[int, RLPayload]],
-        data_packer: DataPacker,
+        payloads: List[RLPayload],
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
     ) -> List[List[str]]:
         if not self._engine_initialized:
@@ -140,7 +139,6 @@ class TRTLLM_Rollout(RolloutBase):
         #   payload,
         #   ...
         # ]
-        payloads = [x[1] for x in prompt_id_and_payload_list]
 
         # Pack the payloads into prompts for vllm.
         prompts = [

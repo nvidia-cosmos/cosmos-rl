@@ -21,9 +21,8 @@ from abc import ABC
 
 import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
-from transformers import AutoTokenizer
 
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data import (
     CosmosDataset,
@@ -44,9 +43,8 @@ class DataFetcherBase(ABC):
     def __init__(
         self,
         config: Config,
-        data_packer: DataPacker,
-        val_data_packer: DataPacker,
-        tokenizer: AutoTokenizer,
+        data_packer: BaseDataPacker,
+        val_data_packer: BaseDataPacker,
         dataset: Optional[Callable[[Config], Dataset]] = None,
         val_dataset: Optional[Callable[[Config], Dataset]] = None,
         is_rl: bool = True,
@@ -54,7 +52,6 @@ class DataFetcherBase(ABC):
         self.config = config
         self.data_packer = data_packer
         self.val_data_packer = val_data_packer
-        self.tokenizer = tokenizer
         self.dataset = dataset
         self.val_dataset = val_dataset
         self.is_rl = is_rl
@@ -97,7 +94,6 @@ class ControllerDataFetcher(DataFetcherBase):
     def __init__(
         self,
         config: Config,
-        tokenizer: AutoTokenizer,
         dataset: Optional[Callable[[Config], Dataset]] = None,
         val_dataset: Optional[Callable[[Config], Dataset]] = None,
         sampler: Optional[Callable] = None,
@@ -111,7 +107,6 @@ class ControllerDataFetcher(DataFetcherBase):
             config,
             None,
             None,
-            tokenizer,
             dataset,
             val_dataset,
             is_rl,
@@ -142,16 +137,12 @@ class ControllerDataFetcher(DataFetcherBase):
             )
             if self.dataset is not None:
                 assert isinstance(self.dataset, Dataset)
-                self.dataset = CosmosDataset(
-                    config=self.config, train_set=self.dataset, tokenizer=self.tokenizer
-                )
+                self.dataset = CosmosDataset(config=self.config, train_set=self.dataset)
                 logger.info(
                     "[Controller] Using provided dataset for training, dataset specification in the toml config will be ignored"
                 )
             else:
-                self.dataset = CosmosDataset(
-                    config=self.config, tokenizer=self.tokenizer
-                )
+                self.dataset = CosmosDataset(config=self.config)
 
             remain_samples_num = (
                 (
@@ -302,15 +293,12 @@ class ControllerDataFetcher(DataFetcherBase):
                     self.val_dataset = CosmosValidationDataset(
                         config=self.config,
                         val_set=self.val_dataset,
-                        tokenizer=self.tokenizer,
                     )
                     logger.info(
                         "[DataFetcher] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
                     )
                 else:
-                    self.val_dataset = CosmosValidationDataset(
-                        config=self.config, tokenizer=self.tokenizer
-                    )
+                    self.val_dataset = CosmosValidationDataset(config=self.config)
                 if self.val_sampler is not None:
                     logger.info("[DataFetcher] Using provided sampler for validation")
                     if isinstance(self.val_sampler, Callable):
@@ -321,7 +309,6 @@ class ControllerDataFetcher(DataFetcherBase):
                             shuffle=False,
                             drop_last=False,
                         )
-                # FIXME: (lms) We should add a default val_sampler for else-branch?
 
                 if self.val_batch_sampler is not None:
                     logger.info(
@@ -377,13 +364,13 @@ class ControllerDataFetcher(DataFetcherBase):
 
     def get_batched_prompt(
         self, n: int, validation_step: Optional[int] = None
-    ) -> Tuple[bool, List[IdxAndRLPayload]]:
+    ) -> Tuple[bool, List[RLPayload]]:
         add_answer = (
             self.config.rollout.multi_turn_config.enable
             or not self.config.train.local_dataset
         )
         # query n prompts from the dataset [idx, payload]
-        prompt_id_and_payload_list: List[IdxAndRLPayload] = []
+        payloads_list: List[RLPayload] = []
         is_end = False
 
         is_validation = validation_step is not None
@@ -452,9 +439,9 @@ class ControllerDataFetcher(DataFetcherBase):
                         # For non-multi-turn rollout, we set reference answer to None.
                         payload.reference_answer = None
 
-                prompt_id_and_payload_list.append((idx, payload))
+                payloads_list.append(payload)
 
-        return prompt_id_and_payload_list, is_end
+        return payloads_list, is_end
 
     def validation_activate_dataloader(self, validation_step: int):
         if validation_step not in self.val_iters:
@@ -492,9 +479,8 @@ class WorkerDataFetcher(DataFetcherBase):
     def __init__(
         self,
         config: Config,
-        data_packer: DataPacker,
-        val_data_packer: DataPacker,
-        tokenizer: AutoTokenizer,
+        data_packer: BaseDataPacker,
+        val_data_packer: BaseDataPacker,
         dataset: Optional[Callable[[Config], Dataset]] = None,
         val_dataset: Optional[Callable[[Config], Dataset]] = None,
         is_rl: bool = True,
@@ -503,7 +489,6 @@ class WorkerDataFetcher(DataFetcherBase):
             config,
             data_packer,
             val_data_packer,
-            tokenizer,
             dataset,
             val_dataset,
             is_rl,
@@ -517,14 +502,12 @@ class WorkerDataFetcher(DataFetcherBase):
 
         if self.dataset is not None:
             assert isinstance(self.dataset, Dataset)
-            self.dataset = CosmosDataset(
-                config=self.config, train_set=self.dataset, tokenizer=self.tokenizer
-            )
+            self.dataset = CosmosDataset(config=self.config, train_set=self.dataset)
             logger.info(
                 "[DataFetcher] Using provided dataset for training, dataset specification in the toml config will be ignored"
             )
         else:
-            self.dataset = CosmosDataset(config=self.config, tokenizer=self.tokenizer)
+            self.dataset = CosmosDataset(config=self.config)
 
         if self.config.validation.enable:
             if self.val_dataset is not None:
@@ -532,15 +515,12 @@ class WorkerDataFetcher(DataFetcherBase):
                 self.val_dataset = CosmosValidationDataset(
                     config=self.config,
                     val_set=self.val_dataset,
-                    tokenizer=self.tokenizer,
                 )
                 logger.info(
                     "[DataFetcher] Using provided validation dataset for validation, dataset specification in the toml config will be ignored"
                 )
             else:
-                self.val_dataset = CosmosValidationDataset(
-                    config=self.config, tokenizer=self.tokenizer
-                )
+                self.val_dataset = CosmosValidationDataset(config=self.config)
 
     def get_payload_by_index(
         self, index: int, is_validation: bool = False, attr: str = "prompt"
