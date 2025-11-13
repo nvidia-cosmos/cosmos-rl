@@ -1,8 +1,8 @@
 # x86_64 Usage:
 # To build without AWS-EFA:
-#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_BUILD_MODE=no-efa .
+#   docker buildx build --platform linux/amd64 --build-arg COSMOS_RL_BUILD_MODE=no-efa -t cosmos_rl:amd64 .
 # To build with AWS-EFA:
-#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_BUILD_MODE=efa .
+#   docker buildx build --platform linux/amd64 --build-arg COSMOS_RL_BUILD_MODE=efa -t cosmos_rl:amd64 .
 
 # arm64 Usage:
 # To build without AWS-EFA:
@@ -12,7 +12,6 @@
 
 ARG COSMOS_RL_BUILD_MODE=no-efa
 ARG CUDA_VERSION=12.8.1
-ARG TARGETARCH
 FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04 AS no-efa-base
 
 ARG TARGETARCH
@@ -149,8 +148,11 @@ COPY . .
 
 RUN if [ "$TARGETARCH" != "amd64" ]; then \
         pip install --no-cache-dir -c constraints.txt -r requirements.txt ; \
+        pip install --no-cache-dir llmcompressor==0.6.0 ; \
     else \
         pip install --no-cache-dir -r requirements.txt ; \
+        pip install --no-cache-dir llmcompressor==0.7.0 ; \
+        pip install --no-cache-dir decord ; \
     fi
 
 ###################################################

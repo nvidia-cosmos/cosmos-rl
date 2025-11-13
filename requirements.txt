@@ -10,7 +10,7 @@ toml
 StrEnum
 redis
 msgpack
-qwen_vl_utils
+qwen_vl_utils==0.0.11
 pynvml
 boto3
 modelscope
@@ -30,4 +30,3 @@ rouge_score
 bert-score
 accelerate
 kernels
-llmcompressor
