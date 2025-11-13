@@ -129,14 +129,6 @@ class HFModel(BaseModel):
         }
 
         if "valid_input_len" in kwargs:
-            if not self.sequence_packing_forward_patched:
-                patch_success = sequence_packing_forward_patch(self.hf_config, self)
-                if patch_success:
-                    self.sequence_packing_forward_patched = True
-                else:
-                    logger.warning(
-                        f"Failed to patch sequence packing forward for {self.hf_config.model_type}"
-                    )
             kwargs_filtered["valid_input_len"] = kwargs["valid_input_len"]
 
         out = self.model(
@@ -886,6 +878,18 @@ class HFModel(BaseModel):
         assert (
             num_key_value_heads % tp_size == 0
         ), f"{num_key_value_heads=} must be divisible by TP size ({tp_size})"
+
+    def check_sequence_packing_compatible(self):
+        if not self.sequence_packing_forward_patched:
+            # called only once if patch is successful
+            patch_success = sequence_packing_forward_patch(self.hf_config, self)
+            if patch_success:
+                self.sequence_packing_forward_patched = True
+            else:
+                logger.warning(
+                    f"Failed to patch sequence packing forward for {self.hf_config.model_type}"
+                )
+        return self.sequence_packing_forward_patched
 
     def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
         if "gpt_oss" in self.hf_config.model_type:

@@ -144,10 +144,6 @@ def make_new_self_attn_forward(original_attn_forward):
                     valid_input_len.tolist(), hidden_states.device
                 )
             kwargs["attention_mask"] = attention_mask
-            # Added for models like gemma3-text
-            # position_ids = kwargs.get("position_ids", None)
-            # if position_ids is not None and position_ids.ndim == 2:
-            #     kwargs["position_ids"] = get_packed_position_ids(valid_input_len.tolist(), hidden_states.device)
         return original_attn_forward(hidden_states, *args, **kwargs)
 
     return self_attn_forward
@@ -232,6 +228,38 @@ def sequence_packing_forward_qwen3_vl_patch(model):
         ).__get__(layer.self_attn, type(layer.self_attn))
 
 
+def sequence_packing_forward_gemma3_vl_patch(model):
+    original_forward = model.model.forward
+
+    def sequence_packing_forward_gemma3_vl_inner(*args, **kwargs):
+        valid_input_len = kwargs.get("valid_input_len", None)
+        if valid_input_len is not None:
+            input_ids = kwargs.get("input_ids")
+            batch_size = valid_input_len.shape[0]
+
+            input_ids_list = []
+            cache_position_list = []
+            for i in range(batch_size):
+                valid_len = valid_input_len[i].item()
+                cur_input_ids = input_ids[i : i + 1, :valid_len].clone()
+                input_ids_list.append(cur_input_ids)
+                cache_position_list.append(
+                    torch.arange(0, valid_len, device=input_ids.device)
+                )
+            kwargs["input_ids"] = torch.cat(input_ids_list, dim=1)
+            kwargs["cache_position"] = torch.cat(cache_position_list, dim=0)
+        return original_forward(*args, **kwargs)
+
+    model.model.forward = sequence_packing_forward_gemma3_vl_inner
+
+    # Replace the self_attn.forward method
+    for layer in model.language_model.layers:
+        original_attn_forward = layer.self_attn.forward
+        layer.self_attn.forward = make_new_self_attn_forward(
+            original_attn_forward
+        ).__get__(layer.self_attn, type(layer.self_attn))
+
+
 def sequence_packing_forward_llm_patch(model):
     original_forward = model.model.forward
 
@@ -282,5 +310,6 @@ def sequence_packing_forward_llm_patch(model):
 # The patching logic is model-dependent, with special handling required for Vision-Language Models (VLMs) and other architectures.
 SEQUENCE_PACKING_FORWARD_PATCH_FUNCTIONS = {
     "qwen3_vl": sequence_packing_forward_qwen3_vl_patch,
+    "gemma3": sequence_packing_forward_gemma3_vl_patch,
     "llm": sequence_packing_forward_llm_patch,
 }
