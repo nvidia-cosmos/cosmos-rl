@@ -250,36 +250,25 @@ def sequence_packing_forward_llm_patch(model):
     def sequence_packing_forward_llm_inner(*args, **kwargs):
         valid_input_len = kwargs.get("valid_input_len", None)
         if valid_input_len is not None:
-            input_ids = kwargs.get("input_ids", None)
-            position_ids = kwargs.get("position_ids", None)
-            cache_position = kwargs.get("cache_position", None)
-
+            input_ids = kwargs.get("input_ids")
             batch_size = valid_input_len.shape[0]
+
             input_ids_list = []
-            position_ids_list = []
             cache_position_list = []
             for i in range(batch_size):
                 valid_len = valid_input_len[i].item()
-                if input_ids is not None:
-                    cur_input_ids = input_ids[i : i + 1, :valid_len].clone()
-                    input_ids_list.append(cur_input_ids)
-                if position_ids is not None:
-                    cur_position_ids = position_ids[i : i + 1, :valid_len].clone()
-                    position_ids_list.append(cur_position_ids)
-                if cache_position is not None:
-                    cur_cache_position = cache_position[i : i + 1, :valid_len].clone()
-                    cache_position_list.append(cur_cache_position)
+                cur_input_ids = input_ids[i : i + 1, :valid_len].clone()
+                input_ids_list.append(cur_input_ids)
+                cache_position_list.append(
+                    torch.arange(0, valid_len, device=input_ids.device)
+                )
 
-            if len(input_ids_list) > 0:
-                kwargs["input_ids"] = torch.cat(input_ids_list, dim=1)
-            if len(position_ids_list) > 0:
-                kwargs["position_ids"] = torch.cat(position_ids_list, dim=1)
-            if len(cache_position_list) > 0:
-                kwargs["cache_position"] = torch.cat(cache_position_list, dim=1)
+            kwargs["input_ids"] = torch.cat(input_ids_list, dim=1)
+            kwargs["cache_position"] = torch.cat(cache_position_list, dim=0)
+            kwargs["position_ids"] = kwargs["cache_position"].clone().unsqueeze(0)
 
             del (
                 input_ids_list,
-                position_ids_list,
                 cache_position_list,
             )
         else:
