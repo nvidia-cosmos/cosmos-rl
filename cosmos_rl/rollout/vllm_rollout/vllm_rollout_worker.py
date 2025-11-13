@@ -55,7 +55,7 @@ from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
     WeightSyncInstructionsGroup,
 )
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils import constant
@@ -149,7 +149,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         if self.config.rollout.quantization != "none":
             self.quantization_type = self.config.rollout.quantization
 
-        self.rollout: vLLMRollout = vLLMRollout(self.config, self.tokenizer)
+        self.rollout: vLLMRollout = vLLMRollout(self.config)
+
+        self.eos_token = util.setup_tokenizer(
+            self.config.policy.model_name_or_path
+        ).eos_token
 
         # communicator index for the cached communicators in C++ binding.
         self.global_commnicator_idex = -1
@@ -250,11 +254,11 @@ class vLLMRolloutWorker(RolloutWorkerBase):
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         val_reward_fns: Optional[List[Callable]] = None,
         num_workers: int = 8,
     ):
@@ -270,7 +274,6 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             val_dataset=val_dataset,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
-            tokenizer=self.tokenizer,
             is_rl=True,
         )
 
@@ -1510,9 +1513,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                             # Because if fully synchronized mode is enabled, we need to make sure the expected
                             # number of global_batch_size is reached at exact time.
                             output_texts.append(
-                                output_text
-                                if output_text != ""
-                                else self.tokenizer.eos_token
+                                output_text if output_text != "" else self.eos_token
                             )
                         # Skip the output if there is one or zero non-empty completions
                         skip_output = (

@@ -20,7 +20,7 @@ import vllm
 import torch
 import copy
 from typing import List, Optional, Dict
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
 from vllm import SamplingParams
@@ -29,7 +29,7 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.utils.tools_use import ToolParser
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
@@ -74,16 +74,15 @@ def update_conversation_wth_rollout_result(
 
 
 class vLLMRollout(RolloutBase):
-    def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
+    def __init__(self, config: Config, **kwargs):
         """Rollout with vLLM as the backend.
 
         Args:
             config: Cosmos Config.
-            tokenizer: Tokenizer of the model.
             hf_config_path: huggingface config file path.
             model_hf_config: the huggingface config to initiallize the generating model in vllm
         """
-        super().__init__(config, tokenizer)
+        super().__init__(config)
         policy_config = self.config.policy
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
@@ -217,7 +216,7 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
         n_to_batch: bool = False,
     ) -> List[RolloutResult]:
@@ -307,7 +306,7 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
@@ -413,7 +412,7 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
         n_to_batch: bool = False,
     ) -> List[RolloutResult]:

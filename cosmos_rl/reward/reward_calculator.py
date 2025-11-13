@@ -21,10 +21,9 @@ from concurrent.futures import ProcessPoolExecutor
 from torch.utils.data import Dataset
 from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
 from cosmos_rl.dispatcher.algo.reward import Reward
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.constant as constant
-from transformers import AutoTokenizer
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from queue import Queue
@@ -151,8 +150,8 @@ class RewardCalculator:
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_reward_fns: Optional[List[Callable]] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         data_fetcher: Optional[DataFetcherBase] = None,
     ) -> None:
         """
@@ -164,13 +163,11 @@ class RewardCalculator:
             filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
             val_dataset (Optional[Dataset]): The validation dataset.
             val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
-            data_packer (Optional[DataPacker]): The data packer for processing the payloads.
-            val_data_packer (Optional[DataPacker]): The data packer for processing the validation payloads.
+            data_packer (Optional[BaseDataPacker]): The data packer for processing the payloads.
+            val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
         """
         self.config = config
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            self.config.policy.model_name_or_path
-        )
+        self.tokenizer = util.setup_tokenizer(self.config.policy.model_name_or_path)
         self.data_fetcher = data_fetcher
 
         self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
@@ -472,8 +469,8 @@ class RewardDispatcher:
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         num_workers: int = 8,
     ) -> None:
         """
@@ -485,8 +482,8 @@ class RewardDispatcher:
             filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
             val_dataset (Optional[Dataset]): The validation dataset.
             val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
-            data_packer (Optional[DataPacker]): The data packer for processing the payloads.
-            val_data_packer (Optional[DataPacker]): The data packer for processing the validation payloads.
+            data_packer (Optional[BaseDataPacker]): The data packer for processing the payloads.
+            val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
             num_workers (int): The number of worker processes for parallel reward calculation.
         """
 

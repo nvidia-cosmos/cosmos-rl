@@ -19,7 +19,7 @@ from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )
 import torch
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from torch.utils.data import Dataset
 from typing import Union, Callable, Optional
 import inspect
@@ -45,6 +45,7 @@ from cosmos_rl.dispatcher.command import (
 import atexit
 from cosmos_rl.utils.util import (
     compute_mfu,
+    setup_tokenizer,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
@@ -362,13 +363,14 @@ class GRPOTrainer(Trainer):
             val_dataset=kwargs.get("val_dataset", None),
             val_data_packer=kwargs.get("val_data_packer", None),
         )
+        self.tokenizer = setup_tokenizer(config.policy.model_name_or_path)
 
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
     ):
         # setup data packer first
         self.init_data_packer(
@@ -382,7 +384,6 @@ class GRPOTrainer(Trainer):
             val_dataset=val_dataset,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
-            tokenizer=self.tokenizer,
             is_rl=True,
         )
 

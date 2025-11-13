@@ -274,7 +274,6 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         self,
         processed_samples: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         """
@@ -292,7 +291,7 @@ class DecoderOnlyLLMDataPacker(DataPacker):
         input_ids = torch.tensor(
             [
                 x[:computed_max_len]
-                + [pad_token_id] * (max(0, computed_max_len - len(x)))
+                + [self.tokenizer.pad_token_id] * (max(0, computed_max_len - len(x)))
                 for x in list_of_input_ids
             ],
             dtype=torch.long,

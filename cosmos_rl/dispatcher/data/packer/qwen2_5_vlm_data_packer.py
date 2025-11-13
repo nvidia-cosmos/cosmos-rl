@@ -4,7 +4,7 @@ import torch
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
-from transformers import AutoTokenizer, AutoProcessor, AutoConfig
+from transformers import AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info
 import logging
 import copy
@@ -27,8 +27,8 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             self.input_ids = input_ids
             self.logprob_masks = logprob_masks
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        super().setup(config, tokenizer, *args, **kwargs)
+    def setup(self, config: Config, *args, **kwargs):
+        super().setup(config, *args, **kwargs)
         self.hf_processor = retry(AutoProcessor.from_pretrained)(
             config.policy.model_name_or_path
         )
@@ -668,7 +668,6 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         self,
         processed_samples: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         # Reuse the RL collate minibatch function

@@ -23,7 +23,7 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 import torch
 from transformers import AutoConfig
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import collections
 from functools import partial
 from typing import Mapping
@@ -467,7 +467,7 @@ class ModelRegistry:
             ModelRegistry._MODEL_REGISTRY[model_type] = model_cls
             WeightMapper.register_class(model_type, weight_mapper_cls)
             if data_packer_cls is not None:
-                DataPacker.register(model_type, data_packer_cls)
+                BaseDataPacker.register(model_type, data_packer_cls)
 
     @classmethod
     def register(

@@ -43,7 +43,6 @@ from cosmos_rl.dispatcher.status import (
 )
 from cosmos_rl.policy.config import Config, SubProfilerConfig
 from cosmos_rl.dispatcher.protocol import SetProfileRequest
-from transformers import AutoTokenizer
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
@@ -101,10 +100,6 @@ class Controller:
 
         self.config = config
         task_type = config.train.train_policy.type
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            config.policy.model_name_or_path,
-            trust_remote_code=True,
-        )
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config
         )
@@ -127,7 +122,6 @@ class Controller:
             batch_sampler=batch_sampler,
             val_sampler=val_sampler,
             val_batch_sampler=val_batch_sampler,
-            tokenizer=self.tokenizer,
             is_rl=self.is_rl,
         )
 
@@ -177,14 +171,14 @@ class Controller:
             * config.rollout.n_generation
             if self.is_rl
             else 0,
-            tokenizer=self.tokenizer,
+            tokenizer=util.setup_tokenizer(config.policy.model_name_or_path)
+            if self.is_rl
+            else None,
             current_step=self.data_fetcher.ckpt_extra_info.get("step", 0),
             max_num_steps=config.train.max_num_steps,
             custom_logger_fns=custom_logger_fns,
         )
-        self.rollout_status_manager.setup(
-            config, self.redis_controller, tokenizer=self.tokenizer
-        )
+        self.rollout_status_manager.setup(config, self.redis_controller)
 
         # Register the exit function to be called when the program exits
         def exit_server(redis_server_proc, redis_free_port):

@@ -17,7 +17,6 @@ from typing import Optional, Any, List, Union
 from torch.utils.data import Dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
-from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ChatMessage,
@@ -91,16 +90,14 @@ class PostCompletionSampleDataPacker(DecoderOnlyLLMDataPacker):
     def setup(
         self,
         config: CosmosConfig,
-        tokenizer: AutoTokenizer,
         *args,
         **kwargs,
     ):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
-        `tokenizer`: tokenizer;
         """
-        super().setup(config, tokenizer, *args, **kwargs)
+        super().setup(config, *args, **kwargs)
         self.storage = SQLiteStorage("sample_data_post_completion_test.db")
 
     def get_policy_input(

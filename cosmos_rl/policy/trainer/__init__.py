@@ -24,7 +24,7 @@ from cosmos_rl.utils.checkpoint import (
     upload_folder_to_s3,
     CheckpointMananger,
 )
-from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationConfig
+from transformers import AutoConfig, GenerationConfig
 from cosmos_rl.policy.trainer.optm import build_optimizers
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -78,36 +78,11 @@ class Trainer(CommMixin):
         self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
         self.check_config()
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            config.policy.model_name_or_path,
-            trust_remote_code=True,
-        )
-        # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
-        if getattr(self.tokenizer, "pad_token_id", None) is None:
-            try:
-                logger.warning(
-                    f"Tokenizer for {config.policy.model_name_or_path} has no pad_token_id, try to use eos_token_id({self.tokenizer.eos_token_id}) as pad_token_id"
-                )
-                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-            except Exception as e:
-                logger.warning(
-                    f"Failed to set pad_token_id with eos_token_id, error = {e}, ignore if not needed"
-                )
 
         self.hf_config = util.retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path,
             trust_remote_code=True,
         )
-        try:
-            self.hf_processor = util.retry(AutoProcessor.from_pretrained)(
-                config.policy.model_name_or_path,
-                trust_remote_code=True,
-            )
-        except Exception as e:
-            self.hf_processor = None
-            logger.info(
-                f"Failed to load processor for {config.policy.model_name_or_path}, using tokenizer as processor, ignore if not needed, error = {e}"
-            )
 
         self.train_stream = torch.cuda.current_stream()
         self.init_comm()
@@ -241,8 +216,6 @@ class Trainer(CommMixin):
 
         save_hf_config = self.config.policy.lora is None
         save_lora_config = self.config.policy.lora is not None
-        save_tokenizer = True
-        save_processor = True
         save_generation_config = True
         export_weight_index_json = self.config.policy.lora is None
 
@@ -443,7 +416,7 @@ class Trainer(CommMixin):
                         indent=4,
                     )
 
-            # save hf_config and tokenizer_config
+            # save hf_config
             if save_hf_config:
                 self.hf_config.save_pretrained(path)
             if save_lora_config:
@@ -455,10 +428,8 @@ class Trainer(CommMixin):
                 lora_config["peft_type"] = "LORA"
                 with open(os.path.join(path, "adapter_config.json"), "w") as f:
                     json.dump(lora_config, f, indent=4)
-            if save_tokenizer:
-                self.tokenizer.save_pretrained(path)
-            if save_processor and self.hf_processor is not None:
-                self.hf_processor.save_pretrained(path)
+
+            self.data_packer.save_state(path)
 
             # save the generation config to get the generation aligned with HF.
             try:

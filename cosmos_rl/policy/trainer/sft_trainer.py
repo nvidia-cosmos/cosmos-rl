@@ -36,9 +36,8 @@ from cosmos_rl.policy.trainer.sampler import SkippingSampler
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.cache as cache
-from transformers import AutoTokenizer
 from datasets import concatenate_datasets
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import os
 from typing import Optional, Dict, Any, Callable, Union
 from tqdm import tqdm
@@ -122,10 +121,9 @@ def collate_fn(
 
 def construct_dataset(
     cosmos_config: CosmosConfig,
-    tokenizer: AutoTokenizer,
-    data_packer: DataPacker,
+    data_packer: BaseDataPacker,
     user_provided_dataset: Optional[Dataset] = None,
-    val_data_packer: Optional[DataPacker] = None,
+    val_data_packer: Optional[BaseDataPacker] = None,
     user_provided_val_dataset: Optional[Dataset] = None,
 ):
     config = cosmos_config.train.train_policy
@@ -213,14 +211,12 @@ def construct_dataset(
 
     train_sft_dataset = SFTDataset(
         config,
-        tokenizer=tokenizer,
         dataset=train_dataset,
         data_packer=data_packer,
         is_user_dataset=user_provided_dataset is not None,
     )
     test_sft_dataset = SFTDataset(
         config,
-        tokenizer=tokenizer,
         dataset=test_dataset,
         data_packer=val_data_packer,
         is_user_dataset=user_provided_dataset is not None,
@@ -233,13 +229,11 @@ class SFTDataset(Dataset):
     def __init__(
         self,
         config: SFTDataConfig,
-        tokenizer: AutoTokenizer,
         dataset: Dataset,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         is_user_dataset: bool = False,
     ):
         self.config = config
-        self.tokenizer = tokenizer
         self.column_name = config.conversation_column_name
         self.dataset = dataset
         self.data_packer = data_packer
@@ -293,9 +287,9 @@ class SFTTrainer(Trainer):
         config: CosmosConfig,
         parallel_dims: ParallelDims,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
@@ -342,8 +336,8 @@ class SFTTrainer(Trainer):
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
@@ -358,11 +352,11 @@ class SFTTrainer(Trainer):
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)
-            dataset.setup(self.config, self.tokenizer)
+            util.call_setup(dataset, self.config)
 
         if isinstance(val_dataset, Callable):
             val_dataset = val_dataset(self.config)
-            val_dataset.setup(self.config, self.tokenizer)
+            util.call_setup(val_dataset, self.config)
 
         if not self.val_data_packer:
             self.val_data_packer = self.data_packer
@@ -370,7 +364,6 @@ class SFTTrainer(Trainer):
         # Prepare dataset
         train_dataset, val_dataset = construct_dataset(
             self.config,
-            tokenizer=self.tokenizer,
             data_packer=self.data_packer,
             user_provided_dataset=dataset,
             val_data_packer=self.val_data_packer,
@@ -487,9 +480,6 @@ class SFTTrainer(Trainer):
             )
         self.epoch = self.config.train.epoch
 
-        assert (
-            self.tokenizer.pad_token_id is not None
-        ), "Tokenizer must have a pad token id"
         self.train_data_loader = get_train_data_loader(train_sampler, batch_sampler)
         if val_batch_sampler is not None:
             logger.info(
@@ -603,7 +593,6 @@ class SFTTrainer(Trainer):
                 val_batch = self.val_data_packer.sft_collate_fn(
                     val_global_batch,
                     computed_max_len=max_len,
-                    pad_token_id=self.tokenizer.pad_token_id,
                     ignore_label_id=-100,
                 )
                 for k, v in val_batch.items():
@@ -728,7 +717,6 @@ class SFTTrainer(Trainer):
                     batch = self.data_packer.sft_collate_fn(
                         raw_batch,
                         computed_max_len=max_len,
-                        pad_token_id=self.tokenizer.pad_token_id,
                         ignore_label_id=-100,
                     )
 
@@ -770,7 +758,7 @@ class SFTTrainer(Trainer):
                         # Prepare for the sequence packing information.
                         packed_args = pack_sequences_info_collect(
                             batch["input_ids"],
-                            pad_token_id=self.tokenizer.pad_token_id,
+                            pad_token_id=self.data_packer.pad_token_id,
                             label_ids=labels,
                             ignore_label_id=-100,
                             seq_len_multiple=self.seq_len_multiple,
@@ -863,7 +851,7 @@ class SFTTrainer(Trainer):
                         #         text = ''
                         #         new_last_token_ids = torch.cat(last_token_ids, dim=-1).squeeze(0)
                         #         logger.info(f'{new_last_token_ids=}')
-                        #         text = self.tokenizer.decode(new_last_token_ids)
+                        #         text = self.data_packer.tokenizer.decode(new_last_token_ids)
                         #         logger.info(
                         #             f"generated tokens at sample : {text}"
                         #         )
