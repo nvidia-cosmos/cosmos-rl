@@ -121,7 +121,7 @@
 <h2>Customized dataset<a class="headerlink" href="#customized-dataset" title="Link to this heading"></a></h2>
 <p>A <cite>torch.utils.data.Dataset</cite> object with <cite>query_reference_answer</cite> method is all you need:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">CustomDataset</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">Dataset</span><span class="p">):</span>
-    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="n">tokenizer</span><span class="p">:</span> <span class="n">AutoTokenizer</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
         <span class="k">pass</span>
 
     <span class="k">def</span><span class="w"> </span><span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
@@ -143,18 +143,18 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">datasets</span><span class="w"> </span><span class="kn">import</span> <span class="n">load_dataset</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">Config</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.dispatcher.algo.reward</span><span class="w"> </span><span class="kn">import</span> <span class="n">direct_math_reward_fn</span><span class="p">,</span> <span class="n">overlong_reward_fn</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoTokenizer</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">torch.utils.data</span><span class="w"> </span><span class="kn">import</span> <span class="n">ConcatDataset</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">cosmos_rl.util.util</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">util</span>
 
 <span class="k">class</span><span class="w"> </span><span class="nc">MathDapoDataset</span><span class="p">(</span><span class="n">Dataset</span><span class="p">):</span>
-    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="n">tokenizer</span><span class="p">:</span> <span class="n">AutoTokenizer</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
 <span class="sd">        This method is optional and get called by launcher after being mounted</span>
 <span class="sd">        `config`: config;</span>
 <span class="sd">        `tokenizer`: tokenizer;</span>
 <span class="sd">        &#39;&#39;&#39;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">config</span> <span class="o">=</span> <span class="n">config</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">tokenizer</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">util</span><span class="o">.</span><span class="n">setup_tokenizer</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">policy</span><span class="o">.</span><span class="n">model_name_or_path</span><span class="p">)</span>
 
         <span class="c1"># This demo is only for DAPO-Math-17k dataset</span>
         <span class="k">assert</span> <span class="n">config</span><span class="o">.</span><span class="n">train</span><span class="o">.</span><span class="n">train_policy</span><span class="o">.</span><span class="n">dataset</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;BytedTsinghua-SIA/DAPO-Math-17k&quot;</span>
@@ -213,7 +213,6 @@
    <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.launcher.worker_entry</span><span class="w"> </span><span class="kn">import</span> <span class="n">main</span> <span class="k">as</span> <span class="n">launch_worker</span>
    <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">Config</span>
    <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.dispatcher.algo.reward</span><span class="w"> </span><span class="kn">import</span> <span class="n">direct_math_reward_fn</span><span class="p">,</span> <span class="n">overlong_reward_fn</span>
-   <span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoTokenizer</span>
    <span class="kn">from</span><span class="w"> </span><span class="nn">torch.utils.data</span><span class="w"> </span><span class="kn">import</span> <span class="n">ConcatDataset</span>
 
    <span class="k">class</span><span class="w"> </span><span class="nc">MathDapoDataset</span><span class="p">(</span><span class="n">Dataset</span><span class="p">):</span>
@@ -281,19 +280,17 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.launcher.worker_entry</span><span class="w"> </span><span class="kn">import</span> <span class="n">main</span> <span class="k">as</span> <span class="n">launch_worker</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.policy.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">Config</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.dispatcher.algo.reward</span><span class="w"> </span><span class="kn">import</span> <span class="n">gsm8k_reward_fn</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">transformers</span><span class="w"> </span><span class="kn">import</span> <span class="n">AutoTokenizer</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.dispatcher.data.packer</span><span class="w"> </span><span class="kn">import</span> <span class="n">DataPacker</span><span class="p">,</span> <span class="n">DecoderOnlyLLMDataPacker</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">cosmos_rl.utils.modelscope</span><span class="w"> </span><span class="kn">import</span> <span class="n">modelscope_load_dataset</span>
 
 <span class="k">class</span><span class="w"> </span><span class="nc">GSM8kDataset</span><span class="p">(</span><span class="n">Dataset</span><span class="p">):</span>
-    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="n">tokenizer</span><span class="p">:</span> <span class="n">AutoTokenizer</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
 <span class="sd">        This method is optional and get called by launcher after being mounted</span>
 <span class="sd">        `config`: config;</span>
-<span class="sd">        `tokenizer`: tokenizer;</span>
 <span class="sd">        &#39;&#39;&#39;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">config</span> <span class="o">=</span> <span class="n">config</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">tokenizer</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span> <span class="o">=</span> <span class="n">util</span><span class="o">.</span><span class="n">setup_tokenizer</span><span class="p">(</span><span class="n">config</span><span class="o">.</span><span class="n">policy</span><span class="o">.</span><span class="n">model_name_or_path</span><span class="p">)</span>
         <span class="n">modelscope_dataset_if_enabled</span> <span class="o">=</span> <span class="n">modelscope_load_dataset</span><span class="p">(</span><span class="s1">&#39;AI-ModelScope/gsm8k&#39;</span><span class="p">,</span> <span class="n">subset_name</span><span class="o">=</span><span class="s1">&#39;main&#39;</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s1">&#39;train&#39;</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">modelscope_dataset_if_enabled</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">dataset</span> <span class="o">=</span> <span class="n">load_dataset</span><span class="p">(</span><span class="s2">&quot;openai/gsm8k&quot;</span><span class="p">,</span> <span class="s2">&quot;main&quot;</span><span class="p">,</span> <span class="n">split</span><span class="o">=</span><span class="s2">&quot;train&quot;</span><span class="p">)</span>
@@ -364,14 +361,13 @@
         <span class="c1"># Check source code of DecoderOnlyLLMDataPacker to see how it&#39;s implemented</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span> <span class="o">=</span> <span class="n">DecoderOnlyLLMDataPacker</span><span class="p">()</span>
 
-    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="n">tokenizer</span><span class="p">:</span> <span class="n">AutoTokenizer</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">config</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
 <span class="sd">        This method is optional and get called by launcher after being mounted</span>
 <span class="sd">        `config`: config;</span>
-<span class="sd">        `tokenizer`: tokenizer;</span>
 <span class="sd">        &#39;&#39;&#39;</span>
-        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">setup</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="n">tokenizer</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span><span class="o">.</span><span class="n">setup</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="n">tokenizer</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="n">setup</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">underlying_data_packer</span><span class="o">.</span><span class="n">setup</span><span class="p">(</span><span class="n">config</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_rollout_input</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">item</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&#39;&#39;&#39;</span>
