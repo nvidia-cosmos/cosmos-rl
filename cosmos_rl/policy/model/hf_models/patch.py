@@ -128,18 +128,6 @@ def get_packed_sliding_attention_mask(lengths, sliding_window, device):
     return mask
 
 
-# Get packed position ids
-# def get_packed_position_ids(lengths, device):
-#     # lengths: list of sequence lengths
-#     L = sum(lengths)
-#     position_ids = torch.zeros((1, L), dtype=torch.int, device=device)
-#     offset = 0
-#     for length in lengths:
-#         position_ids[0, offset : offset + length] = torch.arange(length, device=device)
-#         offset += length
-#     return position_ids
-
-
 def make_new_self_attn_forward(original_attn_forward):
     def self_attn_forward(self, hidden_states, *args, **kwargs):
         valid_input_len = kwargs.get("valid_input_len", None)
