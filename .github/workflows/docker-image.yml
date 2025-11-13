@@ -1,0 +1,100 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ "Try-docker-build" ]
+  pull_request:
+    branches: [ "Try-docker-build" ]
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: 'Log level'
+        required: true
+        default: 'warning'
+        type: choice
+        options:
+          - info
+          - warning
+          - debug
+      tags:
+        description: 'Test scenario tags'
+        required: false
+        default: ''
+        type: string
+      testEnv:
+        description: 'Environment to run tests against'
+        required: true
+        default: 'production'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Inputs
+        run: |
+          echo "LogLevel: ${{ github.event.inputs.logLevel }}"
+          echo "Tags: ${{ github.event.inputs.tags }}"
+          echo "TestEnv: ${{ github.event.inputs.testEnv }}"
+
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # this might remove tools that are actually needed,
+          # if set to "true" but frees about 6 GB
+          tool-cache: false
+          
+          # all of these default to true, but feel free to set to
+          # "false" if necessary for your workflow
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Check Disk Space After Cleanup
+        run: |
+          echo "Disk space after cleanup:"
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker image tags
+        id: meta
+        run: |
+          IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/cosmos-rl"
+          GIT_SHA="${{ github.sha }}"
+          TAG="latest"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag_sha=$GIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag_latest=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          target: package
+          tags: |
+            ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.tag_latest }}
+            ${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.tag_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            COSMOS_RL_BUILD_MODE=no-efa
