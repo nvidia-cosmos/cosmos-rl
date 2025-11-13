@@ -203,16 +203,18 @@ def apply_vla_fsdp(
         if hasattr(llm, 'model') and hasattr(llm.model, 'layers'):
             n_layers = len(llm.model.layers)
             logger.info(f"Language model has {n_layers} transformer layers (will be sharded by top-level FSDP)")
+            for i in range(n_layers):
+                fully_shard(llm.model.layers[i], **fsdp_config, reshard_after_forward=True)
+            fully_shard(llm.model.embed_tokens, **fsdp_config, reshard_after_forward=True)
+            fully_shard(llm.model.norm, **fsdp_config, reshard_after_forward=True)
+        fully_shard(llm.lm_head, **fsdp_config, reshard_after_forward=True)
     
-    # Apply top-level FSDP to shard ALL parameters uniformly
+    fully_shard(actual_model.vision_backbone, **fsdp_config, reshard_after_forward=True)
+    fully_shard(actual_model.projector, **fsdp_config, reshard_after_forward=True)
+    # Apply FSDP to each named module within actual_model
     # This includes vision_backbone, projector, action_head, and language_model
     # All parameters will be in parallelism_info_for_params for P2R sync
-    fully_shard(
-        model,
-        **fsdp_config,
-        reshard_after_forward=not pp_enabled,
-    )
-    
+
     logger.info(f"VLA FSDP applied: All components (vision backbone, projector, language model, action head) sharded by FSDP")
 
 

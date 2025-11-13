@@ -98,8 +98,6 @@ class VLADataPacker(DataPacker):
     def get_policy_input(
         self,
         sample: Any,
-        rollout_output: str,
-        n_ignore_prefix_tokens: int = 0,
     ) -> Any:
         """
         Process VLA sample and rollout output for policy training.
@@ -140,9 +138,6 @@ class VLADataPacker(DataPacker):
                 trajectory = sample.metadata.get('trajectory')
         
         if trajectory and trajectory.get('input_ids') and trajectory.get('responses'):
-            # *** REAL TRAJECTORY DATA AVAILABLE ***
-            logger.info(f"[VLA Policy Input] Using REAL trajectory data from rollout")
-            
             # VLA structure: Keep per-step organization for proper batching
             # Each step has: input_ids (prompt), responses (action tokens), pixel_values (image)
             input_ids_list = trajectory['input_ids']
@@ -165,8 +160,6 @@ class VLADataPacker(DataPacker):
                 if isinstance(step_responses, torch.Tensor):
                     # Flatten if multi-dimensional: (8 actions, 7 tokens) → [56 tokens]
                     response_tokens = step_responses.flatten()
-                    if step_idx == 0:  # Log first step for debugging
-                        logger.info(f"[VLA Policy Input] Step 0: responses shape {step_responses.shape} → flattened to {response_tokens.shape[0]} tokens")
                 elif isinstance(step_responses, list):
                     # Flatten nested lists
                     flat_responses = []
@@ -182,29 +175,32 @@ class VLADataPacker(DataPacker):
                 else:
                     response_tokens = torch.tensor([], dtype=torch.long)
                 
-                # CRITICAL: Concatenate prompt + responses for THIS STEP ONLY
-                # This creates the full sequence for this timestep
-                full_sequence = torch.cat([prompt_tokens, response_tokens])
+                # CRITICAL: Only pass prompt to model (NOT concatenated with actions)
+                # The openvla-oft model internally:
+                #   1. Adds 56 placeholder action tokens
+                #   2. Adds 1 stop token
+                #   3. Returns logits ONLY for the 56 action positions
+                # So input is just the prompt, model handles the rest
                 
-                # Create attention mask (all 1s for actual tokens)
-                attention_mask = torch.ones_like(full_sequence)
+                # Create attention mask for prompt only
+                attention_mask = torch.ones_like(prompt_tokens)
                 
-                # Create logprob mask: 0 for prompt (don't train), 1 for actions (train)
-                logprob_mask = torch.cat([
-                    torch.zeros(len(prompt_tokens), dtype=torch.long),
-                    torch.ones(len(response_tokens), dtype=torch.long)
-                ])
+                # Create logprob mask for action tokens only (56 values)
+                # This will be aligned with the model's output logits (56 tokens)
+                logprob_mask = torch.ones(len(response_tokens), dtype=torch.long)
                 
                 per_step_data.append({
-                    'input_ids': full_sequence,
-                    'attention_mask': attention_mask,
-                    'logprob_mask': logprob_mask,
+                    'input_ids': prompt_tokens,  # Prompt only (31 tokens)
+                    'attention_mask': attention_mask,  # Mask for prompt (31 values)
+                    'logprob_mask': logprob_mask,  # Mask for actions (56 values) - matches model output
+                    'responses': response_tokens,  # Action labels for loss computation (56 tokens)
                 })
                 
-                if step_idx == 0:  # Log first step
+                if step_idx == 0:  # Log first step with response token range
                     logger.info(
-                        f"[VLA Policy Input] Step 0: prompt={len(prompt_tokens)}, "
-                        f"actions={len(response_tokens)}, total={len(full_sequence)}"
+                        f"[VLA Policy Input] Step 0: prompt_only={len(prompt_tokens)}, "
+                        f"actions={len(response_tokens)} (model adds placeholders internally), "
+                        f"response_token_range=[{response_tokens.min()}, {response_tokens.max()}]"
                     )
             
             num_steps = len(per_step_data)
@@ -216,15 +212,17 @@ class VLADataPacker(DataPacker):
                 f"total_tokens={total_tokens}, action_tokens={total_action_tokens}, "
                 f"trainable_ratio={total_action_tokens/total_tokens:.2%}"
             )
-        
-        class RLPolicyInput:
-            """Per-step structured input for VLA training"""
-            def __init__(self, per_step_data, pixel_values):
-                self.per_step_data = per_step_data  # List of dicts, one per step
-                self.pixel_values = pixel_values  # List of tensors, one per step
-                self.num_steps = len(per_step_data)
-        
-        return RLPolicyInput(per_step_data, pixel_values_list)
+            
+            # Return full episode without chunking
+            # Chunking will be handled in train_vla() for gradient accumulation
+            class RLPolicyInput:
+                """Per-step structured input for VLA training"""
+                def __init__(self, per_step_data, pixel_values):
+                    self.per_step_data = per_step_data  # List of dicts, one per step
+                    self.pixel_values = pixel_values  # List of tensors, one per step
+                    self.num_steps = len(per_step_data)
+            
+            return RLPolicyInput(per_step_data, pixel_values_list)
     
     def policy_compute_max_len(self, processed_samples: List[Any]) -> int:
         """
@@ -262,7 +260,20 @@ class VLADataPacker(DataPacker):
         max_steps = max(s.num_steps for s in processed_samples)
         
         device = torch.cuda.current_device()
-        pad_token_id = 0
+        # Get pad_token_id from tokenizer (must match what VLA model uses for unpadding)
+        pad_token_id = getattr(self.tokenizer, 'pad_token_id', 0)
+        if pad_token_id is None:
+            pad_token_id = 0
+        logger.debug(f"[VLA Collate] Using pad_token_id={pad_token_id} from tokenizer")
+        
+        # VRAM logging: Collate start
+        if torch.cuda.is_available():
+            vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
+            vram_reserved_gb = torch.cuda.memory_reserved() / 1e9
+            logger.info(
+                f"[VRAM] policy_collate_fn START: batch_size={batch_size}, max_steps={max_steps} | "
+                f"Allocated={vram_allocated_gb:.2f}GB, Reserved={vram_reserved_gb:.2f}GB"
+            )
         
         if batch_size == 1:
             logger.debug(
@@ -280,6 +291,7 @@ class VLADataPacker(DataPacker):
         batch_input_ids = []
         batch_attention_masks = []
         batch_logprob_masks = []
+        batch_responses = []
         batch_pixel_values = []
         actual_num_steps = []
         
@@ -288,35 +300,47 @@ class VLADataPacker(DataPacker):
             step_input_ids = []
             step_attention_masks = []
             step_logprob_masks = []
+            step_responses = []
             
             for step_data in sample.per_step_data:
                 # Pad/truncate each step's sequence to computed_max_len
-                ids = step_data['input_ids'][:computed_max_len].cpu()  # Ensure CPU
+                ids = step_data['input_ids'][:computed_max_len].cpu()  # Ensure CPU (prompt only)
                 mask = step_data['attention_mask'][:computed_max_len].cpu()
-                logprob_mask = step_data['logprob_mask'][:computed_max_len].cpu()
+                logprob_mask = step_data['logprob_mask'].cpu()  # No truncation - these match action tokens
+                responses = step_data['responses'].cpu()  # Action tokens for loss computation
                 
-                # Pad if shorter than computed_max_len (keep on CPU)
+                # Pad prompt if shorter than computed_max_len (keep on CPU)
                 if len(ids) < computed_max_len:
                     pad_len = computed_max_len - len(ids)
                     ids = torch.cat([ids, torch.full((pad_len,), pad_token_id, dtype=torch.long, device='cpu')])
                     mask = torch.cat([mask, torch.zeros(pad_len, dtype=torch.long, device='cpu')])
-                    logprob_mask = torch.cat([logprob_mask, torch.zeros(pad_len, dtype=torch.long, device='cpu')])
                 
                 step_input_ids.append(ids)
                 step_attention_masks.append(mask)
                 step_logprob_masks.append(logprob_mask)
+                step_responses.append(responses)
             
             # Pad to max_steps if this sample has fewer steps (keep on CPU)
             actual_num_steps.append(len(sample.per_step_data))
+            # Get the action sequence length from the first step's responses/logprob_mask
+            action_seq_len = len(step_responses[0]) if step_responses else 56  # Default to 56 action tokens
+            
+            # For VLA: Pad responses with ACTION_TOKEN_BEGIN_IDX (31744) instead of 0
+            # After remapping (response - 31744), padding becomes 0, which is in valid range [0, 256)
+            ACTION_TOKEN_BEGIN_IDX = 31744  # From openvla-oft constants
+            
             while len(step_input_ids) < max_steps:
                 step_input_ids.append(torch.full((computed_max_len,), pad_token_id, dtype=torch.long, device='cpu'))
                 step_attention_masks.append(torch.zeros(computed_max_len, dtype=torch.long, device='cpu'))
-                step_logprob_masks.append(torch.zeros(computed_max_len, dtype=torch.long, device='cpu'))
+                step_logprob_masks.append(torch.zeros(action_seq_len, dtype=torch.long, device='cpu'))
+                # Pad with ACTION_TOKEN_BEGIN_IDX so that after remapping they become 0 (valid index)
+                step_responses.append(torch.full((action_seq_len,), ACTION_TOKEN_BEGIN_IDX, dtype=torch.long, device='cpu'))
             
-            # Stack: (num_steps, seq_len)
+            # Stack: (num_steps, seq_len) for prompts, (num_steps, action_seq_len) for actions
             batch_input_ids.append(torch.stack(step_input_ids))
             batch_attention_masks.append(torch.stack(step_attention_masks))
             batch_logprob_masks.append(torch.stack(step_logprob_masks))
+            batch_responses.append(torch.stack(step_responses))
             
             # Stack pixel_values: (num_steps, C, H, W) - keep on CPU for now
             step_pixel_values = []
@@ -333,14 +357,49 @@ class VLADataPacker(DataPacker):
             
             batch_pixel_values.append(torch.stack(step_pixel_values))
         
-        # Final batch shapes: (batch, num_steps, seq_len) and (batch, num_steps, C, H, W)
+        # VRAM logging: After stacking on CPU
+        if torch.cuda.is_available():
+            vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
+            logger.info(
+                f"[VRAM] After stacking on CPU (before .to(device)): "
+                f"Allocated={vram_allocated_gb:.2f}GB"
+            )
+        
+        # Final batch shapes:
+        # - Prompts: (batch, num_steps, prompt_seq_len)
+        # - Actions: (batch, num_steps, action_seq_len)  # action_seq_len = 56
+        # - Pixel values: (batch, num_steps, C, H, W)
         collated_dict = {
-            'input_ids': torch.stack(batch_input_ids).to(device),  # (batch, steps, seq_len)
+            'input_ids': torch.stack(batch_input_ids).to(device),  # (batch, steps, prompt_len) - prompt only
             'attention_mask': torch.stack(batch_attention_masks).to(device),
-            'logprob_masks': torch.stack(batch_logprob_masks).to(device),
+            'logprob_masks': torch.stack(batch_logprob_masks).to(device),  # (batch, steps, action_len)
+            'responses': torch.stack(batch_responses).to(device),  # (batch, steps, action_len) - action tokens
             'pixel_values': torch.stack(batch_pixel_values).to(device),  # (batch, steps, C, H, W)
             'num_steps': torch.tensor(actual_num_steps, dtype=torch.long).to(device),
         }
+        
+        # VRAM logging: After moving to GPU
+        if torch.cuda.is_available():
+            vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
+            vram_reserved_gb = torch.cuda.memory_reserved() / 1e9
+            
+            # Calculate tensor sizes
+            input_ids_gb = collated_dict['input_ids'].numel() * collated_dict['input_ids'].element_size() / 1e9
+            pixel_values_gb = collated_dict['pixel_values'].numel() * collated_dict['pixel_values'].element_size() / 1e9
+            
+            logger.info(
+                f"[VRAM] After .to(device): "
+                f"Allocated={vram_allocated_gb:.2f}GB, Reserved={vram_reserved_gb:.2f}GB | "
+                f"input_ids={input_ids_gb:.3f}GB, pixel_values={pixel_values_gb:.3f}GB"
+            )
+        
+        logger.info(
+            f"[VLA Collate] Batch complete: "
+            f"input_ids(prompts)={collated_dict['input_ids'].shape}, "
+            f"responses(actions)={collated_dict['responses'].shape}, "
+            f"logprob_masks={collated_dict['logprob_masks'].shape}, "
+            f"pixel_values={collated_dict['pixel_values'].shape}"
+        )
         
         # Calculate trainable ratio
         total_tokens = collated_dict['logprob_masks'].numel()

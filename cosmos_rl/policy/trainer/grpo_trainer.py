@@ -960,12 +960,22 @@ class GRPOTrainer(Trainer):
                     new_lr_schedulers.load_state_dict(self.lr_schedulers.state_dict())
                 self.lr_schedulers = new_lr_schedulers
                 self.lr_schedulers_updated = True
-            report_data = self.train(
-                current_step=command.global_step,
-                total_steps=command.total_steps,
-                remain_samples_num=command.remain_samples_num,
-                do_save_checkpoint=command.do_save,
-            )
+            # Route to VLA-specific training if applicable
+            is_vla = hasattr(self.config, 'vla') and self.config.vla is not None
+            if is_vla:
+                report_data = self.train_vla(
+                    current_step=command.global_step,
+                    total_steps=command.total_steps,
+                    remain_samples_num=command.remain_samples_num,
+                    do_save_checkpoint=command.do_save,
+                )
+            else:
+                report_data = self.train(
+                    current_step=command.global_step,
+                    total_steps=command.total_steps,
+                    remain_samples_num=command.remain_samples_num,
+                    do_save_checkpoint=command.do_save,
+                )
         else:
             report_data = {}
             logger.info(
@@ -1178,6 +1188,59 @@ class GRPOTrainer(Trainer):
         )
         return rollouts[0]
 
+    def compute_logprobs_vla(
+        self,
+        minibatch: Dict[str, Any],
+        logits: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Compute per-token log probabilities for VLA models (following SimpleVLA-RL approach).
+        
+        VLA differs from standard LLM:
+        - No token shifting (responses are already aligned with logits)
+        - Direct gather from logits using responses as indices
+        
+        Args:
+            minibatch: dict with 'input_ids' (responses), 'logprob_masks'
+            logits: model output logits (batch, seq_len, vocab_size)
+            
+        Returns:
+            logps: per-token log probabilities
+            cu_seqlens: cumulative sequence lengths
+            metrics: dict with entropy metrics
+        """
+        responses = minibatch["input_ids"]  # (batch, seq_len) - action token IDs
+        logprob_masks = minibatch["logprob_masks"].bool()  # (batch, seq_len)
+        
+        # Extract effective (non-masked) logits and responses
+        effective_logits = logits[logprob_masks]  # (n_logprob_tokens, vocab_size)
+        effective_responses = responses[logprob_masks]  # (n_logprob_tokens,)
+        
+        # Compute log probabilities: log_softmax then gather
+        # Following SimpleVLA-RL: logprobs_from_logits(logits, responses)
+        log_probs_all = torch.nn.functional.log_softmax(effective_logits, dim=-1)  # (n_tokens, vocab)
+        log_probs = log_probs_all.gather(
+            dim=-1, 
+            index=effective_responses.unsqueeze(-1)
+        ).squeeze(-1)  # (n_tokens,)
+        
+        # Compute entropy (for logging)
+        metrics_dict = {}
+        with torch.no_grad():
+            # Entropy from probability distribution
+            probs = torch.nn.functional.softmax(effective_logits, dim=-1)
+            entropy = -(probs * log_probs_all).sum(dim=-1)  # (n_tokens,)
+            metrics_dict["entropy"] = entropy.mean()
+            metrics_dict["effective_entropy"] = entropy.mean()  # Same for VLA
+        
+        # Compute cumulative sequence lengths for batching
+        bsz = logprob_masks.shape[0]
+        masked_seqlens = logprob_masks.sum(dim=-1)  # (batch,)
+        cu_seqlens = torch.zeros(bsz + 1, dtype=torch.int32, device=logits.device)
+        cu_seqlens[1:] = torch.cumsum(masked_seqlens, dim=0)
+        
+        return log_probs, cu_seqlens, metrics_dict
+    
     def compute_logprobs(
         self,
         minibatch: Dict[str, Any],
@@ -1201,6 +1264,7 @@ class GRPOTrainer(Trainer):
         assert (
             "logprob_masks" in minibatch
         ), "logprob_masks is required for computing logprobs"
+
         return logprobs_computing(
             minibatch["input_ids"],
             minibatch["logprob_masks"],
@@ -1253,6 +1317,204 @@ class GRPOTrainer(Trainer):
                     self.build_optimizers()
                     for lr in self.lr_schedulers.schedulers:
                         lr.optimizer = self.optimizers
+
+    def train_vla(
+        self,
+        current_step: int,
+        total_steps: int,
+        remain_samples_num: int,
+        do_save_checkpoint: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Clean VLA training loop following SimpleVLA-RL approach.
+        Bypasses the complex GRPO trainer logic.
+        """
+        logger.info(f"[VLA Train] Starting VLA training for step {current_step}/{total_steps}")
+        
+        #  VRAM logging: Start
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            vram_start = torch.cuda.memory_allocated() / 1e9
+            vram_peak = torch.cuda.max_memory_allocated() / 1e9
+            logger.info(f"[VRAM] VLA Train start: {vram_start:.2f}GB, peak={vram_peak:.2f}GB")
+        
+        # 1. Get rollouts
+        rollouts = self.dispatch_rollouts()
+        if not rollouts:
+            logger.warning("[VLA Train] No rollouts received")
+            return {}
+        
+        logger.info(f"[VLA Train] Received {len(rollouts)} rollouts")
+        
+        # 2. Process rollouts into training samples (full episodes)
+        advantages_list = [r.advantage for r in rollouts]  # Use advantage, not reward!
+        
+        # Get policy inputs (data packer returns full episodes now)
+        policy_inputs = [
+            self.data_packer.get_policy_input(traj) for _, traj in enumerate(rollouts)
+        ]
+        
+        logger.info(f"[VLA Train] Processing {len(policy_inputs)} full episodes")
+        
+        # 3. Training loop: process each episode with gradient accumulation
+        # Following SimpleVLA-RL: 1 episode per step, chunk within episode for memory
+        CHUNK_SIZE = 16  # Max steps per mini-step (matches SimpleVLA-RL)
+        
+        self.model.train()
+        total_loss = 0.0
+        total_entropy = 0.0
+        num_mini_steps = 0
+
+
+        if torch.cuda.is_available():
+            vram_end = torch.cuda.memory_allocated() / 1e9
+            vram_peak = torch.cuda.max_memory_allocated() / 1e9
+            logger.info(
+                f"[VRAM] VLA Preprocess end: {vram_end:.2f}GB, "
+                f"peak={vram_peak:.2f}GB, delta={vram_end-vram_start:.2f}GB"
+            )
+
+        #with torch.autocast(None):
+        with torch.autocast(device_type='cuda'): # , dtype=torch.bfloat16):
+            # Process one episode at a time
+            for episode_idx, (policy_input, advantage) in enumerate(zip(policy_inputs, advantages_list)):
+                num_steps = policy_input.num_steps
+                logger.info(
+                    f"[VLA Train] Episode {episode_idx+1}/{len(policy_inputs)}: "
+                    f"{num_steps} steps, advantage={advantage:.4f}"
+                )
+                
+                # Zero gradients at episode start
+                self.optimizers.zero_grad()
+                
+                # Chunk episode into mini-steps for gradient accumulation
+                num_chunks = (num_steps + CHUNK_SIZE - 1) // CHUNK_SIZE
+                episode_loss = 0.0
+                episode_entropy = 0.0
+                
+                for chunk_idx in range(num_chunks):
+                    start_idx = chunk_idx * CHUNK_SIZE
+                    end_idx = min((chunk_idx + 1) * CHUNK_SIZE, num_steps)
+                    
+                    # Create chunk
+                    chunk_per_step_data = policy_input.per_step_data[start_idx:end_idx]
+                    chunk_pixel_values = policy_input.pixel_values[start_idx:end_idx]
+                    
+                    # Temporary RLPolicyInput for this chunk
+                    class ChunkInput:
+                        def __init__(self, per_step_data, pixel_values):
+                            self.per_step_data = per_step_data
+                            self.pixel_values = pixel_values
+                            self.num_steps = len(per_step_data)
+                    
+                    chunk_input = ChunkInput(chunk_per_step_data, chunk_pixel_values)
+                    
+                    # Collate chunk
+                    batch_dict = self.data_packer.policy_collate_fn([chunk_input], computed_max_len=512)
+                    
+                    # Move to device
+                    for key in ['input_ids', 'attention_mask', 'logprob_masks', 'responses', 'pixel_values', 'num_steps']:
+                        if key in batch_dict:
+                            batch_dict[key] = batch_dict[key].to(self.device)
+                    
+                    # Prepare advantages (same for all chunks in episode)
+                    advantages_tensor = torch.tensor([advantage], device=self.device).unsqueeze(1)
+                    action_seq_len = batch_dict['logprob_masks'].shape[1]
+                    advantages_expanded = advantages_tensor.expand(-1, action_seq_len)
+                    
+                    # Forward pass
+                    outputs = self.model.forward_with_trajectory_structure(**batch_dict)
+                    logits = outputs.logits
+                    logprob_masks = batch_dict['logprob_masks']
+                    if logits.ndim == 4:
+                        batch, steps, action_len, vocab = logits.shape
+                        logits = logits.reshape(batch, steps * action_len, vocab)
+                        logprob_masks = logprob_masks.reshape(batch, steps * action_len)
+                        advantages_expanded = advantages_tensor.expand(-1, steps * action_len)
+                    
+                    # Vocab slicing [31744, 32000) → [0, 256)
+                    start_index = logits.shape[-1] - 256 - 64
+                    logits_sliced = logits[..., start_index:start_index+256]
+                    
+                    # Remap responses
+                    responses = batch_dict['responses'].reshape(logits_sliced.shape[0], -1)
+                    responses_remapped = responses - start_index
+                    
+                    # Compute logprobs
+                    logprobs_result = self.compute_logprobs_vla(
+                        {'input_ids': responses_remapped, 'logprob_masks': logprob_masks},
+                        logits_sliced
+                    )
+                    log_probs, cu_seqlens, metrics = logprobs_result
+                    
+                    # Compute loss (policy gradient)
+                    logprob_masks_flat = batch_dict['logprob_masks'].reshape(-1)
+                    advantages_flat = advantages_expanded.reshape(-1)
+                    masked_log_probs = log_probs * advantages_flat[logprob_masks_flat.bool()]
+                    chunk_loss = -masked_log_probs.mean()
+                    
+                    # Backward pass (accumulate gradients)
+                    chunk_loss.backward()
+                    
+                    # Accumulate metrics
+                    episode_loss += chunk_loss.item()
+                    episode_entropy += metrics['entropy'].item()
+                    num_mini_steps += 1
+                    
+                    logger.info(
+                        f"[VLA Train]   Chunk {chunk_idx+1}/{num_chunks} (steps [{start_idx}, {end_idx})): "
+                        f"loss={chunk_loss.item():.4f}, entropy={metrics['entropy'].item():.4f}"
+                    )
+                
+                    # Optimizer step after all chunks (gradient accumulation complete)
+                    self.optimizers.step()
+                
+                avg_episode_loss = episode_loss / num_chunks
+                avg_episode_entropy = episode_entropy / num_chunks
+                total_loss += avg_episode_loss
+                total_entropy += avg_episode_entropy
+                
+                logger.info(
+                    f"[VLA Train] Episode {episode_idx+1} complete: "
+                    f"avg_loss={avg_episode_loss:.4f}, avg_entropy={avg_episode_entropy:.4f}"
+                )
+        
+            # 4. LR scheduler step
+        self.lr_schedulers.step()
+        current_lr = self.optimizers.param_groups[0]['lr']
+        
+        # 5. Report metrics
+        num_episodes = len(policy_inputs)
+        avg_loss = total_loss / num_episodes if num_episodes > 0 else 0.0
+        avg_entropy = total_entropy / num_episodes if num_episodes > 0 else 0.0
+        
+        logger.info(
+            f"[VLA Train] Step {current_step} complete: "
+            f"{num_episodes} episodes, {num_mini_steps} mini-steps, "
+            f"avg_loss={avg_loss:.4f}, avg_entropy={avg_entropy:.4f}, lr={current_lr:.2e}"
+        )
+        
+        # VRAM logging: End
+        if torch.cuda.is_available():
+            vram_end = torch.cuda.memory_allocated() / 1e9
+            vram_peak = torch.cuda.max_memory_allocated() / 1e9
+            logger.info(
+                f"[VRAM] VLA Train end: {vram_end:.2f}GB, "
+                f"peak={vram_peak:.2f}GB, delta={vram_end-vram_start:.2f}GB"
+            )
+        
+        # Checkpoint saving
+        if do_save_checkpoint:
+            self._save_checkpoint(current_step, is_final=(current_step == total_steps))
+        
+        return {
+            'loss': avg_loss,
+            'entropy': avg_entropy,
+            'lr': current_lr,
+            'num_episodes': num_episodes,
+            'num_mini_steps': num_mini_steps,
+            'num_rollouts': len(rollouts),
+        }
 
     def train(
         self,
@@ -1317,7 +1579,19 @@ class GRPOTrainer(Trainer):
         # Otherwise, use the original samples (prompt or conversation)
         use_full_rollout = hasattr(self.config, 'vla') and self.config.vla is not None
         
-        processed_samples: List[Any] = [
+        # VRAM logging: Before processing policy inputs
+        if torch.cuda.is_available():
+            vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
+            vram_reserved_gb = torch.cuda.memory_reserved() / 1e9
+            vram_max_gb = torch.cuda.max_memory_allocated() / 1e9
+            logger.info(
+                f"[VRAM] GRPO train() START - Before get_policy_input: "
+                f"Allocated={vram_allocated_gb:.2f}GB, Reserved={vram_reserved_gb:.2f}GB, Peak={vram_max_gb:.2f}GB | "
+                f"num_rollouts={len(rollouts)}"
+            )
+        
+        # Get policy inputs - for VLA, this may return a list of sub-trajectories per rollout
+        policy_inputs_per_rollout = [
             self.data_packer.get_policy_input(
                 rollouts[i] if use_full_rollout else samples[i],
                 completions_list[i],
@@ -1325,14 +1599,46 @@ class GRPOTrainer(Trainer):
             )
             for i in range(len(samples))
         ]
+        
+        # Flatten sub-trajectories and replicate advantages accordingly
+        processed_samples: List[Any] = []
+        flattened_advantages: List[float] = []
+        
+        for rollout_idx, policy_input in enumerate(policy_inputs_per_rollout):
+            # VLA data packer returns a list of sub-trajectories
+            if isinstance(policy_input, list):
+                num_sub_traj = len(policy_input)
+                processed_samples.extend(policy_input)
+                # Each sub-trajectory gets the same advantage as the parent trajectory
+                flattened_advantages.extend([advantages_list[rollout_idx]] * num_sub_traj)
+                
+                if num_sub_traj > 1:
+                    logger.debug(
+                        f"[GRPO Train] Rollout {rollout_idx}: Split into {num_sub_traj} sub-trajectories "
+                        f"(advantage={advantages_list[rollout_idx]:.4f} replicated)"
+                    )
+            else:
+                # Single sample (non-VLA or short trajectory)
+                processed_samples.append(policy_input)
+                flattened_advantages.append(advantages_list[rollout_idx])
+
+        # VRAM logging: After flattening sub-trajectories
+        if torch.cuda.is_available():
+            vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
+            vram_reserved_gb = torch.cuda.memory_reserved() / 1e9
+            logger.info(
+                f"[VRAM] After flattening sub-trajectories: "
+                f"Allocated={vram_allocated_gb:.2f}GB, Reserved={vram_reserved_gb:.2f}GB | "
+                f"total_samples={len(processed_samples)} (from {len(rollouts)} rollouts)"
+            )
 
         self.metrics = {
             "entropy": 0.0,
             "effective_entropy": 0.0,
         }
         # user_info_keys = list(kwargs.keys())
-        advantages_t = torch.tensor(advantages_list).to(self.device)
-        batch_size = len(rollouts)
+        advantages_t = torch.tensor(flattened_advantages).to(self.device)
+        batch_size = len(processed_samples)  # Use flattened batch size
         per_optimize_batch_size = (
             min(self.batch_size_per_optimize, batch_size)
             if self.batch_size_per_optimize is not None
@@ -1369,6 +1675,8 @@ class GRPOTrainer(Trainer):
         loss_count = 0
         is_computing_refs = [True, False] if need_compute_ref else [False]
         cached_minibatch_arrangements = []
+
+        is_vla = hasattr(self.config, 'vla') and self.config.vla is not None
         for is_computing_ref in is_computing_refs:
             # Set model to eval mode if reference model is being used
             if is_computing_ref:
@@ -1477,19 +1785,23 @@ class GRPOTrainer(Trainer):
                                     // self.seq_len_multiple
                                     * self.seq_len_multiple
                                 )
-                                minibatched_advantages = (
-                                    advantages_t[mini_batch_indices]
-                                    .unsqueeze(1)
-                                    .expand(-1, computed_max_len)
-                                    .to(self.device)
-                                )
-
+                                # Get scalar advantages for this mini-batch
+                                scalar_advantages = advantages_t[mini_batch_indices].to(self.device)  # (batch,)
+                                
                                 user_mini_batch: Dict[str, Any] = (
                                     self.data_packer.policy_collate_fn(
                                         minibatched_processed_samples,
                                         computed_max_len=computed_max_len,
                                     )
                                 )
+
+                                # LLM: Use computed_max_len (prompt length)
+                                minibatched_advantages = (
+                                    scalar_advantages
+                                    .unsqueeze(1)
+                                    .expand(-1, computed_max_len)
+                                )
+
                                 packing_seq = self.config.train.sequence_packing
                                 if packing_seq:
                                     if self.parallel_dims.pp_enabled:
@@ -1714,19 +2026,51 @@ class GRPOTrainer(Trainer):
                                             raw_logits = self.model.forward_with_trajectory_structure(**user_mini_batch)
                                             
                                             # Flatten per-step structure for loss computation
-                                            # Logits: (batch, steps, seq_len, vocab) → (batch, steps*seq_len, vocab)
+                                            # VLA (openvla-oft): Model returns logits for action positions only
                                             if hasattr(raw_logits, 'logits') and raw_logits.logits.ndim == 4:
-                                                batch, steps, seq_len, vocab = raw_logits.logits.shape
-                                                raw_logits.logits = raw_logits.logits.reshape(batch, steps * seq_len, vocab)
-                                                logger.debug(f"[GRPO Train] Flattened logits to {raw_logits.logits.shape}")
+                                                batch, steps, action_seq_len, vocab = raw_logits.logits.shape
                                                 
-                                                # Also flatten input_ids and logprob_masks to match
-                                                if user_mini_batch['input_ids'].ndim == 3:
-                                                    user_mini_batch['input_ids'] = user_mini_batch['input_ids'].reshape(batch, steps * seq_len)
-                                                if user_mini_batch.get('logprob_masks') is not None and user_mini_batch['logprob_masks'].ndim == 3:
-                                                    user_mini_batch['logprob_masks'] = user_mini_batch['logprob_masks'].reshape(batch, steps * seq_len)
-                                                if user_mini_batch.get('attention_mask') is not None and user_mini_batch['attention_mask'].ndim == 3:
-                                                    user_mini_batch['attention_mask'] = user_mini_batch['attention_mask'].reshape(batch, steps * seq_len)
+                                                # Use responses (action tokens) and logprob_masks from model output
+                                                # openvla-oft: input is prompt, output is action logits (56), so we use responses for labels
+                                                if hasattr(raw_logits, 'responses') and hasattr(raw_logits, 'logprob_masks_unpad'):
+                                                    # Responses are the action tokens to compare against output logits
+                                                    responses_flat = raw_logits.responses.reshape(batch, steps * action_seq_len)
+                                                    user_mini_batch['logprob_masks'] = raw_logits.logprob_masks_unpad.reshape(batch, steps * action_seq_len)
+                                                    
+                                                    # CRITICAL: Slice logits to only action token positions in vocab (following SimpleVLA-RL)
+                                                    # Action tokens occupy vocab indices [31744, 32000) = 256 tokens
+                                                    # Vocab structure: [31744:32000] for actions, with 64 reserved tokens after
+                                                    logits_tensor = raw_logits.logits  # (batch, steps, action_seq_len, vocab)
+                                                    start_index = vocab - 256 - 64  # 32000/32064 - 320 = 31744
+                                                    logits_sliced = logits_tensor[..., start_index:start_index+256]  # (batch, steps, action_seq_len, 256)
+                                                    
+                                                    # Remap response token IDs from [31744, 32000) to [0, 256)
+                                                    responses_remapped = responses_flat - start_index
+                                                    user_mini_batch['input_ids'] = responses_remapped  # Use remapped responses for loss computation
+                                                    
+                                                    logger.info(
+                                                        f"[GRPO Train] VLA vocab slicing: "
+                                                        f"logits {logits_tensor.shape} → {logits_sliced.shape}, "
+                                                        f"responses [min={responses_flat.min()}, max={responses_flat.max()}] "
+                                                        f"→ [min={responses_remapped.min()}, max={responses_remapped.max()}], "
+                                                        f"start_index={start_index}, vocab_size={vocab}, "
+                                                        f"scalar_advantages: {scalar_advantages}"
+                                                    )
+
+                                                    minibatched_advantages = (
+                                                        scalar_advantages
+                                                        .unsqueeze(1)
+                                                        .expand(-1, steps * action_seq_len)
+                                                    )
+                                                    
+                                                    # Flatten for loss computation
+                                                    raw_logits = logits_sliced.reshape(batch, steps * action_seq_len, 256)
+                                                else:
+                                                    logger.warning(
+                                                        "[GRPO Train] VLA model didn't return responses/logprob_masks. "
+                                                        "This may cause dimension mismatch errors."
+                                                    )
+                                                    raw_logits = raw_logits.logits.reshape(batch, steps * action_seq_len, vocab)
                                         else:
                                             # Regular LLM training or VLA without per-step structure
                                             raw_logits = self.model(**user_mini_batch)
@@ -1765,6 +2109,14 @@ class GRPOTrainer(Trainer):
                                             "inputs"
                                         ]
 
+                                    # DEBUG: Log shapes before compute_logprobs
+                                    logger.info(
+                                        f"[GRPO Train] Before compute_logprobs: "
+                                        f"input_ids (labels) shape={user_mini_batch['input_ids'].shape}, "
+                                        f"range=[{user_mini_batch['input_ids'].min()}, {user_mini_batch['input_ids'].max()}], "
+                                        f"logits shape={raw_logits.shape}, "
+                                        f"logprob_masks shape={user_mini_batch['logprob_masks'].shape}"
+                                    )
                                     (
                                         current_per_token_logprobs,
                                         cu_seqlens,
@@ -1775,6 +2127,9 @@ class GRPOTrainer(Trainer):
                                         is_full_logits=True
                                         if raw_logits.ndim == 3
                                         else False,
+                                    ) if not is_vla else self.compute_logprobs_vla(
+                                        user_mini_batch,
+                                        logits=raw_logits,
                                     )
                                     logprob_masks = user_mini_batch["logprob_masks"]
                                     current_advantages = (
@@ -1861,7 +2216,29 @@ class GRPOTrainer(Trainer):
                                         )
                                         kl_loss = kl_loss * loss_scaling_factor
 
+                                        # VRAM logging: Before backward
+                                        if torch.cuda.is_available():
+                                            vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
+                                            vram_reserved_gb = torch.cuda.memory_reserved() / 1e9
+                                            vram_max_gb = torch.cuda.max_memory_allocated() / 1e9
+                                            logger.info(
+                                                f"[VRAM] Before loss.backward(): "
+                                                f"Allocated={vram_allocated_gb:.2f}GB, Reserved={vram_reserved_gb:.2f}GB, Peak={vram_max_gb:.2f}GB | "
+                                                f"loss={loss.item():.4f}"
+                                            )
+
                                         loss.backward()
+                                        
+                                        # VRAM logging: After backward
+                                        if torch.cuda.is_available():
+                                            vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
+                                            vram_reserved_gb = torch.cuda.memory_reserved() / 1e9
+                                            vram_max_gb = torch.cuda.max_memory_allocated() / 1e9
+                                            logger.info(
+                                                f"[VRAM] After loss.backward(): "
+                                                f"Allocated={vram_allocated_gb:.2f}GB, Reserved={vram_reserved_gb:.2f}GB, Peak={vram_max_gb:.2f}GB"
+                                            )
+                                        
                                         loss_sum += per_token_loss.item()
                                         kl_loss_sum += kl_loss.item()
                                         loss_count += 1
@@ -1882,6 +2259,17 @@ class GRPOTrainer(Trainer):
 
                             if not is_computing_ref and not all_reduced:
                                 grad_norm_sum += self.execute_all_reduce()
+                                
+                                # VRAM logging: After optimizer step
+                                if torch.cuda.is_available():
+                                    vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
+                                    vram_reserved_gb = torch.cuda.memory_reserved() / 1e9
+                                    vram_max_gb = torch.cuda.max_memory_allocated() / 1e9
+                                    logger.info(
+                                        f"[VRAM] After optimizer step (execute_all_reduce): "
+                                        f"Allocated={vram_allocated_gb:.2f}GB, Reserved={vram_reserved_gb:.2f}GB, Peak={vram_max_gb:.2f}GB"
+                                    )
+                            
                             local_optimize_step += 1
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
