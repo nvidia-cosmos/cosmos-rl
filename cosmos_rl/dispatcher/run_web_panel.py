@@ -391,8 +391,7 @@ async def get_batched_prompt(n: int, validation_step: Optional[int] = None):
 
 @app.post(COSMOS_API_VALIDATION_REPORT_SUFFIX)
 async def validation_report(request: ValidationReportRequest):
-    rollouts_list, invalid_rollouts_list = extract_rollouts(request.payloads, True)
-    assert len(invalid_rollouts_list) == 0, "Validation rollouts should all be valid"
+    rollouts_list = extract_rollouts(request.payloads, True)
     controller.policy_status_manager.validation_report_validation_results(
         request.validation_step, rollouts_list, controller.rollout_status_manager
     )
@@ -452,29 +451,25 @@ async def put_rollout_group(rollout: RolloutRequest):
 
             return {"message": "Rollout end signal received"}
 
-        # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
-        valid_rollouts_list, invalid_rollouts_list = extract_rollouts(
-            rollout.payloads, rollout.is_end
-        )
+        rollouts_list = extract_rollouts(rollout.payloads, rollout.is_end)
+        # Update the statistics for dynamic sampling used for metrics collection
+        if controller.config.train.train_policy.variant == "dapo":
+            controller.policy_status_manager.update_dynamic_sampling_statistics(
+                rollout.metrics
+            )
         # Flatten the rollouts into a single list
-        valid_rollouts = [
+        rollouts = [
             rollout
-            for rollouts_group in valid_rollouts_list
+            for rollouts_group in rollouts_list
             for rollout in rollouts_group  # rollouts_group: all rollouts of the same prompt.
         ]
-        invalid_rollouts = [
-            rollout
-            for rollouts_group in invalid_rollouts_list
-            for rollout in rollouts_group
-        ]
-
-        if len(valid_rollouts) > 0:
+        if len(rollouts) > 0:
             logger.debug(
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
-                f"example: rollouts[0]\n{valid_rollouts[0]}"
+                f"example: rollouts[0]\n{rollouts[0]}"
             )
 
-        await controller.put_rollouts(valid_rollouts, invalid_rollouts)
+        await controller.put_rollouts(rollouts)
         return {"message": "Rollout put"}
     except Exception as e:
         import traceback

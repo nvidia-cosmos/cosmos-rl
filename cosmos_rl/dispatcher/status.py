@@ -33,7 +33,6 @@ from cosmos_rl.utils.wandb_logger import (
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from transformers import AutoTokenizer
 import numpy as np
-import itertools
 
 
 class ReplicaScalingEnum(StrEnum):
@@ -640,15 +639,12 @@ class PolicyStatusManager:
         self.rollout_buffer.put(rollout)
         self.try_trigger_data_fetch_and_training()
 
-    def put_rollouts(
-        self, valid_rollouts: List[Rollout], invalid_rollouts: List[Rollout]
-    ):
+    def put_rollouts(self, rollouts: List[Rollout]):
         """
         Put the rollouts to the rollout buffer.
         """
         completion_tokens_count = 0
         n_samples = 0
-        rollouts_to_put = None
         if (
             self.config.train.train_policy.on_policy
             and self.on_policy_rollout_completed
@@ -656,25 +652,7 @@ class PolicyStatusManager:
             # On-policy training has already completed the required samples for this policy step
             return completion_tokens_count, n_samples
 
-        if self.config.train.train_policy.variant == "dapo":
-            rollouts_to_put = valid_rollouts
-            # In single-thread: invalid rollouts should also be decreased from the total number of samples
-            self.remain_samples_num -= len(invalid_rollouts)
-            for rollout in invalid_rollouts:
-                filter_reward = rollout.filter_reward
-                key = "filtered_positive" if filter_reward > 0 else "filtered_negative"
-                if key not in self.filter_records:
-                    self.filter_records[key] = 0
-                self.filter_records[key] += 1
-            for rollout in valid_rollouts:
-                key = "sampled"
-                if key not in self.filter_records:
-                    self.filter_records[key] = 0
-                self.filter_records[key] += 1
-        else:
-            rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
-
-        for rollout in rollouts_to_put:
+        for rollout in rollouts:
             if self.config.train.train_policy.rollout_as_token_ids:
                 completion_tokens_count += len(rollout.completion_token_ids)
             else:
@@ -690,6 +668,19 @@ class PolicyStatusManager:
                     break
 
         return completion_tokens_count, n_samples
+
+    def update_dynamic_sampling_statistics(self, filter_records: Dict[str, int]):
+        """
+        Update the dynamic sampling statistics.
+        """
+        for k in ["sampled", "filtered_positive", "filtered_negative"]:
+            self.filter_records[k] = self.filter_records.get(k, 0) + filter_records.get(
+                k, 0
+            )
+
+        # Update the remaining samples number to reflect the filtering results
+        self.remain_samples_num -= filter_records.get("filtered_positive", 0)
+        self.remain_samples_num -= filter_records.get("filtered_negative", 0)
 
     def train_ack(
         self,

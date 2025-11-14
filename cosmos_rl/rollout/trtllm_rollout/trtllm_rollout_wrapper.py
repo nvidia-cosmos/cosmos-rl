@@ -265,7 +265,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         response = RolloutRequest(
             src_replica_name=self.replica_name,
             payloads=[],
-            completions=[],
             is_end=True,
         )
         logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")

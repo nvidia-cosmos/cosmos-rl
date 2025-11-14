@@ -13,19 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple
+from typing import List
 from cosmos_rl.dispatcher.data.schema import Rollout, RLPayload
 
 
 def extract_rollouts(
     payloads: List[RLPayload],
     is_end: bool,
-) -> Tuple[List[List[Rollout]], List[List[Rollout]]]:
+) -> List[List[Rollout]]:
     # Extract rollouts from payloads of request
-    # Separate valid and invalid rollouts for Dynamic Sampling
-    # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
-    valid_rollouts_list: List[List[Rollout]] = []
-    invalid_rollouts_list: List[List[Rollout]] = []
+    # The invalid rollouts have already been filtered out by the rollout worekrs if dyanmic sampling is enabled.
+
+    rollouts_list: List[List[Rollout]] = []
     for _, payload in enumerate(payloads):
         assert (
             len(payload.completions)
@@ -70,8 +69,6 @@ def extract_rollouts(
         assert all(
             rollout.prompt_idx >= 0 for rollout in rollouts
         ), "All rollouts should have a valid prompt index"
-        if payload.valid:
-            valid_rollouts_list.append(rollouts)
-        else:
-            invalid_rollouts_list.append(rollouts)
-    return valid_rollouts_list, invalid_rollouts_list
+
+        rollouts_list.append(rollouts)
+    return rollouts_list
