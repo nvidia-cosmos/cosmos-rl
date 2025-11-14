@@ -369,16 +369,13 @@ class Controller:
             return None
         return await replica.set_trace_path(trace_path, global_rank)
 
-    async def put_rollouts(
-        self, valid_rollouts: List[Rollout], invalid_rollouts: List[Rollout]
-    ):
+    async def put_rollouts(self, rollouts: List[Rollout]):
         """
         Dispatch the rollouts to the policy replicas in a round-robin manner.
-        valid_rollouts: List[Rollout]: The rollouts that have valid rewards
-        invalid_rollouts: List[Rollout]: The rollouts that have invalid rewards (all rewards are the same)
+        rollouts: List[Rollout]: The rollouts to be dispatched
         """
         completion_tokens_count, n_samples = self.policy_status_manager.put_rollouts(
-            valid_rollouts, invalid_rollouts
+            rollouts
         )
 
         self.stat_completion_tokens_count += completion_tokens_count
