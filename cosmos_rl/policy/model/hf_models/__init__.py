@@ -93,7 +93,7 @@ class HFModel(BaseModel):
         self.is_vlm = is_vlm
         self.need_dequantization = need_dequantization
         self.tp_slice_dim_map = None
-        self.sequence_packing_forward_patched = False
+        self.sequence_packing_forward_patched = None
         if getattr(model, "_checkpoint_conversion_mapping", None):
             if hf_config.model_type in ["R"]:
                 logger.warning(
@@ -880,15 +880,10 @@ class HFModel(BaseModel):
         ), f"{num_key_value_heads=} must be divisible by TP size ({tp_size})"
 
     def check_sequence_packing_compatible(self):
-        if not self.sequence_packing_forward_patched:
+        if self.sequence_packing_forward_patched is None:
             # called only once if patch is successful
             patch_success = sequence_packing_forward_patch(self.hf_config, self)
-            if patch_success:
-                self.sequence_packing_forward_patched = True
-            else:
-                logger.warning(
-                    f"Failed to patch sequence packing forward for {self.hf_config.model_type}"
-                )
+            self.sequence_packing_forward_patched = patch_success
         return self.sequence_packing_forward_patched
 
     def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
