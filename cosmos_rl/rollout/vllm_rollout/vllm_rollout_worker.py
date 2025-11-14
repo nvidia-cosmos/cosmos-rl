@@ -1425,7 +1425,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,
                     payloads=payloads,
-                    metadata=metadata,
+                    metrics=metadata,
                     is_end=False,
                 )
                 self.api_client.post_rollout_completion(response)

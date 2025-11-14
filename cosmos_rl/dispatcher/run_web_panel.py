@@ -391,8 +391,7 @@ async def get_batched_prompt(n: int, validation_step: Optional[int] = None):
 
 @app.post(COSMOS_API_VALIDATION_REPORT_SUFFIX)
 async def validation_report(request: ValidationReportRequest):
-    rollouts_list, invalid_rollouts_list = extract_rollouts(request.payloads, True)
-    assert len(invalid_rollouts_list) == 0, "Validation rollouts should all be valid"
+    rollouts_list = extract_rollouts(request.payloads, True)
     controller.policy_status_manager.validation_report_validation_results(
         request.validation_step, rollouts_list, controller.rollout_status_manager
     )
@@ -456,7 +455,7 @@ async def put_rollout_group(rollout: RolloutRequest):
         # Update the statistics for dynamic sampling used for metrics collection
         if controller.config.train.train_policy.variant == "dapo":
             controller.policy_status_manager.update_dynamic_sampling_statistics(
-                rollout.meta_data
+                rollout.metrics
             )
         # Flatten the rollouts into a single list
         rollouts = [
