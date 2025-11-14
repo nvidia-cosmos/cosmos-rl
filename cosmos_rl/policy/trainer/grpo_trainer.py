@@ -1198,38 +1198,32 @@ class GRPOTrainer(Trainer):
         
         VLA differs from standard LLM:
         - No token shifting (responses are already aligned with logits)
-        - Direct gather from logits using responses as indices
+        - Returns full log_probs distribution for masking at loss computation level
         
         Args:
             minibatch: dict with 'input_ids' (responses), 'logprob_masks'
             logits: model output logits (batch, seq_len, vocab_size)
             
         Returns:
-            logps: per-token log probabilities
+            log_probs: log probability distribution (batch*seq_len, vocab_size)
             cu_seqlens: cumulative sequence lengths
             metrics: dict with entropy metrics
         """
         responses = minibatch["input_ids"]  # (batch, seq_len) - action token IDs
         logprob_masks = minibatch["logprob_masks"].bool()  # (batch, seq_len)
         
-        # Extract effective (non-masked) logits and responses
-        effective_logits = logits[logprob_masks]  # (n_logprob_tokens, vocab_size)
-        effective_responses = responses[logprob_masks]  # (n_logprob_tokens,)
+        # Compute log probabilities for ALL tokens (don't pre-mask)
+        # Shape: (batch, seq_len, vocab_size) - keep full 896 dimension for masking later
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)  # (batch, seq_len, vocab)
         
-        # Compute log probabilities: log_softmax then gather
-        # Following SimpleVLA-RL: logprobs_from_logits(logits, responses)
-        log_probs_all = torch.nn.functional.log_softmax(effective_logits, dim=-1)  # (n_tokens, vocab)
-        log_probs = log_probs_all.gather(
-            dim=-1, 
-            index=effective_responses.unsqueeze(-1)
-        ).squeeze(-1)  # (n_tokens,)
-        
-        # Compute entropy (for logging)
+        # Compute entropy (for logging, only on effective tokens)
         metrics_dict = {}
         with torch.no_grad():
-            # Entropy from probability distribution
+            # Get effective tokens for entropy calculation
+            effective_logits = logits[logprob_masks]
             probs = torch.nn.functional.softmax(effective_logits, dim=-1)
-            entropy = -(probs * log_probs_all).sum(dim=-1)  # (n_tokens,)
+            log_probs_effective = torch.nn.functional.log_softmax(effective_logits, dim=-1)
+            entropy = -(probs * log_probs_effective).sum(dim=-1)  # (n_effective_tokens,)
             metrics_dict["entropy"] = entropy.mean()
             metrics_dict["effective_entropy"] = entropy.mean()  # Same for VLA
         
@@ -1330,6 +1324,9 @@ class GRPOTrainer(Trainer):
         Bypasses the complex GRPO trainer logic.
         """
         logger.info(f"[VLA Train] Starting VLA training for step {current_step}/{total_steps}")
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
         
         #  VRAM logging: Start
         if torch.cuda.is_available():
@@ -1358,11 +1355,14 @@ class GRPOTrainer(Trainer):
         
         # 3. Training loop: process each episode with gradient accumulation
         # Following SimpleVLA-RL: 1 episode per step, chunk within episode for memory
-        CHUNK_SIZE = 16  # Max steps per mini-step (matches SimpleVLA-RL)
+        CHUNK_SIZE = 8  # Max steps per mini-step (matches SimpleVLA-RL)
         
         self.model.train()
-        total_loss = 0.0
-        total_entropy = 0.0
+        # Initialize as tensors (not floats) for distributed operations compatibility
+        # Root cause: dist_util.dist_mean() expects tensors with .numel() method
+        # If initialized as float 0.0, avg_loss becomes float, causing AttributeError
+        total_loss = torch.tensor(0.0, device=self.device)
+        total_entropy = torch.tensor(0.0, device=self.device)
         num_mini_steps = 0
 
 
@@ -1373,6 +1373,9 @@ class GRPOTrainer(Trainer):
                 f"[VRAM] VLA Preprocess end: {vram_end:.2f}GB, "
                 f"peak={vram_peak:.2f}GB, delta={vram_end-vram_start:.2f}GB"
             )
+        # Zero gradients at episode start
+        self.optimizers.zero_grad()
+        grad_norm_sum = torch.tensor(0.0, device=self.device)
 
         #with torch.autocast(None):
         with torch.autocast(device_type='cuda'): # , dtype=torch.bfloat16):
@@ -1383,39 +1386,31 @@ class GRPOTrainer(Trainer):
                     f"[VLA Train] Episode {episode_idx+1}/{len(policy_inputs)}: "
                     f"{num_steps} steps, advantage={advantage:.4f}"
                 )
+
+                episode_data = self.data_packer.policy_collate_fn([policy_input], max_steps=64)
+                padded_num_steps = episode_data['input_ids'].shape[1]
+
+                prompt_mask = episode_data['input_ids'][0] != self.tokenizer.pad_token_id
+                prompt_len = prompt_mask.sum().item()
+                episode_data['input_ids'] = episode_data['input_ids'][..., :prompt_len]
+                episode_data['attention_mask'] = episode_data['attention_mask'][..., :prompt_len]
                 
-                # Zero gradients at episode start
-                self.optimizers.zero_grad()
+                logger.info(
+                    f"[VLA Train] Episode padded: actual={num_steps} steps, padded={padded_num_steps} steps "
+                    f"(padded steps masked via logprob_masks)"
+                )
                 
-                # Chunk episode into mini-steps for gradient accumulation
-                num_chunks = (num_steps + CHUNK_SIZE - 1) // CHUNK_SIZE
-                episode_loss = 0.0
-                episode_entropy = 0.0
-                
+                # Chunk episode - all workers process same chunks for FSDP sync
+                num_chunks = (padded_num_steps + CHUNK_SIZE - 1) // CHUNK_SIZE
+                episode_loss = torch.tensor(0.0, device=self.device)
+                episode_entropy = torch.tensor(0.0, device=self.device)
+                num_real_chunks = 0  # Chunks with at least one real step
                 for chunk_idx in range(num_chunks):
                     start_idx = chunk_idx * CHUNK_SIZE
-                    end_idx = min((chunk_idx + 1) * CHUNK_SIZE, num_steps)
+                    end_idx = min((chunk_idx + 1) * CHUNK_SIZE, padded_num_steps)
                     
-                    # Create chunk
-                    chunk_per_step_data = policy_input.per_step_data[start_idx:end_idx]
-                    chunk_pixel_values = policy_input.pixel_values[start_idx:end_idx]
-                    
-                    # Temporary RLPolicyInput for this chunk
-                    class ChunkInput:
-                        def __init__(self, per_step_data, pixel_values):
-                            self.per_step_data = per_step_data
-                            self.pixel_values = pixel_values
-                            self.num_steps = len(per_step_data)
-                    
-                    chunk_input = ChunkInput(chunk_per_step_data, chunk_pixel_values)
-                    
-                    # Collate chunk
-                    batch_dict = self.data_packer.policy_collate_fn([chunk_input], computed_max_len=512)
-                    
-                    # Move to device
-                    for key in ['input_ids', 'attention_mask', 'logprob_masks', 'responses', 'pixel_values', 'num_steps']:
-                        if key in batch_dict:
-                            batch_dict[key] = batch_dict[key].to(self.device)
+                    batch_dict = {k : v[:, start_idx:end_idx].to(self.device) 
+                                  for k, v in episode_data.items() if k != 'num_steps'}
                     
                     # Prepare advantages (same for all chunks in episode)
                     advantages_tensor = torch.tensor([advantage], device=self.device).unsqueeze(1)
@@ -1447,51 +1442,149 @@ class GRPOTrainer(Trainer):
                     )
                     log_probs, cu_seqlens, metrics = logprobs_result
                     
-                    # Compute loss (policy gradient)
-                    logprob_masks_flat = batch_dict['logprob_masks'].reshape(-1)
-                    advantages_flat = advantages_expanded.reshape(-1)
-                    masked_log_probs = log_probs * advantages_flat[logprob_masks_flat.bool()]
-                    chunk_loss = -masked_log_probs.mean()
+                    # Compute PPO loss with old_log_prob and clipping (matching SimpleVLA-RL)
+                    # log_probs: (batch, seq_len, vocab) - full distribution for all 896 tokens
+                    # responses_remapped: (batch, seq_len) - action indices
+                    # logprob_masks: (batch, seq_len) - mask for real vs padded tokens
+                    # old_log_prob: (batch, seq_len) - log probs from rollout
                     
-                    # Backward pass (accumulate gradients)
-                    chunk_loss.backward()
+                    # Refactored: Cleaner approach following SimpleVLA-RL pattern
+                    # Always compute loss for all tokens, apply mask weighting at the end
+                    # This naturally handles padded chunks (mask_sum=0 → loss=0, but still connected to model)
+                    # No if/else branching needed → simpler, safer, FSDP-friendly!
                     
-                    # Accumulate metrics
-                    episode_loss += chunk_loss.item()
-                    episode_entropy += metrics['entropy'].item()
-                    num_mini_steps += 1
+                    logprob_masks_flat = batch_dict['logprob_masks'].reshape(-1)  # (896,)
+                    advantages_flat = advantages_expanded.reshape(-1)  # (896,)
+                    mask = logprob_masks_flat.bool()
+                    mask_float = logprob_masks_flat.float()  # For weighting
+                    
+                    # Extract old_log_prob from batch and reshape
+                    old_log_prob_chunk = batch_dict['old_log_prob'].reshape(-1)  # (chunk_steps * 56,)
+                    
+                    # Compute loss for ALL tokens (real and padded)
+                    log_probs_flat = log_probs.reshape(-1, log_probs.shape[-1])  # (896, 256)
+                    responses_flat = responses_remapped.reshape(-1)  # (896,)
+                    
+                    # Gather log probs for actual actions taken (all tokens)
+                    new_log_probs = log_probs_flat.gather(
+                        dim=-1,
+                        index=responses_flat.unsqueeze(-1)
+                    ).squeeze(-1)  # (896,)
+                    
+                    # Get clipping ratios from config
+                    clip_ratio_low = self.config.train.train_policy.epsilon_low
+                    clip_ratio_high = self.config.train.train_policy.epsilon_high
+                    
+                    # Compute importance sampling ratio (all tokens)
+                    negative_approx_kl = new_log_probs - old_log_prob_chunk
+                    ratio = torch.exp(negative_approx_kl)
+                    
+                    # PPO clipped objective (all tokens)
+                    pg_losses = -advantages_flat * ratio
+                    pg_losses2 = -advantages_flat * torch.clamp(ratio, 1.0 - clip_ratio_low, 1.0 + clip_ratio_high)
+                    
+                    # Take maximum for conservative update (all tokens)
+                    pg_losses_max = torch.max(pg_losses, pg_losses2)
+                    
+                    # Apply mask weighting (this handles padded chunks naturally!)
+                    # If chunk is entirely padded: mask_sum=0 → weighted_loss=0 (but still connected!)
+                    mask_sum = mask_float.sum()
+                    weighted_pg_losses = pg_losses_max * mask_float  # Zero out padded tokens
+                    chunk_loss = weighted_pg_losses.sum() / mask_sum.clamp(min=1.0)  # Avoid div-by-zero
+                    
+                    # Compute metrics (only for real tokens)
+                    # Use mask to filter for accurate monitoring
+                    if mask.any():
+                        pg_clipfrac = torch.gt(pg_losses2[mask], pg_losses[mask]).float().mean()
+                        approx_kl = (-negative_approx_kl[mask]).mean()
+                        chunk_entropy = metrics['entropy']
+                    else:
+                        # Chunk is entirely padded - zero metrics
+                        pg_clipfrac = torch.tensor(0.0, device=self.device)
+                        approx_kl = torch.tensor(0.0, device=self.device)
+                        chunk_entropy = torch.tensor(0.0, device=self.device)
+                    
+                    # Scale for gradient accumulation before backward
+                    # Following SimpleVLA-RL pattern: always compute scaling, mask naturally handles padded chunks
+                    # Two scaling factors:
+                    # 1. Actual steps in chunk / actual steps in episode (normalizes by chunk contribution)
+                    # 2. 1 / num_episodes_in_batch (averages across episodes)
+                    num_episodes = len(policy_inputs)
+                    action_tokens_per_step = 56  # OpenVLA-OFT: 8 actions × 7 tokens per action
+                    
+                    # Compute actual steps in this chunk (works for all chunks, padded or not)
+                    actual_tokens_in_chunk = mask_sum  # Already computed above
+                    actual_steps_in_chunk = actual_tokens_in_chunk / action_tokens_per_step
+                    
+                    # Scale by: (steps_in_chunk / total_steps) * (1 / num_episodes)
+                    # For padded chunks: actual_steps_in_chunk=0 → scaling_factor=0 → scaled_loss=0
+                    chunk_weight = actual_steps_in_chunk / num_steps
+                    episode_weight = 1.0 / num_episodes
+                    scaling_factor = chunk_weight * episode_weight
+                    
+                    scaled_loss = chunk_loss * scaling_factor
+                    
+                    # Backward pass (always runs for FSDP sync, even if scaled_loss is zero)
+                    # Because chunk_loss is always connected to model (computed from log_probs),
+                    # this always triggers FSDP gradient synchronization ✅
+                    scaled_loss.backward()
+                    
+                    # Accumulate metrics (skip fully padded chunks)
+                    if mask.any():
+                        episode_loss += chunk_loss
+                        episode_entropy += chunk_entropy
+                        num_real_chunks += 1
+                    
+                    # Logging (simplified - no more if/else!)
+                    actual_steps_in_chunk_log = actual_steps_in_chunk.item() if isinstance(actual_steps_in_chunk, torch.Tensor) else actual_steps_in_chunk
+                    scaling_factor_log = scaling_factor.item() if isinstance(scaling_factor, torch.Tensor) else scaling_factor
                     
                     logger.info(
-                        f"[VLA Train]   Chunk {chunk_idx+1}/{num_chunks} (steps [{start_idx}, {end_idx})): "
-                        f"loss={chunk_loss.item():.4f}, entropy={metrics['entropy'].item():.4f}"
+                        f"[VLA Train]   Chunk {chunk_idx+1}/{num_chunks} (steps [{start_idx}:{end_idx}]): "
+                        f"loss={chunk_loss.item():.4f}, entropy={chunk_entropy.item():.4f}, "
+                        f"clipfrac={pg_clipfrac.item():.3f}, approx_kl={approx_kl.item():.4f}, "
+                        f"scale={scaling_factor_log:.4f} ({actual_steps_in_chunk_log:.1f}/{num_steps} steps, 1/{num_episodes} eps)"
+                        + (" [PADDED]" if not mask.any() else "")
                     )
+                    
+                    num_mini_steps += 1
+
+                # Average over real chunks only (padded chunks don't contribute)
+                if num_real_chunks > 0:
+                    avg_episode_loss = episode_loss / num_real_chunks
+                    avg_episode_entropy = episode_entropy / num_real_chunks
+                else:
+                    avg_episode_loss = torch.tensor(0.0, device=self.device)
+                    avg_episode_entropy = torch.tensor(0.0, device=self.device)
                 
-                    # Optimizer step after all chunks (gradient accumulation complete)
-                    self.optimizers.step()
-                
-                avg_episode_loss = episode_loss / num_chunks
-                avg_episode_entropy = episode_entropy / num_chunks
                 total_loss += avg_episode_loss
                 total_entropy += avg_episode_entropy
                 
                 logger.info(
                     f"[VLA Train] Episode {episode_idx+1} complete: "
-                    f"avg_loss={avg_episode_loss:.4f}, avg_entropy={avg_episode_entropy:.4f}"
+                    f"real_chunks={num_real_chunks}/{num_chunks}, "
+                    f"avg_loss={avg_episode_loss.item():.4f}, avg_entropy={avg_episode_entropy.item():.4f}"
                 )
         
-            # 4. LR scheduler step
+        # 4. LR scheduler step
         self.lr_schedulers.step()
         current_lr = self.optimizers.param_groups[0]['lr']
+        grad_norm_sum += self.execute_all_reduce()
         
         # 5. Report metrics
         num_episodes = len(policy_inputs)
-        avg_loss = total_loss / num_episodes if num_episodes > 0 else 0.0
-        avg_entropy = total_entropy / num_episodes if num_episodes > 0 else 0.0
+        # Keep as tensors for distributed operations
+        if num_episodes > 0:
+            avg_loss = total_loss / num_episodes
+            avg_entropy = total_entropy / num_episodes
+        else:
+            avg_loss = torch.tensor(0.0, device=self.device)
+            avg_entropy = torch.tensor(0.0, device=self.device)
         
         logger.info(
             f"[VLA Train] Step {current_step} complete: "
             f"{num_episodes} episodes, {num_mini_steps} mini-steps, "
-            f"avg_loss={avg_loss:.4f}, avg_entropy={avg_entropy:.4f}, lr={current_lr:.2e}"
+            f"avg_loss={avg_loss.item():.4f}, avg_entropy={avg_entropy.item():.4f}, lr={current_lr:.2e}"
         )
         
         # VRAM logging: End
@@ -1503,18 +1596,81 @@ class GRPOTrainer(Trainer):
                 f"peak={vram_peak:.2f}GB, delta={vram_end-vram_start:.2f}GB"
             )
         
-        # Checkpoint saving
-        if do_save_checkpoint:
-            self._save_checkpoint(current_step, is_final=(current_step == total_steps))
+        if (
+            self.parallel_dims.dp_replicate_enabled
+            or self.parallel_dims.dp_shard_enabled
+            or self.parallel_dims.cp_enabled
+        ):
+            # Distributed reduce operations
+            # Ensure avg_loss is a tensor (defensive check for type safety)
+            if not isinstance(avg_loss, torch.Tensor):
+                avg_loss = torch.tensor(avg_loss, device=self.device)
+            
+            global_avg_loss_tensor = dist_util.dist_mean(avg_loss, self.parallel_dims.mesh["dp_cp"])
+            global_max_loss_tensor = dist_util.dist_max(avg_loss, self.parallel_dims.mesh["dp_cp"])
+            
+            # Convert to Python scalars for reporting
+            # Handle both tensor and non-tensor returns from dist_util
+            global_avg_loss = global_avg_loss_tensor.item() if isinstance(global_avg_loss_tensor, torch.Tensor) else float(global_avg_loss_tensor)
+            global_max_loss = global_max_loss_tensor.item() if isinstance(global_max_loss_tensor, torch.Tensor) else float(global_max_loss_tensor)
+        else:
+            # Single device - convert tensor to scalar
+            global_avg_loss = global_max_loss = avg_loss.item()
         
-        return {
-            'loss': avg_loss,
-            'entropy': avg_entropy,
-            'lr': current_lr,
-            'num_episodes': num_episodes,
-            'num_mini_steps': num_mini_steps,
-            'num_rollouts': len(rollouts),
-        }
+        end_event.record()
+        report_data = {}
+        if is_master_rank(self.parallel_dims, self.global_rank):
+            report_data = {"train_step": current_step}
+            # Calculate the iteration time
+            assert end_event.query()
+            iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+            report_data["train/iteration_time"] = iter_time
+            report_data["train/loss_avg"] = global_avg_loss
+            report_data["train/loss_max"] = global_max_loss
+            report_data["train/learning_rate"] = self.lr_schedulers.get_last_lr()[0]
+            # if self.config.train.train_policy.kl_beta != 0.0:
+            #     report_data["train/kl_loss_avg"] = global_avg_kl_loss
+            #     report_data["train/kl_loss_max"] = global_max_kl_loss
+            report_data["train/grad_norm"] = grad_norm_sum.item() if isinstance(grad_norm_sum, torch.Tensor) else float(grad_norm_sum)
+            # if len(self.metrics) > 0:
+            #     for k, v in self.metrics.items():
+            #         report_data[f"train/{k}"] = (
+            #             v.item() if isinstance(v, torch.Tensor) else v
+            #         ) / loss_count
+        
+
+                # checkpointing
+        if self.is_master_replica and (do_save_checkpoint):
+            if self.config.train.ckpt.export_safetensors:
+                logger.info(
+                    f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
+                )
+                self.export_safetensors(
+                    output_dir=self.config.train.output_dir,
+                    rel_path=os.path.join(
+                        "safetensors",
+                        f"step_{current_step}",
+                    ),
+                    trainable_only=False,
+                    is_final=current_step == total_steps,
+                    dtype=str2torch_dtype(self.config.train.param_dtype),
+                )
+            logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
+            self.ckpt_manager.save_checkpoint(
+                model=self.model,
+                optimizer=self.optimizers,
+                scheduler=self.lr_schedulers,
+                step=current_step,
+                total_steps=total_steps,
+                **{
+                    "remain_samples_num": remain_samples_num,
+                    "is_final": current_step == total_steps,
+                },
+            )
+            self.ckpt_manager.save_check(step=current_step)
+
+        return report_data
+
 
     def train(
         self,

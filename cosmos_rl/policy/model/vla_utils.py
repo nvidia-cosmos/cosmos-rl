@@ -207,17 +207,20 @@ def create_vla_config(
         model = kwargs.get("model", None)
     
     # Create processor and tokenizer based on VLA type
-    processor = None
     
     if model == "openvla-oft":
+        from cosmos_rl.policy.model.vla.openvla_oft.configuration_prismatic import OpenVLAConfig
         from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import PrismaticProcessor
         logger.info(f"Creating OpenVLA-OFT processor from {name_or_path}")
+        AutoConfig.register("openvla", OpenVLAConfig)
         processor = PrismaticProcessor.from_pretrained(name_or_path, trust_remote_code=True)
         tokenizer = processor.tokenizer
         
     elif model == "openvla":
+        from cosmos_rl.policy.model.vla.openvla.configuration_prismatic import OpenVLAConfig
         from cosmos_rl.policy.model.vla.openvla.processing_prismatic import PrismaticProcessor
         logger.info(f"Creating OpenVLA processor from {name_or_path}")
+        AutoConfig.register("openvla", OpenVLAConfig)
         processor = PrismaticProcessor.from_pretrained(name_or_path, trust_remote_code=True)
         tokenizer = processor.tokenizer
         

@@ -180,7 +180,6 @@ class VLAModel(BaseModel):
         input_ids: torch.Tensor,  # (batch, num_steps, seq_len)
         pixel_values: torch.Tensor,  # (batch, num_steps, C, H, W)
         attention_mask: torch.Tensor,  # (batch, num_steps, seq_len)
-        num_steps: torch.Tensor,  # (batch,) - actual steps per sample
         position_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         **kwargs
@@ -199,7 +198,6 @@ class VLAModel(BaseModel):
             input_ids: (batch, num_steps, seq_len) - per-step input tokens
             pixel_values: (batch, num_steps, C, H, W) - per-step images
             attention_mask: (batch, num_steps, seq_len) - per-step masks
-            num_steps: (batch,) - actual number of steps per sample
             
         Returns:
             Output with logits reshaped to (batch, num_steps, output_len, vocab_size)
@@ -208,43 +206,12 @@ class VLAModel(BaseModel):
         batch_size, max_steps, seq_len = input_ids.shape
         _, _, C, H, W = pixel_values.shape
         
-        # VRAM logging: Before flatten
-        if torch.cuda.is_available():
-            vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
-            vram_reserved_gb = torch.cuda.memory_reserved() / 1e9
-            vram_max_gb = torch.cuda.max_memory_allocated() / 1e9
-            logger.info(
-                f"[VRAM] forward_with_trajectory_structure START: "
-                f"batch={batch_size}, steps={max_steps}, total_forward_calls={batch_size * max_steps} | "
-                f"Allocated={vram_allocated_gb:.2f}GB, Reserved={vram_reserved_gb:.2f}GB, Peak={vram_max_gb:.2f}GB"
-            )
-        
- 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             # Flatten: (batch, steps, ...) → (batch*steps, ...)
             input_ids_flat = input_ids.reshape(batch_size * max_steps, seq_len)
             attention_mask_flat = attention_mask.reshape(batch_size * max_steps, seq_len)
             pixel_values_flat = pixel_values.reshape(batch_size * max_steps, C, H, W)
             
-            # Unpad sequences to save computation and memory (following SimpleVLA-RL)
-            # Remove padding tokens from the right side of each sequence
-            # Must use same pad_token_id as data packer (from tokenizer)
-            pad_token_id = getattr(self.hf_config, 'pad_token_id', 32000)
-            if pad_token_id is None:
-                pad_token_id = 32000
-                logger.warning(f"[VLA Unpad] hf_config.pad_token_id is None, using default 32000")
-            
-            logger.debug(f"[VLA Unpad] Using pad_token_id={pad_token_id} from hf_config")
-            
-            input_ids_unpad, valid_len = self._unpad_sequences(input_ids_flat, pad_token_id)
-            attention_mask_unpad, _ = self._unpad_sequences(attention_mask_flat, 0)
-            
-            # Handle logprob_masks for openvla-oft:
-            # - input_ids: prompt only (31 tokens after unpadding)
-            # - Model internally adds: 56 action placeholders + 1 stop token
-            # - Model returns: logits for 56 action positions
-            # - logprob_masks: 56 values (one per action token) - already matches output!
-            # So we DON'T need to unpad logprob_masks - they already align with model output
             logprob_masks_unpad = None
             if 'logprob_masks' in kwargs and kwargs['logprob_masks'] is not None:
                 logprob_masks = kwargs['logprob_masks']
@@ -264,42 +231,14 @@ class VLAModel(BaseModel):
                         f"trainable_tokens={num_trainable} (matches model output action positions)"
                     )
             
-            logger.info(
-                f"[VLA Forward] Unpadded sequences: {seq_len} → {valid_len} tokens "
-                f"(saved {seq_len - valid_len} padding tokens per step)"
-            )
-        
-            # VRAM logging: After unpadding
-            if torch.cuda.is_available():
-                vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
-                logger.info(
-                    f"[VRAM] After unpadding: Allocated={vram_allocated_gb:.2f}GB | "
-                    f"input_ids_unpad={input_ids_unpad.shape}, pixel_values_flat={pixel_values_flat.shape}"
-                )
-        
-            logger.debug(
-                f"[VLA Forward] Processing {batch_size} samples × {max_steps} steps = {batch_size * max_steps} forward calls"
-            )
-        
-            # Forward pass through model with unpadded sequences
             outputs = self.forward(
-                input_ids=input_ids_unpad,
+                input_ids=input_ids_flat,
                 pixel_values=pixel_values_flat,
-                attention_mask=attention_mask_unpad,
+                attention_mask=attention_mask_flat,
                 position_ids=position_ids,
                 labels=labels,
                 **kwargs
             )
-        
-            # VRAM logging: After forward pass
-            if torch.cuda.is_available():
-                vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
-                vram_reserved_gb = torch.cuda.memory_reserved() / 1e9
-                vram_max_gb = torch.cuda.max_memory_allocated() / 1e9
-                logger.info(
-                    f"[VRAM] After forward pass: "
-                    f"Allocated={vram_allocated_gb:.2f}GB, Reserved={vram_reserved_gb:.2f}GB, Peak={vram_max_gb:.2f}GB"
-                )
         
             # Reshape back: (batch*steps, output_len, vocab) → (batch, steps, output_len, vocab)
             # Note: output_len may differ from seq_len (openvla-oft returns only action tokens)
@@ -308,19 +247,6 @@ class VLAModel(BaseModel):
             vocab_size = flat_logits.shape[2]
         
             logits_reshaped = flat_logits.reshape(batch_size, max_steps, output_len, vocab_size)
-        
-            # VRAM logging: After reshape
-            if torch.cuda.is_available():
-                vram_allocated_gb = torch.cuda.memory_allocated() / 1e9
-                logger.info(
-                    f"[VRAM] After reshape: Allocated={vram_allocated_gb:.2f}GB | "
-                    f"logits_reshaped={logits_reshaped.shape}"
-                )
-        
-            logger.debug(
-                f"[VLA Forward] Reshaped logits: ({batch_size * max_steps}, {output_len}, {vocab_size}) → "
-                f"({batch_size}, {max_steps}, {output_len}, {vocab_size})"
-            )
         
             # Set the reshaped logits on the output object
             outputs.logits = logits_reshaped
@@ -335,44 +261,9 @@ class VLAModel(BaseModel):
             # For openvla-oft: responses are the action tokens (56) to compare against output logits
             if 'responses' in kwargs and kwargs['responses'] is not None:
                 outputs.responses = kwargs['responses']
-                logger.debug(f"[VLA Forward] Attached responses for loss computation")
+                logger.debug("[VLA Forward] Attached responses for loss computation")
             
             return outputs
-    
-    def _unpad_sequences(self, tensor: torch.Tensor, pad_id: int) -> tuple:
-        """
-        Remove padding tokens from sequences (following SimpleVLA-RL's approach).
-        
-        Assumes all sequences in the batch have the same padding pattern
-        (padding on the right side).
-        
-        Args:
-            tensor: (batch, seq_len) tensor with padding
-            pad_id: padding token id
-            
-        Returns:
-            unpadded_tensor: (batch, valid_len) tensor without padding
-            valid_len: number of valid (non-padding) tokens
-        """
-        # Create mask for non-padding tokens
-        mask = tensor != pad_id
-        
-        # Verify all samples have the same padding pattern
-        if not torch.all(mask == mask[0:1], dim=0).all():
-            # If padding patterns differ, log warning and use the first sample's pattern
-            logger.warning(
-                "[VLA Unpad] Inconsistent padding patterns detected across batch. "
-                "Using first sample's pattern."
-            )
-        
-        # Use the first sample's mask as the base pattern
-        base_mask = mask[0]
-        valid_len = base_mask.sum().item()
-        
-        # Apply mask to remove padding
-        unpadded_tensor = tensor[:, base_mask]
-        
-        return unpadded_tensor, valid_len
     
     def generate(
         self,

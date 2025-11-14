@@ -22,6 +22,7 @@ patterns from SimpleVLA-RL's rob_rollout.py
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import contextlib
 from typing import Dict, List, Any, Optional, Tuple
@@ -31,6 +32,24 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import torchvision.transforms as transforms
 
 from cosmos_rl.utils.logging import logger
+
+
+def logprobs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """
+    Compute log probabilities from logits and labels.
+    Matches SimpleVLA-RL's logprobs_from_logits function.
+    
+    Args:
+        logits: (batch, seq_len, vocab_size) or (batch*seq_len, vocab_size)
+        labels: (batch, seq_len) or (batch*seq_len,)
+    
+    Returns:
+        log_probs: (batch, seq_len) or (batch*seq_len,) log probabilities
+    """
+    # Naive implementation (memory efficient)
+    logp = F.log_softmax(logits, dim=-1)
+    logpy = torch.gather(logp, dim=-1, index=labels.unsqueeze(-1))
+    return logpy.squeeze(-1)
 
 
 def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
@@ -396,6 +415,98 @@ class VLAModelInference:
         except Exception as e:
             logger.warning(f"OpenVLA inference failed: {e}")
             return self._generate_dummy_step(prompts)
+    
+    def compute_old_log_probs(self, 
+                              input_ids: torch.Tensor,
+                              attention_mask: torch.Tensor, 
+                              pixel_values: torch.Tensor,
+                              responses: torch.Tensor,
+                              temperature: float = 1.0,
+                              proprio: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute log probabilities for generated actions by replaying trajectory.
+        This matches SimpleVLA-RL's _forward_micro_batch logic.
+        
+        Args:
+            input_ids: (batch, seq_len) token ids
+            attention_mask: (batch, seq_len) attention mask
+            pixel_values: (batch, C, H, W) or (batch, num_images, C, H, W) images
+            responses: (batch, response_len) generated action token ids
+            temperature: sampling temperature
+            proprio: Optional proprioceptive features (batch, proprio_dim)
+        
+        Returns:
+            log_probs: (batch, response_len) log probabilities of generated actions
+        """
+        try:
+            # Get vla_type from config
+            vla_type = getattr(self.config, 'vla_type', getattr(self.config, 'vla', None))
+            
+            # Handle FSDP model parameters
+            param_ctx = contextlib.nullcontext()
+            if isinstance(self.module, FSDP):
+                param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+            
+            with param_ctx:
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    if vla_type == "openvla-oft":
+                        # Get model logits for OpenVLA-OFT
+                        logits = self.module(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            pixel_values=pixel_values,
+                            proprio=proprio,
+                        )
+                        
+                        # Extract action token logits (last 256 tokens, excluding padding)
+                        vocab_size = getattr(self.module, 'vocab_size', 32000)
+                        start_index = vocab_size - 256
+                        logits = logits[..., -256-64:-64]  # (batch, seq_len, 256)
+                        
+                        # Remap responses to action space [0, 255]
+                        responses_remapped = responses - start_index
+                        
+                        # Apply temperature
+                        logits = logits.div(temperature)
+                        
+                        # Compute log probabilities
+                        log_probs = logprobs_from_logits(logits, responses_remapped)
+                        
+                        return log_probs
+                    
+                    elif vla_type == "openvla":
+                        # Get model output for OpenVLA
+                        output = self.module(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            pixel_values=pixel_values,
+                            use_cache=False
+                        )
+                        logits = output.logits
+                        
+                        # Extract action token logits
+                        response_length = responses.size(-1)
+                        logits = logits[:, -response_length - 1:-1]
+                        
+                        # Apply temperature
+                        logits = logits.div(temperature)
+                        
+                        # Compute log probabilities
+                        log_probs = logprobs_from_logits(logits, responses)
+                        
+                        return log_probs
+                    
+                    else:
+                        logger.warning(f"Unknown VLA type: {vla_type}, returning dummy log probs")
+                        # Return dummy log probs
+                        return torch.zeros_like(responses, dtype=torch.float32)
+        
+        except Exception as e:
+            logger.error(f"Failed to compute old_log_probs: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return dummy log probs
+            return torch.zeros_like(responses, dtype=torch.float32)
     
     def _generate_dummy_step(self, prompts: Dict[str, torch.Tensor]) -> Dict[str, Any]:
         """Generate dummy step when actual model inference fails"""

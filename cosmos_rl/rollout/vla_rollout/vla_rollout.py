@@ -92,7 +92,12 @@ class VLARollout(RolloutBase):
         self.env_lock = Lock()
         
         # GRPO Streaming Queue: Leftover state persists across batches
-        self.leftover_payloads = []  # Payloads that didn't meet epsilon criteria
+        self.leftover_payloads = []  # Payloads that didn't meet success rate criteria
+        
+        # Success rate thresholds for GRPO filtering (default member variables)
+        # NOTE: These are different from PPO epsilon_low/high which are clipping ratios!
+        self.success_rate_threshold_low = 0.1
+        self.success_rate_threshold_high = 0.9
         self.leftover_metadata = {}  # Track leftover_count, success_rate per payload_id
         self.replacement_mapping = {}  # Maps exhausted payload_id -> replacement payload
         self.MAX_LEFTOVER_ATTEMPTS = 2  # Max attempts before replacement
@@ -538,6 +543,48 @@ class VLARollout(RolloutBase):
                             resp = step_responses
                         trajectory_data['responses'].append(resp)
                 
+                # Compute old_log_probs for the generated trajectory (matching SimpleVLA-RL)
+                # This replays the trajectory through the model to get log probabilities
+                if (len(trajectory_data['input_ids']) > 0 and 
+                    len(trajectory_data['responses']) > 0 and
+                    self.model_inference is not None):
+                    try:
+                        # Stack all steps into batch tensors
+                        input_ids_batch = torch.stack(trajectory_data['input_ids'])  # (num_steps, seq_len)
+                        attention_mask_batch = torch.stack(trajectory_data['attention_mask'])  # (num_steps, seq_len)
+                        pixel_values_batch = torch.stack(trajectory_data['pixel_values'])  # (num_steps, C, H, W)
+                        responses_batch = torch.stack(trajectory_data['responses'])  # (num_steps, response_len)
+                        
+                        # Move to device
+                        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                        input_ids_batch = input_ids_batch.to(device)
+                        attention_mask_batch = attention_mask_batch.to(device)
+                        pixel_values_batch = pixel_values_batch.to(device)
+                        responses_batch = responses_batch.to(device)
+                        
+                        # Compute log probabilities by replaying trajectory
+                        with torch.no_grad():
+                            old_log_probs = self.model_inference.compute_old_log_probs(
+                                input_ids=input_ids_batch,
+                                attention_mask=attention_mask_batch,
+                                pixel_values=pixel_values_batch,
+                                responses=responses_batch,
+                                temperature=self.temperature,
+                                proprio=None  # TODO: Add proprio support if needed
+                            )
+                        
+                        # Store old_log_probs in trajectory data
+                        # Convert to list of tensors for consistency with other trajectory fields
+                        trajectory_data['old_log_prob'] = [old_log_probs[i].cpu() for i in range(old_log_probs.shape[0])]
+                        
+                        logger.debug(f"Computed old_log_probs for trajectory with {len(trajectory_data['old_log_prob'])} steps")
+                    
+                    except Exception as e:
+                        logger.warning(f"Failed to compute old_log_probs for trajectory: {e}")
+                        # Don't fail the entire rollout, just skip old_log_prob computation
+                        import traceback
+                        traceback.print_exc()
+                
                 # Create RolloutResult directly (avoid intermediate episode_data dict)
                 num_actions = len(trajectory_data['responses'])
                 completion_text = f"Task {'completed' if success else 'failed'} in {episode_length} steps ({num_actions} actions)"
@@ -670,20 +717,20 @@ class VLARollout(RolloutBase):
             return None
     
     def _check_grpo_group_valid(self, group_results: List[RolloutResult], 
-                                epsilon_low: float, epsilon_high: float) -> bool:
+                                success_rate_low: float, success_rate_high: float) -> bool:
         """Check if a GRPO group meets success rate criteria.
         
         Args:
             group_results: List of RolloutResult for same task (n_generation rollouts)
-            epsilon_low: Minimum acceptable success rate (e.g., 0.2 = 20%)
-            epsilon_high: Maximum acceptable success rate (e.g., 0.28 = 28%)
+            success_rate_low: Minimum acceptable success rate (e.g., 0.2 = 20%)
+            success_rate_high: Maximum acceptable success rate (e.g., 0.8 = 80%)
             
         Returns:
-            True if group is valid (success rate in [epsilon_low, epsilon_high])
+            True if group is valid (success rate in [success_rate_low, success_rate_high])
         """
         successes = sum(1 for r in group_results if r.environment_info.get('success', False))
         success_rate = successes / len(group_results)
-        return epsilon_low <= success_rate <= epsilon_high
+        return success_rate_low <= success_rate <= success_rate_high
     
     def rollout_generation(self, payloads: List[RLPayload], 
                           n_generation: int = 1,
@@ -698,7 +745,7 @@ class VLARollout(RolloutBase):
         
         For GRPO-style training, this method uses a STREAMING QUEUE approach:
         - Rollout each payload group once
-        - Payloads with success rate in [epsilon_low, epsilon_high] are accepted immediately
+        - Payloads with success rate in [success_rate_threshold_low, success_rate_threshold_high] are accepted immediately
         - Payloads outside range become "leftovers" and are carried to next iteration
         - After MAX_LEFTOVER_ATTEMPTS (default 3), exhausted leftovers are replaced with HARDEST tasks
         - Hardness = (1 - avg_success_rate) * 100 + leftover_count - replacement_usage_count * 20
@@ -754,13 +801,13 @@ class VLARollout(RolloutBase):
             #   6. Hardness = leftover_count * 10 + (1 - success_rate)
             MAX_CHUNK_SIZE = 8  # Maximum parallel environments per chunk
             
-            # Get GRPO filtering params (only for training)
-            epsilon_low = self.config.train.train_policy.epsilon_low if enable_grpo_filter else 0.0
-            epsilon_high = self.config.train.train_policy.epsilon_high if enable_grpo_filter else 1.0
+            # Get success rate thresholds (only for training)
+            success_rate_low = self.success_rate_threshold_low if enable_grpo_filter else 0.0
+            success_rate_high = self.success_rate_threshold_high if enable_grpo_filter else 1.0
             
             if enable_grpo_filter:
                 logger.info(
-                    f"[GRPO Streaming Queue] Filtering enabled: success_rate ∈ [{epsilon_low:.2f}, {epsilon_high:.2f}], "
+                    f"[GRPO Streaming Queue] Filtering enabled: success_rate ∈ [{success_rate_low:.2f}, {success_rate_high:.2f}], "
                     f"max leftover attempts={self.MAX_LEFTOVER_ATTEMPTS}, "
                     f"hardness metric=(1-avg_success_rate)*100 + leftover_count - replacement_usage*20"
                 )
@@ -839,7 +886,7 @@ class VLARollout(RolloutBase):
                     payload_id = self._get_payload_id(payload)
                     metadata = self.leftover_metadata[payload_id]
                     
-                    is_valid = self._check_grpo_group_valid(group_results, epsilon_low, epsilon_high)
+                    is_valid = self._check_grpo_group_valid(group_results, success_rate_low, success_rate_high)
                     successes = sum(1 for r in group_results if r.environment_info.get('success', False))
                     success_rate = successes / len(group_results) if len(group_results) > 0 else 0.0
                     
