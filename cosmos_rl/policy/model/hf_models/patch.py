@@ -132,18 +132,32 @@ def make_new_self_attn_forward(original_attn_forward):
     def self_attn_forward(self, hidden_states, *args, **kwargs):
         valid_input_len = kwargs.get("valid_input_len", None)
         if valid_input_len is not None:
+            attention_mask_cache = kwargs.get("attention_mask_cache")
             if hasattr(self, "is_sliding") and self.is_sliding:
                 assert (
                     hasattr(self, "sliding_window") and self.sliding_window is not None
                 ), "sliding_window must be set for sliding attention"
-                attention_mask = get_packed_sliding_attention_mask(
-                    valid_input_len.tolist(), self.sliding_window, hidden_states.device
+                attention_mask = attention_mask_cache.get(
+                    f"sliding_attention_mask_{self.sliding_window}", None
                 )
+                if attention_mask is None:
+                    attention_mask = get_packed_sliding_attention_mask(
+                        valid_input_len.tolist(),
+                        self.sliding_window,
+                        hidden_states.device,
+                    )
+                    attention_mask_cache[
+                        f"sliding_attention_mask_{self.sliding_window}"
+                    ] = attention_mask
             else:
-                attention_mask = get_packed_attention_mask(
-                    valid_input_len.tolist(), hidden_states.device
-                )
+                attention_mask = attention_mask_cache.get("full_attention_mask", None)
+                if attention_mask is None:
+                    attention_mask = get_packed_attention_mask(
+                        valid_input_len.tolist(), hidden_states.device
+                    )
+                    attention_mask_cache["full_attention_mask"] = attention_mask
             kwargs["attention_mask"] = attention_mask
+
         return original_attn_forward(hidden_states, *args, **kwargs)
 
     return self_attn_forward
@@ -203,6 +217,8 @@ def sequence_packing_forward_qwen3_vl_patch(model):
 
             if len(position_ids_list) > 0:
                 kwargs["position_ids"] = torch.cat(position_ids_list, dim=2)
+            # Clear attention mask cache
+            kwargs["attention_mask_cache"] = {}
 
             del (
                 inputs_embeds_list,
@@ -248,6 +264,8 @@ def sequence_packing_forward_gemma3_vl_patch(model):
                 )
             kwargs["input_ids"] = torch.cat(input_ids_list, dim=1)
             kwargs["cache_position"] = torch.cat(cache_position_list, dim=0)
+            # Clear attention mask cache
+            kwargs["attention_mask_cache"] = {}
         return original_forward(*args, **kwargs)
 
     model.model.forward = sequence_packing_forward_gemma3_vl_inner
@@ -282,7 +300,8 @@ def sequence_packing_forward_llm_patch(model):
             kwargs["input_ids"] = torch.cat(input_ids_list, dim=1)
             kwargs["cache_position"] = torch.cat(cache_position_list, dim=0)
             kwargs["position_ids"] = kwargs["cache_position"].clone().unsqueeze(0)
-
+            # Clear attention mask cache
+            kwargs["attention_mask_cache"] = {}
             del (
                 input_ids_list,
                 cache_position_list,
