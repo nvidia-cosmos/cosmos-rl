@@ -22,7 +22,7 @@ class DemoModel(nn.Module):
     def forward(self, x):
         return self.linear2(self.linear(self.norm(x)))
 
-    def fqn_filter_for_fp8(self):
+    def fqn_filter_for_quantization(self):
         return []
 
 

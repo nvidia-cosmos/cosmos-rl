@@ -38,6 +38,7 @@ from typing import Dict, Optional
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
+from cosmos_rl.utils.fp4.fp4_util import FP4ModelConverter
 from cosmos_rl.policy.kernel.modeling_utils import init_flash_attn_meta
 from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
 from cosmos_rl.utils.util import (
@@ -93,6 +94,9 @@ class Trainer(CommMixin):
         with torch.device("meta"):
             if config.train.fp8.enable_fp8:
                 self.model_converter = FP8ModelConverter(config, parallel_dims)
+                self.model_converter.convert_model(model)
+            elif config.train.fp4.enable_fp4:
+                self.model_converter = FP4ModelConverter(config, parallel_dims)
                 self.model_converter.convert_model(model)
 
         if config.train.fsdp_offload:
@@ -150,13 +154,13 @@ class Trainer(CommMixin):
 
         self.seq_len_multiple = parallel_dims.cp * parallel_dims.tp
         self.lr_schedulers = None
-        if self.config.train.fp8.enable_fp8:
-            # Constraint of FP8 kernel(torch._scaled_mm): it requires K in MNK is mutiple of 16. In backward of Linear, to
+        if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
+            # Constraint of FP8/FP4 kernel(torch._scaled_mm): it requires K in MNK is mutiple of 16. In backward of Linear, to
             # calculate the gradient of weight, we have to round the seq_len_multiple to mutiple of 16.
             # See: https://github.com/pytorch/pytorch/blob/851a6fa82df251fbc368f0284d941ce78f68e7b1/aten/src/ATen/native/cuda/Blas.cpp#L1252
             self.seq_len_multiple = (self.seq_len_multiple + 16 - 1) // 16 * 16
             logger.info(
-                "FP8 Training enabled, round seq_len_multiple to mutiple of 16."
+                "FP8/FP4 Training enabled, round seq_len_multiple to mutiple of 16."
             )
         logger.info(
             f"Trainer initialized at local rank {self.local_rank}, with seq_len_multiple: {self.seq_len_multiple}"
@@ -193,7 +197,7 @@ class Trainer(CommMixin):
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(self.model_parts, self.config)
-        if self.config.train.fp8.enable_fp8:
+        if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
             self.optimizers.register_step_post_hook(
                 lambda *args, **kwargs: self.model_converter.post_optimizer_hook(
                     self.model_parts
