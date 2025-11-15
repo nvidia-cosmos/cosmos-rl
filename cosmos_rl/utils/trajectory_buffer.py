@@ -83,29 +83,7 @@ class TrajectoryBuffer:
             file_size_mb = filepath.stat().st_size / (1024 * 1024)
             num_chunks = len(trajectory_data.get('input_ids', []))
             
-            # Debug logging for trajectory data structure
-            sample_chunk_info = ""
-            if num_chunks > 0:
-                first_input = trajectory_data['input_ids'][0]
-                first_response = trajectory_data['responses'][0] if 'responses' in trajectory_data and trajectory_data['responses'] else None
-                first_pixel = trajectory_data['pixel_values'][0] if 'pixel_values' in trajectory_data and trajectory_data['pixel_values'] else None
-                
-                input_len = len(first_input) if isinstance(first_input, (list, torch.Tensor)) else 0
-                response_shape = first_response.shape if isinstance(first_response, torch.Tensor) else (len(first_response) if isinstance(first_response, list) else "N/A")
-                pixel_shape = first_pixel.shape if isinstance(first_pixel, torch.Tensor) else "N/A"
-                pixel_dtype = first_pixel.dtype if isinstance(first_pixel, torch.Tensor) else "N/A"
-                
-                # Calculate expected pixel_values size
-                if isinstance(first_pixel, torch.Tensor):
-                    per_chunk_mb = first_pixel.element_size() * first_pixel.nelement() / (1024 * 1024)
-                    expected_total_mb = per_chunk_mb * num_chunks
-                    actual_vs_expected = f", expected_pixel_mb={expected_total_mb:.1f}, actual/expected={file_size_mb/expected_total_mb:.2f}x"
-                else:
-                    actual_vs_expected = ""
-                
-                sample_chunk_info = f" | First chunk: input_ids={input_len}, responses={response_shape}, pixel_values={pixel_shape}, dtype={pixel_dtype}{actual_vs_expected}"
-            
-            logger.info(f"[TrajectoryBuffer] Saved trajectory {trajectory_id}: {num_chunks} chunks, {file_size_mb:.1f} MB{sample_chunk_info}")
+            logger.info(f"[TrajectoryBuffer] Saved trajectory {trajectory_id}: {num_chunks} chunks, {file_size_mb:.1f} MB")
             
             return trajectory_id
         except Exception as e:
@@ -136,17 +114,16 @@ class TrajectoryBuffer:
                 trajectory_data = pickle.load(f)
             
             # Debug logging for loaded trajectory structure
-            num_chunks = len(trajectory_data.get('input_ids', []))
-            sample_info = ""
-            if num_chunks > 0:
-                first_input = trajectory_data['input_ids'][0]
-                first_response = trajectory_data['responses'][0] if 'responses' in trajectory_data and trajectory_data['responses'] else None
-                
-                input_len = len(first_input) if isinstance(first_input, (list, torch.Tensor)) else 0
-                response_shape = first_response.shape if isinstance(first_response, torch.Tensor) else (len(first_response) if isinstance(first_response, list) else "N/A")
-                sample_info = f" | {num_chunks} chunks, first: input_ids={input_len}, responses={response_shape}"
+            # Handle both stacked tensors and lists
+            input_ids_data = trajectory_data.get('input_ids')
+            if isinstance(input_ids_data, torch.Tensor):
+                num_chunks = input_ids_data.shape[0] if input_ids_data.dim() > 0 else 0
+            elif isinstance(input_ids_data, list):
+                num_chunks = len(input_ids_data)
+            else:
+                num_chunks = 0
             
-            logger.info(f"[TrajectoryBuffer] Loaded trajectory {trajectory_id}{sample_info}")
+            logger.info(f"[TrajectoryBuffer] Loaded trajectory {trajectory_id}: {num_chunks} chunks")
             
             if remove_after_load:
                 filepath.unlink()

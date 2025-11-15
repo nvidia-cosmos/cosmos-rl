@@ -21,7 +21,7 @@ Reimplemented from verl/utils/libero_utils.py to remove external dependencies.
 
 import os
 import numpy as np
-from typing import Tuple
+from typing import Dict
 from cosmos_rl.utils.logging import logger
 
 from libero.libero import get_libero_path
@@ -163,4 +163,45 @@ def save_rollout_video(
     
     logger.debug(f"✅ Saved {len(rollout_images)} frames to: {mp4_path}")
     return mp4_path
+
+
+def obs_to_vla_input(obs: Dict, is_robotwin: bool = False) -> Dict:
+    """
+    Convert environment observation to VLA model input format
+    
+    Args:
+        obs: Raw observation dict from environment
+        is_robotwin: Whether this is RoboTwin format (default: False for LIBERO)
+    
+    Returns:
+        Dict with 'full_image' (and 'state' for RoboTwin)
+    """
+    if is_robotwin:
+        # RoboTwin format
+        return {
+            'full_image': obs.get('agentview_image', obs.get('image', np.zeros((256, 256, 3)))),
+            'state': obs.get('robot0_proprio', obs.get('state', np.zeros(32)))
+        }
+    else:
+        # LIBERO format
+        # IMPORTANT: Resize to 224x224 to match SimpleVLA-RL's get_libero_image()
+        img = obs.get('agentview_image', np.zeros((256, 256, 3)))
+        
+        # Resize using TensorFlow (EXACT match to SimpleVLA-RL's resize_image function)
+        if img.shape[0] != 224 or img.shape[1] != 224:
+            import tensorflow as tf
+            # Exactly match SimpleVLA-RL's resize_image implementation:
+            # - Encode as JPEG (as done in RLDS dataset builder)
+            # - Decode back
+            # - Resize with lanczos3 and antialias
+            # - Clip and round
+            img = tf.image.encode_jpeg(img)
+            img = tf.io.decode_image(img, expand_animations=False, dtype=tf.uint8)
+            img = tf.image.resize(img, (224, 224), method="lanczos3", antialias=True)
+            img = tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8)
+            img = img.numpy()
+        
+        return {
+            'full_image': img
+        }
 

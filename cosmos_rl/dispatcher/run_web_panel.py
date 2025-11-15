@@ -473,6 +473,7 @@ async def put_rollout_group(rollout: RolloutRequest):
         valid_rollouts_list, invalid_rollouts_list = extract_rollouts(
             rollout.payloads, rollout.is_end, rollout.prompt_idxs
         )
+        logger.info(f"[Controller] valid_rollouts_list: {len(valid_rollouts_list)}, invalid_rollouts_list: {len(invalid_rollouts_list)}")
         # Flatten the rollouts into a single list
         valid_rollouts = [
             rollout

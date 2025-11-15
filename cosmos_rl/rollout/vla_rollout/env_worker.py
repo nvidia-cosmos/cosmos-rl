@@ -24,28 +24,8 @@ import gc
 import torch
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
-import os
-import datetime
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.rollout.vla_rollout.libero_utils import get_libero_env
-
-
-def _log_worker_error(task_suite: str, task_id: int, trial_id: int, error_msg: str):
-    """
-    Write error message to a dedicated log file for worker process debugging.
-    
-    This is necessary because logger and print() don't work reliably in 
-    multiprocessing child processes. We write directly to a file instead.
-    """
-    log_dir = "logs"
-    os.makedirs(log_dir, exist_ok=True)
-    
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    log_file = os.path.join(log_dir, "worker_errors.txt")
-    
-    with open(log_file, 'a') as f:
-        f.write(f"[{timestamp}] {error_msg}\n")
-        f.flush()
 
 
 @dataclass
@@ -112,29 +92,19 @@ def libero_env_worker(
     
     # Initialize environment with retry logic
     env = None
-    retry_count = 0
     while True:
         try:
             env, task_description = get_libero_env(task, 'openvla', resolution=resolution)
-            if retry_count > 0:
-                _log_worker_error(task_suite, task_id, trial_id, 
-                                f"Environment initialization succeeded after {retry_count} retries")
             break
         except Exception as e:
-            retry_count += 1
-            error_msg = f"Environment initialization failed (attempt {retry_count}): {type(e).__name__}: {str(e)}"
-            _log_worker_error(task_suite, task_id, trial_id, error_msg)
-            
+            logger.error(f"Environment initialization failed: {e}")
             if env is not None:
                 try:
                     env.close()
                 except Exception as close_error:
-                    _log_worker_error(task_suite, task_id, trial_id, 
-                                    f"Error closing env: {type(close_error).__name__}: {str(close_error)}")
-            
+                    logger.error(f"Error closing env: {close_error}")
             torch.cuda.empty_cache()
             gc.collect()
-            _log_worker_error(task_suite, task_id, trial_id, "GC collection completed, retrying...")
     
     # Reset and set initial state
     env.reset()
@@ -167,8 +137,7 @@ def libero_env_worker(
         'complete': False,
         'finish_step': 0
     })
-    _log_worker_error(task_suite, task_id, trial_id, "Successfully sent initial observation to main process") 
-       
+    
     # Episode execution loop
     active = True
     complete = False

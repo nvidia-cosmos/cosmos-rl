@@ -68,9 +68,6 @@ class VLARolloutWorker(RolloutWorkerBase):
         self._prompt_queue: Queue[List[IdxAndRLPayload]] = Queue()
         self.current_weight_version = 0
         
-        # Track leftover payloads for GRPO streaming queue
-        self._leftover_prompt_payload_list: List[IdxAndRLPayload] = []
-        
         # Trajectory buffer for filesystem-based storage
         self._trajectory_buffer = get_trajectory_buffer()
         self._rollout_count = 0  # Track rollouts for periodic cleanup
@@ -475,9 +472,6 @@ class VLARolloutWorker(RolloutWorkerBase):
                     self.state.set_prompt_fetch_end()
                     # Further make sure to set `prompt_consume_end` if no more prompts to be consumed
                     if self._prompt_queue.empty():
-                        # Flush any remaining leftovers before ending
-                        self._flush_remaining_leftovers()
-                        
                         self.state.set_prompt_consume_end()
                         if self.global_rank == 0:
                             self.send_end_signal()
@@ -510,20 +504,9 @@ class VLARolloutWorker(RolloutWorkerBase):
                     payload for _, payload in new_prompt_id_and_payload_list
                 ]
                 
-                # Combine leftovers from previous batch with new payloads
-                # This mirrors what rollout_generation does internally
-                num_leftovers = len(self._leftover_prompt_payload_list)
-                combined_prompt_payload_list = self._leftover_prompt_payload_list + new_prompt_id_and_payload_list
-                
-                if num_leftovers > 0:
-                    logger.info(
-                        f"[GRPO Streaming Queue] Processing {len(new_payloads)} new payloads "
-                        f"+ {num_leftovers} leftovers from previous batch"
-                    )
-
                 # Use VLA rollout generation for training (with GRPO-style replication)
                 rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
-                    payloads=new_payloads,  # Only pass NEW payloads; engine merges with leftovers internally
+                    payloads=new_payloads,
                     n_generation=self.config.rollout.n_generation,  # GRPO replication
                     is_validation=False,  # No video saving for training
                     global_steps=self.current_step,
@@ -532,41 +515,26 @@ class VLARolloutWorker(RolloutWorkerBase):
                 if len(rollout_results) == 0:
                     continue
 
-                # With streaming queue GRPO filtering:
-                # - Results include BOTH valid leftovers AND valid new payloads
-                # - Results are ordered: leftover[0], leftover[1], ..., new[0], new[1], ...
+                # GRPO filtering happens inside rollout_generation
+                # Results only include valid (accepted) groups
                 n_gen = self.config.rollout.n_generation
-                total_input_payloads = num_leftovers + len(new_payloads)
-                expected_results = total_input_payloads * n_gen
                 num_valid_payloads = len(rollout_results) // n_gen if n_gen > 0 else 0
-                num_new_leftovers = total_input_payloads - num_valid_payloads
                 
-                if len(rollout_results) != expected_results:
-                    logger.info(
-                        f"[GRPO Streaming Queue] Got {len(rollout_results)} results from {len(new_payloads)} payloads "
-                        f"({num_valid_payloads} valid, {num_new_leftovers} leftovers → next batch)"
-                    )
+                logger.info(
+                    f"[GRPO Filter] Got {len(rollout_results)} results from {len(new_payloads)} payloads "
+                    f"({num_valid_payloads} valid groups accepted)"
+                )
 
-                # Update leftover tracking: extract payloads that became new leftovers
-                # Results come from first num_valid_payloads of combined_prompt_payload_list
-                # Remaining payloads are the new leftovers
-                self._leftover_prompt_payload_list = combined_prompt_payload_list[num_valid_payloads:]
-                
                 # Replicate prompt_id_and_payload_list to match actual results
-                # Use combined list (leftovers + new) for the first num_valid_payloads
+                # Each valid payload contributes n_generation results in sequence
                 if n_gen > 1:
                     replicated_prompt_payload_list = []
-                    # Each valid payload contributes n_generation results in sequence
                     for i in range(num_valid_payloads):
-                        idx_and_payload = combined_prompt_payload_list[i]
+                        idx_and_payload = new_prompt_id_and_payload_list[i]
                         for _ in range(n_gen):
                             replicated_prompt_payload_list.append(idx_and_payload)
-                    logger.debug(
-                        f"[GRPO] Replicated prompt_payload_list: "
-                        f"{num_valid_payloads} valid payloads × {n_gen} = {len(replicated_prompt_payload_list)}"
-                    )
                 else:
-                    replicated_prompt_payload_list = combined_prompt_payload_list[:num_valid_payloads]
+                    replicated_prompt_payload_list = new_prompt_id_and_payload_list[:num_valid_payloads]
 
                 # Process and send results back to controller
                 self._send_rollout_results(rollout_results, replicated_prompt_payload_list)
@@ -580,9 +548,6 @@ class VLARolloutWorker(RolloutWorkerBase):
                     self._rollout_count = 0
 
             if self.state.prompt_fetch_end() and self._prompt_queue.empty():
-                # Flush any remaining leftovers before ending
-                self._flush_remaining_leftovers()
-                
                 self.state.set_prompt_consume_end()
                 if self.global_rank == 0:
                     self.send_end_signal()
@@ -1284,83 +1249,6 @@ class VLARolloutWorker(RolloutWorkerBase):
             self.trainable_params = dist_utils.broadcast_object_cpu(self.trainable_params)
             logger.debug(f"[VLA Rollout] Rank {self.global_rank} has {len(self.trainable_params)} trainable params")
     
-    def _flush_remaining_leftovers(self):
-        """
-        Flush any remaining leftovers from the streaming queue.
-        
-        Called when no more new batches are coming. Keeps rolling leftovers
-        until they become valid or we accept them after max attempts.
-        """
-        if not hasattr(self.rollout, 'leftover_payloads') or not self.rollout.leftover_payloads:
-            logger.info("[GRPO Streaming Queue] No leftovers to flush")
-            return
-        
-        num_leftovers = len(self.rollout.leftover_payloads)
-        logger.info(
-            f"[GRPO Streaming Queue] Flushing {num_leftovers} remaining leftovers "
-            f"(no more new batches)"
-        )
-        
-        # max_flush_iterations = 5  # Don't loop forever
-        n_gen = self.config.rollout.n_generation
-        iteration = 0
-        
-        # for iteration in range(1, max_flush_iterations + 1):
-        while True:
-            # Snapshot leftovers before processing (they'll be modified by rollout_generation)
-            leftovers_snapshot = list(self.rollout.leftover_payloads)
-            
-            if not leftovers_snapshot:
-                break  # No more leftovers to process
-            
-            # Simply call rollout_generation with empty payloads
-            # The streaming queue logic automatically processes leftovers
-            rollout_results = self.rollout.rollout_generation(
-                payloads=[],  # Empty list → only process leftovers
-                n_generation=n_gen,
-                is_validation=False,
-                global_steps=self.current_step,
-                flush_leftovers=True,  # Return results from processed leftovers
-            )
-            
-            if len(rollout_results) > 0:
-                # Build prompt_id_and_payload_list for valid results
-                # Results are ordered: leftover[0]'s n_gen results, then leftover[1]'s, etc.
-                num_valid = len(rollout_results) // n_gen
-                replicated_list = [
-                    (0, leftovers_snapshot[i // n_gen])  # prompt_idx=0 for flushing
-                    for i in range(len(rollout_results))
-                ]
-                
-                logger.info(
-                    f"[GRPO Streaming Queue] Flush iteration {iteration}: "
-                    f"Got {len(rollout_results)} results ({num_valid}/{len(leftovers_snapshot)} valid)"
-                )
-                
-                # Send results
-                self._send_rollout_results(rollout_results, replicated_list)
-
-            # Check if all leftovers are processed
-            if not self.rollout.leftover_payloads:
-                logger.info(
-                    f"[GRPO Streaming Queue] All leftovers flushed after {iteration} iterations"
-                )
-                # Clear worker's leftover tracking as well
-                self._leftover_prompt_payload_list = []
-                break
-
-            iteration += 1
-        else:
-            # Max iterations reached - accept remaining leftovers
-            remaining = len(self.rollout.leftover_payloads)
-            if remaining > 0:
-                logger.warning(
-                    f"[GRPO Streaming Queue] Max flush iterations reached. "
-                    f"Accepting {remaining} remaining leftovers as-is"
-                )
-                # One final call to force accept
-                # Note: The rollout class should have logic to accept exhausted payloads
-    
     def _send_rollout_results(self, results: List[RolloutResult], prompt_id_and_payload_list: List[IdxAndRLPayload]):
         """
         Send rollout results back to controller.
@@ -1427,12 +1315,12 @@ class VLARolloutWorker(RolloutWorkerBase):
                 
                 # Build metadata dict directly (avoid intermediate VLAEpisodeMetadata object)
                 metadata_dict = {
-                    'success': success,
-                    'task_suite': env_info.get('task_suite', ''),
-                    'num_actions': env_info.get('num_actions', 0),
-                    'prompt_id': prompt_idx,
-                    'temperature': self.temperature,
-                    'n_generation': self.n_generation,
+                    'success': bool(success),  # Convert numpy.bool_ to Python bool
+                    'task_suite': str(env_info.get('task_suite', '')),
+                    'num_actions': int(env_info.get('num_actions', 0)),  # Convert numpy int to Python int
+                    'prompt_id': int(prompt_idx),
+                    'temperature': float(self.temperature),
+                    'n_generation': int(self.n_generation),
                 }
                 
                 # Add trajectory data if available (from dedicated vla_trajectory field)
@@ -1444,10 +1332,13 @@ class VLARolloutWorker(RolloutWorkerBase):
                     metadata_dict['trajectory_id'] = trajectory_id
                     
                     # Optionally include lightweight metadata for debugging
+                    # Ensure all values are JSON-serializable Python native types
+                    input_ids = result.vla_trajectory.get('input_ids', [])
+                    num_steps = len(input_ids) if hasattr(input_ids, '__len__') else 0
                     metadata_dict['trajectory_stats'] = {
-                        'num_steps': len(result.vla_trajectory.get('input_ids', [])),
-                        'has_pixel_values': 'pixel_values' in result.vla_trajectory,
-                        'has_responses': 'responses' in result.vla_trajectory,
+                        'num_steps': int(num_steps),
+                        'has_pixel_values': bool('pixel_values' in result.vla_trajectory),
+                        'has_responses': bool('responses' in result.vla_trajectory),
                     }
                 
                 # Create result payload with pre-computed rewards and NORMALIZED advantages
@@ -1464,7 +1355,7 @@ class VLARolloutWorker(RolloutWorkerBase):
                     metadata=metadata_dict,
                     
                     # Pre-computed rewards and advantages (bypass reward_calculator)
-                    rewards=[reward],  # One reward per completion
+                    rewards=[float(reward)],  # Ensure Python float
                     advantages=[float(advantage)],  # **GROUP-NORMALIZED** advantage (SimpleVLA-RL style)
                     valid=True,
                     
@@ -1477,15 +1368,6 @@ class VLARolloutWorker(RolloutWorkerBase):
                 )
                 result_payloads.append(result_payload)
             
-            # Log group normalization statistics
-            num_tasks = len(rewards_by_task)
-            rollouts_per_task = [len(rewards) for rewards in rewards_by_task.values()]
-            logger.info(
-                f"[GRPO Group Normalization] Processed {len(results)} rollouts from {num_tasks} tasks "
-                f"(avg {np.mean(rollouts_per_task):.1f} rollouts/task, "
-                f"range [{min(rollouts_per_task)}, {max(rollouts_per_task)}])"
-            )
-            
             # Send training results directly to controller (bypass reward_dispatcher)
             prompt_idxs = [int(payload.metadata.get('prompt_id', 0)) for payload in result_payloads]
             
@@ -1496,129 +1378,9 @@ class VLARolloutWorker(RolloutWorkerBase):
                 is_end=False,
             )
             self.api_client.post_rollout_completion(response)
-            
-            logger.info(f"[VLA Workaround] Sent {len(result_payloads)} training rollout results directly to controller")
+            logger.info(f"[VLA Rollout] Sent {len(result_payloads)} training rollout results directly to controller")
             
         except Exception as e:
             logger.error(f"Error sending rollout results: {e}")
             traceback.print_exc()
     
-    def _extract_libero_task_info(self, payload: RLPayload) -> Dict[str, Any]:
-        """
-        Extract LIBERO task information from RLPayload
-        
-        The payload should contain LIBERO dataset format:
-        - task_suite_name: str (e.g., "libero_10")
-        - task_id: tensor or int (e.g., 0-9 for libero_10)  
-        - trial_id: tensor or int (e.g., 0-49)
-        - trial_seed: tensor or int (default -1)
-        
-        Args:
-            payload: RLPayload containing task information
-            
-        Returns:
-            Dict with task configuration
-        """
-        try:
-            # Try to extract from payload metadata first
-            if hasattr(payload, 'metadata') and payload.metadata:
-                # Check if task info is in metadata
-                if 'task_suite_name' in payload.metadata:
-                    task_suite_name = payload.metadata['task_suite_name']
-                    task_id = payload.metadata.get('task_id', 0)
-                    trial_id = payload.metadata.get('trial_id', 0)
-                    trial_seed = payload.metadata.get('trial_seed', -1)
-                else:
-                    # Fallback: parse from prompt or conversation
-                    task_suite_name, task_id, trial_id, trial_seed = self._parse_task_from_prompt(payload)
-            else:
-                # Fallback: parse from prompt or conversation
-                task_suite_name, task_id, trial_id, trial_seed = self._parse_task_from_prompt(payload)
-            
-            # Convert tensors to Python integers if needed
-            if hasattr(task_id, 'item'):
-                task_id = task_id.item()
-            if hasattr(trial_id, 'item'):
-                trial_id = trial_id.item()
-            if hasattr(trial_seed, 'item'):
-                trial_seed = trial_seed.item()
-            
-            # Create environment configuration
-            task_config = {
-                'task_suite_name': task_suite_name,
-                'task_name': task_suite_name,  # For compatibility
-                'task_id': int(task_id),
-                'trial_id': int(trial_id),
-                'trial_seed': int(trial_seed),
-                'max_steps': 400,  # Default max steps
-                **self.vla_config.env_config
-            }
-            
-            return task_config
-            
-        except Exception as e:
-            logger.warning(f"Failed to extract LIBERO task info from payload: {e}")
-            # Return default configuration
-            return {
-                'task_suite_name': self.task_suite,
-                'task_name': self.task_suite,
-                'task_id': 0,
-                'trial_id': 0,
-                'trial_seed': -1,
-                'max_steps': 400,
-                **self.vla_config.env_config
-            }
-    
-    def _parse_task_from_prompt(self, payload: RLPayload) -> tuple:
-        """
-        Parse task information from prompt or conversation as fallback
-        
-        Returns:
-            Tuple of (task_suite_name, task_id, trial_id, trial_seed)
-        """
-        # Default values
-        task_suite_name = self.task_suite
-        task_id = 0
-        trial_id = 0
-        trial_seed = -1
-        
-        try:
-            # Try to parse from prompt
-            if payload.prompt:
-                prompt_text = payload.prompt.lower()
-                # Look for task suite indicators
-                if 'libero_10' in prompt_text:
-                    task_suite_name = 'libero_10'
-                elif 'libero_90' in prompt_text:
-                    task_suite_name = 'libero_90'
-                elif 'robotwin' in prompt_text:
-                    task_suite_name = 'robotwin2'
-                
-                # Try to extract numbers as task_id and trial_id
-                import re
-                numbers = re.findall(r'\d+', prompt_text)
-                if len(numbers) >= 2:
-                    task_id = int(numbers[0])
-                    trial_id = int(numbers[1])
-                elif len(numbers) >= 1:
-                    task_id = int(numbers[0])
-            
-            # Try to parse from conversation
-            if payload.conversation:
-                for message in payload.conversation:
-                    if message.get('role') == 'user' and message.get('content'):
-                        content = message.get('content', '').lower()
-                        if 'task' in content and 'trial' in content:
-                            # Extract task information from conversation
-                            import re
-                            task_match = re.search(r'task[_\s]*(\d+)', content)
-                            trial_match = re.search(r'trial[_\s]*(\d+)', content)
-                            if task_match:
-                                task_id = int(task_match.group(1))
-                            if trial_match:
-                                trial_id = int(trial_match.group(1))
-        
-        except Exception as e:
-            logger.debug(f"Error parsing task from prompt: {e}")
-        
-        return task_suite_name, task_id, trial_id, trial_seed

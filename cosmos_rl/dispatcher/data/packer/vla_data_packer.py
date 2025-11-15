@@ -137,13 +137,26 @@ class VLADataPacker(DataPacker):
                 # Fallback: old approach where trajectory was embedded in metadata
                 trajectory = sample.metadata.get('trajectory')
         
-        if trajectory and trajectory.get('input_ids') and trajectory.get('responses'):
-            # VLA structure: Keep per-step organization for proper batching
-            # Each step has: input_ids (prompt), responses (action tokens), pixel_values (image), old_log_prob
-            input_ids_list = trajectory['input_ids']
-            responses_list = trajectory['responses']
-            pixel_values_list = trajectory.get('pixel_values', [])
-            old_log_prob_list = trajectory.get('old_log_prob', [])
+        if trajectory and trajectory.get('input_ids') is not None and trajectory.get('responses') is not None:
+            input_ids_data = trajectory['input_ids']
+            responses_data = trajectory['responses']
+            pixel_values_data = trajectory.get('pixel_values', [])
+            old_log_prob_data = trajectory.get('old_log_prob', [])
+            
+            # Handle both stacked tensors and lists
+            if isinstance(input_ids_data, torch.Tensor) and input_ids_data.dim() >= 2:
+                # NEW FORMAT: Stacked tensors
+                num_steps = input_ids_data.shape[0]
+                input_ids_list = [input_ids_data[i] for i in range(num_steps)]
+                responses_list = [responses_data[i] for i in range(num_steps)]
+                pixel_values_list = [pixel_values_data[i] for i in range(num_steps)] if isinstance(pixel_values_data, torch.Tensor) else pixel_values_data
+                old_log_prob_list = [old_log_prob_data[i] for i in range(num_steps)] if isinstance(old_log_prob_data, torch.Tensor) and old_log_prob_data.numel() > 0 else []
+            else:
+                # OLD FORMAT: Lists
+                input_ids_list = input_ids_data if isinstance(input_ids_data, list) else [input_ids_data]
+                responses_list = responses_data if isinstance(responses_data, list) else [responses_data]
+                pixel_values_list = pixel_values_data if isinstance(pixel_values_data, list) else [pixel_values_data]
+                old_log_prob_list = old_log_prob_data if isinstance(old_log_prob_data, list) else [old_log_prob_data]
             
             # Build per-step data structure (matches SimpleVLA-RL)
             per_step_data = []
