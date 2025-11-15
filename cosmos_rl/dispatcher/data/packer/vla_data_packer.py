@@ -229,6 +229,15 @@ class VLADataPacker(DataPacker):
                     self.num_steps = len(per_step_data)
             
             return RLPolicyInput(per_step_data, pixel_values_list)
+        else:
+            # Trajectory missing or invalid - log for debugging
+            if not trajectory:
+                logger.warning("[VLA Policy Input] No trajectory data found in sample")
+            elif not trajectory.get('input_ids'):
+                logger.warning("[VLA Policy Input] Trajectory missing 'input_ids' field")
+            elif not trajectory.get('responses'):
+                logger.warning("[VLA Policy Input] Trajectory missing 'responses' field")
+            return None
     
     def policy_compute_max_len(self, processed_samples: List[Any]) -> int:
         """

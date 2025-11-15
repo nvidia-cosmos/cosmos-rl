@@ -29,6 +29,7 @@ from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from transformers import AutoTokenizer
+import traceback
 
 from .action_processing import VLAActionProcessor
 from .vla_model_inference import VLAModelInference
@@ -202,7 +203,6 @@ class VLARollout(RolloutBase):
             
         except Exception as e:
             logger.error(f"Failed to initialize VLA engine: {e}")
-            import traceback
             traceback.print_exc()
             raise
     
@@ -438,6 +438,13 @@ class VLARollout(RolloutBase):
                 is_valid=is_validation,
                 global_steps=global_steps
             )
+            for key, value in batch_result.items():
+                if isinstance(value, list) and isinstance(value[0], torch.Tensor):
+                    logger.warning(f"batch_result[{key}] = {len(value)} x {value[0].shape}")
+                elif isinstance(value, torch.Tensor):
+                    logger.warning(f"batch_result[{key}] = {value.shape}")
+                else:
+                    logger.warning(f"batch_result[{key}] = {value}")
             
             # Extract results - one per rollout task
             results = []
@@ -614,9 +621,7 @@ class VLARollout(RolloutBase):
             
         except Exception as e:
             logger.error(f"[Chunk {chunk_idx}] Error processing chunk: {e}")
-            traceback.print_exc()
-            # Return failure results for entire chunk
-            return [self._create_failure_result(payload) for payload, _ in rollout_tasks]
+            raise e
     
     def _get_payload_task_info(self, payload: RLPayload) -> str:
         """Extract task_id and trial_id from payload for logging"""
@@ -1309,7 +1314,7 @@ class VLARollout(RolloutBase):
         
         for idx in range(batch_size):
             try:
-                init_data = output_queues[idx].get(timeout=120)
+                init_data = output_queues[idx].get(timeout=360)
                 assert init_data['type'] == 'init', f"Expected 'init', got '{init_data['type']}'"
                 
                 task_descriptions.append(init_data["task_description"])
@@ -1327,7 +1332,7 @@ class VLARollout(RolloutBase):
                     valid_video[init_data['task_file_name']].extend(init_data['valid_images'])
                     
             except Exception as e:
-                logger.error(f"Failed to initialize task {idx}: {e}")
+                logger.error(f"Failed to get initial data for task {idx}: {e}")
                 raise
         
         # Episode execution loop

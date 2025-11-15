@@ -1541,7 +1541,7 @@ class GRPOTrainer(Trainer):
                     
                     logger.info(
                         f"[VLA Train]   Chunk {chunk_idx+1}/{num_chunks} (steps [{start_idx}:{end_idx}]): "
-                        f"loss={chunk_loss.item():.4f}, entropy={chunk_entropy.item():.4f}, "
+                        f"loss={scaled_loss.item():.4f}, entropy={chunk_entropy.item():.4f}, "
                         f"clipfrac={pg_clipfrac.item():.3f}, approx_kl={approx_kl.item():.4f}, "
                         f"scale={scaling_factor_log:.4f} ({actual_steps_in_chunk_log:.1f}/{num_steps} steps, 1/{num_episodes} eps)"
                         + (" [PADDED]" if not mask.any() else "")
@@ -1601,18 +1601,9 @@ class GRPOTrainer(Trainer):
             or self.parallel_dims.dp_shard_enabled
             or self.parallel_dims.cp_enabled
         ):
-            # Distributed reduce operations
-            # Ensure avg_loss is a tensor (defensive check for type safety)
-            if not isinstance(avg_loss, torch.Tensor):
-                avg_loss = torch.tensor(avg_loss, device=self.device)
-            
-            global_avg_loss_tensor = dist_util.dist_mean(avg_loss, self.parallel_dims.mesh["dp_cp"])
-            global_max_loss_tensor = dist_util.dist_max(avg_loss, self.parallel_dims.mesh["dp_cp"])
-            
-            # Convert to Python scalars for reporting
-            # Handle both tensor and non-tensor returns from dist_util
-            global_avg_loss = global_avg_loss_tensor.item() if isinstance(global_avg_loss_tensor, torch.Tensor) else float(global_avg_loss_tensor)
-            global_max_loss = global_max_loss_tensor.item() if isinstance(global_max_loss_tensor, torch.Tensor) else float(global_max_loss_tensor)
+            # Distributed reduce operations - returns tensors
+            global_avg_loss = dist_util.dist_mean(avg_loss, self.parallel_dims.mesh["dp_cp"])
+            global_max_loss = dist_util.dist_max(avg_loss, self.parallel_dims.mesh["dp_cp"])
         else:
             # Single device - convert tensor to scalar
             global_avg_loss = global_max_loss = avg_loss.item()
