@@ -364,41 +364,50 @@ class VLARollout(RolloutBase):
         }
     
     def _process_grpo_group(self, 
-                           payload: RLPayload,
+                           payloads: List[RLPayload],
                            n_generation: int,
                            is_validation: bool,
                            global_steps: int,
                            group_idx: int) -> List[RolloutResult]:
         """
-        Process one GRPO group (n_generation episodes for a single payload)
+        Process one GRPO group (parallel episodes)
         
-        This function:
-        1. Creates n_generation environment configs from the payload
-        2. Runs them in parallel
-        3. Collects trajectories and computes old_log_probs
-        4. Returns n_generation RolloutResults
+        Two modes:
+        - Training (GRPO): Replicates payloads[0] n_generation times for group normalization
+        - Validation: Processes multiple different payloads in parallel (no replication)
         
         Args:
-            payload: Single RLPayload to replicate
-            n_generation: Number of parallel episodes to run for this payload
-            is_validation: Whether this is validation (controls video saving)
+            payloads: List of payloads (len=1 for training, len>1 for validation batching)
+            n_generation: Number of parallel episodes (used for training replication)
+            is_validation: Whether this is validation (controls video saving and filtering)
             global_steps: Current training step
             group_idx: Index of this GRPO group (for logging)
             
         Returns:
-            List of n_generation RolloutResult objects
+            List of RolloutResult objects (n_generation for training, len(payloads) for validation)
         """
-        # Extract task instruction once for the group
-        instruction = self._extract_instruction_from_payload(payload)
-        
-        # Replicate payload and create generation indices for n_generation episodes
-        payloads = [payload] * n_generation
-        gen_indices = list(range(n_generation))
-        instructions = [instruction] * n_generation
+        if len(payloads) == 1 and not is_validation:
+            # Training mode: replicate single payload for GRPO group normalization
+            payload = payloads[0]
+            instruction = self._extract_instruction_from_payload(payload)
+            
+            payloads_expanded = [payload] * n_generation
+            gen_indices = list(range(n_generation))
+            instructions = [instruction] * n_generation
+            group_size = n_generation
+        else:
+            # Validation mode: process multiple different payloads in parallel
+            payloads_expanded = payloads
+            gen_indices = list(range(len(payloads)))
+            instructions = [self._extract_instruction_from_payload(p) for p in payloads]
+            group_size = len(payloads)
+            
+            # For filtering, we'll use the first instruction (all should be similar tasks)
+            instruction = instructions[0]
         
         # Run parallel inference and simulation
         vla_history, task_records = self._parallel_inference_and_sim(
-            payloads=payloads,
+            payloads=payloads_expanded,
             gen_indices=gen_indices,
             instructions=instructions,
             temperature=self.temperature,
@@ -407,12 +416,12 @@ class VLARollout(RolloutBase):
         )
         
         # Pack GRPO results: Apply filtering, compute old_log_probs, create RolloutResults
-        # Returns None if group doesn't meet GRPO criteria
+        # Returns None if group doesn't meet GRPO criteria (training only)
         results = self._pack_grpo_results(
             vla_history=vla_history,
             task_records=task_records,
             instruction=instruction,
-            group_size=n_generation,
+            group_size=group_size,
             enable_filtering=not is_validation,
         )
         
@@ -483,29 +492,54 @@ class VLARollout(RolloutBase):
                 f"[GRPO Filter] Enabled: success_rate ∈ [{success_rate_low:.2f}, {success_rate_high:.2f}]"
             )
         
-        logger.info(
-            f"[Rollout] Processing {len(payloads)} GRPO groups (each with {n_generation} episodes)"
-        )
+        # Determine batching strategy
+        if is_validation:
+            # Validation: batch multiple different payloads together for efficiency
+            # (n_generation=1 typically, so we batch to avoid process churn)
+            batch_size = max(1, self.config.rollout.n_generation)  # Use n_generation as batch size
+            num_batches = (len(payloads) + batch_size - 1) // batch_size
+            logger.info(
+                f"[Rollout] Validation mode: {len(payloads)} payloads in {num_batches} batches "
+                f"(batch_size={batch_size}, parallel envs per batch)"
+            )
+        else:
+            # Training (GRPO): each payload is replicated n_generation times for group normalization
+            batch_size = 1
+            num_batches = len(payloads)
+            logger.info(
+                f"[Rollout] Training mode: {len(payloads)} GRPO groups "
+                f"(each payload × {n_generation} episodes for group normalization)"
+            )
         
-        # Process each payload as a GRPO group
-        # Filtering happens inside _process_grpo_group (returns None if filtered out)
         valid_results = []
         num_accepted = 0
         num_discarded = 0
         
-        for group_idx, payload in enumerate(payloads):
+        for group_idx in range(num_batches):
             try:
-                # Process one GRPO group (n_generation episodes in parallel)
-                # Returns None if group doesn't pass GRPO filtering
-                group_results = self._process_grpo_group(
-                    payload=payload,
-                    n_generation=n_generation,
-                    is_validation=is_validation,
-                    global_steps=global_steps,
-                    group_idx=group_idx
-                )
+                # Extract batch of payloads
+                start_idx = group_idx * batch_size
+                end_idx = min(start_idx + batch_size, len(payloads))
+                payload_batch = payloads[start_idx:end_idx]
                 
-                task_info = self._get_payload_task_info(payload)
+                if is_validation:
+                    # Validation: process multiple different payloads in parallel
+                    group_results = self._process_grpo_group(
+                        payloads=payload_batch,
+                        n_generation=len(payload_batch),  # Group size = number of payloads in batch
+                        is_validation=is_validation,
+                        global_steps=global_steps,
+                        group_idx=group_idx
+                    )
+                else:
+                    # Training: replicate single payload n_generation times (GRPO)
+                    group_results = self._process_grpo_group(
+                        payloads=payload_batch,  # Single payload list
+                        n_generation=n_generation,
+                        is_validation=is_validation,
+                        global_steps=global_steps,
+                        group_idx=group_idx
+                    )
                 
                 if group_results is not None:
                     # Group passed filtering or filtering disabled
@@ -517,8 +551,8 @@ class VLARollout(RolloutBase):
                     
             except Exception as e:
                 import traceback
-                task_info = self._get_payload_task_info(payload)
-                logger.error(f"[GRPO Group {group_idx}] Failed to process group [{task_info}]: {e}")
+                batch_info = f"batch={group_idx}, size={len(payload_batch)}"
+                logger.error(f"[GRPO Group {group_idx}] Failed to process group [{batch_info}]: {e}")
                 logger.error(f"[GRPO Group {group_idx}] Traceback:\n{traceback.format_exc()}")
                 logger.error(f"[GRPO Group {group_idx}] Skipping this entire group")
                 num_discarded += 1
@@ -714,6 +748,16 @@ class VLARollout(RolloutBase):
             task_ids.append(task_config['task_id'])
             trial_ids.append(task_config.get('trial_id', 0))
         gen_idxs = gen_indices
+        
+        # CRITICAL: Release GPU resources before spawning sim workers
+        # After NCCL broadcast, GPU SM resources may still be occupied by:
+        # - Lingering CUDA kernels from weight sync
+        # - VLA model occupying GPU memory
+        # - CUDA context fragmentation
+        # Without this, sim workers timeout trying to initialize rendering contexts
+        torch.cuda.synchronize()  # Wait for all CUDA operations to complete
+        torch.cuda.empty_cache()  # Free up cached GPU memory
+        logger.debug(f"Released GPU resources before spawning {len(payloads)} sim workers")
         
         # Setup parallel environments (populates self.sim_processes, self.sim_input_queues, self.sim_output_queues)
         initial_data = self._setup_parallel_envs(
