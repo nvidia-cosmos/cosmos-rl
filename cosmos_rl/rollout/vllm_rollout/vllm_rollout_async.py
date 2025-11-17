@@ -17,7 +17,7 @@ import uuid
 
 import torch
 import copy
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Any
 from transformers import AutoTokenizer, AutoConfig
 from transformers import GenerationConfig
 from vllm.v1.engine.async_llm import AsyncLLM as AsyncLLMEngine, AsyncEngineArgs
@@ -53,14 +53,20 @@ class VLLMColocateWorkerExtension:
     def _get_model(self) -> torch.nn.Module:
         return self.model_runner.model
 
-    def get_state_dict_ipc(self) -> Dict[str, Tuple]:
+    def get_state_dict_ipc(self) -> Dict[str, Any]:
         """
         Get the CUDA IPC handles of the model weights.
 
         Returns:
             Dict[param_name, (ipc_handle, shape, dtype, device_id)]
         """
-        return named_tensors_to_serialize(self._get_model().state_dict())
+
+        state_dict = self._get_model().state_dict()
+        # we also mark whether the weight tensor is also a parameter.
+        param_keys = [name for name, _ in self._get_model().named_parameters()]
+
+        not_parameter_names = set(state_dict.keys()) - set(param_keys)
+        return named_tensors_to_serialize(state_dict), not_parameter_names
 
     def apply_fp8_linear_patch(self):
         """
@@ -387,31 +393,19 @@ class vLLMRolloutAsync(RolloutBase):
         if self.underlying_model is not None:
             return self.underlying_model
 
-        state_dict = await self.get_underlying_model_state_dict()
-        self.underlying_model = ModuleLike(state_dict)
-        return self.underlying_model
-
-    async def get_underlying_model_state_dict(self) -> Dict[str, torch.Tensor]:
-        """
-        Get the state dict of the underlying model.
-        """
-        if not self._engine_initialized:
-            raise RuntimeError(
-                "[Rollout] Engine is not initialized, please call init_engine first."
-            )
-
-        if self.underlying_model_state_dict is not None:
-            return self.underlying_model_state_dict
-
         # Note: state dict rather than serialize the whole model, have two benefits:
         # 1. Avoid unexpected object behavior when serializing the whole model.
         # 2. Avoid call `forward()` in the worker process, which is not safe.
-        named_tensors_ipc = await self.rollout_engine.collective_rpc(
-            "get_state_dict_ipc"
-        )
+        (
+            named_tensors_ipc,
+            not_parameter_names,
+        ) = await self.rollout_engine.collective_rpc("get_state_dict_ipc")
+
+        # vllm backend may have multiple workers, we use the first worker's state dict to initialize the underlying model.
         sd_ipc_worker0 = named_tensors_ipc[0]
-        self.underlying_model_state_dict = named_tensors_from_serialize(sd_ipc_worker0)
-        return self.underlying_model_state_dict
+        state_dict = named_tensors_from_serialize(sd_ipc_worker0)
+        self.underlying_model = ModuleLike(state_dict, not_parameter_names)
+        return self.underlying_model
 
     def get_engine(self):
         if not self._engine_initialized:
