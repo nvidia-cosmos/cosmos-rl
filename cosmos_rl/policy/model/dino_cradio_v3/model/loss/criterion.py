@@ -4,10 +4,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from cosmos_rl.utils.distributed import get_world_size, is_dist_avail_and_initialized
+
 from ..model_utils import sigmoid_focal_loss
 from ..deformable_detr import box_ops
 from ..deformable_detr.utils import accuracy
-from ...dist_utils import get_world_size, is_dist_avail_and_initialized
 
 
 class SetCriterion(nn.Module):

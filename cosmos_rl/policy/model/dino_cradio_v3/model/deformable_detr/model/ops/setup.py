@@ -59,7 +59,7 @@ def make_cuda_ext(
 EXT_MODULES = [
     make_cuda_ext(
         name="MultiScaleDeformableAttention",
-        module="cosmos_rl.policy.model.c_radio_v3.model.ops",
+        module="cosmos_rl.policy.model.dino_cradio_v3.model.deformable_detr.model.ops",
         sources=[
             "src/ms_deform_attn_cpu.cpp",
             "src/ms_deform_attn_api.cpp",

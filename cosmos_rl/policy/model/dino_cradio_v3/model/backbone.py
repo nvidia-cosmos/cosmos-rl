@@ -8,7 +8,7 @@ from torch import nn
 from typing import Optional
 from typing import Dict, List
 
-from ..dist_utils import get_global_rank
+from cosmos_rl.utils.distributed import get_global_rank
 from cosmos_rl.utils.logging import logger
 
 from deformable_detr.utils import load_pretrained_weights
