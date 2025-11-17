@@ -16,7 +16,7 @@
 import warnings
 
 import torch
-from typing import Dict, Iterator, Tuple
+from typing import Dict, Iterator, Tuple, Set
 
 
 class ModuleLike:
@@ -26,14 +26,25 @@ class ModuleLike:
     Attention, this class is just a mirror of the nn.Module in another process. Can only ensure the weight's memory is shared.
     """
 
-    def __init__(self, state_dict: Dict[str, torch.Tensor]):
+    def __init__(
+        self, state_dict: Dict[str, torch.Tensor], not_parameter_names: Set[str]
+    ):
+        """
+        Initialize the ModuleLike with the given state_dict.
+
+        Args:
+            state_dict: The state dict of the module.
+            not_parameter_names: The names of the tensors that are not parameters.
+        """
         self._parameters: Dict[str, torch.Tensor] = {}
+        # it will not appear in named_parameters(), for example, lm_head.weight.
+        self._not_parameter_tensors: Dict[str, torch.Tensor] = {}
         self._modules: Dict[str, "ModuleLike"] = {}
 
-        self.__recurse_init_module(state_dict)
+        self.__recurse_init_module(state_dict, not_parameter_names)
 
     def __recurse_init_module(
-        self, state_dict: Dict[str, torch.Tensor]
+        self, state_dict: Dict[str, torch.Tensor], not_parameter_names: Set[str]
     ) -> "ModuleLike":
         """
         Recurse init the module.
@@ -49,12 +60,26 @@ class ModuleLike:
             else:
                 nested_state_dict[name] = value
 
+        nested_not_parameter_names = {}
+        for name in not_parameter_names:
+            if "." in name:
+                parent_name, child_name = name.split(".", 1)
+                if parent_name not in nested_not_parameter_names:
+                    nested_not_parameter_names[parent_name] = set()
+                nested_not_parameter_names[parent_name].add(child_name)
+            else:
+                nested_not_parameter_names[name] = True
+
         # update the parameters and modules.
         for name, value in nested_state_dict.items():
             if isinstance(value, dict):
-                self._modules[name] = ModuleLike(value)
+                chile_not_parameter_names = nested_not_parameter_names.get(name, set())
+                self._modules[name] = ModuleLike(value, chile_not_parameter_names)
             else:
-                self._parameters[name] = value
+                if name in nested_not_parameter_names:
+                    self._not_parameter_tensors[name] = value
+                else:
+                    self._parameters[name] = value
 
     def __getitem__(self, idx: int | str) -> "ModuleLike":
         """
@@ -109,7 +134,9 @@ class ModuleLike:
         """
         state_dict = {}
         for name, param in self._parameters.items():
-            state_dict[name] = param.detach().clone()
+            state_dict[name] = param
+        for name, tensor in self._not_parameter_tensors.items():
+            state_dict[name] = tensor
         for name, sub_module in self._modules.items():
             for sub_name, sub_value in sub_module.state_dict().items():
                 state_dict[f"{name}.{sub_name}"] = sub_value
@@ -119,8 +146,11 @@ class ModuleLike:
         """
         Get the named parameters of the module.
         """
-        for name, param in self.state_dict().items():
+        for name, param in self._parameters.items():
             yield name, param
+        for name, sub_module in self._modules.items():
+            for sub_name, sub_value in sub_module.named_parameters():
+                yield f"{name}.{sub_name}", sub_value
 
     def named_modules(
         self, prefix: str = "", *args, **kwargs

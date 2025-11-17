@@ -167,7 +167,7 @@ class TestTensorIPCUtils(unittest.TestCase):
 class TestModuleLike(unittest.TestCase):
     """Test ModuleLike."""
 
-    def get_module(self) -> ModuleLike:
+    def get_module(self):
         """Get the module."""
         state_dict = {
             "model.embed_tokens.weight": torch.randn(10, 10),
@@ -181,6 +181,7 @@ class TestModuleLike(unittest.TestCase):
             "model.layers.1.self_attn.v_proj.weight": torch.randn(10, 10),
             "model.layers.1.self_attn.o_proj.weight": torch.randn(10, 10),
             "model.layers.1.self_attn.o_proj.bias": torch.randn(10),
+            "lm_head.weight": torch.randn(10, 10),
         }
 
         module_names = [
@@ -200,8 +201,11 @@ class TestModuleLike(unittest.TestCase):
             "model.layers.1.self_attn.k_proj",
             "model.layers.1.self_attn.v_proj",
             "model.layers.1.self_attn.o_proj",
+            "lm_head",
         ]
-        return ModuleLike(state_dict), state_dict, module_names
+
+        not_parameter_names = set(["lm_head.weight"])
+        return ModuleLike(state_dict, not_parameter_names), state_dict, module_names
 
     def test_getattribute(self):
         """Test getattribute of ModuleLike."""
@@ -245,3 +249,17 @@ class TestModuleLike(unittest.TestCase):
 
         assert len(module_names) == len(original_module_names)
         assert set(module_names) == set(original_module_names)
+
+    def test_named_parameters(self):
+        """Test named parameters of ModuleLike."""
+        fake_module, original_state_dict, _ = self.get_module()
+
+        parameter_names = []
+        for name, _ in fake_module.named_parameters():
+            parameter_names.append(name)
+
+        assert len(parameter_names) == len(original_state_dict) - 1
+        assert "lm_head.weight" not in parameter_names
+        assert set(parameter_names) == set(original_state_dict.keys()) - set(
+            ["lm_head.weight"]
+        )
