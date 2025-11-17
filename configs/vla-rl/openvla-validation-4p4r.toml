@@ -4,7 +4,7 @@ redis = "12800"
 resume = false
 epoch = 1
 output_dir = "./outputs/vla-validation-4p4r"
-epsilon = 1e-6
+epsilon = 1e-7
 optm_name = "AdamW"
 optm_lr = 1e-6
 optm_impl = "fused"
@@ -19,7 +19,7 @@ fsdp_reduce_dtype = "float32"
 master_dtype = "bfloat16"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 64  # 8 episodes per policy worker
+train_batch_per_replica = 64
 sync_weight_interval = 1
 
 [policy]
@@ -49,7 +49,7 @@ epsilon_high = 0.28
 lower_bound_ratio = 10.0
 kl_beta = 0.0
 mu_iterations = 1
-mini_batch = 1  # 4 episodes per mini-batch
+mini_batch = 16  # episodes per mini-batch
 min_filter_prefix_tokens = 1
 allowed_outdated_steps = 2
 on_policy = true
@@ -79,9 +79,6 @@ pp_size = 1  # No pipeline parallelism
 dp_replicate_size = 1  # Use 1 for now (can increase if DDP is enabled)
 cp_rotate_method = "allgather"
 
-# ============================================================================
-# Rollout Parallelism: 4 Workers
-# ============================================================================
 [rollout.parallelism]
 n_init_replicas = 4  # 4 rollout workers
 tp_size = 1

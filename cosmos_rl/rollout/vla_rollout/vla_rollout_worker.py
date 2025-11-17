@@ -453,7 +453,7 @@ class VLARolloutWorker(RolloutWorkerBase):
             # Check if validation should be performed
             logger.debug(f"[VLA Rollout] Main loop: validation_flag.is_set()={self.validation_flag.is_set()}")
             if self.validation_flag.is_set():
-                logger.info(f"[VLA Rollout] 🎯 Validation flag is set, starting validation")
+                logger.info("[VLA Rollout] 🎯 Validation flag is set, starting validation")
                 self.do_validation()
                 # Continue to next iteration after validation
                 continue

@@ -576,8 +576,7 @@ class Controller:
             weight_version_for_current_batch = (
                 num_of_valid_prompts_consumed // global_batch_size
             )
-            logger.info(f"[Controller] weight_version_for_current_batch: {weight_version_for_current_batch}, global_batch_size: {global_batch_size}")
-            logger.info(f"[Controller] num_of_valid_prompts_consumed: {num_of_valid_prompts_consumed}, current_fetch_count: {current_fetch_count}, self.weight_version_to_prompt_num: {self.weight_version_to_prompt_num}")
+            logger.info(f"[Controller] num_of_valid_prompts_consumed: {num_of_valid_prompts_consumed}/{global_batch_size}, self.weight_version_to_prompt_num: {self.weight_version_to_prompt_num}")
 
             # record the number of valid prompts for current weight version
             if (
