@@ -152,11 +152,10 @@ class TestCustomRolloutOutput(unittest.TestCase):
                     payloads[i].completed_conversations,
                 )
 
-        valid_rollouts_list, invalid_rollouts_list = extract_rollouts(payloads, False)
+        valid_rollouts_list = extract_rollouts(payloads, False)
 
         assert len(valid_rollouts_list) == 1
         assert len(valid_rollouts_list[0]) == 16
-        assert len(invalid_rollouts_list) == 0
 
         rollouts = [r for rs in valid_rollouts_list for r in rs]
 

@@ -1361,11 +1361,32 @@ class vLLMRolloutWorker(RolloutWorkerBase):
         response = RolloutRequest(
             src_replica_name=self.replica_name,
             payloads=[],
-            completions=[],
             is_end=True,
         )
         logger.info(f"[Rollout] Posting rollout end signal to controller: {response}")
         self.api_client.post_rollout_completion(response)
+
+    def dynamic_sampling(self, payloads: List[RLPayload]):
+        """
+        Dynamic sampling: Filter out the rollouts that the rewards are all the same.
+        This is used to filter out the rollouts that are not useful for training.
+        """
+        # DAPO only needs valid rollouts for training with dynamic sampling.
+        # Separate valid and invalid rollouts for Dynamic Sampling
+        # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
+        valid_payloads = []
+        metadata = {}
+        for payload in payloads:
+            # Collect the statistics for valid and filtered rollouts.
+            if payload.valid:
+                key = "sampled"
+                metadata[key] = metadata.get(key, 0) + len(payload.completions)
+                valid_payloads.append(payload)
+            else:
+                filter_reward = payload.filter_rewards[0]
+                key = "filtered_positive" if filter_reward > 0 else "filtered_negative"
+                metadata[key] = metadata.get(key, 0) + len(payload.completions)
+        return valid_payloads, metadata
 
     def report_rollouts(self, block=False):
         while True:
@@ -1375,6 +1396,12 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             if payloads is not None:
                 if is_validation:
                     break
+
+                metadata = {}
+                if self.config.train.train_policy.variant == "dapo":
+                    payloads, metadata_from_dapo = self.dynamic_sampling(payloads)
+                    metadata.update(metadata_from_dapo)
+
                 for i in range(len(payloads)):
                     (
                         payloads[i].completions,
@@ -1398,6 +1425,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 response = RolloutRequest(
                     src_replica_name=self.replica_name,
                     payloads=payloads,
+                    metrics=metadata,
                     is_end=False,
                 )
                 self.api_client.post_rollout_completion(response)

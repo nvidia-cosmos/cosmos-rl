@@ -1421,6 +1421,17 @@ class GRPOTrainer(Trainer):
                                         logger.debug(
                                             "[Policy] Packing sequence is disabled due to incompatible dimensions."
                                         )
+                                    elif (
+                                        hasattr(
+                                            self.model,
+                                            "check_sequence_packing_compatible",
+                                        )
+                                        and not self.model.check_sequence_packing_compatible()
+                                    ):
+                                        packing_seq = False
+                                        logger.debug(
+                                            "[Policy] Packing sequence is disabled due to unsupported model."
+                                        )
 
                                 # TP/CP will shard the sequence dimension into n-ranks.
                                 # The interested_tokens will be unevenly distributed across ranks.

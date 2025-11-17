@@ -71,6 +71,7 @@ class ValidationReportRequest(BaseModel):
 class RolloutRequest(BaseModel):
     src_replica_name: str
     payloads: List[RLPayload]
+    metrics: Dict[str, Any] = {}
     is_end: bool = False
 
 
