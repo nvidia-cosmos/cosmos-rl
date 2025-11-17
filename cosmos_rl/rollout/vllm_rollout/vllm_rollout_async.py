@@ -396,13 +396,9 @@ class vLLMRolloutAsync(RolloutBase):
         # Note: state dict rather than serialize the whole model, have two benefits:
         # 1. Avoid unexpected object behavior when serializing the whole model.
         # 2. Avoid call `forward()` in the worker process, which is not safe.
-        (
-            named_tensors_ipc,
-            not_parameter_names,
-        ) = await self.rollout_engine.collective_rpc("get_state_dict_ipc")
-
+        rpc_results = await self.rollout_engine.collective_rpc("get_state_dict_ipc")
         # vllm backend may have multiple workers, we use the first worker's state dict to initialize the underlying model.
-        sd_ipc_worker0 = named_tensors_ipc[0]
+        sd_ipc_worker0, not_parameter_names = rpc_results[0]
         state_dict = named_tensors_from_serialize(sd_ipc_worker0)
         self.underlying_model = ModuleLike(state_dict, not_parameter_names)
         return self.underlying_model
