@@ -22,6 +22,7 @@ import atexit
 import types
 from functools import partial
 from asyncio import timeout as asyncio_timeout
+from typing import Tuple
 
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Optional, Callable, Union
@@ -58,6 +59,8 @@ from cosmos_rl.dispatcher.data.schema import (
 from torch.utils.data import Dataset
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
 from cosmos_rl.utils.command_executor import CommandExecutor
+from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
+from cosmos_rl.dispatcher.data.packer import DataPacker
 from vllm.sampling_params import SamplingParams, RequestOutputKind
 
 from .vllm_rollout_worker import vLLMRolloutWorker
@@ -143,7 +146,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
     - Sync operations (API calls, reward calculation) run in thread executor
     """
 
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
+    def __init__(
+        self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs
+    ) -> None:
         super(vLLMRolloutWorkerAsync, self).__init__(config, parallel_dims)
 
         # TODO(zjx): refactor those methods to common methods in RolloutWorkerBase
@@ -276,17 +281,45 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         # TODO(zjx): below variables need remove after refactor.
         self.temp_recv_tensor_queue = Queue()
 
+        self.setup(
+            dataset=kwargs.get("dataset"),
+            data_packer=kwargs.get("data_packer"),
+            reward_fns=kwargs.get("reward_fns"),
+            filter_reward_fns=kwargs.get("filter_reward_fns"),
+            val_dataset=kwargs.get("val_dataset"),
+            val_data_packer=kwargs.get("val_data_packer"),
+            val_reward_fns=kwargs.get("val_reward_fns"),
+        )
+
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        data_packer: Optional[DataPacker] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_dataset: Optional[Dataset] = None,
+        val_data_packer: Optional[DataPacker] = None,
         val_reward_fns: Optional[List[Callable]] = None,
         num_workers: int = 8,
     ):
+        self.init_data_packer(
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+        )
+
+        self.data_fetcher = WorkerDataFetcher(
+            config=self.config,
+            dataset=dataset,
+            val_dataset=val_dataset,
+            data_packer=self.data_packer,
+            val_data_packer=self.val_data_packer,
+            tokenizer=self.tokenizer,
+            is_rl=True,
+        )
+
         self.reward_dispatcher.setup(
             config=self.config,
+            data_fetcher=self.data_fetcher,
             dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
@@ -1111,13 +1144,38 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                 payloads, is_end = self.api_client.get_next_prompt(
                     batch_size, validation_step=validation_step, **kwargs
                 )
+
+                assert all(
+                    payload["prompt_idx"] >= 0 for payload in payloads
+                ), "All payloads should have a valid prompt index"
+
+                is_validation = validation_step is not None
+                if len(payloads) > 0:
+                    if self.config.train.local_dataset:
+                        for payload in payloads:
+                            payload["prompt"] = self.data_fetcher.get_payload_by_index(
+                                payload["prompt_idx"],
+                                is_validation=is_validation,
+                            )
+                            payload["conversation"] = (
+                                self.data_fetcher.get_payload_by_index(
+                                    payload["prompt_idx"],
+                                    is_validation=is_validation,
+                                    attr="conversation",
+                                )
+                            )
+                    payloads = [
+                        RLPayload.model_validate(payload) for payload in payloads
+                    ]
                 prompts_and_is_end = (
                     payloads if len(payloads) > 0 else None,
                     is_end,
                 )
 
         # Broadcast the prompts and is_end to all ranks
-        prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
+        prompts_and_is_end: Tuple[List[RLPayload], bool] = (
+            dist_utils.broadcast_object_cpu(prompts_and_is_end)
+        )
         prompts, is_end = prompts_and_is_end
         if prompts is not None:
             sp = (
@@ -1127,8 +1185,8 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             )
             tasks = [
                 RolloutTask(
-                    idx=prompt[0],
-                    payload=RLPayload.model_validate(prompt[1]),
+                    idx=prompt.prompt_idx,
+                    payload=prompt,
                     sampling_params=sp,
                 )
                 for prompt in prompts
@@ -1303,11 +1361,8 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         if should_report:
             # only the first tp rank in the rollout replica will post the completion to the controller.
             valid_payloads: List[RLPayload] = []
-            valid_prompt_idxs: List[int] = []
 
             for cr in valid_results:
-                valid_prompt_idxs.append(cr.idx)
-
                 # update payload
                 cr.payload.completions = cr.result.completions
                 if self.rollout.rollout_config.multi_turn_config.enable:
@@ -1316,11 +1371,16 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                     )
                 valid_payloads.append(cr.payload)
 
+            import math
+
+            n_samples = math.fsum(
+                [len(payload.completions) for payload in valid_payloads]
+            )
+            logger.info(f"[Rollout] generate {n_samples} samples to report.")
             self.reward_dispatcher.enqueue_rewards_cal(
                 valid_payloads,
                 False,
                 self.current_weight_version,
-                valid_prompt_idxs,
             )
 
         if self.state.prompt_fetch_end() and self.scheduler.task_queue.empty():
