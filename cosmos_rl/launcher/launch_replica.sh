@@ -114,6 +114,7 @@ if [ "$TYPE" == "rollout" ]; then
 elif [ "$TYPE" == "policy" ]; then
   DEFAULT_MODULE="cosmos_rl.policy.train"
   export COSMOS_ROLE="Policy"
+  set_env "PYTORCH_CUDA_ALLOC_CONF" "expandable_segments:True"
 else
   echo "Error: Invalid --type value '$TYPE'. Must be 'rollout' or 'policy'."
   print_help
