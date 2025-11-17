@@ -348,7 +348,7 @@ def _get_timeout_ms(user_timeout: Optional[int] = None) -> int:
     """Resolve timeout value (environment variable overrides default)."""
     if user_timeout is not None:
         return user_timeout
-    return int(os.getenv("COSMOS_NCCL_TIMEOUT_MS", "600000"))  # 10 minutes default
+    return int(os.getenv("COSMOS_NCCL_TIMEOUT_MS", "6000000"))  # 10 minutes default
 
 
 # ---------------------------------------------------------------------------

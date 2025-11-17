@@ -17,7 +17,10 @@ from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 import re
 from typing import Tuple, Dict, Any
-from cosmos_rl.utils.parallelism_registry import register_parallelism_strategy
+from cosmos_rl.utils.parallelism_registry import (
+    ParallelismStrategyRole,
+    register_parallelism_strategy,
+)
 
 
 def map_key_from_hf(name: str, src_model_type: str) -> str:
@@ -86,7 +89,7 @@ def convert_weight_from_hf(
             shard = tensor.tensor_split(tp_ep_size, dim=-1)[tp_ep_rank]
     elif (
         match := re.search(  # noqa: F841
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj)\.(weight|bias)",
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
             dest_name,
         )
     ) is not None:
@@ -101,27 +104,6 @@ def convert_weight_from_hf(
         belongs_to_current_ep = (
             tp_ep_rank * n_expert_per_ep
             <= int(match.group(2))  # Expert index
-            < (tp_ep_rank + 1) * n_expert_per_ep
-        )
-        belongs_to_current_dp_shard = (
-            int(match.group(2)) - tp_ep_rank * n_expert_per_ep
-        ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
-        if belongs_to_current_ep and belongs_to_current_dp_shard:
-            should_do_fsdp_sharding = False
-            shard = tensor
-        else:
-            # If the expert does not belong to the current process, return None to skip this weight
-            return None, None
-    elif (
-        match := re.search(
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)", dest_name
-        )  # noqa: F841
-    ) is not None:
-        # The same logic as the up_proj/gate_proj
-        n_expert_per_ep = n_experts // tp_ep_size
-        belongs_to_current_ep = (
-            tp_ep_rank * n_expert_per_ep
-            <= int(match.group(2))
             < (tp_ep_rank + 1) * n_expert_per_ep
         )
         belongs_to_current_dp_shard = (
@@ -158,7 +140,7 @@ def convert_weight_from_hf(
     return dest_name, shard.contiguous()
 
 
-@register_parallelism_strategy("qwen3_moe")
+@register_parallelism_strategy("qwen3_moe", role=ParallelismStrategyRole.ROLLOUT)
 def map_weight_parallel_dims(
     n_dim: int, dest_name: str, parallel_dims: ParallelDims, model_config: Any
 ) -> Tuple[Dict[str, int], Dict[int, list], int]:
@@ -215,15 +197,8 @@ def map_weight_parallel_dims(
                 dims_map[dim] = n_dim - 1
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.(up_proj|gate_proj)\.(weight|bias)", dest_name
-                )
-            ) is not None:
-                dims_map[dim] = (
-                    0  # For MoE Expert Parallelism, split in expert_num dimension
-                )
-            elif (
-                match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.experts\.(gate_and_up_proj|down_proj)\.(weight|bias)",
+                    dest_name,
                 )
             ) is not None:
                 dims_map[dim] = (

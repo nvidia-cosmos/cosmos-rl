@@ -40,6 +40,7 @@ from cosmos_rl.policy.model.qwen3_moe.weight_mapper import Qwen3MoeWeightMapper
 from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
 from cosmos_rl.policy.kernel.moe.indices import generate_permute_indices
 from cosmos_rl.policy.kernel.moe.grouped_gemm import group_gemm_imp
+from cosmos_rl.policy.kernel.moe.moe import MoE, MoEArgs
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
@@ -74,6 +75,9 @@ class Qwen3MoeArgs:
     rope_theta: float = 10000
     norm_type: str = "rmsnorm"
     rope_type: str = "default"
+    train_gate: bool = True
+    gate_bias_update_factor: float = 0.0
+    aux_loss_coeff: float = 0.0
     hf_config: AutoConfig = None
 
 
@@ -544,17 +548,20 @@ class Qwen3MoEBlock(nn.Module):
 
     """
 
-    def __init__(self, layer_id: int, model_args: Qwen3MoeArgs):
+    def __init__(self, layer_id: int, model_args: Qwen3MoeArgs, moe_args: MoEArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
         self.self_attn = Attention(model_args)
-        self.mlp = FeedForward(
-            dim=model_args.dim,
-            intermediate_dim=model_args.ffn_dim,
-            model_args=model_args,
-            layer_id=layer_id,
-        )
+        if moe_args.enable_deepep:
+            self.mlp = MoE(moe_args)
+        else:
+            self.mlp = FeedForward(
+                dim=model_args.dim,
+                intermediate_dim=model_args.ffn_dim,
+                model_args=model_args,
+                layer_id=layer_id,
+            )
         self.layer_id = layer_id
         self.num_layers = model_args.n_layers
 
@@ -570,6 +577,7 @@ class Qwen3MoEBlock(nn.Module):
             eps=model_args.norm_eps,
             casting_mode=model_args.hf_config.model_type,
         )
+        self.moe_args = moe_args
 
     def forward(
         self,
@@ -597,7 +605,11 @@ class Qwen3MoEBlock(nn.Module):
             cu_seqlens=kwargs.get("cu_seqlens", None),
             max_seqlen=kwargs.get("max_seqlen", None),
         )
-        out = self.mlp(self.post_attention_layernorm(h))
+
+        if self.moe_args.enable_deepep:
+            out = self.mlp(self.post_attention_layernorm(h))[0]
+        else:
+            out = self.mlp(self.post_attention_layernorm(h))
         out = h + out
         return out
 
@@ -632,10 +644,27 @@ class Qwen3MoE(BaseModel):
         self.rotary_emb = RotaryEmbedding(model_args)
 
         self.embed_tokens = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.moe_args = MoEArgs(
+            n_routed_experts=model_args.n_experts,
+            n_shared_experts=getattr(model_args.hf_config, "n_shared_experts", 0),
+            n_activated_experts=model_args.hf_config.num_experts_per_tok,
+            n_expert_groups=getattr(model_args.hf_config, "n_group", 0),
+            n_limited_groups=getattr(model_args.hf_config, "topk_group", 0),
+            train_gate=model_args.train_gate,
+            gate_bias_update_factor=model_args.gate_bias_update_factor,
+            aux_loss_coeff=model_args.aux_loss_coeff,
+            score_func=getattr(model_args.hf_config, "scoring_func", "softmax"),
+            route_scale=getattr(model_args.hf_config, "routed_scaling_factor", 1.0),
+            dim=model_args.dim,
+            moe_inter_dim=model_args.ffn_dim,
+            enable_deepep=True,
+        )
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = Qwen3MoEBlock(layer_id, model_args)
+            self.layers[str(layer_id)] = Qwen3MoEBlock(
+                layer_id, model_args, self.moe_args
+            )
 
         self.norm = build_norm(
             model_args.norm_type,
@@ -738,8 +767,9 @@ class Qwen3MoE(BaseModel):
             return h
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
-        for layer in self.layers.values():
-            layer.mlp.gate.weight.requires_grad_(False)
+        if not self.moe_args.fake_balanced_gate:
+            for layer in self.layers.values():
+                layer.mlp.gate.weight.requires_grad_(False)
 
         # rotary.inv_freq could get deleted and not re-initialized
         # so we need to delete it manually
@@ -756,6 +786,8 @@ class Qwen3MoE(BaseModel):
         )
 
         OnDeviceAllToAllV.max_output_len = MAX_BATCH_MUL_SEQ_LEN * overflow
+        if self.moe_args.enable_deepep:
+            return  # MoE kernel will handle the buffer initialization
         # Init MoE kernel related buffers
         if FeedForward.token_send_buf is None:
             dtype = self.model_args.hf_config.torch_dtype
@@ -837,6 +869,12 @@ class Qwen3MoE(BaseModel):
 
         self_state_dict = self.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
+        new_state_dict = self_state_dict.copy()
+        for k, v in self_state_dict.items():
+            if "mlp.experts.gate_and_up_projs" in k or "mlp.experts.down_projs" in k:
+                new_state_dict[k.replace("projs", "proj.weight")] = v
+                del new_state_dict[k]
+        self_state_dict = new_state_dict
         lm_head_weight_key = "lm_head.weight"
         embed_tokens_weight_key = "model.embed_tokens.weight"
         weights_of_ckpt_names = set()
@@ -875,7 +913,7 @@ class Qwen3MoE(BaseModel):
                 ):
                     # remove `experts.$ID.` from dest_name
                     expert_id = int(match.group(2))
-                    dest_name = dest_name.replace(f"experts.{expert_id}.", "")
+                    dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
                     # Convert expert_id to local_expert_id
                     n_local_experts = (
                         self.model_args.n_experts
@@ -890,6 +928,13 @@ class Qwen3MoE(BaseModel):
                         f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
                     )
                     continue
+                slice_range = None
+                if "gate_proj" in dest_name:
+                    dest_name = dest_name.replace("gate_proj", "gate_and_up_proj")
+                    slice_range = slice(0, self.model_args.ffn_dim)
+                elif "up_proj" in dest_name:
+                    dest_name = dest_name.replace("up_proj", "gate_and_up_proj")
+                    slice_range = slice(self.model_args.ffn_dim, None)
 
                 target_tensor = self_state_dict[dest_name]
                 if isinstance(target_tensor, torch.distributed.tensor.DTensor):
@@ -897,7 +942,11 @@ class Qwen3MoE(BaseModel):
                 # Write to the correct expert of the target tensor
                 if expert_id is not None:
                     target_tensor = target_tensor[expert_id]
-
+                if slice_range is not None:
+                    assert (
+                        target_tensor.shape[0] == 2 * self.model_args.ffn_dim
+                    ), f"Shape mismatch: {target_tensor.shape} != {2 * self.model_args.ffn_dim} for {dest_name}"
+                    target_tensor = target_tensor[slice_range]
                 assert (
                     target_tensor.shape == shared_weight.shape
                 ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"

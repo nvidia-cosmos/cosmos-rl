@@ -17,10 +17,7 @@ import re
 import torch
 from typing import List, Tuple, Dict
 from cosmos_rl.policy.model.base import WeightMapper
-from cosmos_rl.utils.parallelism_registry import (
-    get_policy_parallelism_strategy,
-    get_rollout_parallelism_strategy,
-)
+from cosmos_rl.utils.parallelism_registry import get_rollout_parallelism_strategy
 from cosmos_rl.utils import util
 from transformers import AutoConfig
 
@@ -37,16 +34,16 @@ class Qwen3MoeWeightMapper(WeightMapper):
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w13_weight", "gate_up_proj.weight"
+                    "experts.w13_weight", "experts.gate_up_proj.weight"
                 )
             elif "experts.w2_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w2_weight", "down_proj.weight"
+                    "experts.w2_weight", "experts.down_proj.weight"
                 )
             # below are for trtllm weight for gate_up_proj and input_layernorm.
             elif "experts.w3_w1_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w3_w1_weight", "gate_up_proj.weight"
+                    "experts.w3_w1_weight", "experts.gate_up_proj.weight"
                 )
             elif "next_layer_layernorm" in rollout_weight_name:
                 # For trtllm, next_layer_layernorm is:
@@ -111,19 +108,11 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
                 group_keys.append((v_proj_weight_key, v_weight.ndim))
             elif "gate_up_proj" in param_name_hf:
-                # split gate and up proj
-                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
-                    param_name_hf, param
+                gate_and_up_proj_weight_name = param_name_hf.replace(
+                    "gate_up_proj", "gate_and_up_proj"
                 )
-                gate_proj_weight_key = param_name_hf.replace(
-                    "gate_up_proj", "gate_proj"
-                )
-                vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
-
-                up_proj_weight_key = param_name_hf.replace("gate_up_proj", "up_proj")
-                vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
+                vllm_weight_inplace_view_map[gate_and_up_proj_weight_name] = param
+                group_keys.append((gate_and_up_proj_weight_name, param.ndim))
             else:
                 vllm_weight_inplace_view_map[param_name_hf] = param
                 group_keys.append((param_name_hf, param.ndim))
@@ -135,7 +124,8 @@ class Qwen3MoeWeightMapper(WeightMapper):
         self, name, expert_weight: torch.Tensor
     ):
         if match := re.search(
-            r"model\.layers\.(\d+)\.mlp\.(up_proj|gate_proj|down_proj)\.(weight)", name
+            r"model\.layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.(weight)",
+            name,
         ):
             layer_id = int(match.group(1))
             w_name = match.group(2)
@@ -154,10 +144,11 @@ class Qwen3MoeWeightMapper(WeightMapper):
         if not name == "lm_head.weight":
             if not name.startswith("model."):
                 name = "model." + name
+        if re.search(
+            r"model\.layers\.(\d+)\.mlp\.experts\.(gate_and_up_projs|down_projs)", name
+        ):
+            name = name.replace("projs", "proj.weight")
         return name
-
-    def get_policy_parallelism_strategy(self):
-        return [get_policy_parallelism_strategy("qwen3_moe")]
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("qwen3_moe")]

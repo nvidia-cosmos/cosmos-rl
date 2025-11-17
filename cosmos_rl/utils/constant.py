@@ -58,7 +58,7 @@ COSMOS_RECV_TENSOR_QUEUE_SIZE = int(
     os.environ.get("COSMOS_RECV_TENSOR_QUEUE_SIZE", "8")
 )
 
-COSMOS_GLOO_TIMEOUT = int(os.environ.get("COSMOS_GLOO_TIMEOUT", "600"))
+COSMOS_GLOO_TIMEOUT = int(os.environ.get("COSMOS_GLOO_TIMEOUT", "6000"))
 
 # Internal model type for HFModel
 COSMOS_HF_MODEL_TYPES = "hfmodel"
