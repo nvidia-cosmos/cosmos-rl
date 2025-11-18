@@ -242,7 +242,7 @@ def map_weight_parallel_dims(
                 dims_map[dim] = n_dim - 1
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
+                    r"layers\.(\d+)\.mlp\.experts\.(gate_and_up_proj|down_proj)\.(weight|bias)",
                     dest_name,
                 )
             ) is not None:
