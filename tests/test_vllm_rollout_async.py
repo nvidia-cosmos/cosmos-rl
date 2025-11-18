@@ -22,7 +22,6 @@ import uuid
 import functools
 from typing import Optional, Tuple, List, Any, Dict
 
-import datasets
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, RequestOutputKind
 
@@ -37,6 +36,7 @@ from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
     DataPacker,
 )
 from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
+from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 
@@ -48,6 +48,7 @@ def override_environment(port: int = 29500) -> dict[str, str]:
     os.environ["LOCAL_RANK"] = "0"
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = f"{port}"
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     return old_env
 
 
@@ -64,14 +65,18 @@ class MockAPIClient(APIClient):
         self.data_packer = data_packer
 
         # load test dataset
-        cur_dir = os.path.dirname(os.path.abspath(__file__))
-        self.dataset = datasets.load_from_disk(
-            os.path.join(cur_dir, "data_fixtures", "sharegpt52k_small")
-        )["train"]
-        self.data_iter = iter(self.dataset)
-        self.cur_epoch = 0
+        self.data_fetcher = ControllerDataFetcher(
+            config=self.config,
+            tokenizer=tokenizer,
+            dataset=None,
+            val_dataset=None,
+            is_rl=True,
+        )
+        self.max_iter = 10
+        self.cur_iter = 0
 
-        self.rollout_completion_response: RolloutRequest = None
+        # rollout_completion_payloads cache 1 batch of payloads for testing
+        self.rollout_completion_payloads: List[RLPayload] = []
 
     def post_rollout_shard_info(
         self,
@@ -102,32 +107,17 @@ class MockAPIClient(APIClient):
     def get_next_prompt(
         self, batch_size: int, validation_step: Optional[int] = None
     ) -> Tuple[List[Tuple[int, str]], bool]:
-        def _collect_batch(self):
-            batch = []
-            for i in range(batch_size):
-                dat = next(self.data_iter)
-                conversation = dat["conversation"]
-                prompt = self.data_packer.get_rollout_input(conversation)
-                payload = RLPayload(
-                    prompt=prompt,
-                    conversation=conversation,
-                    reference_answer="#### 123",
-                )
-                batch.append((i, payload))
-            return batch
+        payloads_list, is_end = self.data_fetcher.get_batched_prompt(
+            batch_size, validation_step
+        )
+        self.cur_iter += 1
 
-        try:
-            batch = _collect_batch(self)
-        except StopIteration:
-            self.data_iter = iter(self.dataset)
-            batch = _collect_batch(self)
-            self.cur_epoch += 1
-
-        return batch, self.cur_epoch == 2
+        payloads_list = [pl.model_dump() for pl in payloads_list]
+        return payloads_list, is_end or self.cur_iter == self.max_iter
 
     def post_rollout_completion(self, response: RolloutRequest):
         logger.info(f"[MockAPIClient] Post rollout completion: {response}")
-        self.rollout_completion_response = response
+        self.rollout_completion_payloads.extend(response.payloads)
 
     def post_validation_report(self, report: ValidationReportRequest):
         logger.info(f"[MockAPIClient] Post validation report: {report}")
@@ -326,8 +316,10 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         worker.setup()
         worker.work()
 
-        self.assertIsNotNone(worker.api_client.rollout_completion_response)
-        self.assertTrue(len(worker.api_client.rollout_completion_response.payloads) > 0)
+        self.assertEqual(
+            len(worker.api_client.rollout_completion_payloads),
+            cosmos_config.rollout.batch_size * worker.api_client.max_iter,
+        )
 
         # clean the test environment
         worker.handle_shutdown()

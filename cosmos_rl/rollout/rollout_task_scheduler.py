@@ -563,13 +563,6 @@ class RolloutTaskScheduler:
                 )
             await asyncio.sleep(0.1)
 
-    async def wait_for_all_tasks_to_complete(self):
-        """
-        Wait for all tasks to complete.
-        """
-        while len(self.active_tasks) > 0:
-            await asyncio.sleep(0.1)
-
     def is_idle(self) -> bool:
         """
         Check if the scheduler is idle.
@@ -580,6 +573,19 @@ class RolloutTaskScheduler:
             and self.task_queue.empty()
             and self.complete_queue.empty()
         )
+
+    def is_all_tasks_completed(self) -> bool:
+        """
+        Check if all tasks are completed.
+        """
+        return self.task_queue.empty() and len(self.active_tasks) == 0
+
+    async def wait_all_tasks_completed(self):
+        """
+        Wait for all tasks to complete.
+        """
+        while not self.is_all_tasks_completed():
+            await asyncio.sleep(0.1)
 
     def has_results(self) -> bool:
         """
@@ -630,8 +636,8 @@ class RolloutTaskScheduler:
             "total_submitted": self.total_submitted,
             "total_processed": self.total_processed,
             "active_tasks": len(self.active_tasks),
-            "pending_tasks": self.task_queue.qsize(),
-            "completed_results": self.complete_queue.qsize(),
+            "pending_tasks": self.pending_tasks(),
+            "completed_results": self.completed_results(),
             "max_concurrent_requests": self.max_concurrent_requests,
         }
 
