@@ -594,7 +594,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
             inst_dest_name = insts_for_per_param.param_name
 
             if inst_dest_name not in self.trainable_params and trainable_only:
-                logger.info(
+                logger.debug(
                     f"[Rollout] Skip {inst_dest_name} in P2R recv due to non trainable."
                 )
                 skipped_params_cnt += 1
@@ -1167,7 +1167,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                             name not in self.trainable_params
                             and broadcast_command.trainable_only
                         ):
-                            logger.info(
+                            logger.debug(
                                 f"[Rollout] Skip {name} in R2R due to non trainable."
                             )
                             skipped_params_cnt += 1
