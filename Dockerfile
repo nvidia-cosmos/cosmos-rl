@@ -85,19 +85,10 @@ RUN pip install -U pip setuptools wheel packaging psutil
 # make sure the cuda version matches, we install it here.
 RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
-# Install nvshmem grouped_gemm and DeepEP for MoE
-RUN pip install nvidia-nvshmem-cu12
-RUN pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4
-RUN git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep \
-    && cd /tmp/deepep \
-    && python setup build \
-    && python setup.py install
-
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
 # Install flash_attn separately
 # RUN pip install flash_attn==2.8.2 --no-build-isolation
-
 
 RUN pip install \
     torchao==0.13.0 \
@@ -109,6 +100,14 @@ RUN pip install \
 
 ###################################################
 
+# Install nvshmem grouped_gemm and DeepEP for MoE
+RUN pip install nvidia-nvshmem-cu12
+RUN TORCH_CUDA_ARCH_LIST="8.0 9.0+PTX" pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4 --no-build-isolation
+RUN apt-get update && apt-get install -y  libibverbs-dev
+RUN git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep \
+    && cd /tmp/deepep \
+    && python setup.py build \
+    && python setup.py install
 
 # Phase for building any lib that we want to builf from source
 FROM no-efa-base AS source-build
