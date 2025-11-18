@@ -16,7 +16,7 @@
 import asyncio
 import torch
 import threading
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 from queue import Queue
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -85,13 +85,16 @@ class RolloutTaskScheduler:
     # Start the background worker thread
     scheduler.start()
 
-    # Put payloads into scheduler with sampling parameters
-    scheduler.put_rollout(payload1, sampling_params1)
-    scheduler.put_rollout(payload2, sampling_params2)
+    # Create and put rollout tasks into scheduler
+    task1 = RolloutTask(idx=0, payload=payload1, sampling_params=sampling_params1)
+    task2 = RolloutTask(idx=1, payload=payload2, sampling_params=sampling_params2)
+    scheduler.put_rollout(task1)
+    scheduler.put_rollout(task2)
 
     # Get completed results (non-blocking)
     completed = scheduler.get(block=False)
     if completed:
+        print(f"Index: {completed.idx}")
         print(f"Prompt: {completed.result.prompt}")
         print(f"Completions: {completed.result.completions}")
 
@@ -182,11 +185,10 @@ class RolloutTaskScheduler:
 
     def put_rollout(self, task: RolloutTask):
         """
-        Put a single payload into the task queue for processing.
+        Put a single rollout task into the task queue for processing.
 
         Args:
-            payload: The RLPayload to process (tuple of idx and RLPayload)
-            sampling_params: Sampling parameters for this specific generation
+            task: The RolloutTask containing payload index, RLPayload, and sampling parameters
         """
         self.task_queue.put(task)
         self.total_submitted += 1
@@ -197,11 +199,10 @@ class RolloutTaskScheduler:
 
     def put_rollout_batch(self, tasks: List[RolloutTask]):
         """
-        Put multiple payloads into the task queue for processing.
+        Put multiple rollout tasks into the task queue for processing.
 
         Args:
-            payloads: List of RLPayloads to process (each is a tuple of idx and RLPayload)
-            sampling_params: Sampling parameters to use for all payloads in this batch
+            tasks: List of RolloutTask objects, each containing payload index, RLPayload, and sampling parameters
         """
         for task in tasks:
             self.task_queue.put(task)
@@ -545,15 +546,15 @@ class RolloutTaskScheduler:
 
     async def draining_activate_tasks(self, timeout: Optional[float] = None):
         """
-        Draining all active tasks from the active tasks set, and block processing task from task queue.
+        Drain all active tasks from the active tasks set and block processing new tasks from task queue.
 
-        Which is useful when we want to update the weights during training.
+        This is useful when we want to update the weights during training.
 
         Args:
             timeout: Maximum time in seconds to wait for active tasks (None means wait forever)
 
-        Returns:
-            True if all active tasks are drained, False if timeout occurs
+        Raises:
+            TimeoutError: If timeout occurs before all active tasks are drained
         """
         start_time = time.time()
         while len(self.active_tasks) > 0:
@@ -565,7 +566,10 @@ class RolloutTaskScheduler:
 
     def is_idle(self) -> bool:
         """
-        Check if the scheduler is idle.
+        Check if the scheduler is idle (running with no tasks and no results).
+
+        Returns:
+            True if scheduler is running, has no active tasks, no pending tasks, and no completed results
         """
         return (
             self.is_running()
@@ -576,13 +580,18 @@ class RolloutTaskScheduler:
 
     def is_all_tasks_completed(self) -> bool:
         """
-        Check if all tasks are completed.
+        Check if all tasks are completed (no pending or active tasks).
+
+        Returns:
+            True if task queue is empty and there are no active tasks
         """
         return self.task_queue.empty() and len(self.active_tasks) == 0
 
     async def wait_all_tasks_completed(self):
         """
-        Wait for all tasks to complete.
+        Wait asynchronously for all pending and active tasks to complete.
+
+        This method blocks until the task queue is empty and all active tasks finish.
         """
         while not self.is_all_tasks_completed():
             await asyncio.sleep(0.1)
@@ -642,9 +651,17 @@ class RolloutTaskScheduler:
         }
 
     # TODO(zjx): below are some HACKs in this class, be careful when calling them.
-    def get_front_prompt_weight_version(self) -> (bool, int):
+    def get_front_prompt_weight_version(self) -> Tuple[bool, int]:
         """
-        Get the weight version of the front prompt in the task queue.
+        Get the weight version of the front task in the task queue.
+
+        This is a HACK method that directly accesses the internal queue structure.
+        Use with caution as it bypasses the normal queue interface.
+
+        Returns:
+            A tuple of (has_task, weight_version):
+                - has_task: True if there is a task in the queue, False otherwise
+                - weight_version: The weight version from the front task's payload (0 if queue is empty)
         """
 
         if self.task_queue.empty():

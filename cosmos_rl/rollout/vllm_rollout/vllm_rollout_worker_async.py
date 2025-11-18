@@ -1370,10 +1370,11 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                 self.current_weight_version,
             )
 
-        if self.state.prompt_fetch_end() and self.scheduler.task_queue.empty():
-            self.state.set_prompt_consume_end()
-            if self.global_rank == 0:
-                self.send_end_signal()
+            if (
+                self.state.prompt_fetch_end()
+                and self.scheduler.is_all_tasks_completed()
+            ):
+                self.state.set_prompt_consume_end()
 
     async def main_loop_async(self):
         """Main loop with async scheduler integration (coroutine version)."""
@@ -1401,11 +1402,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                         f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
                     )
                     self.state.set_prompt_fetch_end()
-                    # Check if scheduler has pending or active tasks
-                    if self.scheduler.task_queue.empty():
-                        self.state.set_prompt_consume_end()
-                        if self.global_rank == 0:
-                            self.send_end_signal()
 
             # Report rollouts (dequeue from reward_dispatcher)
             _, is_validation, _, _ = self.report_rollouts()
@@ -1413,10 +1409,11 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
             # Check if all prompts are consumed
             if self.state.prompt_consume_end():
-                assert (
-                    self.scheduler.task_queue.empty() and self.state.prompt_fetch_end()
-                ), "[Rollout] If prompt are all consumed, prompt queue should be empty and prompt end event should be set."
-                continue
+                # Send end signal to the controller
+                # Because we first report_rollouts() to the controller, so we don't need to check the reward_dispatcher queue here.
+                self.shutdown_signal.set()
+                if self.global_rank == 0:
+                    self.send_end_signal()
             elif self.scheduler.task_queue.empty():
                 continue
             else:
