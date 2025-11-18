@@ -242,15 +242,7 @@ def map_weight_parallel_dims(
                 dims_map[dim] = n_dim - 1
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.(up_proj|gate_proj)\.(weight|bias)", dest_name
-                )
-            ) is not None:
-                dims_map[dim] = (
-                    0  # For MoE Expert Parallelism, split in expert_num dimension
-                )
-            elif (
-                match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.(weight|bias)", dest_name
                 )
             ) is not None:
                 dims_map[dim] = (
