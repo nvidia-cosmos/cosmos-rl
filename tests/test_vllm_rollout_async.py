@@ -72,7 +72,7 @@ class MockAPIClient(APIClient):
             val_dataset=None,
             is_rl=True,
         )
-        self.max_iter = 10
+        self.max_iter = 2
         self.cur_iter = 0
 
         # rollout_completion_payloads cache 1 batch of payloads for testing
@@ -284,6 +284,7 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         cosmos_config.rollout.parallelism.dp_shard_size = 1
         cosmos_config.rollout.parallelism.tp_size = 1
         cosmos_config.rollout.parallelism.pp_size = 1
+        cosmos_config.rollout.batch_size = 4
 
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
 
