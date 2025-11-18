@@ -82,7 +82,7 @@ ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 RUN pip install -U pip setuptools wheel packaging psutil
 
 # Install nvshmem grouped_gemm and DeepEP for MoE
-RUN pip install nvidia-nvshmem-cu128
+RUN pip install nvidia-nvshmem-cu12
 RUN pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4
 RUN git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep \
     && cd /tmp/deepep \
