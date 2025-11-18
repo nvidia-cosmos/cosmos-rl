@@ -44,6 +44,7 @@ from cosmos_rl.utils.ulysses import (
 from cosmos_rl.policy.kernel.moe.moe import MoE, GroupedExpertsDeepEP
 from torch.distributed.tensor import distribute_module, distribute_tensor
 
+
 def parallelize(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -291,6 +292,7 @@ class _ExpertParallel(ParallelStyle):
             device_mesh,
             self._partition_fn,
         )
+
 
 def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
     """Apply Context Parallel to the model."""

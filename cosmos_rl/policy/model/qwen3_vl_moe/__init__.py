@@ -46,7 +46,7 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
-from cosmos_rl.policy.kernel.moe.moe import MoE, MoEArgs
+from cosmos_rl.policy.kernel.moe.moe import MoEArgs
 from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoEBlock,
     Qwen3MoeArgs,
@@ -164,7 +164,9 @@ class Qwen3MoE(nn.Module):
         )
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = Qwen3MoEBlock(layer_id, model_args, self.moe_args)
+            self.layers[str(layer_id)] = Qwen3MoEBlock(
+                layer_id, model_args, self.moe_args
+            )
 
         self.norm = qwen3_moe_build_norm(
             model_args.norm_type,
