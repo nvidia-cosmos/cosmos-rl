@@ -107,9 +107,6 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 group_keys.append((k_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
                 group_keys.append((v_proj_weight_key, v_weight.ndim))
-            elif "gate_and_up_proj" in param_name_hf:
-                vllm_weight_inplace_view_map[param_name_hf] = param
-                group_keys.append((param_name_hf, param.ndim))
             else:
                 vllm_weight_inplace_view_map[param_name_hf] = param
                 group_keys.append((param_name_hf, param.ndim))
