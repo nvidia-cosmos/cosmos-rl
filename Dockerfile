@@ -105,9 +105,6 @@ RUN pip install \
 # Phase for building any lib that we want to builf from source
 FROM no-efa-base AS source-build
 
-# install git
-RUN apt-get update -y && apt-get install -y git
-
 WORKDIR /workspace
 
 RUN git clone --branch v${FLASH_ATTN_VERSION} --single-branch https://github.com/Dao-AILab/flash-attention.git
