@@ -769,10 +769,6 @@ class Qwen3VLMoeModel(BaseModel):
             clear_weight_name(k): v for k, v in visual_state_dict.items()
         }
 
-        for k, v in lm_state_dict.items():
-            if "layers.0" in k and ("down_proj" in k or "gate_and_up_proj" in k):
-                print(f"k: {k}, v: {v.shape}")
-
         with torch.device(device):
             for f in safetensors_files:
                 weights_of_ckpt = {}
