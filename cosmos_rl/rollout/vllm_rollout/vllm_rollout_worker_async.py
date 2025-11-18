@@ -108,7 +108,7 @@ def filter_valid_single_turn_rollout_results(
             cr.result.completions = output_texts
             valid_results.append(cr)
 
-        return valid_results
+    return valid_results
 
 
 def filter_valid_multi_turn_rollout_results(
@@ -1326,13 +1326,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
     async def do_generate(self):
         logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
 
-        rollout_results: List[CompletedRollout] = []
-        while not self.scheduler.is_idle():
-            res = self.scheduler.get_all()
-            if len(res) > 0:
-                rollout_results.extend(res)
-            else:
-                await asyncio.sleep(0.1)
+        # we enqueue tasks by batch in the main loop, so we need to collect all task results here.
+        await self.scheduler.wait_all_tasks_completed()
+        rollout_results = self.scheduler.get_all()
 
         assert (
             len(rollout_results) == self.batch_size
@@ -1355,9 +1351,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             and len(valid_results) > 0
         )
 
-        # wait for all tasks to complete
-        await self.scheduler.wait_for_all_tasks_to_complete()
-
         if should_report:
             # only the first tp rank in the rollout replica will post the completion to the controller.
             valid_payloads: List[RLPayload] = []
@@ -1371,12 +1364,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                     )
                 valid_payloads.append(cr.payload)
 
-            import math
-
-            n_samples = math.fsum(
-                [len(payload.completions) for payload in valid_payloads]
-            )
-            logger.info(f"[Rollout] generate {n_samples} samples to report.")
             self.reward_dispatcher.enqueue_rewards_cal(
                 valid_payloads,
                 False,
