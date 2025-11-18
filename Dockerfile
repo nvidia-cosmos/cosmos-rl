@@ -81,6 +81,10 @@ ENV PATH="/opt/venv/cosmos_rl/bin:$PATH"
 
 RUN pip install -U pip setuptools wheel packaging psutil
 
+# even though we don't depend on torchaudio, vllm does. in order to
+# make sure the cuda version matches, we install it here.
+RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+
 # Install nvshmem grouped_gemm and DeepEP for MoE
 RUN pip install nvidia-nvshmem-cu12
 RUN pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4
@@ -88,10 +92,6 @@ RUN git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep \
     && cd /tmp/deepep \
     && python setup build \
     && python setup.py install
-
-# even though we don't depend on torchaudio, vllm does. in order to
-# make sure the cuda version matches, we install it here.
-RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
 COPY requirements.txt /workspace/cosmos_rl/requirements.txt
 
