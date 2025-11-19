@@ -186,7 +186,10 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             self.quantization_type = self.config.rollout.quantization
 
         # Use async rollout engine
-        self.rollout: vLLMRolloutAsync = vLLMRolloutAsync(self.config, self.tokenizer)
+        self.rollout: vLLMRolloutAsync = vLLMRolloutAsync(self.config)
+        self.eos_token = util.setup_tokenizer(
+            self.config.policy.model_name_or_path
+        ).eos_token
 
         # communicator index for the cached communicators in C++ binding.
         self.global_commnicator_idex = -1
@@ -313,7 +316,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             val_dataset=val_dataset,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
-            tokenizer=self.tokenizer,
             is_rl=True,
         )
 
@@ -1340,7 +1342,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             valid_results = filter_valid_multi_turn_rollout_results(rollout_results)
         else:
             valid_results = filter_valid_single_turn_rollout_results(
-                rollout_results, self.tokenizer.eos_token
+                rollout_results, self.eos_token
             )
 
         logger.debug(f"[Rollout] generate end for rank {self.global_rank}")

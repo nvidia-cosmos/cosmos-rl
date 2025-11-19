@@ -58,16 +58,9 @@ class MockAPIClient(APIClient):
 
         self.config = getMockConfig()
 
-        # initialize the data_packer
-        tokenizer = AutoTokenizer.from_pretrained(self.config.policy.model_name_or_path)
-        data_packer = DecoderOnlyLLMDataPacker()
-        data_packer.setup(config=self.config, tokenizer=tokenizer)
-        self.data_packer = data_packer
-
         # load test dataset
         self.data_fetcher = ControllerDataFetcher(
             config=self.config,
-            tokenizer=tokenizer,
             dataset=None,
             val_dataset=None,
             is_rl=True,
@@ -116,11 +109,15 @@ class MockAPIClient(APIClient):
         return payloads_list, is_end or self.cur_iter == self.max_iter
 
     def post_rollout_completion(self, response: RolloutRequest):
-        logger.info(f"[MockAPIClient] Post rollout completion: {response}")
+        logger.info(
+            f"[MockAPIClient] Post rollout completion: {len(response.payloads)} results"
+        )
         self.rollout_completion_payloads.extend(response.payloads)
 
     def post_validation_report(self, report: ValidationReportRequest):
-        logger.info(f"[MockAPIClient] Post validation report: {report}")
+        logger.info(
+            f"[MockAPIClient] Post validation report: {len(report.payloads)} results"
+        )
 
 
 def getMockConfig():
