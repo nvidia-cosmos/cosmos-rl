@@ -262,12 +262,11 @@ class GroupedExpertsDeepEP(nn.Module):
                 model and intermediate dimension parameters.
         """
         super().__init__()
-
         self.gate_and_up_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim * 2)
+            torch.empty(args.n_routed_experts, args.moe_inter_dim * 2, args.dim)
         )
         self.down_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
+            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim)
         )
         self.args = args
 
@@ -323,10 +322,6 @@ class GroupedExpertsDeepEP(nn.Module):
         """
         assert not isinstance(x, DTensor)
 
-        assert (
-            self.n_routed_experts % self.ep_size == 0
-        ), f"Number of experts must be divisible by ep_size (ep_size={self.ep_size})"
-
         indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
 
         (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
@@ -344,16 +339,16 @@ class GroupedExpertsDeepEP(nn.Module):
                 permuted_local_hidden_states,
                 self.gate_and_up_projs.to_local(),
                 tokens_per_expert,
-                trans_b=False,
+                trans_b=True,
             )
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             output2 = ops.gmm(
-                output1_, self.down_projs.to_local(), tokens_per_expert, trans_b=False
+                output1_, self.down_projs.to_local(), tokens_per_expert, trans_b=True
             )
         else:
-            output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0])
+            output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
-            output2 = torch.matmul(output1_, self.down_projs.to_local()[0])
+            output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
 
         y = self.token_dispatcher.token_unpermutation(output2)
 
@@ -716,7 +711,11 @@ class MoE(nn.Module):
             self.experts = GroupedExpertsDeepEP(args)
         else:
             self.experts = GroupedExperts(args)
-        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
+        if args.n_shared_experts > 0:
+            self.shared_experts = MLP(
+                args.dim, args.n_shared_experts * args.moe_inter_dim
+            )
+        self.args = args
 
     def forward(
         self,
@@ -745,24 +744,25 @@ class MoE(nn.Module):
 
         weights, indices, aux_loss = self.gate(x, token_mask, cp_mesh)
 
+        y = self.experts(x, token_mask, weights, indices)
         # Execute shared experts in a separate stream to overlap compute with the
         # communication for grouped experts.
-        global _shared_experts_stream
-        if _shared_experts_stream is None:
-            _shared_experts_stream = torch.cuda.Stream()
+        if self.args.n_shared_experts > 0:
+            global _shared_experts_stream
+            if _shared_experts_stream is None:
+                _shared_experts_stream = torch.cuda.Stream()
 
-        _shared_experts_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(_shared_experts_stream):
-            z = self.shared_experts(x)
-
-        y = self.experts(x, token_mask, weights, indices)
-
-        # Wait for the shared experts stream to complete all operations before
-        # adding together the outputs of grouped experts and shared experts.
-        torch.cuda.current_stream().wait_stream(_shared_experts_stream)
+            _shared_experts_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(_shared_experts_stream):
+                z = self.shared_experts(x)
+            # Wait for the shared experts stream to complete all operations before
+            # adding together the outputs of grouped experts and shared experts.
+            torch.cuda.current_stream().wait_stream(_shared_experts_stream)
 
         # Reshape the outputs back to 3-D.
-        return (y + z).view(shape), aux_loss
+        return (y + z).view(shape) if self.args.n_shared_experts > 0 else y.view(
+            shape
+        ), aux_loss
 
     def init_weights(self) -> None:
         self.apply(_init_weights)

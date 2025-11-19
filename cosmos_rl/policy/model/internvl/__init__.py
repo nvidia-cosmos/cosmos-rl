@@ -43,6 +43,7 @@ from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
 from functools import cached_property
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
 from cosmos_rl.policy.model.gpt import GPTArgs
+from cosmos_rl.policy.kernel.moe.moe import MoEArgs
 from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoEBlock,
     Qwen3MoeArgs,
@@ -78,10 +79,27 @@ class Qwen3MoE(nn.Module):
         self.rotary_emb = Qwen3MoERotaryEmbedding(model_args)
 
         self.embed_tokens = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.moe_args = MoEArgs(
+            n_routed_experts=model_args.n_experts,
+            n_shared_experts=getattr(model_args.hf_config, "n_shared_experts", 0),
+            n_activated_experts=model_args.hf_config.num_experts_per_tok,
+            n_expert_groups=getattr(model_args.hf_config, "n_group", 0),
+            n_limited_groups=getattr(model_args.hf_config, "topk_group", 0),
+            train_gate=model_args.train_gate,
+            gate_bias_update_factor=model_args.gate_bias_update_factor,
+            aux_loss_coeff=model_args.aux_loss_coeff,
+            score_func=getattr(model_args.hf_config, "scoring_func", "softmax"),
+            route_scale=getattr(model_args.hf_config, "routed_scaling_factor", 1.0),
+            dim=model_args.dim,
+            moe_inter_dim=model_args.ffn_dim,
+            enable_deepep=True,
+        )
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = Qwen3MoEBlock(layer_id, model_args)
+            self.layers[str(layer_id)] = Qwen3MoEBlock(
+                layer_id, model_args, self.moe_args
+            )
 
         self.norm = qwen3_moe_build_norm(
             model_args.norm_type,
@@ -180,8 +198,9 @@ class Qwen3MoE(nn.Module):
         return next(self.parameters()).device
 
     def post_to_empty_hook(self, cosmos_config: CosmosConfig):
-        for layer in self.layers.values():
-            layer.mlp.gate.weight.requires_grad_(False)
+        if not self.moe_args.fake_balanced_gate:
+            for layer in self.layers.values():
+                layer.mlp.gate.weight.requires_grad_(False)
 
         # rotary.inv_freq could get deleted and not re-initialized
         # so we need to delete it manually
@@ -198,6 +217,8 @@ class Qwen3MoE(nn.Module):
         )
 
         OnDeviceAllToAllV.max_output_len = MAX_BATCH_MUL_SEQ_LEN * overflow
+        if self.moe_args.enable_deepep:
+            return
         # Init MoE kernel related buffers
         if FeedForward.token_send_buf is None:
             dtype = self.model_args.hf_config.torch_dtype
@@ -495,6 +516,12 @@ class InternVLChatModel(BaseModel):
         # Load LM weights
         lm_state_dict = self.model.state_dict()
         lm_state_dict = {clear_weight_name(k): v for k, v in lm_state_dict.items()}
+        new_state_dict = lm_state_dict.copy()
+        for k, v in lm_state_dict.items():
+            if "mlp.experts.gate_and_up_projs" in k or "mlp.experts.down_projs" in k:
+                new_state_dict[k.replace("projs", "proj.weight")] = v
+                del new_state_dict[k]
+        lm_state_dict = new_state_dict
         # print(f"lm_state_dict: {lm_state_dict.keys()}")
         # Rename dict to remove all `._orig_mod` in keys
         if self.visual is not None:
@@ -541,7 +568,9 @@ class InternVLChatModel(BaseModel):
                     ):
                         # remove `experts.$ID.` from dest_name
                         expert_id = int(match.group(2))
-                        dest_name = dest_name.replace(f"experts.{expert_id}.", "")
+                        dest_name = dest_name.replace(
+                            f"experts.{expert_id}.", "experts."
+                        )
                         # Convert expert_id to local_expert_id
                         n_local_experts = (
                             n_experts
@@ -549,6 +578,14 @@ class InternVLChatModel(BaseModel):
                             // (parallel_dims.dp_shard * parallel_dims.cp)
                         )
                         expert_id = expert_id % n_local_experts
+
+                    slice_range = None
+                    if "gate_proj" in dest_name:
+                        dest_name = dest_name.replace("gate_proj", "gate_and_up_proj")
+                        slice_range = slice(0, self.model.model_args.ffn_dim)
+                    elif "up_proj" in dest_name:
+                        dest_name = dest_name.replace("up_proj", "gate_and_up_proj")
+                        slice_range = slice(self.model.model_args.ffn_dim, None)
 
                     if dest_name in lm_state_dict:
                         target_tensor = lm_state_dict[dest_name]
@@ -561,15 +598,22 @@ class InternVLChatModel(BaseModel):
                         continue
                     else:
                         raise ValueError(f"Unsupported weight: {dest_name}")
+
                     is_dist_tensor = isinstance(
                         target_tensor, torch.distributed.tensor.DTensor
                     )
                     local_view = (
                         target_tensor.to_local() if is_dist_tensor else target_tensor
                     )
+
                     # Write to the correct expert of the target tensor
                     if expert_id is not None:
                         local_view = local_view[expert_id]
+                    if slice_range is not None:
+                        assert (
+                            local_view.shape[0] == 2 * self.model.model_args.ffn_dim
+                        ), f"Shape mismatch: {local_view.shape} != {2 * self.model.model_args.ffn_dim} for {dest_name}"
+                        local_view = local_view[slice_range]
 
                     assert (
                         local_view.shape == shared_weight.shape
@@ -654,6 +698,9 @@ class InternVLChatModel(BaseModel):
                 norm_type="rmsnorm",
                 rope_type=rope_type,
                 biases=bias_list,
+                train_gate=True,
+                gate_bias_update_factor=1.0,
+                aux_loss_coeff=0.0,
                 hf_config=lm_config,
             )
         else:

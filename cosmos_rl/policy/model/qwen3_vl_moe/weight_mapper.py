@@ -43,11 +43,11 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w13_weight", "gate_up_proj.weight"
+                    "experts.w13_weight", "experts.gate_and_up_proj.weight"
                 )
             elif "experts.w2_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w2_weight", "down_proj.weight"
+                    "experts.w2_weight", "experts.down_proj.weight"
                 )
         return rollout_weight_name
 
@@ -113,20 +113,20 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 group_keys.append((k_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
                 group_keys.append((v_proj_weight_key, v_weight.ndim))
-            elif "gate_up_proj" in compatible_key:
-                # split gate and up proj
-                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
-                    compatible_key, param
-                )
-                gate_proj_weight_key = compatible_key.replace(
-                    "gate_up_proj", "gate_proj"
-                )
-                vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
+            # elif "gate_up_proj" in compatible_key:
+            #     # split gate and up proj
+            #     gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
+            #         compatible_key, param
+            #     )
+            #     gate_proj_weight_key = compatible_key.replace(
+            #         "gate_up_proj", "gate_proj"
+            #     )
+            #     vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
+            #     group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
-                up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
-                vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
+            #     up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
+            #     vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
+            #     group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
             elif "qkv" in compatible_key and "visual" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
                     compatible_key, param
@@ -146,12 +146,36 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             recv_key_n_rank_list.append(group_keys)
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
+    @torch.no_grad()
+    def policy_maybe_decompose_weights_to_hf_naming(
+        self, name, expert_weight: torch.Tensor
+    ):
+        if match := re.search(
+            r"model\.layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.(weight)",
+            name,
+        ):
+            layer_id = int(match.group(1))
+            w_name = match.group(2)
+            n_experts = expert_weight.shape[0]
+            for expert_id in range(n_experts):
+                single_expert_weight = expert_weight[expert_id].contiguous()
+                yield (
+                    f"model.layers.{layer_id}.mlp.experts.{expert_id}.{w_name}.weight",
+                    single_expert_weight,
+                )
+        else:
+            yield name, expert_weight
+
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
         if name.startswith("language_model."):
             name = name.replace("language_model.", "")
         if name == "model.lm_head.weight":
             name = "lm_head.weight"
+        if re.search(
+            r"model\.layers\.(\d+)\.mlp\.experts\.(gate_and_up_projs|down_projs)", name
+        ):
+            name = name.replace("projs", "proj.weight")
         return name
 
     def name_to_model_part_index(self, dest_name: str) -> int:
@@ -226,7 +250,7 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 return weight_key.replace(key, "qkv_proj")
         for key in ["gate_proj", "up_proj"]:
             if key in weight_key:
-                return weight_key.replace(key, "gate_up_proj")
+                return weight_key.replace(key, "gate_and_up_proj")
         for key in ["q", "k", "v"]:
             if "visual" in weight_key and key in weight_key:
                 return weight_key.replace(key, "qkv")
