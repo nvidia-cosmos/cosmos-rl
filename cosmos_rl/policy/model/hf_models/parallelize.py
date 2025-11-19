@@ -53,7 +53,6 @@ def parallelize(
     assert not config.train.compile, "Compile is not supported for HFModel"
 
     if parallel_dims.tp_enabled:
-        model.check_tp_compatible(world_mesh["tp"].size())
         apply_tp(
             model,
             world_mesh["tp"],
