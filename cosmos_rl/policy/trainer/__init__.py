@@ -117,24 +117,30 @@ class Trainer(CommMixin):
             parallelize_fn, _ = model.parallelize_fn
             # `pp_scheduler` is used for both `sft` and `RLHF`
             # `pp_scheduler_val` is used only for `sft`, since `RLHF` does not require policy model via validation
-            self.pp_scheduler, self.pp_scheduler_val, model = parallelize_fn(
+            self.pp_scheduler, self.pp_scheduler_val, model_parts = parallelize_fn(
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )
+            if not isinstance(model_parts, list):
+                model_parts = [model_parts]
             if not config.train.fsdp_offload:
-                model.to_empty(device=self.device)
-            model.post_to_empty_hook(config)
+                for m in model_parts:
+                    m.to_empty(device=self.device)
+            for m in model_parts:
+                m.post_to_empty_hook(config)
             if config.policy.lora is not None:
                 from cosmos_rl.policy.lora.plugin import reinitialize_lora_params
 
-                reinitialize_lora_params(model)
+                for m in model_parts:
+                    reinitialize_lora_params(m)
             # Enable gradient checkpointing for the model
-            model.set_gradient_checkpointing_enabled(
-                config.policy.model_gradient_checkpointing
-            )
+            for m in model_parts:
+                m.set_gradient_checkpointing_enabled(
+                    config.policy.model_gradient_checkpointing
+                )
 
             torch.cuda.empty_cache()
-            self.model_parts = model.separate_model_parts()
-            self.model = model
+            self.model_parts = model_parts # model.separate_model_parts()
+            self.model = model_parts
             # util.add_nan_checks(model)
         except Exception as e:
             import traceback
@@ -145,9 +151,10 @@ class Trainer(CommMixin):
         self.ckpt_manager = CheckpointMananger(
             config, self.parallel_dims, self.global_rank
         )
-        self.act_offloading_ctx_manager = get_act_offloading_ctx_manager(
-            self.model, config.train.activation_offload
-        )
+        for m in model_parts:
+            self.act_offloading_ctx_manager = get_act_offloading_ctx_manager(
+                m, config.train.activation_offload
+            )
 
         # profiler is initialized after the init_comm()
         self.profiler = CosmosProfiler(

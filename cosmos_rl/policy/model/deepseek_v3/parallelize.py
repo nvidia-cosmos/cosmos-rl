@@ -368,6 +368,6 @@ def parallelize(
                 loss_fn=pp_loss_fn,
                 # has_backward=pp_config.has_backward,
             )
-        return pp_schedules["train"], pp_schedules["validation"], model_parts[0]
+        return pp_schedules["train"], pp_schedules["validation"], model_parts
     else:
         return parallelize_fn(model, parallel_dims, config, pp_loss_fn)

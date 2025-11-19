@@ -38,9 +38,10 @@ from cosmos_rl.utils.sequence_packing import (
 )
 from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 from cosmos_rl.utils.wandb_logger import init_wandb, is_wandb_available, log_wandb
-from datasets import concatenate_datasets
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, Sampler
 from transformers import AutoTokenizer
+
+from datasets import concatenate_datasets
 
 
 def async_safe_ce(
@@ -336,13 +337,15 @@ class SFTTrainer(Trainer):
                     revision=config.policy.model_revision,
                 )
         else:
-            self.model.load_hf_weights(
-                config.policy.model_name_or_path,
-                parallel_dims,
-                self.device,
-                revision=config.policy.model_revision,
-            )
-        self.model.train()
+            for m in self.model:
+                m.load_hf_weights(
+                    config.policy.model_name_or_path,
+                    parallel_dims,
+                    self.device,
+                    revision=config.policy.model_revision,
+                )
+        for m in self.model:
+            m.train()
 
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
@@ -568,7 +571,8 @@ class SFTTrainer(Trainer):
             return
 
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
-        self.model.eval()
+        for m in self.model:
+            m.eval()
         with torch.no_grad():
             val_total_loss = 0.0
             for val_global_batch in tqdm(self.val_data_loader, desc="Validation"):
@@ -604,7 +608,7 @@ class SFTTrainer(Trainer):
                     )
                 val_inputs = val_batch["input_ids"]
                 val_labels = val_batch.pop("label_ids")
-                val_position_ids, _, val_pos_seq_dim = self.model.get_position_ids(
+                val_position_ids, _, val_pos_seq_dim = self.model[0].get_position_ids(
                     **val_batch
                 )
 
@@ -612,7 +616,7 @@ class SFTTrainer(Trainer):
                 val_padding_mask = val_batch.get("padding_mask", None)
 
                 delay_cp_slice_inputs = getattr(
-                    self.model, "delay_cp_slice_inputs", False
+                    self.model[0], "delay_cp_slice_inputs", False
                 )
                 if self.parallel_dims.cp_enabled and not delay_cp_slice_inputs:
                     [val_inputs, val_position_ids, val_padding_mask] = (
@@ -653,7 +657,7 @@ class SFTTrainer(Trainer):
                     else:
                         val_loss = torch.tensor([-1.0], device=self.device)
                 else:
-                    val_logits = self.model(**val_batch)
+                    val_logits = self.model[0](**val_batch)
 
                     val_loss = self.loss_fn(val_logits, val_labels)
                 val_total_loss += val_loss.item() * val_inputs.size(0)
@@ -743,7 +747,8 @@ class SFTTrainer(Trainer):
                         ):
                             torch.cuda.cudart().cudaProfilerStop()
 
-                    self.model.train()
+                    for m in self.model:
+                        m.train()
                     for k, v in batch.items():
                         batch[k] = (
                             v.to(self.device) if isinstance(v, torch.Tensor) else v
@@ -751,9 +756,9 @@ class SFTTrainer(Trainer):
 
                     labels = batch.pop("label_ids")
 
-                    position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
-                        **batch
-                    )
+                    position_ids, input_ids, pos_seq_dim = self.model[
+                        0
+                    ].get_position_ids(**batch)
 
                     batch["position_ids"] = position_ids
                     padding_mask = batch.get("padding_mask", None)
