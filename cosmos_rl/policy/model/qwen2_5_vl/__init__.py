@@ -1095,11 +1095,6 @@ class Qwen2_5_VLConditionalModel(BaseModel):
         llm_n_heads = self.config.lm_args.n_heads
         llm_n_kv_heads = self.config.lm_args.n_kv_heads
         assert (
-            visual_n_heads >= tp_size
-            and llm_n_heads >= tp_size
-            and llm_n_kv_heads >= tp_size
-        ), f"Model is not compatible with tp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} must be greater than or equal to TP size ({tp_size})"
-        assert (
             visual_n_heads % tp_size == 0
             and llm_n_heads % tp_size == 0
             and llm_n_kv_heads % tp_size == 0

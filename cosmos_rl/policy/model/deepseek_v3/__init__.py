@@ -458,9 +458,8 @@ class DeepseekV3MoEModel(BaseModel):
             )
 
     def check_tp_compatible(self, tp_size: int):
-        number_not_match = self.config.n_heads < tp_size
         non_divisible_by_tp_size = self.config.n_heads % tp_size != 0
-        if number_not_match or non_divisible_by_tp_size:
+        if non_divisible_by_tp_size:
             raise ValueError(
                 f"Model is not compatible with tp parallelism, model's head number={self.config.n_heads} is not satisified by tp size({tp_size})"
             )
