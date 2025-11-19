@@ -74,6 +74,7 @@ jobs:
           ${LONG_DOCKER_RUN} /bin/bash -c "torchrun --nproc_per_node=2 tests/test_hf_models_tp.py"
           ${DOCKER_RUN} python tests/test_activation_offload.py
           ${DOCKER_RUN} python tests/test_policy_variant.py
+          ${DOCKER_RUN} python tests/test_deepep.py
 
       - name: Cleanup
         if: always()
