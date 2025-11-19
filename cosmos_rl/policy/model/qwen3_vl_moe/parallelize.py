@@ -30,7 +30,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from cosmos_rl.utils.distributed import ReplicateParallel
-from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -42,6 +42,7 @@ from cosmos_rl.utils.ulysses import (
 )
 
 
+@pre_parallelize_sanity_check
 def parallelize(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -269,8 +270,6 @@ def parallelize(
 def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
     """Apply Context Parallel to the model."""
     # check if cp is compatible with model
-    cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
-    model.check_cp_compatible(cp_size, tp_size)
 
     cp_mesh = parallel_dims.mesh["cp"]
     # For language

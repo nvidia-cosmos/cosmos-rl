@@ -873,6 +873,9 @@ class HFModel(BaseModel):
         num_attention_heads = self.text_config.num_attention_heads
         num_key_value_heads = self.text_config.num_key_value_heads
         assert (
+            num_attention_heads >= tp_size and num_key_value_heads >= tp_size
+        ), f"{num_attention_heads=} or {num_key_value_heads=} must be greater than or equal to TP size ({tp_size})"
+        assert (
             num_attention_heads % tp_size == 0
         ), f"{num_attention_heads=} must be divisible by TP size ({tp_size})"
         assert (

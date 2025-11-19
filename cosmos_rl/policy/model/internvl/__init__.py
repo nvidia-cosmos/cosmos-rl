@@ -716,3 +716,22 @@ class InternVLChatModel(BaseModel):
             raise ValueError(
                 f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
             )
+
+    def check_tp_compatible(self, tp_size: int):
+        visual_n_heads = self.config.encoder_args.num_attention_heads
+        llm_n_heads = self.config.lm_args.n_heads
+        llm_n_kv_heads = self.config.lm_args.n_kv_heads
+        number_not_match = (
+            visual_n_heads < tp_size
+            or llm_n_heads < tp_size
+            or llm_n_kv_heads < tp_size
+        )
+        non_divisible_by_tp_size = (
+            visual_n_heads % tp_size != 0
+            or llm_n_heads % tp_size != 0
+            or llm_n_kv_heads % tp_size != 0
+        )
+        if number_not_match or non_divisible_by_tp_size:
+            raise ValueError(
+                f"Model is not compatible with tp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} or llm_n_kv_heads={llm_n_kv_heads} is not satisified by tp size({tp_size})"
+            )

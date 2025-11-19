@@ -448,9 +448,10 @@ class BaseModel(torch.nn.Module, ABC):
         raise NotImplementedError
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
-        raise NotImplementedError(
-            "This func should not be called in BaseModel instance."
-        )
+        raise NotImplementedError("Please implement this method in the derived class.")
+
+    def check_tp_compatible(self, tp_size: int):
+        raise NotImplementedError("Please implement this method in the derived class.")
 
 
 class ModelRegistry:
