@@ -5,7 +5,7 @@ A simple module swap UX for a float4 version of `torch.nn.Linear`.
 from typing import Optional
 
 import torch
-from .config import Float4LinearConfig, ScalingType
+from cosmos_rl.utils.fp4.config import Float4LinearConfig, ScalingType
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer

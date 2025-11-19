@@ -17,16 +17,16 @@ import torch
 import torch.nn as nn
 
 from strenum import StrEnum
-from abc import abstractmethod, ABC
 from typing import Union, List
 from functools import partial
-from .float4_linear_utils import convert_to_float4_training
-from .config import Float4LinearConfig
+from cosmos_rl.utils.fp4.float4_linear_utils import convert_to_float4_training
+from cosmos_rl.utils.fp4.config import Float4LinearConfig
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import is_cuda_compatible, torch_version_at_least
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.model_converter import ModelConverter
 
 MIN_TORCH_VERSION_FOR_FP4 = "2.7.0"
 IS_TORCH_COMPATIBLE_WITH_FP4 = torch_version_at_least(MIN_TORCH_VERSION_FOR_FP4)
@@ -35,21 +35,6 @@ if not IS_TORCH_COMPATIBLE_WITH_FP4:
     logger.warning(
         f"[FP4] FP4 is not supported for this version of PyTorch, minimum version required: {MIN_TORCH_VERSION_FOR_FP4}, but got: {torch.__version__}. FP4 setting will take no effect."
     )
-
-
-class ModelConverter(ABC):
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
-        self.config = config
-        self.parallel_dims = parallel_dims
-
-    @abstractmethod
-    def convert_model(self, model: torch.nn.Module) -> torch.nn.Module: ...
-
-    def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
-        """
-        Post-optimizer hook (e.g. compute weights statistics).
-        """
-        ...
 
 
 class FP4Recipe(StrEnum):

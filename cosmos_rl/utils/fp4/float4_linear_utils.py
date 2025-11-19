@@ -2,8 +2,8 @@ from typing import Callable, Optional
 
 import torch.nn as nn
 
-from .config import Float4LinearConfig
-from .float4_linear import Float4Linear
+from cosmos_rl.utils.fp4.config import Float4LinearConfig
+from cosmos_rl.utils.fp4.float4_linear import Float4Linear
 
 
 def swap_linear_layers(
