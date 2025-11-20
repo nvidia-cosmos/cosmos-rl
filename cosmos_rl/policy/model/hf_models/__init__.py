@@ -109,6 +109,20 @@ class HFModel(BaseModel):
                     f"reverse_hf_conversion_mapping={self.weight_mapper.reverse_hf_conversion_mapping}"
                 )
 
+    def set_gradient_checkpointing_enabled(self, enabled: bool):
+        """
+        Set the gradient checkpointing enabled flag.
+        This is used to enable or disable the gradient checkpointing for the model.
+        """
+        super().set_gradient_checkpointing_enabled(enabled)
+        # Configure gradient checkpointing if enabled
+        if self._gradient_checkpointing_enabled:
+            self.model.gradient_checkpointing_enable()
+            assert (
+                self.model.is_gradient_checkpointing
+            ), "Gradient checkpointing is not enabled"
+            logger.info("Enabled gradient checkpointing for HFModel")
+
     @cached_property
     def model_forward_valid_kwargs(self):
         if self.hf_config.model_type == "NemotronH_Nano_VL_V2":
@@ -608,14 +622,6 @@ class HFModel(BaseModel):
                 modules_to_not_convert=quantization_config["modules_to_not_convert"],
             )
             kwargs["quantization_config"] = mxfp4_quantization_config
-
-        # Configure gradient checkpointing if enabled
-        if self._gradient_checkpointing_enabled:
-            self.model.gradient_checkpointing_enable()
-            assert (
-                self.model.is_gradient_checkpointing
-            ), "Gradient checkpointing is not enabled"
-            logger.info("Enabled gradient checkpointing for HFModel")
 
         # Use from_pretrained loading in two scenarios:
         # 1. Model requires dequantization (e.g., gpt-oss)
