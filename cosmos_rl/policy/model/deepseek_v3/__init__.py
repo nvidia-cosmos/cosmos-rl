@@ -451,14 +451,22 @@ class DeepseekV3MoEModel(BaseModel):
 
         return sorted(transforms.items())
 
+
     @classmethod
     def fqn_filter_for_quantization(cls) -> List[str]:
         return ["lm_head"]
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
-        if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
+        if not (self.config.n_heads % (cp_size * tp_size) == 0):
             raise ValueError(
-                f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+                f"Model is not compatible with cp parallelism, model's head number={self.config.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+            )
+
+    def check_tp_compatible(self, tp_size: int):
+        non_divisible_by_tp_size = self.config.n_heads % tp_size != 0
+        if non_divisible_by_tp_size:
+            raise ValueError(
+                f"Model is not compatible with tp parallelism, model's head number={self.config.n_heads} is not satisified by tp size({tp_size})"
             )
 
 

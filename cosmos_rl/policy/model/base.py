@@ -448,9 +448,18 @@ class BaseModel(torch.nn.Module, ABC):
         raise NotImplementedError
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
-        raise NotImplementedError(
-            "This func should not be called in BaseModel instance."
-        )
+        """
+        Check if the model is compatible with context parallelism. By default, it does nothing.
+        This is a model-specific check, so it should be overridden in the derived class of different models.
+        """
+        pass
+
+    def check_tp_compatible(self, tp_size: int):
+        """
+        Check if the model is compatible with tensor parallelism. By default, it does nothing.
+        This is a model-specific check, so it should be overridden in the derived class of different models.
+        """
+        pass
 
 
 class ModelRegistry:
