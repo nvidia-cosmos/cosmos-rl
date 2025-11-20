@@ -1089,3 +1089,13 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             raise ValueError(
                 f"Model is not compatible with cp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
             )
+
+    def check_tp_compatible(self, tp_size: int):
+        visual_n_heads = self.config.encoder_args.n_heads
+        llm_n_heads = self.config.lm_args.n_heads
+        llm_n_kv_heads = self.config.lm_args.n_kv_heads
+        assert (
+            visual_n_heads % tp_size == 0
+            and llm_n_heads % tp_size == 0
+            and llm_n_kv_heads % tp_size == 0
+        ), f"Model is not compatible with tp parallelism, model's visual_n_heads={visual_n_heads} or llm_n_heads={llm_n_heads} must be divisible by TP size ({tp_size})"

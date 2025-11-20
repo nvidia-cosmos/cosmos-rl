@@ -768,3 +768,13 @@ class GPT(BaseModel):
             raise ValueError(
                 f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
             )
+
+    def check_tp_compatible(self, tp_size: int):
+        non_divisible_by_tp_size = (
+            self.model_args.n_heads % tp_size != 0
+            or self.model_args.n_kv_heads % tp_size != 0
+        )
+        if non_divisible_by_tp_size:
+            raise ValueError(
+                f"Model is not compatible with tp parallelism, model's head number={self.model_args.n_heads} or kv head number={self.model_args.n_kv_heads} is not satisified by tp size({tp_size})"
+            )
