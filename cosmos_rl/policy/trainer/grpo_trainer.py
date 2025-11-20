@@ -1198,23 +1198,26 @@ class GRPOTrainer(Trainer):
         
         VLA differs from standard LLM:
         - No token shifting (responses are already aligned with logits)
-        - Returns full log_probs distribution for masking at loss computation level
+        - Only returns log_probs for the sampled responses (not full vocab distribution)
         
         Args:
             minibatch: dict with 'input_ids' (responses), 'logprob_masks'
             logits: model output logits (batch, seq_len, vocab_size)
             
         Returns:
-            log_probs: log probability distribution (batch*seq_len, vocab_size)
+            log_probs: log probability for sampled responses (batch, seq_len)
             cu_seqlens: cumulative sequence lengths
             metrics: dict with entropy metrics
         """
         responses = minibatch["input_ids"]  # (batch, seq_len) - action token IDs
         logprob_masks = minibatch["logprob_masks"].bool()  # (batch, seq_len)
         
-        # Compute log probabilities for ALL tokens (don't pre-mask)
-        # Shape: (batch, seq_len, vocab_size) - keep full 896 dimension for masking later
-        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)  # (batch, seq_len, vocab)
+        # Compute log probabilities for full vocab first
+        log_probs_full = torch.nn.functional.log_softmax(logits, dim=-1)  # (batch, seq_len, vocab)
+        
+        # Extract log_probs for sampled responses only (following SimpleVLA-RL approach)
+        # This is critical: we only care about the log_prob of the action that was actually taken
+        log_probs = torch.gather(log_probs_full, dim=-1, index=responses.unsqueeze(-1)).squeeze(-1)  # (batch, seq_len)
         
         # Compute entropy (for logging, only on effective tokens)
         metrics_dict = {}
@@ -1382,10 +1385,7 @@ class GRPOTrainer(Trainer):
             # Process one episode at a time
             for episode_idx, (policy_input, advantage) in enumerate(zip(policy_inputs, advantages_list)):
                 num_steps = policy_input.num_steps
-                logger.info(
-                    f"[VLA Train] Episode {episode_idx+1}/{len(policy_inputs)}: "
-                    f"{num_steps} steps, advantage={advantage:.4f}"
-                )
+
 
                 episode_data = self.data_packer.policy_collate_fn([policy_input], max_steps=64)
                 padded_num_steps = episode_data['input_ids'].shape[1]
@@ -1394,11 +1394,18 @@ class GRPOTrainer(Trainer):
                 prompt_len = prompt_mask.sum().item()
                 episode_data['input_ids'] = episode_data['input_ids'][..., :prompt_len]
                 episode_data['attention_mask'] = episode_data['attention_mask'][..., :prompt_len]
-                
+                episode_logprob_masks = episode_data['logprob_masks']
+                #logger.info(f"episode_logprob_masks: {episode_logprob_masks.shape}")
+                episode_mask_sum = episode_logprob_masks.sum()
                 logger.info(
-                    f"[VLA Train] Episode padded: actual={num_steps} steps, padded={padded_num_steps} steps "
-                    f"(padded steps masked via logprob_masks)"
+                    f"[VLA Train] Episode {episode_idx+1}/{len(policy_inputs)}: "
+                    f"{num_steps} action chunks, {episode_mask_sum} action steps, advantage={advantage:.4f}, temperature={self.config.train.train_policy.temperature}"
                 )
+                
+                # logger.info(
+                #     f"[VLA Train] Episode padded: actual={num_steps} steps, padded={padded_num_steps} steps "
+                #     f"(padded steps masked via logprob_masks)"
+                # )
                 
                 # Chunk episode - all workers process same chunks for FSDP sync
                 num_chunks = (padded_num_steps + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -1411,140 +1418,73 @@ class GRPOTrainer(Trainer):
                     
                     batch_dict = {k : v[:, start_idx:end_idx].to(self.device) 
                                   for k, v in episode_data.items() if k != 'num_steps'}
+
+                    input_ids = batch_dict['input_ids'].squeeze(0) # (CHUNK_SIZE, prompt_len)
+                    pixel_values = batch_dict['pixel_values'].squeeze(0) # (CHUNK_SIZE, 6, 224, 224)
+                    attention_mask = batch_dict['attention_mask'].squeeze(0) # (CHUNK_SIZE, prompt_len)
+                    responses = batch_dict['responses'].squeeze(0) # (CHUNK_SIZE, 56)
+                    old_log_prob = batch_dict['old_log_prob'].reshape(1, -1) # (1, CHUNK_SIZE x 56)
+                    response_mask = batch_dict['logprob_masks'].reshape(1, -1) # (1, CHUNK_SIZE x 56)
                     
-                    # Prepare advantages (same for all chunks in episode)
-                    advantages_tensor = torch.tensor([advantage], device=self.device).unsqueeze(1)
-                    action_seq_len = batch_dict['logprob_masks'].shape[1]
-                    advantages_expanded = advantages_tensor.expand(-1, action_seq_len)
-                    
-                    # Forward pass
-                    outputs = self.model.forward_with_trajectory_structure(**batch_dict)
-                    logits = outputs.logits
-                    logprob_masks = batch_dict['logprob_masks']
-                    if logits.ndim == 4:
-                        batch, steps, action_len, vocab = logits.shape
-                        logits = logits.reshape(batch, steps * action_len, vocab)
-                        logprob_masks = logprob_masks.reshape(batch, steps * action_len)
-                        advantages_expanded = advantages_tensor.expand(-1, steps * action_len)
-                    
-                    # Vocab slicing [31744, 32000) → [0, 256)
-                    start_index = logits.shape[-1] - 256 - 64
-                    logits_sliced = logits[..., start_index:start_index+256]
-                    
-                    # Remap responses
-                    responses = batch_dict['responses'].reshape(logits_sliced.shape[0], -1)
-                    responses_remapped = responses - start_index
-                    
-                    # Compute logprobs
-                    logprobs_result = self.compute_logprobs_vla(
-                        {'input_ids': responses_remapped, 'logprob_masks': logprob_masks},
-                        logits_sliced
+                    # Forward pass (vocab slicing and temperature applied inside)
+                    outputs = self.model.forward_with_trajectory_structure(
+                        input_ids, pixel_values, attention_mask,
+                        temperature=self.config.train.train_policy.temperature
                     )
-                    log_probs, cu_seqlens, metrics = logprobs_result
+                    logits = outputs.logits  # (batch*steps, action_len, 256) - already sliced and temp-scaled
+                    start_index = outputs.action_vocab_start_index
                     
-                    # Compute PPO loss with old_log_prob and clipping (matching SimpleVLA-RL)
-                    # log_probs: (batch, seq_len, vocab) - full distribution for all 896 tokens
-                    # responses_remapped: (batch, seq_len) - action indices
-                    # logprob_masks: (batch, seq_len) - mask for real vs padded tokens
-                    # old_log_prob: (batch, seq_len) - log probs from rollout
+                    # Remap responses from full vocab to action vocab [0, 256)
+                    responses = batch_dict['responses'].reshape(logits.shape[0], -1)
+                    responses_remapped = responses - start_index
+
                     
-                    # Refactored: Cleaner approach following SimpleVLA-RL pattern
-                    # Always compute loss for all tokens, apply mask weighting at the end
-                    # This naturally handles padded chunks (mask_sum=0 → loss=0, but still connected to model)
-                    # No if/else branching needed → simpler, safer, FSDP-friendly!
+                    # Compute log probabilities (entropy computed in forward pass)
+                    log_probs_full = torch.nn.functional.log_softmax(logits, dim=-1)  # (batch, seq_len, 256)
+                    log_probs = torch.gather(log_probs_full, dim=-1, index=responses_remapped.unsqueeze(-1)).squeeze(-1)
+                    log_probs = log_probs.reshape(1, -1)
+                    entropy = outputs.entropy  # Already computed in forward pass
+                    chunk_entropy = entropy.mean()
                     
-                    logprob_masks_flat = batch_dict['logprob_masks'].reshape(-1)  # (896,)
-                    advantages_flat = advantages_expanded.reshape(-1)  # (896,)
-                    mask = logprob_masks_flat.bool()
-                    mask_float = logprob_masks_flat.float()  # For weighting
-                    
-                    # Extract old_log_prob from batch and reshape
-                    old_log_prob_chunk = batch_dict['old_log_prob'].reshape(-1)  # (chunk_steps * 56,)
-                    
-                    # Compute loss for ALL tokens (real and padded)
-                    log_probs_flat = log_probs.reshape(-1, log_probs.shape[-1])  # (896, 256)
-                    responses_flat = responses_remapped.reshape(-1)  # (896,)
-                    
-                    # Gather log probs for actual actions taken (all tokens)
-                    new_log_probs = log_probs_flat.gather(
-                        dim=-1,
-                        index=responses_flat.unsqueeze(-1)
-                    ).squeeze(-1)  # (896,)
-                    
-                    # Get clipping ratios from config
+                    # Compute PPO loss (following SimpleVLA-RL approach)
                     clip_ratio_low = self.config.train.train_policy.epsilon_low
                     clip_ratio_high = self.config.train.train_policy.epsilon_high
                     
-                    # Compute importance sampling ratio (all tokens)
-                    negative_approx_kl = new_log_probs - old_log_prob_chunk
+                    negative_approx_kl = log_probs - old_log_prob
                     ratio = torch.exp(negative_approx_kl)
                     
-                    # PPO clipped objective (all tokens)
-                    pg_losses = -advantages_flat * ratio
-                    pg_losses2 = -advantages_flat * torch.clamp(ratio, 1.0 - clip_ratio_low, 1.0 + clip_ratio_high)
+                    pg_losses = -advantage * ratio
+                    pg_losses2 = -advantage * torch.clamp(ratio, 1.0 - clip_ratio_low, 1.0 + clip_ratio_high)
                     
-                    # Take maximum for conservative update (all tokens)
-                    pg_losses_max = torch.max(pg_losses, pg_losses2)
+                    # Masked mean (following SimpleVLA-RL pattern)
+                    response_mask_sum = response_mask.sum()
+                    #logger.info(f"response_mask_sum: {response_mask_sum}, episode_mask_sum: {episode_mask_sum}")
+                    pg_loss = (torch.max(pg_losses, pg_losses2) * response_mask).sum() / response_mask_sum.clamp(min=1.0)
+                    pg_clipfrac = (torch.gt(pg_losses2, pg_losses).float() * response_mask).sum() / response_mask_sum.clamp(min=1.0)
+                    approx_kl = ((-negative_approx_kl) * response_mask).sum() / response_mask_sum.clamp(min=1.0)
                     
-                    # Apply mask weighting (this handles padded chunks naturally!)
-                    # If chunk is entirely padded: mask_sum=0 → weighted_loss=0 (but still connected!)
-                    mask_sum = mask_float.sum()
-                    weighted_pg_losses = pg_losses_max * mask_float  # Zero out padded tokens
-                    chunk_loss = weighted_pg_losses.sum() / mask_sum.clamp(min=1.0)  # Avoid div-by-zero
+                    policy_loss = pg_loss * response_mask_sum / episode_mask_sum
+                    pg_clipfrac = pg_clipfrac * response_mask_sum / episode_mask_sum
+                    ppo_kl = approx_kl * response_mask_sum / episode_mask_sum
+                    loss = policy_loss / len(policy_inputs)
+                    #logger.info(f"new loss: {loss.item():.4f}, policy_loss: {policy_loss.item():.4f}, pg_clipfrac: {pg_clipfrac.item():.3f}, ppo_kl: {ppo_kl.item():.4f}")
                     
-                    # Compute metrics (only for real tokens)
-                    # Use mask to filter for accurate monitoring
-                    if mask.any():
-                        pg_clipfrac = torch.gt(pg_losses2[mask], pg_losses[mask]).float().mean()
-                        approx_kl = (-negative_approx_kl[mask]).mean()
-                        chunk_entropy = metrics['entropy']
-                    else:
-                        # Chunk is entirely padded - zero metrics
-                        pg_clipfrac = torch.tensor(0.0, device=self.device)
-                        approx_kl = torch.tensor(0.0, device=self.device)
-                        chunk_entropy = torch.tensor(0.0, device=self.device)
-                    
-                    # Scale for gradient accumulation before backward
-                    # Following SimpleVLA-RL pattern: always compute scaling, mask naturally handles padded chunks
-                    # Two scaling factors:
-                    # 1. Actual steps in chunk / actual steps in episode (normalizes by chunk contribution)
-                    # 2. 1 / num_episodes_in_batch (averages across episodes)
-                    num_episodes = len(policy_inputs)
-                    action_tokens_per_step = 56  # OpenVLA-OFT: 8 actions × 7 tokens per action
-                    
-                    # Compute actual steps in this chunk (works for all chunks, padded or not)
-                    actual_tokens_in_chunk = mask_sum  # Already computed above
-                    actual_steps_in_chunk = actual_tokens_in_chunk / action_tokens_per_step
-                    
-                    # Scale by: (steps_in_chunk / total_steps) * (1 / num_episodes)
-                    # For padded chunks: actual_steps_in_chunk=0 → scaling_factor=0 → scaled_loss=0
-                    chunk_weight = actual_steps_in_chunk / num_steps
-                    episode_weight = 1.0 / num_episodes
-                    scaling_factor = chunk_weight * episode_weight
-                    
-                    scaled_loss = chunk_loss * scaling_factor
-                    
-                    # Backward pass (always runs for FSDP sync, even if scaled_loss is zero)
-                    # Because chunk_loss is always connected to model (computed from log_probs),
-                    # this always triggers FSDP gradient synchronization ✅
-                    scaled_loss.backward()
+                    # Backward pass
+                    loss.backward()
                     
                     # Accumulate metrics (skip fully padded chunks)
-                    if mask.any():
-                        episode_loss += chunk_loss
+                    if response_mask_sum > 0:
+                        episode_loss += pg_loss
                         episode_entropy += chunk_entropy
                         num_real_chunks += 1
                     
-                    # Logging (simplified - no more if/else!)
-                    actual_steps_in_chunk_log = actual_steps_in_chunk.item() if isinstance(actual_steps_in_chunk, torch.Tensor) else actual_steps_in_chunk
-                    scaling_factor_log = scaling_factor.item() if isinstance(scaling_factor, torch.Tensor) else scaling_factor
-                    
+                    # Logging
                     logger.info(
-                        f"[VLA Train]   Chunk {chunk_idx+1}/{num_chunks} (steps [{start_idx}:{end_idx}]): "
-                        f"loss={scaled_loss.item():.4f}, entropy={chunk_entropy.item():.4f}, "
+                        f"[VLA Train]   Chunk {chunk_idx+1}/{num_chunks}: "
+                        f"loss={loss.item():.4f}, entropy={chunk_entropy.item():.4f}, "
                         f"clipfrac={pg_clipfrac.item():.3f}, approx_kl={approx_kl.item():.4f}, "
-                        f"scale={scaling_factor_log:.4f} ({actual_steps_in_chunk_log:.1f}/{num_steps} steps, 1/{num_episodes} eps)"
-                        + (" [PADDED]" if not mask.any() else "")
+                        f"mask_sum={response_mask_sum.item():.0f}"
+                        + (" [PADDED]" if response_mask_sum == 0 else "")
                     )
                     
                     num_mini_steps += 1
@@ -1566,6 +1506,7 @@ class GRPOTrainer(Trainer):
                     f"avg_loss={avg_episode_loss.item():.4f}, avg_entropy={avg_episode_entropy.item():.4f}"
                 )
         
+        exit(0)
         # 4. LR scheduler step
         self.lr_schedulers.step()
         current_lr = self.optimizers.param_groups[0]['lr']

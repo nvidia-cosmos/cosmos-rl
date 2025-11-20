@@ -893,6 +893,8 @@ class VLARolloutWorker(RolloutWorkerBase):
             logger.info(f"[VLA Rollout] Starting weight verification...")
             self._verify_weights(model_params, reference_weights, trainable_only)
             logger.info(f"[VLA Rollout] ✅ Weight verification passed!")
+            del reference_weights
+            torch.cuda.empty_cache()
     
     def _post_shard_info_to_controller(self):
         """
@@ -1077,7 +1079,8 @@ class VLARolloutWorker(RolloutWorkerBase):
         # Report results
         logger.info(f"[VLA Rollout] Verification results:")
         logger.info(f"  ✅ Matched: {total_verified} parameters")
-        logger.info(f"  ❌ Mismatched: {len(mismatches)} parameters")
+        if len(mismatches) > 0:
+            logger.info(f"  ❌ Mismatched: {len(mismatches)} parameters")
         if mismatches:
             logger.info(f"  Max absolute difference: {max_abs_diff:.2e}")
             logger.info(f"  Max relative difference: {max_rel_diff:.2e}")

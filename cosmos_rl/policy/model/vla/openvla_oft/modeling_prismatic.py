@@ -1340,34 +1340,10 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             input_embeddings = input_embeddings * ~all_actions_mask
 
             # Build multimodal embeddings and attention mask
-            # multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
-            #     input_embeddings, projected_patch_embeddings, attention_mask
-            # )
-            #test
-            
-            projected_patch_attention_mask = None
-            if attention_mask is not None:
-                projected_patch_attention_mask = torch.full(
-                    (projected_patch_embeddings.shape[0], projected_patch_embeddings.shape[1]),
-                    fill_value=True,
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-
-            # Build multimodal embeddings & attention mask; insert embeddings after <BOS> token (1:)
-            multimodal_embeddings = torch.cat(
-                [input_embeddings[:, :1, :], projected_patch_embeddings, input_embeddings[:, 1:, :]], dim=1
+            # Use the same function as generate_action_verl to ensure train/inference consistency
+            multimodal_embeddings, multimodal_attention_mask = self._build_multimodal_attention(
+                input_embeddings, projected_patch_embeddings, attention_mask
             )
-
-            multimodal_attention_mask = None
-            if attention_mask is not None:
-                multimodal_attention_mask = torch.cat(
-                    [attention_mask[:, :1], projected_patch_attention_mask, attention_mask[:, 1:]], dim=1
-                )
-
-            #return multimodal_embeddings, multimodal_attention_mask
-            
-            #test end
 
             # Forward pass through language model
             language_model_output = self.language_model(

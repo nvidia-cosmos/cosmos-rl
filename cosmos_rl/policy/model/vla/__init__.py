@@ -84,21 +84,11 @@ class VLAModel(BaseModel):
         logger.info(f"Creating VLA model structure on device: {init_device}")
         with torch.device(init_device):
             self.model = OpenVLAForActionPrediction(self.hf_config)
-        
-        # For meta device, allocate memory without initializing weights
-        if init_device == "meta":
-            device = torch.device(f"cuda:{torch.cuda.current_device()}")
-            logger.info(f"Allocating VLA model on {device} (weights uninitialized, for NCCL sync)")
-            self.model.to_empty(device=device)
-            # Set dtype after allocation
-            if hasattr(self.hf_config, 'torch_dtype'):
-                self.model = self.model.to(dtype=self.hf_config.torch_dtype)
-        else:
-            # Normal initialization with random weights
-            if hasattr(self.hf_config, 'torch_dtype'):
-                self.model = self.model.to(dtype=self.hf_config.torch_dtype)
-        
-        # Initialize additional attributes  
+
+        self.model.to(dtype=torch.bfloat16)
+        self._replace_rope_modules_float32()
+
+        # Initialize additional attributes
         self.processor = None
         self.is_vlm = True
         
@@ -182,87 +172,61 @@ class VLAModel(BaseModel):
         attention_mask: torch.Tensor,  # (batch, num_steps, seq_len)
         position_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
+        temperature: float = 1.0,
+        return_action_logits_only: bool = True,
         **kwargs
     ):
         """
         Forward pass for VLA training with per-step trajectory structure.
         
-        Data packer already splits long trajectories into manageable sub-trajectories,
-        so we just need to:
-        1. Unpad sequences (remove padding tokens to save computation/memory)
-        2. Flatten (batch, steps, ...) → (batch*steps, ...)
-        3. Forward pass
-        4. Reshape back to (batch, steps, output_len, vocab)
+        Matches SimpleVLA-RL approach:
+        1. Forward pass to get logits
+        2. Slice vocab to action tokens [vocab_size-256-64 : vocab_size-64]
+        3. Apply temperature scaling
         
         Args:
             input_ids: (batch, num_steps, seq_len) - per-step input tokens
             pixel_values: (batch, num_steps, C, H, W) - per-step images
             attention_mask: (batch, num_steps, seq_len) - per-step masks
+            temperature: Temperature for scaling logits (default: 1.0)
+            return_action_logits_only: If True, slice vocab to action tokens (default: True)
             
         Returns:
-            Output with logits reshaped to (batch, num_steps, output_len, vocab_size)
-            Note: output_len may differ from seq_len (openvla-oft returns only action tokens ~56)
+            Output with logits: (batch*steps, output_len, 256) if return_action_logits_only
+                          else: (batch*steps, output_len, vocab_size)
         """
-        batch_size, max_steps, seq_len = input_ids.shape
-        _, _, C, H, W = pixel_values.shape
         
+        # Use autocast to compute in bfloat16 (params are stored in float32 via master_dtype)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            # Flatten: (batch, steps, ...) → (batch*steps, ...)
-            input_ids_flat = input_ids.reshape(batch_size * max_steps, seq_len)
-            attention_mask_flat = attention_mask.reshape(batch_size * max_steps, seq_len)
-            pixel_values_flat = pixel_values.reshape(batch_size * max_steps, C, H, W)
-            
-            logprob_masks_unpad = None
-            if 'logprob_masks' in kwargs and kwargs['logprob_masks'] is not None:
-                logprob_masks = kwargs['logprob_masks']
-                if logprob_masks.ndim == 3:  # (batch, steps, action_seq_len)
-                    # logprob_masks are already the right shape for model output (action tokens only)
-                    # Just flatten for processing
-                    action_seq_len = logprob_masks.shape[2]
-                    logprob_masks_flat = logprob_masks.reshape(batch_size * max_steps, action_seq_len)
-                    
-                    # No unpadding needed - these match the model's output logits directly
-                    logprob_masks_unpad = logprob_masks_flat.reshape(batch_size, max_steps, action_seq_len)
-                    
-                    # Log action token info
-                    num_trainable = logprob_masks_unpad.sum().item()
-                    logger.debug(
-                        f"[VLA logprob_masks] Shape: {logprob_masks_unpad.shape}, "
-                        f"trainable_tokens={num_trainable} (matches model output action positions)"
-                    )
-            
             outputs = self.forward(
-                input_ids=input_ids_flat,
-                pixel_values=pixel_values_flat,
-                attention_mask=attention_mask_flat,
-                position_ids=position_ids,
-                labels=labels,
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                attention_mask=attention_mask,
                 **kwargs
             )
         
-            # Reshape back: (batch*steps, output_len, vocab) → (batch, steps, output_len, vocab)
-            # Note: output_len may differ from seq_len (openvla-oft returns only action tokens)
-            flat_logits = outputs.logits  # (batch*steps, output_len, vocab)
-            output_len = flat_logits.shape[1]
-            vocab_size = flat_logits.shape[2]
-        
-            logits_reshaped = flat_logits.reshape(batch_size, max_steps, output_len, vocab_size)
-        
-            # Set the reshaped logits on the output object
-            outputs.logits = logits_reshaped
+            # Get raw logits: (batch*steps, output_len, vocab)
+            logits = outputs.logits
             
-            # Attach logprob_masks for trainer to use
-            # For openvla-oft: logprob_masks (56 values) match output logits (56 tokens)
-            if logprob_masks_unpad is not None:
-                outputs.logprob_masks_unpad = logprob_masks_unpad
-                logger.debug(f"[VLA Forward] Attached logprob_masks: {logprob_masks_unpad.shape} (matches output logits)")
+            if return_action_logits_only:
+                # Slice vocab to action tokens: [vocab_size-256-64 : vocab_size-64]
+                # This extracts the 256 action tokens from the full vocabulary
+                vocab_size = logits.shape[-1]
+                start_index = vocab_size - 256 - 64
+                logits = logits[..., start_index:start_index + 256]
+                # Store start_index for response remapping
+                outputs.action_vocab_start_index = start_index
             
-            # Attach responses if available (needed for loss computation)
-            # For openvla-oft: responses are the action tokens (56) to compare against output logits
-            if 'responses' in kwargs and kwargs['responses'] is not None:
-                outputs.responses = kwargs['responses']
-                logger.debug("[VLA Forward] Attached responses for loss computation")
+            # Apply temperature scaling
+            logits = logits.div(temperature)
             
+            # Compute entropy: -sum(p * log(p))
+            log_probs_full = torch.nn.functional.log_softmax(logits, dim=-1)
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+            entropy = -(probs * log_probs_full).sum(dim=-1)  # (batch, seq_len)
+            
+            outputs.logits = logits
+            outputs.entropy = entropy
             return outputs
     
     def generate(
@@ -368,6 +332,8 @@ class VLAModel(BaseModel):
         """
         logger.info("🔧 VLA post_to_empty_hook called - checking parameter requires_grad status")
         
+        self._replace_rope_modules_float32()
+        
         # Count frozen vs trainable params BEFORE
         frozen_before = sum(1 for _, p in self.model.named_parameters() if not p.requires_grad)
         trainable_before = sum(1 for _, p in self.model.named_parameters() if p.requires_grad)
@@ -385,6 +351,52 @@ class VLAModel(BaseModel):
         trainable_after = sum(1 for _, p in self.model.named_parameters() if p.requires_grad)
         logger.info(f"After unfreezing: {trainable_after} trainable, {frozen_after} frozen params")
         logger.info("✅ VLA post_to_empty_hook completed")
+    
+    def _replace_rope_modules_float32(self):
+        """Replace RoPE modules with fresh float32 versions.
+        
+        After model.to(dtype=bfloat16), RoPE buffers are incorrectly converted to bfloat16.
+        This method simply replaces the entire RoPE module with a fresh one that has
+        correct float32 buffers. Much simpler than selective dtype conversion!
+        """
+        try:
+            from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+            
+            if not (hasattr(self.model, 'language_model') and hasattr(self.model.language_model, 'model')):
+                logger.debug("No language_model found, skipping RoPE replacement")
+                return
+            
+            device = next(self.model.parameters()).device
+            llm_config = self.model.language_model.model.config
+            
+            # Create fresh RoPE module with float32 buffers
+            new_rope = LlamaRotaryEmbedding(config=llm_config, device=device)
+            
+            replaced_count = 0
+            
+            # Replace the top-level rotary_emb
+            if hasattr(self.model.language_model.model, 'rotary_emb'):
+                old_dtype = self.model.language_model.model.rotary_emb.inv_freq.dtype
+                self.model.language_model.model.rotary_emb = new_rope
+                logger.info(f"Replaced top-level rotary_emb: {old_dtype} → {new_rope.inv_freq.dtype}")
+                replaced_count += 1
+            
+            # Also check for RoPE in each layer (some models have per-layer RoPE)
+            if hasattr(self.model.language_model.model, 'layers'):
+                for i, layer in enumerate(self.model.language_model.model.layers):
+                    if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'rotary_emb'):
+                        # Share the same RoPE instance across all layers
+                        layer.self_attn.rotary_emb = new_rope
+                        replaced_count += 1
+            
+            logger.info(f"✅ Replaced {replaced_count} RoPE modules with float32 versions")
+            
+        except Exception as e:
+            logger.error(f"Failed to replace RoPE modules: {e}")
+            import traceback
+            traceback.print_exc()
+    
+
     
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         """Get position IDs for input"""
@@ -457,6 +469,9 @@ class VLAModel(BaseModel):
             
             # Move our model to device
             self.model = self.model.to(device)
+            
+            # Replace RoPE modules with float32 versions (rollout workers need this too!)
+            self._replace_rope_modules_float32()
             
             # Clean up HF model
             del hf_model
@@ -656,6 +671,10 @@ class VLAModel(BaseModel):
             
         # Load normalization stats
         self._load_vla_norm_stats(model_name_or_path)
+        
+        # Replace RoPE modules with float32 versions
+        # (checkpoint may have bfloat16 buffers that overwrote our float32 ones)
+        self._replace_rope_modules_float32()
         
         logger.info("✅ VLA weight loading completed")
         
