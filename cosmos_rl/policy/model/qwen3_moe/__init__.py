@@ -48,6 +48,7 @@ from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
+from cosmos_rl.utils.dim_slice_info import get_local_weight_shard_with_DTensor
 
 
 def build_norm(
@@ -893,11 +894,16 @@ class Qwen3MoE(BaseModel):
 
                 target_tensor = self_state_dict[dest_name]
                 if isinstance(target_tensor, torch.distributed.tensor.DTensor):
-                    target_tensor = target_tensor.to_local()
+                    target_tensor = self.get_local_shard(dest_name, target_tensor)
                 # Write to the correct expert of the target tensor
                 if expert_id is not None:
                     target_tensor = target_tensor[expert_id]
-
+                if target_tensor.shape != shared_weight.shape:
+                    shared_weight = get_local_weight_shard_with_DTensor(
+                        self_state_dict[dest_name], dest_name, tensor, self.get_uneven_shard_params(dest_name)
+                    )
+                if shared_weight.numel() == 0:
+                    continue
                 assert (
                     target_tensor.shape == shared_weight.shape
                 ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"

@@ -16,7 +16,8 @@
 from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 import re
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
+from cosmos_rl.utils.dim_slice_info import extract_infomation_from_DTensor, slice_tensor_with_strategies
 from cosmos_rl.utils.parallelism_registry import register_parallelism_strategy
 
 
@@ -206,7 +207,7 @@ def map_weight_parallel_dims(
                     dest_name,
                 )
             ) is not None:
-                dims_map[dim] = 0
+                return None, None, None
             elif (
                 match := re.search(  # noqa: F841
                     r"layers\.(\d+)\.self_attn\.(o_proj)\.(weight|bias)", dest_name

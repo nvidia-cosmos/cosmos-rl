@@ -666,7 +666,7 @@ class GRPOTrainer(Trainer):
                     def grouped_send(grouped_send_ops):
                         nccl_group_start(comm_id)
                         for view, r_rank, dest_name in grouped_send_ops:
-                            logger.debug(
+                            logger.info(
                                 f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
                             )
                             nccl_send(

@@ -28,6 +28,8 @@ import collections
 from functools import partial
 from typing import Mapping
 from cosmos_rl.policy.lora.plugin import LoraInjectedLinear
+from cosmos_rl.utils.dim_slice_info import merge_continuous_dims
+from cosmos_rl.utils.dim_slice_info import DimSliceInfo, extract_infomation_from_DTensor
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -122,8 +124,7 @@ class BaseModel(torch.nn.Module, ABC):
         transforms = collections.OrderedDict()
         for k in keys:
             v = named_parameters[k]
-            is_dist_tensor = isinstance(v, torch.distributed.tensor.DTensor)
-            local_view = v.to_local() if is_dist_tensor else v
+            local_view = self.get_local_shard(k, v)
             local_view = self.post_transform_of_local_view(local_view, k)
             transforms[
                 self.weight_mapper.policy_map_local_key_to_hf_key(
@@ -142,52 +143,9 @@ class BaseModel(torch.nn.Module, ABC):
 
         # 2. do 1->n decomposition on weights like qkv_proj.weight -> q.weight, k.weight, v.weight
         for name, param in self.named_parameters():
-            is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
-            dims_map = {}
-            dims_rank_info = {}
+            dims_rank_info, dims_map = extract_infomation_from_DTensor(param, name, self.get_uneven_shard_params(name))
             global_shape = tuple(param.shape)
 
-            if is_dist_tensor:
-                dims_map = {}
-                mesh = param.device_mesh
-                placements = param.placements
-                assert (
-                    len(placements) == len(mesh.mesh_dim_names)
-                ), f"Number of placements {placements} does not match number of mesh dimensions {mesh}."
-                for dim, placement in zip(mesh.mesh_dim_names, placements):
-                    if placement.is_shard():
-                        dims_map[dim] = placement.dim
-                    elif placement.is_replicate():
-                        pass
-                    else:
-                        raise ValueError(f"Unsupported placement type: {placement}")
-                chunk_meta_list = param.__create_chunk_list__()
-                local = param.to_local()
-                assert (
-                    len(chunk_meta_list) == 1
-                ), f"Expected only one chunk meta, but got {len(chunk_meta_list)} for {name}."
-                meta = chunk_meta_list[0]
-                assert (
-                    len(meta.offsets)
-                    == len(meta.sizes)
-                    == len(global_shape)
-                    == len(tuple(local.shape))
-                ), f"Offsets {meta.offsets} and sizes {meta.sizes} must match global shape {global_shape} and local shape {tuple(local.shape)}."
-
-                for idx, g_size in enumerate(global_shape):
-                    offset = int(meta.offsets[idx])
-                    total_size = int(g_size)
-                    length = int(meta.sizes[idx])
-                    if total_size == length:
-                        assert (
-                            offset == 0
-                        ), f"Expected rank 0 for full size dimension {idx}, but got {offset}."
-                    else:
-                        dims_rank_info[idx] = DimSliceInfo(
-                            offset=offset,
-                            total_size=total_size,
-                            length=length,
-                        ).__dict__
             decomposed_key_and_slices = (
                 self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
                     self.weight_mapper.policy_map_local_key_to_hf_key(name)
@@ -356,7 +314,44 @@ class BaseModel(torch.nn.Module, ABC):
             # Not found: raise with fuzzy suggestions
             raise KeyError(f"Path '{name}' not found among parameters or modules.")
         return {"touched_params": touched_params, "touched_modules": touched_modules}
-
+    
+    def add_uneven_shard_params(self, param_name, original_shape, splited_dimension):
+        """
+        Add parameters that are unevenly sharded to the model.
+        Args:
+            param_name: The name of the parameter.
+            original_shape: The original shape of the parameter.
+            splited_dimension: The dimension that is splited.
+        """
+        if not hasattr(self, "_uneven_shard_params"):
+            self._uneven_shard_params = {}
+        self._uneven_shard_params[param_name] = (original_shape, splited_dimension)
+        
+    def get_uneven_shard_params(self, param_name: str) -> Optional[Tuple[torch.Size, List[int]]]:
+        """
+        Get the parameters that are unevenly sharded.
+        Returns:
+            A dict of parameter names and their original shapes and splited dimensions.
+        """
+        if not hasattr(self, "_uneven_shard_params") or param_name not in self._uneven_shard_params:
+            return None
+        return self._uneven_shard_params[param_name][1]
+    
+    def get_local_shard(self, param_name: str, tensor: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        Get the local shard of the parameter.
+        Args:
+            param_name: The name of the parameter.
+            tensor: The global tensor.
+        Returns:
+            The local shard of the parameter.
+        """
+        is_dist_tensor = isinstance(tensor, torch.distributed.tensor.DTensor)
+        local_view = tensor.to_local() if is_dist_tensor else tensor
+        if hasattr(self, "_uneven_shard_params") and param_name in self._uneven_shard_params:
+            _, splited_dimension = self._uneven_shard_params[param_name]
+            local_view = merge_continuous_dims(local_view, splited_dimension)
+        return local_view
     """
     Abstract methods
     """
