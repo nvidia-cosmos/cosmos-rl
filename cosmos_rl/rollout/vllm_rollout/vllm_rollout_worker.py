@@ -617,7 +617,7 @@ class vLLMRolloutWorker(RolloutWorkerBase):
                 recv_tensor, recv_complete_event, inplace = recv_tensor_creator(
                     vllm_tensor_view
                 )
-                logger.debug(
+                logger.info(
                     f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {target_tensor.shape} with dtype {vllm_tensor_view.dtype}."
                 )
                 nccl_recv(recv_tensor, p_rank, communicator_index)

@@ -23,6 +23,7 @@ from queue import Queue, Empty
 from datetime import timedelta
 from typing import Dict, Iterable, Optional, Union, Callable
 from functools import partial
+from dataclasses import dataclass
 
 # Third party imports
 import torch
@@ -31,7 +32,18 @@ import torch.distributed.distributed_c10d as c10d
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, distribute_module, Placement
-from torch.distributed.tensor.parallel import ParallelStyle
+from torch.distributed.tensor.parallel import ParallelStyle, ColwiseParallel
+
+from torch.distributed.tensor import (
+    DeviceMesh,
+    distribute_tensor,
+    Shard,
+)
+from torch.distributed.tensor.placement_types import UnevenShard
+from torch.distributed.tensor._collective_utils import (
+    fill_empty_tensor_to_shards,
+    pad_tensor,
+)
 
 # Local imports
 from cosmos_rl.utils.logging import logger
@@ -69,6 +81,328 @@ def init_distributed(cpu_enabled: bool = True):
 def destroy_distributed():
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+
+
+class UnevenShardLinear(torch.nn.Linear):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.weight, DTensor):
+            weight = self.weight
+            logger.info(
+                f"UnevenShardLinear: Forwarding with weight shape {weight.shape} and input shape {weight.__create_chunk_list__()}"
+            )
+        else:
+            logger.info(f"Expected weight to be a DTensor, but got {type(self.weight)}")
+        
+        logger.info(f"UnevenShardLinear: Forwarding with {input.shape} {isinstance(input, DTensor) and input.__create_chunk_list__() or 'N/A'}")
+        # if isinstance(weight, DTensor) and weight.to_local().numel() == 0:
+        #     logger.info(f"Input tensor is empty after to_local(), returning empty tensor")
+        #     # return  torch.distributed.tensor.DTensor.from_local(
+        #     #             torch.empty(
+        #     #                 input.size(0), input.size(1), 0, device=input.device, dtype=input.dtype
+        #     #             ),
+        #     #             weight.device_mesh,
+        #     #             [UnevenShard(2, weight.placements[0].min_chunk)],
+        #     #             run_check=False,
+        #     #         )
+        #     time.sleep(120)
+        #     return torch.empty(0, self.out_features, device=input.device, dtype=input.dtype)
+        ret = torch.nn.functional.linear(input, weight, self.bias)
+        logger.info(f"UnevenShardLinear: Forwarding with output shape {ret.shape} {isinstance(ret, DTensor) and ret.__create_chunk_list__() or 'N/A'}")
+        return ret
+
+
+# @dataclass(frozen=True)
+# class UnevenShard(Shard):
+#     min_chunk: int
+
+#     def __eq__(self, other: object) -> bool:
+#         if isinstance(other, UnevenShard):
+#             return self.dim == other.dim and self.min_chunk == other.min_chunk
+#         return False
+
+#     def __hash__(self) -> int:
+#         return hash((self.dim, self.min_chunk))
+
+#     def __repr__(self) -> str:
+#         """
+#         machine readable representation of the UnevenShard placement
+#         """
+#         return f"(dim={self.dim}, min_chunk={self.min_chunk})"
+
+#     def __str__(self) -> str:
+#         """human readable representation of the UnevenShard placement"""
+#         return f"_S({self.dim}, min_chunk={self.min_chunk})"
+
+#     def _split_tensor(
+#         self,
+#         tensor: torch.Tensor,
+#         num_chunks: int,
+#         *,
+#         with_padding: bool = True,
+#         contiguous: bool = True,
+#     ) -> tuple[list[torch.Tensor], list[int]]:
+#         if tensor.shape[self.dim] % (self.min_chunk * num_chunks) == 0:
+#             return super()._split_tensor(
+#                 tensor,
+#                 num_chunks,
+#                 with_padding=with_padding,
+#                 contiguous=contiguous,
+#             )
+#         assert (
+#             self.dim <= tensor.ndim
+#         ), f"Sharding dim {self.dim} greater than tensor ndim {tensor.ndim}"
+#         # chunk tensor over dimension `dim` into n slices
+#         chunk_sizes = []
+#         size = tensor.shape[self.dim]
+#         for i in range(num_chunks):
+#             chunk_size = min(self.min_chunk, size)
+#             if chunk_size > 0:
+#                 size -= chunk_size
+#                 chunk_sizes.append(chunk_size)
+#         while size > 0:
+#             for i in range(num_chunks):
+#                 chunk_size = min(self.min_chunk, size)
+#                 if chunk_size > 0:
+#                     size -= chunk_size
+#                     chunk_sizes[i] += chunk_size
+
+#         tensor_list = list(torch.split(tensor, chunk_sizes, dim=self.dim))
+
+#         tensor_list = fill_empty_tensor_to_shards(
+#             tensor_list, self.dim, num_chunks - len(tensor_list)
+#         )
+
+#         # compute the chunk size inline with ``torch.chunk`` to calculate padding
+#         full_chunk_size = (tensor.size(self.dim) + num_chunks - 1) // num_chunks
+
+#         shard_list: list[torch.Tensor] = []
+#         pad_sizes: list[int] = []
+#         for shard in tensor_list:
+#             if with_padding:
+#                 pad_size = full_chunk_size - shard.size(self.dim)
+#                 shard = pad_tensor(shard, self.dim, pad_size)
+#                 pad_sizes.append(pad_size)
+#             if contiguous:
+#                 shard = shard.contiguous()
+#             shard_list.append(shard)
+#         return shard_list, pad_sizes
+
+#     def _local_shard_size_and_offset(
+#         self,
+#         curr_local_size: int,
+#         num_chunks: int,
+#         rank: int,
+#     ) -> tuple[int, int]:
+#         """
+#         Given the size of the current local tensor (which may already be sharded on some dimensions),
+#         computes the new local shard size and offset given the desired number of chunks
+#         (num_chunks is generally equal to the size of the current sharding dim).
+
+#         Note: new local shard offset is relative to the current sharded tensor, not the global tensor.
+#         See `_utils.compute_local_shape_and_global_offset` for computing global offset.
+
+#         Returns (new local shard size, offset)
+
+#         """
+#         # Compute the chunk size inline with ``torch.chunk``
+#         chunk_sizes = []
+#         size = curr_local_size
+#         for i in range(num_chunks):
+#             chunk_size = min(self.min_chunk, size)
+#             if chunk_size > 0:
+#                 size -= chunk_size
+#                 chunk_sizes.append(chunk_size)
+#         while size > 0:
+#             for i in range(num_chunks):
+#                 chunk_size = min(self.min_chunk, size)
+#                 if chunk_size > 0:
+#                     size -= chunk_size
+#                     chunk_sizes[i] += chunk_size
+        
+#         for _ in range(num_chunks - len(chunk_sizes)):
+#             chunk_sizes.append(0)
+
+#         # logger.info(f"UnevenShard: local shard size {curr_local_size}, num_chunks {num_chunks}, chunk_sizes {chunk_sizes} {rank}")
+#         return chunk_sizes[rank], sum(chunk_sizes[:rank])
+
+
+class UnevenColwiseParallel(ColwiseParallel):
+    def __init__(
+        self,
+        *,
+        min_chunk: int,
+        input_layouts: Optional[Placement] = None,
+        output_layouts: Optional[Placement] = None,
+        use_local_output: bool = True,
+    ):
+        super().__init__(
+            input_layouts=input_layouts,
+            output_layouts=UnevenShard(-1, min_chunk),
+            use_local_output=use_local_output,
+        )
+        self.min_chunk = min_chunk
+        
+    @staticmethod
+    def _prepare_output_fn(output_layouts, use_local_output, mod, outputs, device_mesh):
+        # outputs is a shard on last dimension DTensor, i.e. Shard(-1)
+        # back to local tensor
+        # logger.info(
+        #     f"Uneven: Forwarding with output shape {outputs.shape} {isinstance(outputs, DTensor) and outputs.__create_chunk_list__() or 'N/A'} {outputs._local_tensor.shape if isinstance(outputs, DTensor) else 'N/A'}"
+        # )
+        if outputs.placements != output_layouts:
+            from cosmos_rl.utils.logging import logger
+            logger.info(f"==== ColwiseParallel output layout {outputs.placements} is different from the desired output layout {output_layouts}, redistributing...")
+            outputs = outputs.redistribute(placements=[Replicate()] * len(output_layouts), async_op=True).redistribute(placements=output_layouts, async_op=True)
+        if not isinstance(outputs, DTensor):
+            return outputs
+        return outputs.to_local() if use_local_output else outputs
+
+    def _partition_linear_fn(self, name, module, device_mesh):
+        # colwise shard weight/bias to Shard(0), weight be Shard(0)
+        # means Colwise as Linear is input * weight^T + bias, where
+        # weight would become Shard(1)
+        for name, param in module.named_parameters():
+            dist_param = torch.nn.Parameter(
+                distribute_tensor(
+                    param,
+                    device_mesh,
+                    [UnevenShard(0, self.min_chunk)],
+                    src_data_rank=self.src_data_rank,
+                )
+            )
+            logger.info(
+                f"Registered uneven shard parameter {name} with original shape {dist_param.__create_chunk_list__()}"
+            )
+            module.register_parameter(name, dist_param)
+
+
+def parse_modules_for_parallelism(
+    module: torch.nn.Module,
+    device_mesh: Optional[DeviceMesh] = None,
+    parallelize_plan: Optional[Union[ParallelStyle, dict[str, ParallelStyle]]] = None,
+) -> torch.nn.Module:
+    upper_modules = {}
+    for name, plan in parallelize_plan.items():
+        if isinstance(plan, ColwiseParallel):
+            upper_module_name = name.rsplit(".", 1)[0]
+            if upper_module_name not in upper_modules:
+                upper_modules[upper_module_name] = None
+
+    for name, sub_module in module.named_modules():
+        if name in upper_modules:
+            upper_modules[name] = sub_module
+        if parallelize_plan is not None:
+            if isinstance(parallelize_plan, dict):
+                if name in parallelize_plan and isinstance(
+                    parallelize_plan[name], ColwiseParallel
+                ):
+                    upper_module_name = name.rsplit(".", 1)[0]
+                    upper_module = upper_modules[upper_module_name]
+                    if hasattr(upper_module, "head_dim"):
+                        head_dim = upper_module.head_dim
+                    else:
+                        raise ValueError(
+                            f"Expected upper module {upper_module_name} to have attribute 'head_dim'"
+                        )
+                    assert isinstance(
+                        sub_module, torch.nn.Linear
+                    ), f"Expected module {name} to be torch.nn.Linear"
+                    head = sub_module.out_features // head_dim
+                    if head < device_mesh.size():
+                        updated_module = UnevenShardLinear(
+                            sub_module.in_features,
+                            sub_module.out_features,
+                            bias=sub_module.bias is not None,
+                        )
+                        if "." in name:
+                            uppper_path = name.rsplit(".", 1)[0]
+                            leaf_name = name.rsplit(".", 1)[1]
+                            uppper_module = module
+                            for part in uppper_path.split("."):
+                                uppper_module = getattr(uppper_module, part)
+                        else:
+                            uppper_module = module
+                            leaf_name = name
+                        # Replace the module
+                        setattr(uppper_module, leaf_name, updated_module)
+                        
+                        def input_hook(module, input):
+                            # logger.info(
+                            #     f"UnevenShardLinear: Forwarding with weight shape {module.weight.shape} and input shape {input[0].shape} {isinstance(module.weight, DTensor) and module.weight.__create_chunk_list__() or 'N/A'}"
+                            #     f"{isinstance(input[0], DTensor) and input[0].__create_chunk_list__() or 'N/A'}"
+                            # )
+                            if module.weight.numel() == 0:
+                                return None
+                            else:
+                                return input
+                        
+                        def output_hook(module, input, output):
+                            # logger.info(
+                            #     f"UnevenShardLinear: Forwarding with weight shape {module.weight.shape} and output shape {output.shape} {isinstance(module.weight, DTensor) and module.weight.__create_chunk_list__() or 'N/A'}"
+                            #     f"{isinstance(output, DTensor) and output.__create_chunk_list__() or 'N/A'}"
+                            # )
+                            return output
+                            
+                        sub_module.register_forward_pre_hook(input_hook)
+                        sub_module.register_forward_hook(output_hook)
+                        
+
+
+
+def parse_modules_after_parallelism(
+    model: torch.nn.Module,
+    module: torch.nn.Module,
+    module_name: str,
+    device_mesh: Optional[DeviceMesh] = None,
+    parallelize_plan: Optional[Union[ParallelStyle, dict[str, ParallelStyle]]] = None,
+) -> torch.nn.Module:
+    upper_modules = {}
+    for name, plan in parallelize_plan.items():
+        if isinstance(plan, ColwiseParallel):
+            upper_module_name = name.rsplit(".", 1)[0]
+            if upper_module_name not in upper_modules:
+                upper_modules[upper_module_name] = None
+
+    for name, sub_module in module.named_modules():
+        if name in upper_modules:
+            upper_modules[name] = sub_module
+        if parallelize_plan is not None:
+            if isinstance(parallelize_plan, dict):
+                if name in parallelize_plan and isinstance(
+                    parallelize_plan[name], ColwiseParallel
+                ):
+                    upper_module_name = name.rsplit(".", 1)[0]
+                    upper_module = upper_modules[upper_module_name]
+                    if hasattr(upper_module, "head_dim"):
+                        head_dim = upper_module.head_dim
+                    else:
+                        raise ValueError(
+                            f"Expected upper module {upper_module_name} to have attribute 'head_dim'"
+                        )
+                    assert isinstance(
+                        sub_module, torch.nn.Linear
+                    ), f"Expected module {name} to be torch.nn.Linear"
+                    head = sub_module.out_features // head_dim
+                    if head < device_mesh.size():
+                        for n, param in sub_module.named_parameters():
+                            original_shape = param.shape
+                            # param = param.view(
+                            #     -1,
+                            #     head_dim,
+                            #     sub_module.in_features,
+                            # )
+                            param = param.redistribute(
+                                device_mesh,
+                                [UnevenShard(0, head)],
+                            )
+                            dist_param = torch.nn.Parameter(
+                                param,
+                            )
+                            logger.info(
+                                f"Registered uneven shard parameter {n} with original shape {dist_param.__create_chunk_list__()}"
+                            )
+                            # model.add_uneven_shard_params(".".join([module_name, name, n]) , original_shape, [[0, 1]])
+                            sub_module.register_parameter(n, dist_param)
 
 
 @torch.no_grad()

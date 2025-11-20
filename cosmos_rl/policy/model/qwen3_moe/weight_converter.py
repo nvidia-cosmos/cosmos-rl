@@ -188,7 +188,7 @@ def map_weight_parallel_dims(
                     dest_name,
                 )
             ) is not None:
-                dims_map[dim] = 0
+                return None, None, None
             elif (
                 match := re.search(  # noqa: F841
                     r"layers\.(\d+)\.self_attn\.(o_proj)\.(weight|bias)", dest_name

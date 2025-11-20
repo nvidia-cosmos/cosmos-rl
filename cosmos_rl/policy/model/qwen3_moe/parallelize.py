@@ -36,7 +36,7 @@ from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.patch import PipelineStage, Schedule1F1B, ScheduleGPipe
 from typing import Callable, Optional
-from cosmos_rl.utils.distributed import ReplicateParallel
+from cosmos_rl.utils.distributed import ReplicateParallel, UnevenColwiseParallel, parse_modules_for_parallelism
 from cosmos_rl.utils.ulysses import ulysses_attn_func, swizzle_cp_forward
 from cosmos_rl.policy.kernel.moe.moe import MoE, GroupedExpertsDeepEP
 from torch.distributed.tensor import distribute_module, distribute_tensor
@@ -273,7 +273,7 @@ def apply_tp_ep(
             prepare_module_input,
         ) = (
             RowwiseParallel,
-            ColwiseParallel,
+            UnevenColwiseParallel,
             PrepareModuleInput,
         )
 
@@ -292,11 +292,11 @@ def apply_tp_ep(
                     None,
                 ),  # Attn OP needs the input to be replicated over the sequence dimension so that all sequence can be attended to
             ),
-            "self_attn.q_proj": colwise_parallel(),
-            "self_attn.k_proj": colwise_parallel(),
+            "self_attn.q_proj": colwise_parallel(min_chunk=model.model_args.head_dim),
+            "self_attn.k_proj": colwise_parallel(min_chunk=model.model_args.head_dim),
             "self_attn.q_norm": ReplicateParallel(),
             "self_attn.k_norm": ReplicateParallel(),
-            "self_attn.v_proj": colwise_parallel(),
+            "self_attn.v_proj": colwise_parallel(min_chunk=model.model_args.head_dim),
             "self_attn.o_proj": rowwise_parallel(output_layouts=Shard(1)),
             "post_attention_layernorm": SequenceParallel(use_local_output=True),
             # "mlp.gate": ReplicateParallel(),
@@ -432,12 +432,24 @@ def apply_tp_ep(
         #         )
         #     ),
         # )
+        parse_modules_for_parallelism(
+            transformer_block,
+            tp_ep_mesh,
+            layer_plan,
+        )
 
         parallelize_module(
             module=transformer_block,
             device_mesh=tp_ep_mesh,
             parallelize_plan=layer_plan,
         )
+        # parse_modules_after_parallelism(
+        #     model,
+        #     transformer_block,
+        #     "layers." + layer_id,
+        #     tp_ep_mesh,
+        #     layer_plan,
+        # )
 
     if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group

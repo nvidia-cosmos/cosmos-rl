@@ -49,6 +49,7 @@ from cosmos_rl.policy.kernel.modeling_utils import FlashAttnMeta
 from cosmos_rl.policy.kernel.norm import RMSNorm
 import cosmos_rl.policy.kernel.rope as rope
 from cosmos_rl.utils.sequence_packing import pack_sequences_for_inputs
+from cosmos_rl.utils.dim_slice_info import get_local_weight_shard_with_DTensor
 
 
 def build_norm(
@@ -228,10 +229,12 @@ class Attention(nn.Module):
 
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        logger.info(f"====== Attention forward: xq shape {xq.shape}, xk shape {xk.shape}, xv shape {xv.shape}")
         if self.q_norm is not None:
             xq = self.q_norm(xq.view(bs, seqlen, -1, self.head_dim))
         if self.k_norm is not None:
             xk = self.k_norm(xk.view(bs, seqlen, -1, self.head_dim))
+        logger.info(f"====== Attention forward after norm: xq shape {xq.shape}, xk shape {xk.shape}, xv shape {xv.shape}")
 
         # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
         # local heads from sizes of xq, xk, and xv as TP may have sharded them
@@ -938,7 +941,7 @@ class Qwen3MoE(BaseModel):
 
                 target_tensor = self_state_dict[dest_name]
                 if isinstance(target_tensor, torch.distributed.tensor.DTensor):
-                    target_tensor = target_tensor.to_local()
+                    target_tensor = self.get_local_shard(dest_name, target_tensor)
                 # Write to the correct expert of the target tensor
                 if expert_id is not None:
                     target_tensor = target_tensor[expert_id]
@@ -947,6 +950,15 @@ class Qwen3MoE(BaseModel):
                         target_tensor.shape[0] == 2 * self.model_args.ffn_dim
                     ), f"Shape mismatch: {target_tensor.shape} != {2 * self.model_args.ffn_dim} for {dest_name}"
                     target_tensor = target_tensor[slice_range]
+                if target_tensor.shape != shared_weight.shape:
+                    shared_weight = get_local_weight_shard_with_DTensor(
+                        self_state_dict[dest_name],
+                        dest_name,
+                        tensor,
+                        self.get_uneven_shard_params(dest_name),
+                    )
+                if shared_weight.numel() == 0:
+                    continue
                 assert (
                     target_tensor.shape == shared_weight.shape
                 ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
@@ -1112,12 +1124,13 @@ class Qwen3MoE(BaseModel):
             )
 
     def check_tp_compatible(self, tp_size: int):
-        non_divisible_by_tp_size = (
-            self.model_args.n_heads % tp_size != 0
-            or self.model_args.n_kv_heads % tp_size != 0
-            or self.model_args.n_experts % tp_size != 0
-        )
-        if non_divisible_by_tp_size:
-            raise ValueError(
-                f"Model is not compatible with tp/ep parallelism, model's head number={self.model_args.n_heads} or kv head number={self.model_args.n_kv_heads} or expert number={self.model_args.n_experts} is not satisified by tp size({tp_size})"
-            )
+        pass
+        # non_divisible_by_tp_size = (
+        #     self.model_args.n_heads % tp_size != 0
+        #     or self.model_args.n_kv_heads % tp_size != 0
+        #     or self.model_args.n_experts % tp_size != 0
+        # )
+        # if non_divisible_by_tp_size:
+        #     raise ValueError(
+        #         f"Model is not compatible with tp/ep parallelism, model's head number={self.model_args.n_heads} or kv head number={self.model_args.n_kv_heads} or expert number={self.model_args.n_experts} is not satisified by tp size({tp_size})"
+        #     )
