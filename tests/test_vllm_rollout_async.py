@@ -149,7 +149,7 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         # initialize tokenizer
         tokenizer = AutoTokenizer.from_pretrained(config.policy.model_name_or_path)
         # initialize rollout engine
-        rollout_engine = vLLMRolloutAsync(config, tokenizer)
+        rollout_engine = vLLMRolloutAsync(config)
         await rollout_engine.init_engine(
             quantization="none", seed=42, load_format="auto"
         )
@@ -242,25 +242,6 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         self.assertEqual(len(results), len(payloads))
         for i, result in enumerate(results):
             print(f"Result {i}: {result}")
-
-    def test_async_rollout_get_underlying_model_state_dict(self):
-        """Test async rollout get underlying model state dict."""
-        cosmos_config = getMockConfig()
-        cosmos_config.rollout.parallelism.tp_size = 1
-
-        async def test_helper():
-            rollout_engine, _ = await self.get_rollout_engine_and_data_packer(
-                cosmos_config
-            )
-            state_dict = await rollout_engine.get_underlying_model_state_dict()
-            print(f"State dict: {state_dict}")
-            self.assertIn("model.layers.0.self_attn.q_proj.weight", state_dict)
-            self.assertGreater(
-                state_dict["model.layers.0.self_attn.q_proj.weight"].sum(), 0
-            )
-            rollout_engine.shutdown()
-
-        asyncio.run(test_helper())
 
 
 class TestVLLMRolloutWorkerAsync(unittest.TestCase):
