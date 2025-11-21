@@ -28,7 +28,11 @@ import collections
 from functools import partial
 from typing import Mapping
 from cosmos_rl.policy.lora.plugin import LoraInjectedLinear
-from cosmos_rl.utils.dim_slice_info import DimSliceInfo, extract_infomation_from_dtensor
+from cosmos_rl.utils.dim_slice_info import (
+    DimSliceInfo,
+    extract_infomation_from_dtensor,
+    tensor_overlap_info_at_dim,
+)
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -135,8 +139,6 @@ class BaseModel(torch.nn.Module, ABC):
 
     @cached_property
     def weight_sync_transforms(self) -> List[Tuple[str, Union[torch.Tensor, Callable]]]:
-        from cosmos_rl.utils.parallelism_map import ParallelTopoMapper
-
         # 1. get all parameters, but not buffers
         transforms = self.gen_local_view_transforms()
 
@@ -174,10 +176,8 @@ class BaseModel(torch.nn.Module, ABC):
                             local_part = DimSliceInfo(offset=0, total_size=1)
                         else:
                             local_part = DimSliceInfo.from_dict(dims_rank_info[dim])
-                        slice_in_splited, overlap_in_local = (
-                            ParallelTopoMapper.tensor_overlap_info_at_dim(
-                                {dim: dim_slice}, {dim: local_part}, dim
-                            )
+                        slice_in_splited, overlap_in_local = tensor_overlap_info_at_dim(
+                            {dim: dim_slice}, {dim: local_part}, dim
                         )
                         if slice_in_splited is None:
                             splitted_dim_rank_info = None
