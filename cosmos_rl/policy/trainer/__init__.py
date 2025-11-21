@@ -38,7 +38,6 @@ from typing import Dict, Optional
 import cosmos_rl.utils.util as util
 from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
-from cosmos_rl.utils.fp4.fp4_util import FP4ModelConverter
 from cosmos_rl.policy.kernel.modeling_utils import init_flash_attn_meta
 from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
 from cosmos_rl.utils.util import (
@@ -96,6 +95,8 @@ class Trainer(CommMixin):
                 self.model_converter = FP8ModelConverter(config, parallel_dims)
                 self.model_converter.convert_model(model)
             elif config.train.fp4.enable_fp4:
+                from cosmos_rl.utils.fp4.fp4_util import FP4ModelConverter
+
                 self.model_converter = FP4ModelConverter(config, parallel_dims)
                 self.model_converter.convert_model(model)
 
