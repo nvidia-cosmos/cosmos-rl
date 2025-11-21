@@ -16,15 +16,15 @@ print_help() {
   echo "Usage: ./launch_replica.sh [OPTIONS]"
   echo ""
   echo "Options:"
-  echo "  --type <rollout|policy>            Required. Type of replica to launch."
-  echo "  --nnodes <int>                     Number of nodes to launch. Default: 1"
-  echo "  --ngpus <int>                      Number of GPUs per node. Default: 2"
-  echo "  --log-rank <comma-separated ints>  Comma-separated list of ranks to enable logging. Default: Empty for all ranks."
-  echo "  --rdzv-endpoint <host:port>        Rendezvous endpoint for distributed training. Default: localhost:0"
-  echo "  --script <script>                  The user script to run before launch."
-  echo "  --config <path>                    The path to the config file."
-  echo "  --backend <vllm|trtllm>            The backend to use for the job. Default: vllm"
-  echo "  --help                             Show this help message"
+  echo "  --type <rollout|policy>               Required. Type of replica to launch."
+  echo "  --nnodes <int>                        Number of nodes to launch. Default: 1"
+  echo "  --ngpus <int>                         Number of GPUs per node. Default: 2"
+  echo "  --log-rank <comma-separated ints>     Comma-separated list of ranks to enable logging. Default: Empty for all ranks."
+  echo "  --rdzv-endpoint <host:port>           Rendezvous endpoint for distributed training. Default: localhost:0"
+  echo "  --script <script>                     The user script to run before launch."
+  echo "  --config <path>                       The path to the config file."
+  echo "  --backend <vllm|vllm_async|trtllm>    The backend to use for the job. Default: vllm"
+  echo "  --help                                Show this help message"
   echo "Examples:"
   echo "  ./launch_replica.sh --type rollout --ngpus 4 --log-rank 0,1"
   echo "  ./launch_replica.sh --type policy --ngpus 8 --log-rank 0"
@@ -143,7 +143,7 @@ if [ "$TYPE" == "policy" ]; then
     LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
   fi
 elif [ "$TYPE" == "rollout" ]; then
-  if [ "$BACKEND" == "vllm" ]; then
+  if [ "$BACKEND" == "vllm" ] || [ "$BACKEND" == "vllm_async" ]; then
     LAUNCH_CMD+=(
       --nproc-per-node="$NGPU"
       --nnodes="$NNODES"
@@ -174,7 +174,7 @@ elif [ "$TYPE" == "rollout" ]; then
     echo "Launching trtllm as the backend, ignoring:
             --log-rank flags."
   else
-    echo "Error: Invalid --backend value '$BACKEND'. Must be 'vllm' or 'trtllm'."
+    echo "Error: Invalid --backend value '$BACKEND'. Must be 'vllm' 'vllm_async' or 'trtllm'."
     print_help
     exit 1
   fi

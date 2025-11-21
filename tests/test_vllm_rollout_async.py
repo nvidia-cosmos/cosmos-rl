@@ -1,0 +1,308 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import unittest
+import asyncio
+import toml
+import threading
+import uuid
+import functools
+from typing import Optional, Tuple, List, Any, Dict
+
+from transformers import AutoTokenizer
+from vllm.sampling_params import SamplingParams, RequestOutputKind
+
+from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.dispatcher.data.schema import ChatMessage
+from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.rollout.vllm_rollout.vllm_rollout_async import vLLMRolloutAsync
+from cosmos_rl.dispatcher.data.packer.decoder_only_llm_data_packer import (
+    DecoderOnlyLLMDataPacker,
+    DataPacker,
+)
+from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportRequest
+from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
+
+
+def override_environment(port: int = 29500) -> dict[str, str]:
+    old_env = os.environ.copy()
+    os.environ["RANK"] = "0"
+    os.environ["WORLD_SIZE"] = "1"
+    os.environ["LOCAL_RANK"] = "0"
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = f"{port}"
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    return old_env
+
+
+class MockAPIClient(APIClient):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.config = getMockConfig()
+
+        # load test dataset
+        self.data_fetcher = ControllerDataFetcher(
+            config=self.config,
+            dataset=None,
+            val_dataset=None,
+            is_rl=True,
+        )
+        self.max_iter = 2
+        self.cur_iter = 0
+
+        # rollout_completion_payloads cache 1 batch of payloads for testing
+        self.rollout_completion_payloads: List[RLPayload] = []
+
+    def post_rollout_shard_info(
+        self,
+        shard_infos: List[Dict[str, Any]],
+        param_groups: List[List[str]],
+        sorted_params: List[List[str]],
+    ):
+        pass
+
+    def register(
+        self,
+        replica_name: str,
+        role: str,
+        mesh_names: List[str],
+        ranks: List[int],
+        group_size: int,
+        global_rank: int,
+        host_ip: str,
+        host_name: str,
+    ):
+        logger.info(
+            f"[MockAPIClient] Register: {replica_name}, {role}, {mesh_names}, {ranks}, {group_size}, {global_rank}, {host_ip}, {host_name}"
+        )
+
+    def unregister(self, replica_name: str):
+        logger.info(f"[MockAPIClient] Unregister: {replica_name}")
+
+    def get_next_prompt(
+        self, batch_size: int, validation_step: Optional[int] = None
+    ) -> Tuple[List[Tuple[int, str]], bool]:
+        payloads_list, is_end = self.data_fetcher.get_batched_prompt(
+            batch_size, validation_step
+        )
+        self.cur_iter += 1
+
+        payloads_list = [pl.model_dump() for pl in payloads_list]
+        return payloads_list, is_end or self.cur_iter == self.max_iter
+
+    def post_rollout_completion(self, response: RolloutRequest):
+        logger.info(
+            f"[MockAPIClient] Post rollout completion: {len(response.payloads)} results"
+        )
+        self.rollout_completion_payloads.extend(response.payloads)
+
+    def post_validation_report(self, report: ValidationReportRequest):
+        logger.info(
+            f"[MockAPIClient] Post validation report: {len(report.payloads)} results"
+        )
+
+
+def getMockConfig():
+    # Construct the model and trainer
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(cur_dir, "configs", "test_simple_grpo.toml")
+
+    with open(config_path, "r") as f:
+        config_dict = toml.load(f)
+
+    return CosmosConfig.from_dict(config_dict)
+
+
+class TestVLLMRolloutAsync(unittest.TestCase):
+    """Test vLLMRolloutAsync."""
+
+    def setUp(self):
+        self.old_env = override_environment()
+        init_distributed()
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.old_env)
+        destroy_distributed()
+
+    async def get_rollout_engine_and_data_packer(
+        self, config: CosmosConfig
+    ) -> Tuple[vLLMRolloutAsync, DataPacker]:
+        # initialize tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(config.policy.model_name_or_path)
+        # initialize rollout engine
+        rollout_engine = vLLMRolloutAsync(config)
+        await rollout_engine.init_engine(
+            quantization="none", seed=42, load_format="auto"
+        )
+
+        # create data packer
+        data_packer = DecoderOnlyLLMDataPacker()
+        data_packer.setup(config=config, tokenizer=tokenizer)
+        return rollout_engine, data_packer
+
+    def test_async_rollout_single_generate(self):
+        """Test async rollout."""
+        cosmos_config = getMockConfig()
+
+        # force try tp1, pp1
+        cosmos_config.rollout.parallelism.tp_size = 1
+
+        payloads = [
+            RLPayload(prompt="What is 2+2?", weight_version=0),
+            # RLPayload(prompt="Explain AI in one sentence.", weight_version=0),
+        ]
+
+        sampling_params = SamplingParams(
+            temperature=0.8,
+            top_p=0.95,
+            max_tokens=128,
+            n=2,  # 2 responses for each prompt
+            output_kind=RequestOutputKind.FINAL_ONLY,
+        )
+
+        async def test_helper():
+            rollout_engine, data_packer = await self.get_rollout_engine_and_data_packer(
+                cosmos_config
+            )
+            results = await rollout_engine.rollout_generation(
+                payloads=payloads,
+                stream=None,
+                data_packer=data_packer,
+                sampling_params=sampling_params,
+            )
+            rollout_engine.get_engine().shutdown()
+            return results
+
+        results = asyncio.run(test_helper())
+
+        # check results
+        self.assertEqual(len(results), len(payloads))
+        for i, result in enumerate(results):
+            self.assertEqual(len(result.completions), sampling_params.n)
+
+    def test_async_rollout_multi_turn_generate(self):
+        """Test async rollout multi turn."""
+        cosmos_config = getMockConfig()
+        cosmos_config.rollout.multi_turn_config.enable = True
+        cosmos_config.rollout.multi_turn_config.max_assistant_turns = 2
+        cosmos_config.rollout.multi_turn_config.enable_thinking = True
+
+        # force try tp1, pp1
+        cosmos_config.rollout.parallelism.tp_size = 1
+
+        payloads = [
+            RLPayload(
+                conversation=[ChatMessage(role="user", content="What is 2+2?")],
+                weight_version=0,
+            ),
+        ]
+
+        sampling_params = SamplingParams(
+            temperature=0.8,
+            top_p=0.95,
+            max_tokens=128,
+            n=2,  # 2 responses for each prompt
+        )
+
+        async def test_helper():
+            rollout_engine, data_packer = await self.get_rollout_engine_and_data_packer(
+                cosmos_config
+            )
+            results = await rollout_engine.rollout_generation(
+                payloads=payloads,
+                stream=None,
+                data_packer=data_packer,
+                sampling_params=sampling_params,
+            )
+            rollout_engine.get_engine().shutdown()
+            return results
+
+        results = asyncio.run(test_helper())
+
+        # check results
+        self.assertEqual(len(results), len(payloads))
+        for i, result in enumerate(results):
+            print(f"Result {i}: {result}")
+
+
+class TestVLLMRolloutWorkerAsync(unittest.TestCase):
+    """Test vLLMRolloutWorkerAsync."""
+
+    def setUp(self):
+        self.old_env = override_environment(port=29501)
+        init_distributed()
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.old_env)
+        destroy_distributed()
+
+    def test_async_rollout_worker_1gpu(self):
+        """Test async rollout worker."""
+        cosmos_config = getMockConfig()
+        cosmos_config.rollout.parallelism.dp_shard_size = 1
+        cosmos_config.rollout.parallelism.tp_size = 1
+        cosmos_config.rollout.parallelism.pp_size = 1
+        cosmos_config.rollout.batch_size = 4
+
+        parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
+
+        from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker_async import (
+            vLLMRolloutWorkerAsync,
+        )
+
+        # here dummy some functions to make the worker work
+        def dummy_init_comm(self):
+            self.api_client = MockAPIClient(
+                role="ROLLOUT", remote_ips=["localhost"], remote_port=8000
+            )
+            self.data_packer = DecoderOnlyLLMDataPacker()
+            self.val_data_packer = self.data_packer
+
+        def dummy(self):
+            pass
+
+        vLLMRolloutWorkerAsync.init_comm = dummy_init_comm
+        vLLMRolloutWorkerAsync.init_redis = dummy
+
+        worker = vLLMRolloutWorkerAsync(cosmos_config, parallel_dims)
+        worker.query_command_from_controller = functools.partial(dummy, worker)
+        worker.replica_name = str(uuid.uuid4())
+        worker.shutdown_signal = threading.Event()
+        worker.shutdown_mp_signal = threading.Event()
+        worker.heartbeat_thread = None
+        # Skip weight sync preparation in test since we don't need it
+        worker.state.set_weight_synced()
+        worker.setup()
+        worker.work()
+
+        self.assertEqual(
+            len(worker.api_client.rollout_completion_payloads),
+            cosmos_config.rollout.batch_size * worker.api_client.max_iter,
+        )
+
+        # clean the test environment
+        worker.handle_shutdown()
+
+
+if __name__ == "__main__":
+    unittest.main()
