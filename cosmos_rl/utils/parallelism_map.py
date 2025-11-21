@@ -16,7 +16,7 @@
 import msgpack
 import torch
 from cosmos_rl.utils.parallelism import ParallelDims
-from typing import Dict, List, Tuple, Callable, Any, Optional, Union
+from typing import Dict, List, Tuple, Callable, Any, Optional
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.logging import logger
@@ -36,63 +36,8 @@ from cosmos_rl.utils import util
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.dim_slice_info import DimSliceInfo
-
-
-def slice_tensor_with_strategy(
-    tensor: torch.Tensor, idx: int, tensor_split_strategy: DimSliceInfo
-):
-    """
-    Slices a tensor according to the given strategy at one dimension index.
-    :param tensor: The tensor to be sliced.
-    :param idx: The index of the dimension to slice.
-    :param tensor_split_strategy: The strategy for slicing the tensor.
-    :return: A sliced view of the tensor for the given dimension index.
-    """
-
-    view = tensor
-    assert (
-        view.shape[idx] % tensor_split_strategy.total_size == 0
-    ), f"Tensor shape {view.shape} on dim {idx} must be divisible by {tensor_split_strategy.total_size}"
-    start = (
-        view.shape[idx]
-        // tensor_split_strategy.total_size
-        * tensor_split_strategy.offset
-    )
-    length = (
-        view.shape[idx]
-        // tensor_split_strategy.total_size
-        * tensor_split_strategy.length
-    )
-    dim = view.dim()
-    assert idx < view.dim(), f"Invalid index {idx} for {dim}D tensor."
-    slices = (
-        [slice(None, None)] * idx
-        + [slice(start, start + length)]
-        + [slice(None, None)] * (dim - idx - 1)
-    )
-    return view[slices]
-
-
-def slice_tensor_with_strategies(
-    self: torch.Tensor, strategys: Dict[int, Union[DimSliceInfo, Dict[str, Any]]]
-) -> torch.Tensor:
-    """
-    Slices the tensor according to the given strategies at all dimension indices.
-    :param tensor: The tensor to be sliced.
-    :param strategys: A dictionary mapping dimension indices to DimSliceInfo objects.
-    :return: The sliced tensor.
-    """
-    view = self
-    for idx, split in strategys.items():
-        idx = int(idx)
-        if isinstance(split, dict):
-            split = DimSliceInfo.from_dict(split)
-        view = slice_tensor_with_strategy(view, idx, split)
-    return view
-
-
-torch.Tensor.cosmos_slice = slice_tensor_with_strategies
+from cosmos_rl.utils.dim_slice_info import DimSliceInfo, extract_infomation_from_DTensor
+from cosmos_rl.utils.dim_slice_info import tensor_overlap_info_at_dim, merge_rank
 
 
 class WeightSyncInstruction:
@@ -248,124 +193,6 @@ class ParallelTopoMapper:
         )
         return full_mesh_rank_info
 
-    @classmethod
-    def get_unified_rank_info(
-        cls, a: DimSliceInfo, b: DimSliceInfo
-    ) -> Tuple[DimSliceInfo, DimSliceInfo]:
-        """
-        Get the unified slice information with the same total size for two DimSliceInfo objects.
-        :param a: The first DimSliceInfo object.
-        :param b: The second DimSliceInfo object.
-        :return: A tuple containing the unified slice information for both objects.
-        """
-        size = max(a.total_size, b.total_size)
-        assert (
-            size % a.total_size == 0 and size % b.total_size == 0
-        ), "Sizes are not compatible for unification"
-        scale_a = size // a.total_size
-        scale_b = size // b.total_size
-        scaled_a_size = a.total_size * scale_a
-        scaled_b_size = b.total_size * scale_b
-        scaled_a_rank = a.offset * scale_a
-        scaled_b_rank = b.offset * scale_b
-        unified_a = DimSliceInfo(
-            scaled_a_rank, scaled_a_size, a.dim, a.length * scale_a
-        )
-        unified_b = DimSliceInfo(
-            scaled_b_rank, scaled_b_size, b.dim, b.length * scale_b
-        )
-        return unified_a, unified_b
-
-    @classmethod
-    def rank_overlap(cls, a: DimSliceInfo, b: DimSliceInfo) -> DimSliceInfo:
-        """
-        Check if the parts of two DimSliceInfo objects overlap.
-
-        :param a: The first DimSliceInfo object.
-        :param b: The second DimSliceInfo object.
-        :return: A DimSliceInfo object representing the overlap, or None if there is no overlap.
-        """
-        a_new, b_new = cls.get_unified_rank_info(a, b)
-        assert (
-            a_new.total_size == b_new.total_size
-        ), "Sizes do not match after unification"
-
-        left = max(a_new.offset, b_new.offset)
-        right = min(
-            a_new.offset + a_new.length,
-            b_new.offset + b_new.length,
-        )
-        overlapped = None
-        if left < right:
-            overlapped = DimSliceInfo(left, a_new.total_size, a_new.dim, right - left)
-        return overlapped
-
-    @classmethod
-    def relative_rank(cls, smaller: DimSliceInfo, larger: DimSliceInfo) -> DimSliceInfo:
-        """
-        Get the relative slice information of two DimSliceInfo objects.
-        :param smaller: The smaller DimSliceInfo object.
-        :param larger: The larger DimSliceInfo object.
-        :return: A DimSliceInfo object representing the relative slice of the smaller on in the larger one.
-        """
-        s, l = cls.get_unified_rank_info(smaller, larger)  # noqa: E741
-        assert (
-            s.offset >= l.offset
-        ), "Smaller rank is not less than or equal to larger rank"
-        assert (
-            s.offset + s.length <= l.offset + l.length
-        ), "Smaller rank does not fit within larger rank"
-        rank = s.offset - l.offset
-        size = l.length
-        length = s.length
-        return DimSliceInfo(rank, size, s.dim, length)
-
-    @classmethod
-    def merge_rank(cls, outter: DimSliceInfo, inner: DimSliceInfo) -> DimSliceInfo:
-        """
-        Merge two nested DimSliceInfo objects into one.
-        :param outter: The DimSliceInfo object at a outter dimension.
-        :param inner: The DimSliceInfo object at an inner dimension.
-        :return: A DimSliceInfo object representing the merged slice information.
-        """
-        assert outter.length == 1, "Outer rank length must be 1"
-        size = outter.total_size * inner.total_size
-        rank = outter.offset * inner.total_size + inner.offset
-        length = inner.length
-        return DimSliceInfo(rank, size, outter.dim, length)
-
-    @classmethod
-    def tensor_overlap_info_at_dim(
-        cls,
-        policy_rank: Dict[int, DimSliceInfo],
-        rollout_rank: Dict[int, DimSliceInfo],
-        dim: int,
-    ) -> Tuple[DimSliceInfo, DimSliceInfo]:
-        """
-        Get the tensor overlap information at one dimension index.
-        :param policy_rank: The sharded slice information for the given tensor from policy.
-        :param rollout_rank: The sharded slice information for the given tensor from rollout.
-        :param dim: The dimension index to check for overlap.
-        :return: A tuple containing the overlap information between the given policy and rollout tensors.
-        """
-        if dim not in policy_rank:
-            p = DimSliceInfo(0, 1)
-        else:
-            p = policy_rank[dim]
-        if dim not in rollout_rank:
-            r = DimSliceInfo(0, 1)
-        else:
-            r = rollout_rank[dim]
-
-        p_new, r_new = cls.get_unified_rank_info(p, r)
-        overlap = cls.rank_overlap(p_new, r_new)
-
-        if overlap is None:
-            return None, None
-        overlap_r = cls.relative_rank(overlap, r_new)
-        overlap_p = cls.relative_rank(overlap, p_new)
-        return overlap_p.simplify(), overlap_r.simplify()
-
     def shard_info_at_dim(
         self,
         rank_infos: Dict[str, DimSliceInfo],
@@ -399,9 +226,7 @@ class ParallelTopoMapper:
         if self.ordered_dims[1] not in rank_info:
             rank_info[self.ordered_dims[1]] = DimSliceInfo(0, 1, self.ordered_dims[1])
         # Merge the ranks of the two dimensions
-        p = self.merge_rank(
-            rank_info[self.ordered_dims[0]], rank_info[self.ordered_dims[1]]
-        )
+        p = merge_rank(rank_info[self.ordered_dims[0]], rank_info[self.ordered_dims[1]])
         return p
 
     @classmethod
@@ -653,50 +478,8 @@ class ParallelTopoMapper:
         for name, param in self.underlying_model.named_parameters(
             remove_duplicate=False
         ):
-            is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
-            dims_rank_info = {}
-            dims_map = {}
             global_shape = tuple(param.shape)
-            if is_dist_tensor:
-                mesh = param.device_mesh
-                placements = param.placements
-                assert (
-                    len(placements) == len(mesh.mesh_dim_names)
-                ), f"Number of placements {placements} does not match number of mesh dimensions {mesh}."
-                for dim, placement in zip(mesh.mesh_dim_names, placements):
-                    if placement.is_shard():
-                        dims_map[dim] = placement.dim
-                    elif placement.is_replicate():
-                        pass
-                    else:
-                        raise ValueError(f"Unsupported placement type: {placement}")
-                chunk_meta_list = param.__create_chunk_list__()
-                local = param.to_local()
-                assert (
-                    len(chunk_meta_list) == 1
-                ), f"Expected only one chunk meta, but got {len(chunk_meta_list)} for {name}."
-                meta = chunk_meta_list[0]
-                assert (
-                    len(meta.offsets)
-                    == len(meta.sizes)
-                    == len(global_shape)
-                    == len(tuple(local.shape))
-                ), f"Offsets {meta.offsets} and sizes {meta.sizes} must match global shape {global_shape} and local shape {tuple(local.shape)}."
-
-                for idx, g_size in enumerate(global_shape):
-                    offset = int(meta.offsets[idx])
-                    total_size = int(g_size)
-                    length = int(meta.sizes[idx])
-                    if total_size == length:
-                        assert (
-                            offset == 0
-                        ), f"Expected rank 0 for full size dimension {idx}, but got {offset}."
-                    else:
-                        dims_rank_info[idx] = DimSliceInfo(
-                            offset=offset,
-                            total_size=total_size,
-                            length=length,
-                        ).__dict__
+            dims_rank_info, dims_map = extract_infomation_from_DTensor(param, name)
             decomposed_key_and_slices = (
                 self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
                     self.weight_mapper.policy_map_local_key_to_hf_key(name)
@@ -726,10 +509,8 @@ class ParallelTopoMapper:
                             local_part = DimSliceInfo(offset=0, total_size=1)
                         else:
                             local_part = DimSliceInfo.from_dict(dims_rank_info[dim])
-                        slice_in_splited, overlap_in_local = (
-                            self.tensor_overlap_info_at_dim(
-                                {dim: dim_slice}, {dim: local_part}, dim
-                            )
+                        slice_in_splited, overlap_in_local = tensor_overlap_info_at_dim(
+                            {dim: dim_slice}, {dim: local_part}, dim
                         )
                         if slice_in_splited is None:
                             splitted_dim_rank_info = None
@@ -1296,9 +1077,7 @@ class ParallelizedShardMapper:
                 r_tensor_split_strategys = {}
                 for d in all_dims:
                     p_tensor_split_strategy, r_tensor_split_strategy = (
-                        ParallelTopoMapper.tensor_overlap_info_at_dim(
-                            shard_info, r_shard_info, d
-                        )
+                        tensor_overlap_info_at_dim(shard_info, r_shard_info, d)
                     )
                     if p_tensor_split_strategy is None:
                         assert r_tensor_split_strategy is None
@@ -1359,9 +1138,7 @@ class ParallelizedShardMapper:
                     p_tensor_split_strategys = {}
                     for d in all_dims:
                         p_tensor_split_strategy, r_tensor_split_strategy = (
-                            ParallelTopoMapper.tensor_overlap_info_at_dim(
-                                shard_info, r_shard_info, d
-                            )
+                            tensor_overlap_info_at_dim(shard_info, r_shard_info, d)
                         )
                         if p_tensor_split_strategy is None:
                             assert r_tensor_split_strategy is None
@@ -1488,9 +1265,7 @@ class ParallelizedShardMapper:
                 r_tensor_split_strategys = {}
                 for d in all_dims:
                     p_tensor_split_strategy, r_tensor_split_strategy = (
-                        ParallelTopoMapper.tensor_overlap_info_at_dim(
-                            p_shard_info, shard_info, d
-                        )
+                        tensor_overlap_info_at_dim(p_shard_info, shard_info, d)
                     )
                     if r_tensor_split_strategy is None:
                         assert p_tensor_split_strategy is None
@@ -1551,9 +1326,7 @@ class ParallelizedShardMapper:
                     r_tensor_split_strategys = {}
                     for d in all_dims:
                         p_tensor_split_strategy, r_tensor_split_strategy = (
-                            ParallelTopoMapper.tensor_overlap_info_at_dim(
-                                p_shard_info, shard_info, d
-                            )
+                            tensor_overlap_info_at_dim(p_shard_info, shard_info, d)
                         )
                         if r_tensor_split_strategy is None:
                             assert p_tensor_split_strategy is None
