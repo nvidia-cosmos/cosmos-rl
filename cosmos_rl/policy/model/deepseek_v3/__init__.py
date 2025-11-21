@@ -451,6 +451,10 @@ class DeepseekV3MoEModel(BaseModel):
 
         return sorted(transforms.items())
 
+    @classmethod
+    def fqn_filter_for_quantization(cls) -> List[str]:
+        return ["lm_head"]
+
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         if not (self.config.n_heads % (cp_size * tp_size) == 0):
             raise ValueError(

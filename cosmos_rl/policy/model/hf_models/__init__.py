@@ -862,14 +862,14 @@ class HFModel(BaseModel):
         return self.model.named_parameters(*args, **kwargs)
 
     @classmethod
-    def fqn_filter_for_fp8(cls) -> List[str]:
+    def fqn_filter_for_quantization(cls) -> List[str]:
         llm = [
             "lm_head",
         ]
         visual = [
             "visual",
             "vision_tower",
-        ]  # Filter Linear in visual out, they will corrupt the FP8 Linear.
+        ]  # Filter Linear in visual out, they will corrupt the FP8/FP4 Linear.
         return llm + visual
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
