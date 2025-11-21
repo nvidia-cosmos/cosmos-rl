@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import uuid
 
 import torch
 import copy
@@ -209,6 +208,9 @@ class vLLMRolloutAsync(RolloutBase):
             self._engine_initialized = False
             self.rollout_engine.shutdown()
 
+    def _get_request_id(self, prompt_idx: int):
+        return str(f"req_{prompt_idx}")
+
     @torch.no_grad()
     async def rollout_generation_single_turn(
         self,
@@ -233,6 +235,8 @@ class vLLMRolloutAsync(RolloutBase):
             len(payloads) == 1
         ), "vLLM async rollout only support one prompt at a time."
 
+        request_id = self._get_request_id(payloads[0].prompt_idx)
+
         # Pack the payloads into prompts for vllm.
         prompts = []
         for pl in payloads:
@@ -255,7 +259,7 @@ class vLLMRolloutAsync(RolloutBase):
                     prompt=new_prompts[0],
                     sampling_params=sampling_params,
                     # there is no request tracking now.
-                    request_id=str(uuid.uuid4()),
+                    request_id=request_id,
                 ):
                     if result.finished:
                         response.append(
@@ -287,7 +291,7 @@ class vLLMRolloutAsync(RolloutBase):
             )
         stream = torch.cuda.current_stream() if stream is None else stream
 
-        request_id = str(uuid.uuid4())
+        request_id = self._get_request_id(payloads[0].prompt_idx)
 
         async def generation_multi_turn_for_one_payload(
             current_conversation: ConversationType,
