@@ -33,7 +33,6 @@ import threading
 import asyncio
 from queue import Queue, Empty
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
-from cosmos_rl.policy.model.base import BaseModel
 from cosmos_rl.dispatcher.command import (
     Command,
     BuildMeshCommand,
@@ -392,13 +391,6 @@ class GRPOTrainer(Trainer):
     def prepare_shard_infos_for_weight_sync_insts(self):
         keys_n_ranks = []
         trainable_params = self.model.trainable_params
-        # After building model, weight_sync_transforms may become unavailable (like for qwen2.5vl),
-        # so we need to set it again, otherwise it will cause error when later calling model.weight_sync_transforms
-        if "weight_sync_transforms" not in self.model.__dict__:
-            descriptor = BaseModel.__dict__["weight_sync_transforms"]
-            self.model.__dict__["weight_sync_transforms"] = descriptor.__get__(
-                self.model, type(self.model)
-            )
         for name, tensor_or_callable in self.model.weight_sync_transforms:
             if isinstance(tensor_or_callable, torch.Tensor):
                 keys_n_ranks.append((name, tensor_or_callable.ndim))
