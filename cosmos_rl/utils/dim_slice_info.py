@@ -232,7 +232,7 @@ def tensor_overlap_info_at_dim(
     return overlap_p.simplify(), overlap_r.simplify()
 
 
-def extract_infomation_from_DTensor(
+def extract_infomation_from_dtensor(
     param: torch.Tensor, name: str
 ) -> Tuple[Dict[int, Dict[str, Any]], Dict[str, int]]:
     """
@@ -310,7 +310,7 @@ def get_local_weight_shard_with_DTensor(
     :param mesh_dims: The list of mesh dimensions to consider for slicing.
     :return: The local weight shard for the given tensor.
     """
-    dims_rank_info, dims_map = extract_infomation_from_DTensor(
+    dims_rank_info, dims_map = extract_infomation_from_dtensor(
         target, dest_name, splited_dims
     )
     dims_rank_info = {

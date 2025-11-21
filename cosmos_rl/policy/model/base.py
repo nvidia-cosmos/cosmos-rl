@@ -28,7 +28,7 @@ import collections
 from functools import partial
 from typing import Mapping
 from cosmos_rl.policy.lora.plugin import LoraInjectedLinear
-from cosmos_rl.utils.dim_slice_info import DimSliceInfo, extract_infomation_from_DTensor
+from cosmos_rl.utils.dim_slice_info import DimSliceInfo, extract_infomation_from_dtensor
 
 
 class BaseModel(torch.nn.Module, ABC):
@@ -142,7 +142,7 @@ class BaseModel(torch.nn.Module, ABC):
 
         # 2. do 1->n decomposition on weights like qkv_proj.weight -> q.weight, k.weight, v.weight
         for name, param in self.named_parameters():
-            dims_rank_info, dims_map = extract_infomation_from_DTensor(param, name)
+            dims_rank_info, dims_map = extract_infomation_from_dtensor(param, name)
             global_shape = tuple(param.shape)
 
             decomposed_key_and_slices = (

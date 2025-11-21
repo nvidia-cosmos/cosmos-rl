@@ -36,7 +36,7 @@ from cosmos_rl.utils import util
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.dim_slice_info import DimSliceInfo, extract_infomation_from_DTensor
+from cosmos_rl.utils.dim_slice_info import DimSliceInfo, extract_infomation_from_dtensor
 from cosmos_rl.utils.dim_slice_info import tensor_overlap_info_at_dim, merge_rank
 
 
@@ -479,7 +479,7 @@ class ParallelTopoMapper:
             remove_duplicate=False
         ):
             global_shape = tuple(param.shape)
-            dims_rank_info, dims_map = extract_infomation_from_DTensor(param, name)
+            dims_rank_info, dims_map = extract_infomation_from_dtensor(param, name)
             decomposed_key_and_slices = (
                 self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
                     self.weight_mapper.policy_map_local_key_to_hf_key(name)
