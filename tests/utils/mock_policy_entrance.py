@@ -75,6 +75,42 @@ def mock_for_decoupled_loss():
     GRPOTrainer.compute_logprobs = compute_logprobs
 
 
+def mock_for_custom_rollout():
+    orig_dispatch_rollouts = GRPOTrainer.dispatch_rollouts
+
+    def dispatch_rollouts(self):
+        ret: List[Rollout] = orig_dispatch_rollouts(self)
+        for rollout in ret:
+            assert rollout.completion
+            assert isinstance(rollout.completion, str)
+            assert len(rollout.completion) > 0
+        return ret
+
+    GRPOTrainer.dispatch_rollouts = dispatch_rollouts
+
+    orig_compute_logprobs = GRPOTrainer.compute_logprobs
+
+    def compute_logprobs(
+        self,
+        minibatch,
+        logits,
+        is_full_logits,
+    ):
+        ret = orig_compute_logprobs(
+            self,
+            minibatch,
+            logits,
+            is_full_logits,
+        )
+        if not hasattr(self, "computed_cnt"):
+            self.computed_cnt = 0
+        self.computed_cnt += 1
+        assert torch.any(ret[0] != 0)
+        return ret
+
+    GRPOTrainer.compute_logprobs = compute_logprobs
+
+
 def main(*args, **kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 
@@ -107,6 +143,9 @@ def main(*args, **kwargs):
     if args.test == "decoupled_loss":
         # Apply the mock for decoupled loss testing
         mock_for_decoupled_loss()
+    elif args.test == "custom_rollout":
+        # Apply the mock for custom rollout testing
+        mock_for_custom_rollout()
 
     try:
         with torch.autocast(
@@ -124,6 +163,8 @@ def main(*args, **kwargs):
                     val_data_packer=kwargs.get("val_data_packer", None),
                 )
                 trainer.main_loop()
+                if args.test == "custom_rollout":
+                    assert trainer.computed_cnt == 4
             else:
                 raise ValueError(f"Unknown policy type: {policy_type}")
     except Exception as e:

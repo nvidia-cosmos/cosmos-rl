@@ -10,6 +10,7 @@ SCRIPT=""
 SCRIPT_ARGS=()
 CONFIG=""
 BACKEND="vllm"
+DIFFUSION_MODE="False"
 
 print_help() {
   echo ""
@@ -24,6 +25,7 @@ print_help() {
   echo "  --script <script>                  The user script to run before launch."
   echo "  --config <path>                    The path to the config file."
   echo "  --backend <vllm|trtllm>            The backend to use for the job. Default: vllm"
+  echo "  --diffusion-mode <True|False>      Whether to launch in diffusion mode. Default: False"
   echo "  --help                             Show this help message"
   echo "Examples:"
   echo "  ./launch_replica.sh --type rollout --ngpus 4 --log-rank 0,1"
@@ -73,6 +75,10 @@ while [[ $# -gt 0 ]]; do
     BACKEND="$2"
     shift 2
     ;;
+  --diffusion-mode)
+    DIFFUSION_MODE="$2"
+    shift 2
+    ;;
   --help)
     print_help
     exit 0
@@ -102,6 +108,10 @@ fi
 
 # Torch related
 set_env "TORCH_CPP_LOG_LEVEL" "ERROR"
+
+if [ "$DIFFUSION_MODE" == "True" ]; then
+  set_env "COSMOS_IS_DIFFUSION" "True"
+fi
 
 LAUNCH_BINARY="torchrun"
 
@@ -143,20 +153,7 @@ if [ "$TYPE" == "policy" ]; then
     LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
   fi
 elif [ "$TYPE" == "rollout" ]; then
-  if [ "$BACKEND" == "vllm" ]; then
-    LAUNCH_CMD+=(
-      --nproc-per-node="$NGPU"
-      --nnodes="$NNODES"
-      --role rank
-      --tee 3
-      --rdzv_backend c10d
-      --rdzv_endpoint="$RDZV_ENDPOINT"
-    )
-
-    if [ -n "$LOG_RANKS" ]; then
-      LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
-    fi
-  elif [ "$BACKEND" == "trtllm" ]; then
+  if [ "$BACKEND" == "trtllm" ]; then
     COSMOS_WORLD_SIZE=$((NNODES * NGPU))
     export COSMOS_WORLD_SIZE
     COSMOS_LOCAL_WORLD_SIZE=$((NGPU))
@@ -174,9 +171,18 @@ elif [ "$TYPE" == "rollout" ]; then
     echo "Launching trtllm as the backend, ignoring:
             --log-rank flags."
   else
-    echo "Error: Invalid --backend value '$BACKEND'. Must be 'vllm' or 'trtllm'."
-    print_help
-    exit 1
+    LAUNCH_CMD+=(
+      --nproc-per-node="$NGPU"
+      --nnodes="$NNODES"
+      --role rank
+      --tee 3
+      --rdzv_backend c10d
+      --rdzv_endpoint="$RDZV_ENDPOINT"
+    )
+
+    if [ -n "$LOG_RANKS" ]; then
+      LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
+    fi
   fi
 fi
 
@@ -208,5 +214,7 @@ if [ -n "$CONFIG" ]; then
     --config "$CONFIG"
   )
 fi
+
+echo "Launching command: ${LAUNCH_CMD[@]}"
 
 "${LAUNCH_CMD[@]}"

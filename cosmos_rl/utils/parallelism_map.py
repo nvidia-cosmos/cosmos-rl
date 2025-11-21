@@ -350,7 +350,13 @@ class ParallelTopoMapper:
         if self.is_policy:
             self.parallelism_info_for_dtensor_params()
         else:
-            self.parallelism_info_for_vllm_params()
+            if self.backend == "vllm":
+                self.parallelism_info_for_vllm_params()
+            else:
+                logger.warning(
+                    f"Backend {self.backend} is not added for rollout parallelism analysis. Use default dtensor based parallelism info for rollout params."
+                )
+                self.parallelism_info_for_dtensor_params()
 
         for dest_name, shape in params:
             split_dim_map, dim_to_parallel, pp_rank, dims_rank_info = (
@@ -469,9 +475,6 @@ class ParallelTopoMapper:
         The method checks if the model parameters are distributed tensors (DTensor) and extracts their detailed shard information from DTensor specifications.
         This method updates a dictionary with parameter names as keys and their parallel dimensions with shard information as values.
         """
-        assert (
-            self.is_policy
-        ), "parallelism_info_for_dtensor_params should only be called for policy model."
         if hasattr(self, "parallelism_info_for_params"):
             return self.parallelism_info_for_params
         self.parallelism_info_for_params = {}

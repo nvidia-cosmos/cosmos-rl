@@ -578,6 +578,9 @@ def main(
                 "Error when parsing args. Did you use custom arguments in your script? If so, please check your custom script and pass `args` to this main function."
             )
             raise e
+        assert (
+            args.config is not None
+        ), "Config file path is required. Please provide --config argument."
 
     # Load config from file if provided
     loaded_config = None
