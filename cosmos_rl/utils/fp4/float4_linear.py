@@ -6,11 +6,40 @@ from typing import Optional
 
 import torch
 from cosmos_rl.utils.fp4.config import Float4LinearConfig, ScalingType
-import transformer_engine_torch as tex
-from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
-te_dtype = tex.DType.kFloat4E2M1
+# TODO: (lms) remove the context manager after this PR is released: https://github.com/NVIDIA/TransformerEngine/pull/1913
+from contextlib import contextmanager
+from importlib.metadata import version as get_pkg_version, PackageNotFoundError
+
+
+@contextmanager
+def importlib_metadata_version_context():
+    original_version = get_pkg_version
+
+    def mocked_version(name):
+        if name == "flash-attn-3":
+            raise PackageNotFoundError
+        return original_version(name)
+
+    import importlib.metadata
+
+    importlib.metadata.version = mocked_version
+    try:
+        yield
+    finally:
+        importlib.metadata.version = original_version
+
+
+with importlib_metadata_version_context():
+    try:
+        import transformer_engine_torch as tex
+        from transformer_engine.pytorch.constants import TE_DType
+        from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+
+        te_dtype = tex.DType.kFloat4E2M1
+        HAVE_TE = True
+    except ImportError:
+        HAVE_TE = False
 
 
 class matmul_with_hp_or_float4_args(torch.autograd.Function):
@@ -289,6 +318,10 @@ class Float4Linear(torch.nn.Linear):
         Additional arguments on top of `torch.nn.Linear`'s arguments:
         * `config`: Float4LinearConfig
         """
+        if not HAVE_TE:
+            raise ImportError(
+                "Transformer Engine is required for Float4Linear. Please install it with `pip install transformer-engine`."
+            )
 
         config = kwargs.pop("config")
         super().__init__(*args, **kwargs)
