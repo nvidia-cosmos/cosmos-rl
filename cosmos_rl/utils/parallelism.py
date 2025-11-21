@@ -261,6 +261,56 @@ class ParallelDims:
             mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
 
         self.mesh = mesh
+
+        def separate_mesh_dimension(device_mesh: DeviceMesh, mesh_dim, new_sub_mesh_dims):
+            """
+            Separate an existing dimension into sub-dimensions
+            
+            Args:
+                device_mesh: Original DeviceMesh
+                dim_idx: Index of dimension to separate (0-indexed)
+                new_sub_shape: Tuple of new sub-dimension sizes
+            """
+            
+            logger.info(f"Separating dimension {mesh_dim} of mesh {device_mesh.mesh.shape} into {device_mesh.mesh} {device_mesh}")
+            current_shape = list(device_mesh.mesh.shape)
+            new_shape = []
+            for dim, mesh_shape in zip(device_mesh.mesh_dim_names, current_shape):
+                if mesh_dim == dim:
+                    for sub_dim in new_sub_mesh_dims.values():
+                        new_shape.append(sub_dim)
+                else:
+                    new_shape.append(mesh_shape)
+                
+            # Verify that the new shape is compatible
+            if math.prod(new_shape) != math.prod(current_shape):
+                raise ValueError(
+                    f"New shape {new_shape} is not compatible with original shape {current_shape}"
+                )
+
+            # Reshape device tensor
+            reshaped_devices = device_mesh.mesh.view(new_shape)
+            
+            # Create new dimension names
+            new_dim_names = []
+            for dim in device_mesh.mesh_dim_names:
+                if dim == mesh_dim:
+                    new_dim_names.extend(new_sub_mesh_dims.keys())
+                else:
+                    new_dim_names.append(dim)
+            
+            return DeviceMesh(
+                device_mesh.device_type,
+                reshaped_devices,
+                mesh_dim_names=new_dim_names
+            )
+
+
+    
+        # Separate tp=8 into tp0=4, tp1=2 (4*2=8, so this works)
+        new_mesh = separate_mesh_dimension(mesh, mesh_dim="tp", new_sub_mesh_dims={"tp0": mesh["tp"].size() // 2, "tp1": 2})
+        
+        logger.info(f"Original mesh shape: {mesh}, new mesh shape: {new_mesh}")
         return mesh
 
     def build_meshes_with_ep(self, device_type: str) -> dict[str, DeviceMesh]:
