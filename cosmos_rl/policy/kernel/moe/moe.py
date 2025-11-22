@@ -45,25 +45,15 @@ from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
 _shared_experts_stream: Optional[torch.cuda.Stream] = None
 
 
-def is_nvlink_supported():
-    n_gpus = torch.cuda.device_count()
-    if n_gpus < 2:
-        return False
-
-    for i in range(n_gpus):
-        for j in range(n_gpus):
-            if i != j:
-                if not torch.cuda.can_device_access_peer(i, j):
-                    return False
-    return True
-
-
-def is_nvshmem_supported():
+def is_deepep_supported():
     try:
-        import nvidia.nvshmem as nvshmem  # noqa: F401
+        import os
+        from deep_ep import Buffer
+        from deep_ep.utils import EventHandle, EventOverlap  # noqa: F401
 
+        Buffer.set_num_sms(int(os.environ.get("DEEP_EP_SM_NUMS", 20)))
         return True
-    except Exception:
+    except ImportError:
         return False
 
 
@@ -729,7 +719,7 @@ class MoE(nn.Module):
         else:
             self.gate = Gate(args)
 
-        if is_nvlink_supported() and is_nvshmem_supported():
+        if is_deepep_supported():
             self.experts = GroupedExpertsDeepEP(args)
         else:
             # Use allgather dispatcher
