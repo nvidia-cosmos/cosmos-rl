@@ -29,7 +29,7 @@ from cosmos_rl.utils.util import is_master_rank
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from typing import List, Callable, Union
+from typing import List, Callable, Union, Optional
 
 
 def upload_file_to_s3(
@@ -308,6 +308,8 @@ class CheckpointMananger:
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
         scheduler: Union[torch.optim.lr_scheduler._LRScheduler, Callable],
+        model_name_or_path: str,
+        revision: Optional[str] = None,
     ):
         extra_vars = {}
         base_paths: List[str] = self.get_ckpt_path()
@@ -354,6 +356,10 @@ class CheckpointMananger:
                     logger.info(
                         f"[Policy] Checkpoint loaded successfully from {base_path}."
                     )
+                    if hasattr(model, "reset_named_buffers_from_pretrained"):
+                        model.reset_named_buffers_from_pretrained(
+                            model_name_or_path, revision
+                        )
                     return outputs[0] if len(outputs) == 1 else outputs
             except Exception as e:
                 logger.error(

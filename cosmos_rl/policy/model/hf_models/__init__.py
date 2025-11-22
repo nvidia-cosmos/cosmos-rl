@@ -594,6 +594,22 @@ class HFModel(BaseModel):
                 with torch.no_grad():
                     local_view.data.copy_(shared_weight.to(device))
 
+    def reset_named_buffers_from_pretrained(
+        self, model_name_or_path: str, revision: Optional[str] = None
+    ):
+        dtype = self.hf_config.torch_dtype
+        kwargs = {
+            "config": self.hf_config,
+            "revision": revision,
+            "trust_remote_code": True,
+        }
+        hf_model = self.model_class.from_pretrained(
+            model_name_or_path,
+            **kwargs,
+        ).to(device="cpu", dtype=dtype)
+
+        self.reset_named_buffers(hf_model=hf_model)
+
     def load_hf_weights(
         self,
         model_name_or_path: str,
