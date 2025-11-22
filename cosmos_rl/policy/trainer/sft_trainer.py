@@ -1082,6 +1082,8 @@ class SFTTrainer(Trainer):
                             scheduler=partial(
                                 build_lr_schedulers, self.optimizers, self.config
                             ),
+                            model_name_or_path=self.config.policy.model_name_or_path,
+                            revision=self.config.policy.model_revision,
                         )
                     )
                     ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
