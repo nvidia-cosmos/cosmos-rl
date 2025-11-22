@@ -123,6 +123,8 @@ def main(args: argparse.Namespace):
 
     rollout_engine = vLLMRollout(
         config,
+        parallel_dims,
+        device,
         seed=seed,
         load_format="auto",
     )

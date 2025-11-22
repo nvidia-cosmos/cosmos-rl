@@ -18,7 +18,9 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as RolloutConfig
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
-from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker import vLLMRolloutWorker
+from cosmos_rl.rollout.worker.rollout_control_worker import (
+    DisaggregatedRolloutControlWorker,
+)
 from cosmos_rl.dispatcher.api.client import APIClient
 
 
@@ -58,13 +60,13 @@ def run_rollout(*args, **kwargs):
 
     try:
         rollout_backend = cosmos_rollout_config.rollout.backend
-        if rollout_backend == "vllm":
+        if rollout_backend != "trtllm":
             parallel_dims = ParallelDims.from_config(
                 parallesim_config=cosmos_rollout_config.rollout.parallelism
             )
             init_distributed()
             parallel_dims.build_mesh(device_type="cuda")
-            rollout_worker = vLLMRolloutWorker(
+            rollout_worker = DisaggregatedRolloutControlWorker(
                 cosmos_rollout_config, parallel_dims, **kwargs
             )
         else:

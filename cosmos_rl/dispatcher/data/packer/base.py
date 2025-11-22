@@ -39,7 +39,6 @@ def worker_entry_parser() -> argparse.ArgumentParser:
         "--config",
         type=str,
         default=None,
-        required=True,
         help="Path to TOML configuration file to load.",
     )
 

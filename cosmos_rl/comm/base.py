@@ -15,11 +15,12 @@
 
 import torch.distributed as dist
 import uuid
-from typing import Dict, Callable, Type, Optional
+from typing import Dict, Callable, Type, Optional, Any
 import copy
 import time
 import atexit
 import threading
+from abc import ABC, abstractmethod
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 from cosmos_rl.utils.network_util import get_local_ip
 from cosmos_rl.dispatcher.command import (
@@ -258,3 +259,26 @@ class CommMixin:
                 time.sleep(constant.COSMOS_HEARTBEAT_SEND_INTERVAL)
                 if shutdown_signal.is_set():
                     break
+
+
+class WorkerBase(ABC):
+    def __init__(self, config: Any, **kwargs):
+        self.config = config
+        # Forward the args and kwargs to the worker_init method.
+        self.worker_init(**kwargs)
+
+    @abstractmethod
+    def worker_init(self, **kwargs):
+        raise RuntimeError("worker_init method must be implemented")
+
+    @abstractmethod
+    def execute(self):
+        raise RuntimeError("execute method must be implemented")
+
+    @abstractmethod
+    def build_runner(self, **kwargs):
+        raise RuntimeError("build_runner method must be implemented")
+
+    @abstractmethod
+    def destroy_worker(self):
+        raise RuntimeError("destroy method must be implemented")
