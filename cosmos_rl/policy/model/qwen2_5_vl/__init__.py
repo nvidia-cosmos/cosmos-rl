@@ -387,7 +387,15 @@ class Qwen2_5_VLModel(nn.Module):
             config.dim, config.norm_eps, casting_mode=config.hf_config.model_type
         )
         self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
-        self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
+        if not config.hf_config.tie_word_embeddings:
+            self.tie_embed_tokens = False
+            self.lm_head = nn.Linear(
+                config.dim,
+                config.vocab_size,
+                bias=False
+            )
+        else:
+            self.tie_embed_tokens = True
         self.identity_layer = IdentityLayer()
 
     def forward(
@@ -461,9 +469,25 @@ class Qwen2_5_VLModel(nn.Module):
                     h, torch.distributed.tensor.DTensor
                 ), "interested_tokens must be a local tensor"
                 h = h[interested_tokens]
-            assert self.lm_head is not None, "lm_head must be provided in last stage"
-            h = self.lm_head(self.norm(h))
-        return h
+
+            h = self.norm(h)
+            if not self.tie_embed_tokens:
+                output = self.lm_head(h)
+            else:
+                is_w_dist_tensor = isinstance(
+                    self.embed_tokens.weight, torch.distributed.tensor.DTensor
+                )
+                embed_tokens_weight = (
+                    self.embed_tokens.weight.full_tensor()
+                    if is_w_dist_tensor
+                    else self.embed_tokens.weight
+                )
+                is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
+                h = h.full_tensor() if is_a_dist_tensor else h
+                output = h @ embed_tokens_weight.t()
+            return output
+        else:
+            return h
 
     @cached_property
     def _get_nparams_and_flops_fn(self) -> Callable[[int], tuple[int, int]]:
@@ -499,6 +523,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
     def __init__(self, config: Qwen2_5_VL_LM_Args):
         super().__init__(config.hf_config)
         self.config = config
+        self.hf_config = self.config.hf_config
         self.visual = Qwen2_5_VisionTransformerPretrainedModel(config.encoder_args)
         self.model = Qwen2_5_VLModel(config.lm_args)
         self.vocab_size = config.lm_args.vocab_size
