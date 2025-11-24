@@ -488,7 +488,7 @@ class ParallelTopoMapper:
             )
             decomposed_key_and_slices = (
                 self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
-                    self.weight_mapper.policy_map_local_key_to_hf_key(local_name)
+                    self.weight_mapper.map_policy_weight_name_to_hf(local_name)
                 )
             )
             if decomposed_key_and_slices:
@@ -528,7 +528,7 @@ class ParallelTopoMapper:
                         self.insert_to_parallelism_info(
                             part_name,
                             dims_map,
-                            self.weight_mapper.policy_map_local_key_to_hf_key,
+                            self.weight_mapper.map_policy_weight_name_to_hf,
                             dims_rank_info=splitted_dim_rank_info,
                         )
                 continue
@@ -536,7 +536,7 @@ class ParallelTopoMapper:
             self.insert_to_parallelism_info(
                 local_name,
                 dims_map,
-                self.weight_mapper.policy_map_local_key_to_hf_key,
+                self.weight_mapper.map_policy_weight_name_to_hf,
                 dims_rank_info=dims_rank_info,
             )
 
@@ -711,7 +711,7 @@ class ParallelTopoMapper:
             self.insert_to_parallelism_info(
                 param_name,
                 dims_map,
-                self.weight_mapper._rollout_vllm_name_to_hf,
+                self.weight_mapper.map_rollout_weight_name_to_hf,
                 packed_modules_mapping=packed_modules_mapping,
                 dims_rank_info=dims_rank_info,
             )

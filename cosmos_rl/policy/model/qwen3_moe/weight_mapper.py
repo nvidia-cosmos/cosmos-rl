@@ -30,7 +30,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         )
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def map_rollout_weight_name_to_hf(self, rollout_weight_name: str) -> str:
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
@@ -90,7 +90,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
-            param_name_hf = self._rollout_vllm_name_to_hf(param_name)
+            param_name_hf = self.map_rollout_weight_name_to_hf(param_name)
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:
                 # only for language model
@@ -147,7 +147,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         else:
             yield name, expert_weight
 
-    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+    def map_policy_weight_name_to_hf(self, name: str) -> str:
         name = util.clear_weight_name(name)
         if not name == "lm_head.weight":
             if not name.startswith("model."):

@@ -34,10 +34,10 @@ class QwenVL25WeightMapper(WeightMapper):
         )
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def map_rollout_weight_name_to_hf(self, rollout_weight_name: str) -> str:
         if self.backend == "vllm":
             # Happen to be the same as policy name mapping.
-            return self.policy_map_local_key_to_hf_key(rollout_weight_name)
+            return self.map_policy_weight_name_to_hf(rollout_weight_name)
         elif self.backend == "trtllm":
             if rollout_weight_name.startswith("llm.model."):
                 hf_name = rollout_weight_name.replace("llm.model.", "model.")
@@ -98,7 +98,7 @@ class QwenVL25WeightMapper(WeightMapper):
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
-            compatible_key = self._rollout_vllm_name_to_hf(param_name)
+            compatible_key = self.map_rollout_weight_name_to_hf(param_name)
 
             if "qkv_proj" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
@@ -146,7 +146,7 @@ class QwenVL25WeightMapper(WeightMapper):
             recv_key_n_rank_list.append(group_keys)
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
-    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+    def map_policy_weight_name_to_hf(self, name: str) -> str:
         name = util.clear_weight_name(name)
         if name.startswith("language_model."):
             name = name.replace("language_model.", "")

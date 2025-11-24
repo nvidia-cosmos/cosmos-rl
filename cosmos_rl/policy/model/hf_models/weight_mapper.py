@@ -53,7 +53,7 @@ class HFModelWeightMapper(WeightMapper):
         self.is_vlm = getattr(self.config, "vision_config", None) is not None
         self.reverse_hf_conversion_mapping = None
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def map_rollout_weight_name_to_hf(self, rollout_weight_name: str) -> str:
         # Happen to be the same as policy name mapping.
         model_type = self.config.model_type
         if model_type == "gpt_oss":
@@ -96,7 +96,7 @@ class HFModelWeightMapper(WeightMapper):
 
             return rollout_weight_name
 
-        return self.policy_map_local_key_to_hf_key(rollout_weight_name)
+        return self.map_policy_weight_name_to_hf(rollout_weight_name)
 
     def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         if "visual" in name or "vision_tower" in name:
@@ -142,7 +142,7 @@ class HFModelWeightMapper(WeightMapper):
         # If we don't set `remove_duplicate` to False, the `lm_head` will not be included in the named_parameters.
         for param_name, param in vllm_model.named_parameters(remove_duplicate=False):
             group_keys = []
-            compatible_key = self._rollout_vllm_name_to_hf(param_name)
+            compatible_key = self.map_rollout_weight_name_to_hf(param_name)
             if ("qkv_proj" in compatible_key) or (
                 "qkv" in compatible_key and not self.is_vlm
             ):
@@ -199,7 +199,7 @@ class HFModelWeightMapper(WeightMapper):
             recv_key_n_shape_list.append(group_keys)
         return vllm_weight_inplace_view_map, recv_key_n_shape_list
 
-    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+    def map_policy_weight_name_to_hf(self, name: str) -> str:
         name = util.clear_weight_name(name)
         if self.is_vlm:
             # Policy model is HFModel, so we need to reverse the hf checkpoint conversion mapping

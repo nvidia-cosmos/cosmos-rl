@@ -1904,18 +1904,18 @@ class GRPOTrainer(Trainer):
                     dtype=str2torch_dtype(self.config.train.param_dtype),
                 )
             logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
-            # self.ckpt_manager.save_checkpoint(
-            #     model=self.model,
-            #     optimizer=self.optimizers,
-            #     scheduler=self.lr_schedulers,
-            #     step=current_step,
-            #     total_steps=total_steps,
-            #     **{
-            #         "remain_samples_num": remain_samples_num,
-            #         "is_final": current_step == total_steps,
-            #     },
-            # )
-            # self.ckpt_manager.save_check(step=current_step)
+            self.ckpt_manager.save_checkpoint(
+                model=self.model,
+                optimizer=self.optimizers,
+                scheduler=self.lr_schedulers,
+                step=current_step,
+                total_steps=total_steps,
+                **{
+                    "remain_samples_num": remain_samples_num,
+                    "is_final": current_step == total_steps,
+                },
+            )
+            self.ckpt_manager.save_check(step=current_step)
 
         # For profiling
         self.profiler.step()

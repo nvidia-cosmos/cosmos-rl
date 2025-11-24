@@ -29,9 +29,9 @@ class GPTWeightMapper(WeightMapper):
         )
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def map_rollout_weight_name_to_hf(self, rollout_weight_name: str) -> str:
         # Happen to be the same as policy name mapping.
-        return self.policy_map_local_key_to_hf_key(rollout_weight_name)
+        return self.map_policy_weight_name_to_hf(rollout_weight_name)
 
     def _rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         # weight has shape [q_num_heads * head_dim + k_num_heads * head_dim + v_num_heads * head_dim, hidden_dim]
@@ -64,7 +64,7 @@ class GPTWeightMapper(WeightMapper):
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
-            compatible_key = self._rollout_vllm_name_to_hf(param_name)
+            compatible_key = self.map_rollout_weight_name_to_hf(param_name)
             if "qkv_proj" in compatible_key:
                 # must be inplace slicing.
                 # split qkv weight
@@ -102,7 +102,7 @@ class GPTWeightMapper(WeightMapper):
 
         return vllm_weight_inplace_view_map, recv_key_n_shape_list
 
-    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+    def map_policy_weight_name_to_hf(self, name: str) -> str:
         name = util.clear_weight_name(name)
         if not name == "lm_head.weight":
             if not name.startswith("model."):
