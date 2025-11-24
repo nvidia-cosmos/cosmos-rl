@@ -1115,6 +1115,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.validation_flag.set()
 
         if broadcast_command.replica_should_stop():
+            # Do validation if the flag is set before stopping.
+            if self.validation_flag.is_set():
+                self.do_validation()
             self.shutdown_signal.set()
             self.shutdown_mp_signal.set()
 
