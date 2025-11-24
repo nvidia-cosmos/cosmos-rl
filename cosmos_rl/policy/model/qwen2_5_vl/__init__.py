@@ -389,11 +389,7 @@ class Qwen2_5_VLModel(nn.Module):
         self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
         if not config.hf_config.tie_word_embeddings:
             self.tie_embed_tokens = False
-            self.lm_head = nn.Linear(
-                config.dim,
-                config.vocab_size,
-                bias=False
-            )
+            self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
         else:
             self.tie_embed_tokens = True
         self.identity_layer = IdentityLayer()
