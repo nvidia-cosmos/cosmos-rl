@@ -61,7 +61,8 @@ class RLInternalDataset(Dataset):
         self.response_column = response_column
 
     def __len__(self):
-        return len(self.dataset)
+        return 5
+        # return len(self.dataset)
 
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
         prompt: str = self.dataset[idx][self.prompt_column]

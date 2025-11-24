@@ -93,6 +93,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
             param_name_hf = self._rollout_vllm_name_to_hf(param_name)
             # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
             if "qkv_proj" in param_name_hf:
+                # only for language model
                 # must be inplace slicing.
                 # split qkv weight
                 q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
@@ -114,22 +115,35 @@ class Qwen3MoeWeightMapper(WeightMapper):
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     @torch.no_grad()
-    def policy_maybe_decompose_weights_to_hf_naming(
-        self, name, expert_weight: torch.Tensor
-    ):
-        if match := re.search(
-            r"model\.layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.(weight)",
-            name,
-        ):
-            layer_id = int(match.group(1))
-            w_name = match.group(2)
-            n_experts = expert_weight.shape[0]
+    def policy_transform_weight_to_hf_store(self, name, expert_weight: torch.Tensor):
+        # name is HF naming convention
+        def yield_weight(n_experts, expert_weight, w_name, layer_id):
             for expert_id in range(n_experts):
                 single_expert_weight = expert_weight[expert_id].contiguous()
                 yield (
                     f"model.layers.{layer_id}.mlp.experts.{expert_id}.{w_name}.weight",
                     single_expert_weight,
                 )
+
+        if match := re.search(
+            r"model\.layers\.(\d+)\.mlp\.experts\.(gate_and_up_proj|down_proj)\.(weight)",
+            name,
+        ):
+            layer_id = int(match.group(1))
+            w_name = match.group(2)
+            n_experts = expert_weight.shape[0]
+            if w_name == "gate_and_up_proj":
+                # for qwen3 moe, gate_and_up_proj is split into gate_proj and up_proj and stored.
+                # shape: [experts, 2 * ffn_dim, hidden_dim]
+                part = expert_weight.shape[1] // 2
+                gate_proj_weight = expert_weight[:, :part, :]
+                up_proj_weight = expert_weight[:, part:, :]
+                yield from yield_weight(
+                    n_experts, gate_proj_weight, "gate_proj", layer_id
+                )
+                yield from yield_weight(n_experts, up_proj_weight, "up_proj", layer_id)
+            else:
+                yield_weight(n_experts, expert_weight, w_name, layer_id)
         else:
             yield name, expert_weight
 

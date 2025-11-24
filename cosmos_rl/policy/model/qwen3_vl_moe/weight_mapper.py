@@ -39,17 +39,36 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
         )
 
     def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
-        rollout_weight_name = self.policy_map_local_key_to_hf_key(rollout_weight_name)
-        if not rollout_weight_name == "lm_head.weight":
-            if "experts.w13_weight" in rollout_weight_name:
-                return rollout_weight_name.replace(
-                    "experts.w13_weight", "experts.gate_and_up_proj.weight"
-                )
-            elif "experts.w2_weight" in rollout_weight_name:
-                return rollout_weight_name.replace(
-                    "experts.w2_weight", "experts.down_proj.weight"
-                )
-        return rollout_weight_name
+        converted_name = None
+
+        if rollout_weight_name.startswith("language_model.model."):
+            converted_name = rollout_weight_name.replace(
+                "language_model.model.", "model.language_model."
+            )
+
+        if rollout_weight_name.startswith("visual."):
+            converted_name = rollout_weight_name.replace("visual.", "model.visual.")
+
+        if rollout_weight_name == "language_model.lm_head.weight":
+            converted_name = "lm_head.weight"
+
+        if "experts.w13_weight" in converted_name:
+            converted_name = converted_name.replace(
+                "experts.w13_weight", "experts.gate_up_proj"
+            )
+        elif "experts.w2_weight" in converted_name:
+            converted_name = converted_name.replace(
+                "experts.w2_weight", "experts.down_proj"
+            )
+
+        from cosmos_rl.utils.logging import logger
+
+        logger.info(
+            f"LMS: converted_name: {converted_name}, orig: {rollout_weight_name}"
+        )
+
+        assert converted_name is not None
+        return converted_name
 
     def __rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         # visual
@@ -144,51 +163,53 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 vllm_weight_inplace_view_map[compatible_key] = param
                 group_keys.append((compatible_key, param.ndim))
             recv_key_n_rank_list.append(group_keys)
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list
+        for key, value in vllm_weight_inplace_view_map.items():
+            from cosmos_rl.utils.logging import logger
 
-    @torch.no_grad()
-    def policy_maybe_decompose_weights_to_hf_naming(
-        self, name, expert_weight: torch.Tensor
-    ):
-        if match := re.search(
-            r"model\.layers\.(\d+)\.mlp\.experts\.(up_proj|gate_proj|down_proj)\.(weight)",
-            name,
-        ):
-            layer_id = int(match.group(1))
-            w_name = match.group(2)
-            n_experts = expert_weight.shape[0]
-            for expert_id in range(n_experts):
-                single_expert_weight = expert_weight[expert_id].contiguous()
-                yield (
-                    f"model.layers.{layer_id}.mlp.experts.{expert_id}.{w_name}.weight",
-                    single_expert_weight,
-                )
-        else:
-            yield name, expert_weight
+            logger.info(f"LMS: vllm_weight_inplace_view_map: {key}, {value.shape}")
+        return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
-        if name.startswith("language_model."):
-            name = name.replace("language_model.", "")
-        if name == "model.lm_head.weight":
+        from cosmos_rl.utils.logging import logger
+
+        logger.info(f"LMS: policy name: {name}")
+        if name.startswith("model."):
+            name = name.replace("model.", "model.language_model.")
+        if name.startswith("visual."):
+            name = name.replace("visual.", "model.visual.")
+
+        if "lm_head.weight" in name:
             name = "lm_head.weight"
+
         if re.search(
-            r"model\.layers\.(\d+)\.mlp\.experts\.(gate_and_up_projs|down_projs)", name
+            r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.gate_and_up_projs",
+            name,
         ):
-            name = name.replace("projs", "proj.weight")
+            name = name.replace("gate_and_up_projs", "gate_up_proj")
+        elif re.search(
+            r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.down_projs",
+            name,
+        ):
+            name = name.replace("down_projs", "down_proj")
+
         return name
 
     def name_to_model_part_index(self, dest_name: str) -> int:
         if dest_name in ["lm_head.weight", "lm_head.bias"]:
             return 0
-        elif dest_name.startswith("visual."):
+        elif dest_name.startswith("model.visual."):
             return 1
-        elif dest_name.startswith("model."):
+        elif dest_name.startswith("model.language_model."):
             return 0
         else:
             raise ValueError(f"Unsupported weight: {dest_name}")
 
     def policy_decompose_param_1_to_n_for_sync(self, name):
+        if "qkv." in name:
+            from cosmos_rl.utils.logging import logger
+
+            logger.info(f"LMS: policy_decompose_param_1_to_n_for_sync: {name}")
         if match := re.search(  # noqa: F841
             r"visual\.blocks\.(\d+)\.attn\.qkv\.(weight|bias)",
             name,

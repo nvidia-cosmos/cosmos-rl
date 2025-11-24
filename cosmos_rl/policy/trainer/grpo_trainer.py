@@ -645,6 +645,12 @@ class GRPOTrainer(Trainer):
             self.policy_to_rollout_insts = self.api_client.post_policy_shard_send_insts(
                 self.global_rank
             )
+        for inst_group in self.policy_to_rollout_insts:
+            for inst_param in inst_group.param_instructions:
+                for instruction in inst_param.instructions:
+                    logger.info(
+                        f"LMS: send_insts: {instruction}, param_name: {inst_param.param_name}"
+                    )
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
         # There is a local-replica comm in training step
@@ -1904,18 +1910,18 @@ class GRPOTrainer(Trainer):
                     dtype=str2torch_dtype(self.config.train.param_dtype),
                 )
             logger.info(f"[Policy] Saving cosmos checkpoint at step {current_step}...")
-            self.ckpt_manager.save_checkpoint(
-                model=self.model,
-                optimizer=self.optimizers,
-                scheduler=self.lr_schedulers,
-                step=current_step,
-                total_steps=total_steps,
-                **{
-                    "remain_samples_num": remain_samples_num,
-                    "is_final": current_step == total_steps,
-                },
-            )
-            self.ckpt_manager.save_check(step=current_step)
+            # self.ckpt_manager.save_checkpoint(
+            #     model=self.model,
+            #     optimizer=self.optimizers,
+            #     scheduler=self.lr_schedulers,
+            #     step=current_step,
+            #     total_steps=total_steps,
+            #     **{
+            #         "remain_samples_num": remain_samples_num,
+            #         "is_final": current_step == total_steps,
+            #     },
+            # )
+            # self.ckpt_manager.save_check(step=current_step)
 
         # For profiling
         self.profiler.step()
