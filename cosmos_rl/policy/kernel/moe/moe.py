@@ -29,6 +29,7 @@ except ImportError:
 try:
     from grouped_gemm import ops
 except ImportError:
+    ops = None
     print(
         "grouped_gemm is not available. Please run:"
         "pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
@@ -46,15 +47,17 @@ _shared_experts_stream: Optional[torch.cuda.Stream] = None
 
 
 def is_deepep_supported():
-    try:
-        import os
-        from deep_ep import Buffer
-        from deep_ep.utils import EventHandle, EventOverlap  # noqa: F401
+    supported = False
+    # GroupedExpertsDeepEP requires both 'grouped_gemm' and 'deep_ep' packages to be installed.
+    if ops is not None:
+        try:
+            from deep_ep import Buffer  # noqa: F401
+            from deep_ep.utils import EventHandle, EventOverlap  # noqa: F401
 
-        Buffer.set_num_sms(int(os.environ.get("DEEP_EP_SM_NUMS", 20)))
-        return True
-    except ImportError:
-        return False
+            supported = True
+        except ImportError as e:
+            print(f"Failed to import deep_ep: {e}")
+    return supported
 
 
 @dataclass

@@ -24,7 +24,7 @@ sync_weight_interval = 1
 
 [policy]
 model_name_or_path = "heslami/DeepSeek-V3-4Layer"
-model_max_length = 1024 
+model_max_length = 1024
 model_gradient_checkpointing = true
 
 [logging]
@@ -44,7 +44,7 @@ mini_batch = 1
 n_init_replicas = 1
 tp_size = 1
 cp_size = 1
-ep_size = 1
+ep_size = 2
 dp_shard_size = 8
 pp_size = 1
 dp_replicate_size = 1
