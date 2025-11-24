@@ -493,9 +493,6 @@ class ParallelTopoMapper:
             )
             if decomposed_key_and_slices:
                 for part_name, part_slice in decomposed_key_and_slices:
-                    logger.info(
-                        f"LMS: part_name: {part_name}, part_slice: {part_slice}"
-                    )
                     splitted_dim_rank_info = {}
                     part_in_local = {}
                     part_slice = {

@@ -645,12 +645,6 @@ class GRPOTrainer(Trainer):
             self.policy_to_rollout_insts = self.api_client.post_policy_shard_send_insts(
                 self.global_rank
             )
-        for inst_group in self.policy_to_rollout_insts:
-            for inst_param in inst_group.param_instructions:
-                for instruction in inst_param.instructions:
-                    logger.info(
-                        f"LMS: send_insts: {instruction}, param_name: {inst_param.param_name}"
-                    )
         # sort the param list by the dest_name, same as rollout
         total_bytes_sent = 0
         # There is a local-replica comm in training step

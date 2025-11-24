@@ -187,9 +187,6 @@ def map_weight_parallel_dims(
     n_dim: int, dest_name: str, parallel_dims: ParallelDims, model_config: Any
 ) -> Tuple[Dict[str, int], Dict[int, list], int]:
     # dest_name is HF style name
-    from cosmos_rl.utils.logging import logger
-
-    logger.info(f"LMS: map_weight_parallel_dims: {dest_name}")
     if dest_name.startswith("model.visual."):
         return None, None, None
 

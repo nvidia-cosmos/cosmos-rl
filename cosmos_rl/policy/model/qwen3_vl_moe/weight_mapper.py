@@ -61,12 +61,6 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 "experts.w2_weight", "experts.down_proj"
             )
 
-        from cosmos_rl.utils.logging import logger
-
-        logger.info(
-            f"LMS: converted_name: {converted_name}, orig: {rollout_weight_name}"
-        )
-
         assert converted_name is not None
         return converted_name
 
@@ -163,18 +157,11 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 vllm_weight_inplace_view_map[compatible_key] = param
                 group_keys.append((compatible_key, param.ndim))
             recv_key_n_rank_list.append(group_keys)
-        for key, value in vllm_weight_inplace_view_map.items():
-            from cosmos_rl.utils.logging import logger
-
-            logger.info(f"LMS: vllm_weight_inplace_view_map: {key}, {value.shape}")
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
-        from cosmos_rl.utils.logging import logger
-
-        logger.info(f"LMS: policy name: {name}")
-        if name.startswith("model."):
+        if name.startswith("model.") and "visual" not in name:
             name = name.replace("model.", "model.language_model.")
         if name.startswith("visual."):
             name = name.replace("visual.", "model.visual.")
@@ -206,10 +193,6 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             raise ValueError(f"Unsupported weight: {dest_name}")
 
     def policy_decompose_param_1_to_n_for_sync(self, name):
-        if "qkv." in name:
-            from cosmos_rl.utils.logging import logger
-
-            logger.info(f"LMS: policy_decompose_param_1_to_n_for_sync: {name}")
         if match := re.search(  # noqa: F841
             r"visual\.blocks\.(\d+)\.attn\.qkv\.(weight|bias)",
             name,

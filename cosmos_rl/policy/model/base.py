@@ -211,6 +211,7 @@ class BaseModel(torch.nn.Module, ABC):
 
         weight_sync_transforms = []
         for name, _ in transforms.items():
+            # `name` from transforms is alread in HF naming convention
             decomposed_key_and_ranks: List[Tuple[str, int]] = (
                 self.weight_mapper.policy_decompose_param_1_to_n_for_sync(name)
             )
@@ -650,6 +651,7 @@ class WeightMapper(ABC):
         """
         Set the mapping of a parameter to be synced to a transform function to get the sent view of the parameter.
         The function is Callable(local_param: torch.Tensor) -> torch.Tensor
+        `name` is in HF naming convention
         """
         if not hasattr(self, "policy_map_param_to_transform_func_for_sync"):
             self.policy_map_param_to_transform_func_for_sync = {}
