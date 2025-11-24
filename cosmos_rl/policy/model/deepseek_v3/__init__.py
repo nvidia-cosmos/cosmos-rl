@@ -437,7 +437,7 @@ class DeepseekV3MoEModel(BaseModel):
         transforms = {}
 
         for local_name, param in self.named_parameters():
-            hf_name = self.weight_mapper.map_policy_weight_name_to_hf(
+            hf_name = self.weight_mapper.policy_map_local_key_to_hf_key(
                 clear_weight_name(local_name)
             )
 

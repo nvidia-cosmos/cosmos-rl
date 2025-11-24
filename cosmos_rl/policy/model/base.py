@@ -81,7 +81,7 @@ class BaseModel(torch.nn.Module, ABC):
         named_parameters = {name: param for name, param in self.named_parameters()}
         for k, v in named_parameters.items():
             # Clear and get the correct format of the param names.
-            name = self.weight_mapper.map_policy_weight_name_to_hf(
+            name = self.weight_mapper.policy_map_local_key_to_hf_key(
                 util.clear_weight_name(k)
             )
             is_trainable = v.requires_grad
@@ -101,7 +101,7 @@ class BaseModel(torch.nn.Module, ABC):
         for k, m in self.named_modules():
             if isinstance(m, LoraInjectedLinear):
                 # Clear and get the correct format of the param names.
-                name = self.weight_mapper.map_policy_weight_name_to_hf(
+                name = self.weight_mapper.policy_map_local_key_to_hf_key(
                     util.clear_weight_name(k + ".weight")
                 )
                 decomposed_key_and_ranks: List[Tuple[str, int]] = (
@@ -131,7 +131,7 @@ class BaseModel(torch.nn.Module, ABC):
             local_view = v.to_local() if is_dist_tensor else v
             local_view = self.post_transform_of_local_view(local_view, k)
             transforms[
-                self.weight_mapper.map_policy_weight_name_to_hf(
+                self.weight_mapper.policy_map_local_key_to_hf_key(
                     util.clear_weight_name(k)
                 )
             ] = local_view
@@ -149,7 +149,7 @@ class BaseModel(torch.nn.Module, ABC):
 
             decomposed_key_and_slices = (
                 self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
-                    self.weight_mapper.map_policy_weight_name_to_hf(name)
+                    self.weight_mapper.policy_map_local_key_to_hf_key(name)
                 )
             )
             if decomposed_key_and_slices:
@@ -200,7 +200,9 @@ class BaseModel(torch.nn.Module, ABC):
                             return local.cosmos_slice(part_in_local)
 
                         self.weight_mapper.set_transform_func_from_local_param_for_sync(
-                            self.weight_mapper.map_policy_weight_name_to_hf(part_name),
+                            self.weight_mapper.policy_map_local_key_to_hf_key(
+                                part_name
+                            ),
                             partial(
                                 slice_tensor_with_part,
                                 part_in_local=part_in_local,
@@ -609,7 +611,7 @@ class WeightMapper(ABC):
         pass
 
     @abstractmethod
-    def map_policy_weight_name_to_hf(self, name: str) -> str:
+    def policy_map_local_key_to_hf_key(self, name: str) -> str:
         pass
 
     def get_policy_parallelism_strategy(self):

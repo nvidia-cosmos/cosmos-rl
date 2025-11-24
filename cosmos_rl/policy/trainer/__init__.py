@@ -280,7 +280,7 @@ class Trainer(CommMixin):
 
         for name, param in self.model.named_parameters():
             # First map the key from local to hf naming convention
-            name = self.model.weight_mapper.map_policy_weight_name_to_hf(name)
+            name = self.model.weight_mapper.policy_map_local_key_to_hf_key(name)
             if trainable_only and not param.requires_grad:
                 continue
             is_dtensor = isinstance(param, torch.distributed.tensor.DTensor)

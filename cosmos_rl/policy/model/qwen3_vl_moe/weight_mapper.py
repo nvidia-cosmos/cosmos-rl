@@ -38,7 +38,7 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             // self.config.text_config.num_attention_heads
         )
 
-    def map_rollout_weight_name_to_hf(self, rollout_weight_name: str) -> str:
+    def rollout_map_local_key_to_hf_key(self, rollout_weight_name: str) -> str:
         converted_name = None
 
         if rollout_weight_name.startswith("language_model.model."):
@@ -111,7 +111,7 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
         vllm_weight_inplace_view_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
-            compatible_key = self.map_rollout_weight_name_to_hf(param_name)
+            compatible_key = self.rollout_map_local_key_to_hf_key(param_name)
 
             if "qkv_proj" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
@@ -159,7 +159,7 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             recv_key_n_rank_list.append(group_keys)
         return vllm_weight_inplace_view_map, recv_key_n_rank_list
 
-    def map_policy_weight_name_to_hf(self, name: str) -> str:
+    def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
         if name.startswith("model.") and "visual" not in name:
             name = name.replace("model.", "model.language_model.")
