@@ -61,7 +61,9 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 "experts.w2_weight", "experts.down_proj"
             )
 
-        assert converted_name is not None
+        assert (
+            converted_name is not None
+        ), f"{rollout_weight_name} is not mapped successfully."
         return converted_name
 
     def __rollout_split_qkv_weight(self, name, weight: torch.Tensor):

@@ -64,8 +64,7 @@ class HFVLMGRPODataset(Dataset):
                 self.dataset = self.dataset[config.train.train_policy.dataset.split]
 
     def __len__(self):
-        return 5
-        # return len(self.dataset)
+        return len(self.dataset)
 
     def __getitem__(self, idx: int) -> tuple[Any, Any]:
         """

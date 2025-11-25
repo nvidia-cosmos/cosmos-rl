@@ -29,7 +29,7 @@ except ImportError:
 try:
     from grouped_gemm import ops
 except ImportError:
-    raise ImportError(
+    print(
         "grouped_gemm is not available. Please run:"
         "pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
     )
