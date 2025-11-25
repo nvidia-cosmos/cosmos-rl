@@ -66,6 +66,7 @@ class MoEArgs:
     n_shared_experts: int
     n_activated_experts: int
     n_expert_groups: int
+    norm_topk_prob: bool
     n_limited_groups: int
     train_gate: bool
     gate_bias_update_factor: float
@@ -347,7 +348,6 @@ class GroupedExpertsDeepEP(nn.Module):
             )
         )
         permuted_probs = permuted_probs.unsqueeze(-1)
-
         if torch.count_nonzero(tokens_per_expert) > 0:
             output1 = ops.gmm(
                 permuted_local_hidden_states,
@@ -446,6 +446,7 @@ class Gate(nn.Module):
         self.n_groups = args.n_expert_groups
         self.topk_groups = args.n_limited_groups
         self.score_func = args.score_func
+        self.norm_topk_prob = args.norm_topk_prob
         self.route_scale = args.route_scale
         self.train_gate = args.train_gate
         self.bias_update_factor = args.gate_bias_update_factor
@@ -514,8 +515,9 @@ class Gate(nn.Module):
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
 
-        if self.score_func == "sigmoid":
+        if self.score_func == "sigmoid" or self.norm_topk_prob:
             weights /= weights.sum(dim=-1, keepdim=True)
+        if self.score_func == "sigmoid":
             original_scores /= original_scores.sum(dim=-1, keepdim=True)
         weights *= self.route_scale
 
