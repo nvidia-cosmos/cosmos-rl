@@ -26,7 +26,8 @@ def convert_weight_from_hf(
     tp_slice_dim: Optional[int] = None,
     ignore_unknown_weights: bool = False,
 ) -> Tuple[str, torch.Tensor]:
-    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+    load_weight_test = not hasattr(parallel_dims, 'mesh')
+    if not load_weight_test:
         dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
         dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
     else:
