@@ -42,7 +42,7 @@ def convert_weight_from_hf(
         return lm_part_name, lm_part_shard
     assert name.startswith("visual."), f"Unsupported weight: {name}"
 
-    load_weight_test = not hasattr(parallel_dims, 'mesh')
+    load_weight_test = not hasattr(parallel_dims, "mesh")
     if not load_weight_test:
         dp_shard_rank = parallel_dims.mesh["dp_cp_tp"].get_local_rank()
         dp_shard_size = parallel_dims.mesh["dp_cp_tp"].size()
