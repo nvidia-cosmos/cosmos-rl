@@ -764,10 +764,10 @@ class vLLMRollout(RolloutBase):
                     # this is a mxfp4 quant layer
                     w13_weight_name = f"{module_name}.w13_weight"
                     w2_weight_name = f"{module_name}.w2_weight"
-                    w13_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
+                    w13_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
                         w13_weight_name
                     )
-                    w2_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
+                    w2_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
                         w2_weight_name
                     )
                     quantized_tensors[w13_compatible_name] = (

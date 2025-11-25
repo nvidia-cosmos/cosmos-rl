@@ -40,7 +40,7 @@ def replace_weight_of_quantized_module(
         w2_weight_name = "w2_weight"
         w13_bias_name = "w13_bias"
         for weight_name in [w13_weight_name, w2_weight_name, w13_bias_name]:
-            compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
+            compatible_name = weight_mapper._rollout_vllm_name_to_hf(
                 name + f".{weight_name}"
             )
             if compatible_name in cached_weight_map:
@@ -67,15 +67,15 @@ def cache_weight_of_quantized_module(
             ), "Mxfp4MoEMethod should be used with FusedMoE"
             # w13 and w2
             w13_weight_name = "w13_weight"
-            w13_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
+            w13_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
                 name + f".{w13_weight_name}"
             )
             w2_weight_name = "w2_weight"
-            w2_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
+            w2_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
                 name + f".{w2_weight_name}"
             )
             w13_bias_name = "w13_bias"
-            w13_bias_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
+            w13_bias_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
                 name + f".{w13_bias_name}"
             )
             # Keep same as vLLM did: delete the original weight.

@@ -711,7 +711,7 @@ class ParallelTopoMapper:
             self.insert_to_parallelism_info(
                 param_name,
                 dims_map,
-                self.weight_mapper.rollout_map_local_key_to_hf_key,
+                self.weight_mapper._rollout_vllm_name_to_hf,
                 packed_modules_mapping=packed_modules_mapping,
                 dims_rank_info=dims_rank_info,
             )

@@ -175,7 +175,7 @@ class RolloutBase(ABC):
         model = self.get_underlying_model()
         param_map = {}
         for name, param in model.state_dict().items():
-            compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(name)
+            compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
             param_map[compatible_name] = param
 
         quantized_tensors = self.get_quantized_tensors(weight_mapper)

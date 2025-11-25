@@ -263,7 +263,7 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
     def __init__(self, hf_config: AutoConfig):
         super().__init__(hf_config)
 
-    def rollout_map_local_key_to_hf_key(self, rollout_weight_name: str) -> str:
+    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
         # TODO(aazzolini): 2.2. Implement name_to_hf correctly.
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
@@ -318,7 +318,7 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         compatible_weight_map = {}
         for param_name, param in vllm_model.named_parameters():
             group_keys = []
-            compatible_key = self.rollout_map_local_key_to_hf_key(param_name)
+            compatible_key = self._rollout_vllm_name_to_hf(param_name)
             logger.info(
                 f"[Rollout] param vllm_name {param_name} hf_name: {compatible_key}"
             )

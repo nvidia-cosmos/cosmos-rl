@@ -589,7 +589,7 @@ class WeightMapper(ABC):
         self.backend = "vllm"  # default rollout backend is vllm.
 
     @torch.no_grad()
-    def policy_transform_weight_to_hf_store(self, name, param):
+    def policy_maybe_decompose_weights_to_hf_naming(self, name, param):
         """
         Transform the weight to the Huggingface weight store and naming convention.
         For example, Qwen3 MoE experts' weight of `gate_and_up_proj` are stacked in the 0th dimension(expert dimension) in cosmos-rl,
