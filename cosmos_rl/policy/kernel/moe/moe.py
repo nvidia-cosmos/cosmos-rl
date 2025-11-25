@@ -66,7 +66,6 @@ class MoEArgs:
     n_shared_experts: int
     n_activated_experts: int
     n_expert_groups: int
-    norm_topk_prob: bool
     n_limited_groups: int
     train_gate: bool
     gate_bias_update_factor: float
@@ -75,6 +74,7 @@ class MoEArgs:
     route_scale: float
     dim: int
     moe_inter_dim: int
+    norm_topk_prob: bool = False
     fake_balanced_gate: bool = False
 
 
