@@ -148,25 +148,21 @@ def main(*args, **kwargs):
         mock_for_custom_rollout()
 
     try:
-        with torch.autocast(
-            device_type="cuda",
-            dtype=util.str2torch_dtype(cosmos_config.train.param_dtype),
-        ):
-            if policy_type == "grpo":
-                logger.info("Starting GRPO training...")
-                trainer = GRPOTrainer(
-                    config=cosmos_config,
-                    parallel_dims=parallel_dims,
-                    dataset=kwargs.get("dataset", None),
-                    data_packer=kwargs.get("data_packer", None),
-                    val_dataset=kwargs.get("val_dataset", None),
-                    val_data_packer=kwargs.get("val_data_packer", None),
-                )
-                trainer.main_loop()
-                if args.test == "custom_rollout":
-                    assert trainer.computed_cnt == 4
-            else:
-                raise ValueError(f"Unknown policy type: {policy_type}")
+        if policy_type == "grpo":
+            logger.info("Starting GRPO training...")
+            trainer = GRPOTrainer(
+                config=cosmos_config,
+                parallel_dims=parallel_dims,
+                dataset=kwargs.get("dataset", None),
+                data_packer=kwargs.get("data_packer", None),
+                val_dataset=kwargs.get("val_dataset", None),
+                val_data_packer=kwargs.get("val_data_packer", None),
+            )
+            trainer.main_loop()
+            if args.test == "custom_rollout":
+                assert trainer.computed_cnt == 4
+        else:
+            raise ValueError(f"Unknown policy type: {policy_type}")
     except Exception as e:
         import traceback
 
