@@ -88,7 +88,11 @@ class HFModel(BaseModel):
         super().__init__(hf_config)
         self.hf_config = hf_config
         self.model = model
-        self.model = self.model.to(dtype=hf_config.torch_dtype)
+        # The whole init function in run inside context:
+        # with util.cosmos_default_dtype(cosmos_default_dtype)
+        # cosmos_default_dtype is config.train.master_dtype
+        # Change model to torch.get_default_dtype() will change it precision to config.train.master_dtype
+        self.model = self.model.to(dtype=torch.get_default_dtype())
         self.model_class = model_class
         self.is_vlm = is_vlm
         self.need_dequantization = need_dequantization
