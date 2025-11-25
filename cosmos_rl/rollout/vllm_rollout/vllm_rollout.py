@@ -15,7 +15,10 @@
 import os
 
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+    apply_fp8_linear_patch,
+    simplify_process_weights_after_loading,
+)
 
 import vllm
 import torch
@@ -301,6 +304,7 @@ class vLLMRollout(RolloutBase):
                 vllm_config = self.rollout_engine.llm_engine.vllm_config
                 with set_current_vllm_config(vllm_config):
                     apply_fp8_linear_patch(self.get_underlying_model())
+                simplify_process_weights_after_loading()
 
     def post_init_engine_hook(
         self, consume_command_hook, report_rollouts_hook, validation_flag, **kwargs
