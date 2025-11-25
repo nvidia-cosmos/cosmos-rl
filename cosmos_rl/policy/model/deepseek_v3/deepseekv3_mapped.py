@@ -456,7 +456,7 @@ class Block(nn.Module):
                 route_scale=args.route_scale,
                 dim=args.dim,
                 moe_inter_dim=args.moe_inter_dim,
-                fake_balanced_gate=args.fake_balanced_gate
+                fake_balanced_gate=args.fake_balanced_gate,
             )
             self.mlp = MoE(moe_args)
         self.input_layernorm = RMSNorm(args.dim)
