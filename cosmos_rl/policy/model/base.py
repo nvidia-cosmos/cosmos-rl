@@ -211,6 +211,7 @@ class BaseModel(torch.nn.Module, ABC):
 
         weight_sync_transforms = []
         for name, _ in transforms.items():
+            # `name` from transforms is alread in HF naming convention
             decomposed_key_and_ranks: List[Tuple[str, int]] = (
                 self.weight_mapper.policy_decompose_param_1_to_n_for_sync(name)
             )
@@ -590,10 +591,10 @@ class WeightMapper(ABC):
     @torch.no_grad()
     def policy_maybe_decompose_weights_to_hf_naming(self, name, param):
         """
-        Decompose the weights of the model parameters into fine-grained weights
-        This is especially useful for models with non-symmetric parameter layout than the original HuggingFace one
-        For example, MoE experts' weights are stacked in the 0th dimension,
-        while they are stored in different keys in the original HuggingFace naming convention
+        Transform the weight to the Huggingface weight store and naming convention.
+        For example, Qwen3 MoE experts' weight of `gate_and_up_proj` are stacked in the 0th dimension(expert dimension) in cosmos-rl,
+        with shape [experts, 2 * ffn_dim, hidden_dim], while they are splited into `experts` single-expert weights to store in Huggingface,
+        each of the single-expert weights has shape [ffn_dim, hidden_dim] of `gate_proj`, and [ffn_dim, hidden_dim] of `up_proj`.
         """
         yield name, param
 
@@ -608,9 +609,6 @@ class WeightMapper(ABC):
             - recv_key_n_rank_list: List[List[Tuple[str, int]]]: the list of grouped recv key and its tensor rank
         """
         pass
-
-    def name_to_model_part_index(self, dest_name: str) -> int:
-        return 0
 
     @abstractmethod
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
@@ -653,6 +651,7 @@ class WeightMapper(ABC):
         """
         Set the mapping of a parameter to be synced to a transform function to get the sent view of the parameter.
         The function is Callable(local_param: torch.Tensor) -> torch.Tensor
+        `name` is in HF naming convention
         """
         if not hasattr(self, "policy_map_param_to_transform_func_for_sync"):
             self.policy_map_param_to_transform_func_for_sync = {}

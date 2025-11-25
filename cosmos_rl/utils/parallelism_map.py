@@ -478,14 +478,17 @@ class ParallelTopoMapper:
         if hasattr(self, "parallelism_info_for_params"):
             return self.parallelism_info_for_params
         self.parallelism_info_for_params = {}
-        for name, param in self.underlying_model.named_parameters(
+        for local_name, param in self.underlying_model.named_parameters(
             remove_duplicate=False
         ):
+            # `local_name` is local key, not hf key
             global_shape = tuple(param.shape)
-            dims_rank_info, dims_map = extract_infomation_from_dtensor(param, name)
+            dims_rank_info, dims_map = extract_infomation_from_dtensor(
+                param, local_name
+            )
             decomposed_key_and_slices = (
                 self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
-                    self.weight_mapper.policy_map_local_key_to_hf_key(name)
+                    self.weight_mapper.policy_map_local_key_to_hf_key(local_name)
                 )
             )
             if decomposed_key_and_slices:
@@ -531,7 +534,7 @@ class ParallelTopoMapper:
                 continue
 
             self.insert_to_parallelism_info(
-                name,
+                local_name,
                 dims_map,
                 self.weight_mapper.policy_map_local_key_to_hf_key,
                 dims_rank_info=dims_rank_info,
