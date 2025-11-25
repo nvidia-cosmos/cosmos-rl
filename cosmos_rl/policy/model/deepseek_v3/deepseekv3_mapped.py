@@ -122,7 +122,7 @@ class DeepseekConfig:
     gate_bias_update_factor: float = 0.01
     score_func: Literal["softmax", "sigmoid"] = "sigmoid"
     route_scale: float = 2.5
-    enable_deepep: bool = False
+    enable_deepep: bool = True
     fake_balanced_gate: bool = False
     # mla
     q_lora_rank: int = 1536

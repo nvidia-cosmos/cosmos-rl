@@ -318,6 +318,14 @@ class DeepseekV3MoEModel(BaseModel):
                         )
                         continue
 
+                    slice_range = None
+                    if ".experts.gate_proj" in dest_name:
+                        dest_name = dest_name.replace("gate_projs", "gate_and_up_projs")
+                        slice_range = slice(0, self.config.moe_inter_dim)
+                    elif ".experts.up_proj" in dest_name:
+                        dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
+                        slice_range = slice(self.config.moe_inter_dim, None)
+
                     target_tensor = self_state_dict[dest_name]
                     if isinstance(target_tensor, torch.distributed.tensor.DTensor):
                         target_tensor = target_tensor.to_local()
@@ -332,6 +340,12 @@ class DeepseekV3MoEModel(BaseModel):
 
                         expert_id = expert_id % n_local_experts
                         target_tensor = target_tensor[expert_id]
+
+                    if slice_range is not None:
+                        assert (
+                            target_tensor.shape[0] == 2 * self.config.moe_inter_dim
+                        ), f"Shape mismatch: {target_tensor.shape} != {2 * self.config.moe_inter_dim} for {dest_name}"
+                        target_tensor = target_tensor[slice_range]
 
                     assert (
                         target_tensor.shape == shared_weight.shape

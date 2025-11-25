@@ -22,7 +22,6 @@ import torch
 import torch.nn as nn
 from transformers import AutoConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-import torch.distributed._symmetric_memory as symm_mem
 from cosmos_rl.utils.util import (
     resolve_model_path,
     IdentityLayer,
@@ -41,7 +40,6 @@ from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import (
     Qwen3_VL_DataPacker,
 )
 from cosmos_rl.policy.model.qwen3_vl_moe.weight_mapper import Qwen3VLMoeWeightMapper
-from cosmos_rl.policy.kernel.symm_mem_recipes import OnDeviceAllToAllV
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel
@@ -50,7 +48,6 @@ from cosmos_rl.policy.kernel.moe.moe import MoEArgs
 from cosmos_rl.policy.model.qwen3_moe import (
     Qwen3MoEBlock,
     Qwen3MoeArgs,
-    FeedForward,
     build_norm as qwen3_moe_build_norm,
 )
 
@@ -160,7 +157,6 @@ class Qwen3MoE(nn.Module):
             route_scale=getattr(model_args.hf_config, "routed_scaling_factor", 1.0),
             dim=model_args.dim,
             moe_inter_dim=model_args.ffn_dim,
-            enable_deepep=True,
         )
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
@@ -302,37 +298,6 @@ class Qwen3MoE(nn.Module):
         current_device = torch.cuda.current_device()
         self.rotary_emb.to(current_device)
         self.rotary_emb.reset_inv_freq()
-        # Basically, max_seq_len * 2 is enough for all-to-all-v communication.
-        overflow = 2
-
-        MAX_BATCH_MUL_SEQ_LEN = (
-            self.model_args.max_seq_len
-            * cosmos_config.train.train_policy.mini_batch
-            * self.model_args.hf_config.num_experts_per_tok
-        )
-
-        OnDeviceAllToAllV.max_output_len = MAX_BATCH_MUL_SEQ_LEN * overflow
-        if self.moe_args.enable_deepep:
-            return
-        # Init MoE kernel related buffers
-        if FeedForward.token_send_buf is None:
-            dtype = self.model_args.hf_config.torch_dtype
-            # Input buffer for DP-to-EP shuffle
-            FeedForward.token_send_buf = symm_mem.empty(
-                MAX_BATCH_MUL_SEQ_LEN,
-                self.model_args.dim,  # hidden dim
-                dtype=dtype,
-                device=self.current_device(),
-            )
-            FeedForward.token_send_buf.zero_()
-            # Input buffer for EP-to-DP shuffle
-            FeedForward.token_gather_buf = symm_mem.empty(
-                MAX_BATCH_MUL_SEQ_LEN * overflow,
-                self.model_args.dim,  # hidden dim
-                dtype=dtype,
-                device=self.current_device(),
-            )
-            FeedForward.token_gather_buf.zero_()
 
     @cached_property
     def _get_nparams_and_flops_fn(self) -> Callable[[int], tuple[int, int]]:
