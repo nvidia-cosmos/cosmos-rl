@@ -516,7 +516,7 @@ class GPT(BaseModel):
                 )
                 is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
                 h = h.full_tensor() if is_a_dist_tensor else h
-                # Since call dtensor.full_tensor here, 
+                # Since call dtensor.full_tensor here,
                 # full_tensor's dtype will equal to shard's dtype which will not be controlled by mp_policy
                 # for run torch.mm on input's dtype
                 with torch.autocast(device_type="cuda", dtype=h.dtype):

@@ -240,7 +240,7 @@ class Attention(nn.Module):
 
         input_dtype = xq.dtype
         if input_dtype == torch.float32:
-            target_dtype=torch.bfloat16
+            target_dtype = torch.bfloat16
             xq = xq.to(target_dtype)
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
@@ -523,10 +523,10 @@ class Qwen3MoE(BaseModel):
                 )
                 is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
                 h = h.full_tensor() if is_a_dist_tensor else h
-                # Since call dtensor.full_tensor here, 
+                # Since call dtensor.full_tensor here,
                 # full_tensor's dtype will equal to shard's dtype which will not be controlled by mp_policy
                 # for run torch.mm on input's dtype
-                with torch.autocast(device='cuda', dtype=h.dtype):
+                with torch.autocast(device="cuda", dtype=h.dtype):
                     output = h @ embed_tokens_weight.t()
             return output
         else:

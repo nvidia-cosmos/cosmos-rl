@@ -93,9 +93,7 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
             self.patch_size,
             self.patch_size,
         )
-        hidden_states = self.proj(hidden_states).view(
-            -1, self.embed_dim
-        )
+        hidden_states = self.proj(hidden_states).view(-1, self.embed_dim)
         return hidden_states
 
 

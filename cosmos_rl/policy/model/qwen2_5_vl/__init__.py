@@ -123,9 +123,9 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
             else "cpu"
         )
 
-        freqs = (
-            inv_freq_expanded.float() @ position_ids_expanded.float()
-        ).transpose(2, 3)
+        freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(
+            2, 3
+        )
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos()
         sin = emb.sin()
@@ -480,7 +480,7 @@ class Qwen2_5_VLModel(nn.Module):
                 )
                 is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
                 h = h.full_tensor() if is_a_dist_tensor else h
-                # Since call dtensor.full_tensor here, 
+                # Since call dtensor.full_tensor here,
                 # full_tensor's dtype will equal to shard's dtype which will not be controlled by mp_policy
                 # for run torch.mm on input's dtype
                 with torch.autocast(device_type="cuda", dtype=h.dtype):

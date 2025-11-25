@@ -195,7 +195,7 @@ class ParallelDims:
         valid_names = []
         for dim, name in zip(dims, names):
             # always have dp_shard mesh in mesh
-            if dim > 1 or name == 'dp_shard':
+            if dim > 1 or name == "dp_shard":
                 valid_dims.append(dim)
                 valid_names.append(name)
 
@@ -313,7 +313,7 @@ class ParallelDims:
 
     @property
     def dp_shard_enabled(self) -> bool:
-        # alway warp model with fsdp 
+        # alway warp model with fsdp
         # to ensure consistent mix precision trainning strategy controled by mp_policy
         return self.dp_shard >= 1
 

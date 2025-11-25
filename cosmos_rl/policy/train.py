@@ -20,7 +20,6 @@ from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
-from cosmos_rl.utils import util
 from cosmos_rl.dispatcher.api.client import APIClient
 
 
