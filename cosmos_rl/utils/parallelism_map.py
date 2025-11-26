@@ -617,9 +617,10 @@ class ParallelTopoMapper:
             assert (
                 dims_rank_info is None
             ), f"Packed modules mapping {packed_modules_mapping} should not be used with dims_rank_info {dims_rank_info}."
-            if k in param_name:
+            hf_name = name_to_hf(param_name)
+            if k in hf_name:
                 for rename in v:
-                    name = name_to_hf(param_name).replace(k, rename)
+                    name = hf_name.replace(k, rename)
                     self.parallelism_info_for_params[name] = (
                         dims_map,
                         tensor_dim_to_parallel_map,
@@ -654,12 +655,9 @@ class ParallelTopoMapper:
         ):
             is_dist_tensor = isinstance(param, torch.distributed.tensor.DTensor)
             dims_rank_info = {}
-            if not is_dist_tensor:
-                dims_map = {}
-                global_shape = tuple(param.shape)
-            else:
-                dims_map = {}
-                global_shape = tuple(param.shape)
+            dims_map = {}
+            global_shape = tuple(param.shape)
+            if is_dist_tensor:
                 mesh = param.device_mesh
                 placements = param.placements
                 assert (
@@ -699,54 +697,55 @@ class ParallelTopoMapper:
                             total_size=total_size,
                             length=length,
                         ).__dict__
-                decomposed_key_and_slices = (
-                    self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
-                        self.weight_mapper.policy_map_local_key_to_hf_key(name)
-                    )
+            decomposed_key_and_slices = (
+                self.weight_mapper.policy_decompose_param_1_to_n_for_sync(
+                    self.weight_mapper.policy_map_local_key_to_hf_key(name)
                 )
-                if decomposed_key_and_slices:
-                    for part_name, part_slice in decomposed_key_and_slices:
-                        splitted_dim_rank_info = {}
-                        part_in_local = {}
-                        part_slice = {
-                            len(global_shape) + k if k < 0 else k: v
-                            for k, v in part_slice.items()
-                        }
-                        all_dims = part_slice.keys() | dims_rank_info.keys()
-                        for dim in all_dims:
-                            if dim not in part_slice:
-                                dim_slice = DimSliceInfo(
-                                    offset=0,
-                                    total_size=1,
-                                )
-                            else:
-                                dim_slice = DimSliceInfo.from_dict(part_slice[dim])
-                            if dim not in dims_rank_info:
-                                assert (
-                                    len(global_shape) > dim
-                                ), f"Dimension {dim} is out of bounds for global shape {global_shape}."
-                                local_part = DimSliceInfo(offset=0, total_size=1)
-                            else:
-                                local_part = DimSliceInfo.from_dict(dims_rank_info[dim])
-                            slice_in_splited, overlap_in_local = (
-                                self.tensor_overlap_info_at_dim(
-                                    {dim: dim_slice}, {dim: local_part}, dim
-                                )
+            )
+            if decomposed_key_and_slices:
+                for part_name, part_slice in decomposed_key_and_slices:
+                    splitted_dim_rank_info = {}
+                    part_in_local = {}
+                    part_slice = {
+                        len(global_shape) + k if k < 0 else k: v
+                        for k, v in part_slice.items()
+                    }
+                    all_dims = part_slice.keys() | dims_rank_info.keys()
+                    for dim in all_dims:
+                        if dim not in part_slice:
+                            dim_slice = DimSliceInfo(
+                                offset=0,
+                                total_size=1,
                             )
-                            if slice_in_splited is None:
-                                splitted_dim_rank_info = None
-                                break
+                        else:
+                            dim_slice = DimSliceInfo.from_dict(part_slice[dim])
+                        if dim not in dims_rank_info:
+                            assert (
+                                len(global_shape) > dim
+                            ), f"Dimension {dim} is out of bounds for global shape {global_shape}."
+                            local_part = DimSliceInfo(offset=0, total_size=1)
+                        else:
+                            local_part = DimSliceInfo.from_dict(dims_rank_info[dim])
+                        slice_in_splited, overlap_in_local = (
+                            self.tensor_overlap_info_at_dim(
+                                {dim: dim_slice}, {dim: local_part}, dim
+                            )
+                        )
+                        if slice_in_splited is None:
+                            splitted_dim_rank_info = None
+                            break
 
-                            splitted_dim_rank_info[dim] = slice_in_splited.__dict__
-                            part_in_local[dim] = overlap_in_local
-                        if splitted_dim_rank_info is not None:
-                            self.insert_to_parallelism_info(
-                                part_name,
-                                dims_map,
-                                self.weight_mapper.policy_map_local_key_to_hf_key,
-                                dims_rank_info=splitted_dim_rank_info,
-                            )
-                    continue
+                        splitted_dim_rank_info[dim] = slice_in_splited.__dict__
+                        part_in_local[dim] = overlap_in_local
+                    if splitted_dim_rank_info is not None:
+                        self.insert_to_parallelism_info(
+                            part_name,
+                            dims_map,
+                            self.weight_mapper.policy_map_local_key_to_hf_key,
+                            dims_rank_info=splitted_dim_rank_info,
+                        )
+                continue
+
             self.insert_to_parallelism_info(
                 name,
                 dims_map,
@@ -1643,6 +1642,21 @@ class ParallelizedShardMapper:
         )
         return recv_insts
 
+    def cleanup(self):
+        """
+        Cleanup the multiprocessing pool.
+        This method is called to cleanup the multiprocessing pool when it is no longer needed.
+        """
+        if all([s is not None for s in self.send_insts_for_policy]) and all(
+            [r is not None for r in self.recv_insts_for_rollout]
+        ):
+            if self.multiprocessing_pool is not None:
+                logger.info(
+                    "[ParallelizedShardMapper] Shutting down multiprocessing pool."
+                )
+                self.multiprocessing_pool.shutdown()
+            self.multiprocessing_pool = None
+
     async def get_send_insts_for_policy(
         self, rank: int
     ) -> List[WeightSyncInstructionsGroup]:
@@ -1653,6 +1667,7 @@ class ParallelizedShardMapper:
         """
         if self.send_insts_for_policy[rank] is None:
             self.send_insts_for_policy[rank] = await self.policy_results[rank]
+        self.cleanup()
         return self.send_insts_for_policy[rank]
 
     async def get_recv_insts_for_rollout(
@@ -1665,4 +1680,5 @@ class ParallelizedShardMapper:
         """
         if self.recv_insts_for_rollout[rank] is None:
             self.recv_insts_for_rollout[rank] = await self.rollout_results[rank]
+        self.cleanup()
         return self.recv_insts_for_rollout[rank]

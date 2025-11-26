@@ -139,8 +139,8 @@ class vLLMRollout(RolloutBase):
 
             # Check if the model has MoE
             # Note: even though deepseek_v3 is MoE, EP in rollout is not supported for it yet
-            moe_model_type = {"qwen3_moe"}
-            multimodal_type = {"qwen2_5_vl", "qwen3_vl"}
+            moe_model_type = {"qwen3_moe", "qwen3_vl_moe"}
+            multimodal_type = {"qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe"}
 
             model_type = self.model_config.model_type
             if model_type in moe_model_type:
@@ -156,6 +156,9 @@ class vLLMRollout(RolloutBase):
             self.quantization = quantization
 
             policy_config = self.config.policy
+
+            if seed is not None and seed < 0:
+                seed = None
 
             self.rollout_engine = LLM(
                 model=model_path,
@@ -182,7 +185,7 @@ class vLLMRollout(RolloutBase):
                 enable_prefix_caching=False,
                 trust_remote_code=trust_remote_code,
                 quantization=self.quantization,
-                seed=seed or 42,
+                seed=seed,
                 load_format=load_format,
             )
             self._engine_initialized = True
@@ -204,11 +207,19 @@ class vLLMRollout(RolloutBase):
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
+        n_to_batch: bool = False,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
+        n_repeats = sampling_params.n if n_to_batch else 1
+        payloads = [p for p in payloads for _ in range(n_repeats)]
+        if n_to_batch:
+            local_sampling_params = copy.deepcopy(sampling_params)
+            local_sampling_params.n = 1
+        else:
+            local_sampling_params = sampling_params
 
         # Pack the payloads into prompts for vllm.
         prompts = []
@@ -230,16 +241,22 @@ class vLLMRollout(RolloutBase):
             with torch.cuda.stream(stream):
                 results = self.rollout_engine.generate(
                     new_prompts,
-                    sampling_params=sampling_params,
+                    sampling_params=local_sampling_params,
                     use_tqdm=False,
                 )
-
-            for i, output in enumerate(results):
+            assert len(results) % n_repeats == 0, (
+                "[Rollout] The number of results %d is not divisible by n_repeats %d"
+                % (len(results), n_repeats)
+            )
+            for i in range(0, len(results), n_repeats):
+                outputs = results[i : i + n_repeats]
                 response.append(
                     RolloutResult(
                         prompt=payloads[i].prompt,
                         completions=[
-                            output.outputs[i].text for i in range(len(output.outputs))
+                            output.outputs[j].text
+                            for output in outputs
+                            for j in range(len(output.outputs))
                         ],
                     )
                 )
@@ -343,14 +360,22 @@ class vLLMRollout(RolloutBase):
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
         sampling_params: SamplingParams,
+        n_to_batch: bool = False,
     ) -> List[RolloutResult]:
         if self.rollout_config.multi_turn_config.enable:
             return self.rollout_generation_multi_turn(
-                payloads, stream, data_packer, sampling_params
+                payloads,
+                stream,
+                data_packer,
+                sampling_params,
             )
         else:
             return self.rollout_generation_single_turn(
-                payloads, stream, data_packer, sampling_params
+                payloads,
+                stream,
+                data_packer,
+                sampling_params,
+                n_to_batch=n_to_batch,
             )
 
     def get_underlying_model(self):

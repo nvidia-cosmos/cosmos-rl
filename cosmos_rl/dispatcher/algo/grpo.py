@@ -21,7 +21,7 @@ from cosmos_rl.utils.constant import Algo
 
 class GRPO(RuleBasedAlgo):
     def __init__(
-        self, reward_fn: Callable, unbiased: bool = False, eps: float = 1e-5, **kwargs
+        self, reward_fn: Callable, unbiased: bool = False, eps: float = 1e-6, **kwargs
     ):
         super().__init__(**kwargs)
         self.reward_fn = reward_fn

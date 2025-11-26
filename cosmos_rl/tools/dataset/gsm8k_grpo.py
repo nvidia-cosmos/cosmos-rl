@@ -361,6 +361,27 @@ class GSM8kDataPacker(DataPacker):
         return conversation
 
 
+        real_response = ""
+        for response in responses:
+            if response:
+                real_response = response
+                break
+
+        if real_response == "":
+            return conversation
+
+        # 1. add real_response as assistant
+        conversation = add_assistant_message(conversation, real_response)
+
+        # 2. check if the response contains tool call instruction
+        tool_responses = self.tool_agent.call_tools(real_response, ground_truth)
+        if tool_responses:
+            for tr in tool_responses:
+                conversation = add_tool_response_messages(conversation, tr.text)
+
+        return conversation
+
+
 @monitor_status(name="Cosmos-RL GSM8k GRPO Dataset", mode="dataset")
 def main():
     def get_dataset(config: CosmosConfig) -> Dataset:

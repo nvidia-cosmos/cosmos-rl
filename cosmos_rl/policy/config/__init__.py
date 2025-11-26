@@ -601,6 +601,11 @@ class TrainingConfig(BaseModel):
         default=False,
         description="Whether to use activation offload",
     )
+    fa_version: Optional[int] = Field(
+        default=None,
+        description="FlashAttention version to use. If None, will use the default version.",
+        choices=[2, 3],
+    )
 
     seed: Optional[int] = Field(
         default=None,
@@ -947,6 +952,10 @@ class RolloutConfig(BaseModel):
     )
     n_generation: int = Field(
         default=16, description="n parameter same like what in OpenAI chat API."
+    )
+    n_generation_to_batch: bool = Field(
+        default=False,
+        description="Whether to treat n_generation as batch dimension in rollout generation.",
     )
 
     batch_size: int = Field(default=1, description="Batch size for rollout.")

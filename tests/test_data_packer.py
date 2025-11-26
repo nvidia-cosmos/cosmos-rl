@@ -16,8 +16,21 @@
 
 import unittest
 from unittest.mock import Mock
+from packaging import version
+import transformers
+from transformers import AutoConfig, AutoTokenizer
 
+import cosmos_rl.utils.util as util
+from cosmos_rl.policy.model.hf_models import HFModel
+from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
+from cosmos_rl.policy.model.qwen3_vl_moe import Qwen3VLMoeModel
+from cosmos_rl.dispatcher.data.packer import DataPacker, DecoderOnlyLLMDataPacker
 from cosmos_rl.dispatcher.data.packer.deepseek_data_packer import DeepSeek_DataPacker
+from cosmos_rl.dispatcher.data.packer.qwen2_5_vlm_data_packer import (
+    Qwen2_5_VLM_DataPacker,
+)
+from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import Qwen3_VL_DataPacker
+from cosmos_rl.dispatcher.data.packer.hf_vlm_data_packer import HFVLMDataPacker
 from cosmos_rl.policy.config import Config, PolicyConfig, TrainingConfig
 
 
@@ -44,6 +57,104 @@ class TestDataPacker(unittest.TestCase):
         output = data_packer.sft_collate_fn(TEST_SAMPLES, 2, -100, -100)
         assert output["input_ids"].shape == (len(TEST_SAMPLES), MAX_LEN)
         assert output["label_ids"].shape == (len(TEST_SAMPLES), MAX_LEN)
+
+    def test_all_data_packers(self):
+        for model_id in [
+            "microsoft/phi-4",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            "Qwen/Qwen3-VL-8B-Instruct",
+            "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        ]:
+            if (
+                version.parse(transformers.__version__) < version.parse("4.57.0")
+                and "qwen3-vl" in model_id.lower()
+            ):
+                continue
+            hf_config = util.retry(AutoConfig.from_pretrained)(
+                model_id, trust_remote_code=True
+            )
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            is_vlm = getattr(hf_config, "vision_config", None) is not None
+
+            try:
+                data_packer = DataPacker.get_default_data_packer(hf_config.model_type)
+            except ValueError:
+                data_packer = (
+                    DecoderOnlyLLMDataPacker() if not is_vlm else HFVLMDataPacker()
+                )
+
+            config = Config(
+                policy=PolicyConfig(model_max_length=4096, model_name_or_path=model_id),
+                train=TrainingConfig(),
+            )
+            data_packer.setup(config, tokenizer)
+
+            if model_id == "Qwen/Qwen2.5-VL-7B-Instruct":
+                assert isinstance(data_packer, Qwen2_5_VLM_DataPacker)
+                assert (
+                    hf_config.model_type
+                    in Qwen2_5_VLConditionalModel.supported_model_types()
+                )
+            elif model_id == "Qwen/Qwen3-VL-8B-Instruct":
+                assert isinstance(data_packer, HFVLMDataPacker)
+                # HFModel use hfmodel as the default model type, so qwen3-vl should not be in the supported_model_types
+                assert hf_config.model_type not in HFModel.supported_model_types()
+            elif model_id == "Qwen/Qwen3-VL-30B-A3B-Instruct":
+                # Qwen3-VL-Moe uses a custom implementation and relies on Qwen3_VL_DataPacker as its specific data packer
+                assert isinstance(data_packer, Qwen3_VL_DataPacker)
+                assert hf_config.model_type in Qwen3VLMoeModel.supported_model_types()
+            elif model_id == "microsoft/phi-4":
+                assert isinstance(data_packer, DecoderOnlyLLMDataPacker)
+
+            if model_id in [
+                "Qwen/Qwen3-VL-8B-Instruct",
+                "Qwen/Qwen3-VL-30B-A3B-Instruct",
+            ]:
+                print(f"model_id: {model_id}")
+                MAX_PIXELS = 128 * 1024
+                FPS1 = 2
+                FPS2 = 1
+                content1 = [
+                    {
+                        "type": "video",
+                        "video": "tests/data/test_data_packer.mp4",
+                        "max_pixels": MAX_PIXELS,
+                        "fps": FPS1,
+                    },
+                    {
+                        "type": "text",
+                        "text": "describe this video.",
+                    },
+                ]
+                content2 = [
+                    {
+                        "type": "video",
+                        "video": "tests/data/test_data_packer.mp4",
+                        "max_pixels": MAX_PIXELS,
+                        "fps": FPS2,
+                    },
+                    {
+                        "type": "text",
+                        "text": "please describe this video.",
+                    },
+                ]
+                sample1 = [{"role": "user", "content": content1}]
+                sample2 = [{"role": "user", "content": content2}]
+                return_dict1 = data_packer.sft_process_sample(sample1)
+                return_dict2 = data_packer.sft_process_sample(sample2)
+                pixel_value_video_shape0 = return_dict1["pixel_values_videos"].shape[0]
+                pixel_value_video_shape1 = return_dict2["pixel_values_videos"].shape[0]
+                computed_max_len = max(
+                    len(return_dict1["input_ids"]), len(return_dict2["input_ids"])
+                )
+                output = data_packer.sft_collate_fn(
+                    [return_dict1, return_dict2], computed_max_len, -100, -100
+                )
+                assert output["input_ids"].shape == (2, computed_max_len)
+                assert output["label_ids"].shape == (2, computed_max_len)
+                assert (
+                    pixel_value_video_shape0 == FPS1 // FPS2 * pixel_value_video_shape1
+                )
 
 
 if __name__ == "__main__":

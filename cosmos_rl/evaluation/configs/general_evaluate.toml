@@ -1,4 +1,4 @@
-# Number of GPUs (automatically configures parallelism)
+# Number of GPUs to use for evaluation (detected by TAO API as evaluate.num_gpus)
 num_gpus = 1
 
 [task]

@@ -22,6 +22,7 @@ ARG EFA_INSTALLER_VERSION=1.42.0
 ARG AWS_OFI_NCCL_VERSION=v1.16.0
 # NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
 ARG NCCL_VERSION=2.26.2-1+cuda12.8
+ARG FLASH_ATTN_VERSION=2.8.3
 ARG PYTHON_VERSION=3.12
 
 ENV TZ=Etc/UTC
@@ -156,6 +157,23 @@ RUN if [ "$TARGETARCH" != "amd64" ]; then \
     fi
 
 ###################################################
+
+
+# Phase for building any lib that we want to builf from source
+FROM no-efa-base AS source-build
+
+# install git
+RUN apt-get update -y && apt-get install -y git
+
+WORKDIR /workspace
+
+RUN git clone --branch v${FLASH_ATTN_VERSION} --single-branch https://github.com/Dao-AILab/flash-attention.git
+
+WORKDIR /workspace/flash-attention/hopper
+
+RUN MAX_JOBS=8 python setup.py bdist_wheel
+
+
 FROM no-efa-base AS efa-base
 
 # Remove HPCX and MPI to avoid conflicts with AWS-EFA
@@ -213,14 +231,31 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/extras/CUPTI/lib64:/opt/amazon/openmpi/lib:/
 ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$PATH
 
 
-###################################################
-## Image target: cosmos_rl (runtime optimized)
-FROM ${COSMOS_RL_BUILD_MODE}-base AS package
+##################################################
+# Image target: cosmos_rl
+FROM ${COSMOS_RL_BUILD_MODE}-base AS pre-package
+
+# install fa3
+COPY --from=source-build /workspace/flash-attention/hopper/dist/*.whl /workspace
+RUN pip install /workspace/*.whl
+RUN rm /workspace/*.whl
 
 # Clean up unnecessary packages to reduce image size
 RUN apt-get autoremove -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /workspace/cosmos_rl
+
+# Copy source code last - this layer will rebuild when code changes
+# but pip installs above will be cached
+COPY . .
+
+RUN if [ "$TARGETARCH" != "amd64" ]; then \
+        pip install --no-cache-dir -c constraints.txt -r requirements.txt ; \
+    else \
+        pip install --no-cache-dir -r requirements.txt ; \
+    fi
 
 # Install additional dependencies that depend on the source code
 # Use SETUPTOOLS_SCM_PRETEND_VERSION since .git is excluded from Docker context
@@ -247,7 +282,7 @@ RUN pip uninstall -y ray
 
 
 ENV NVIDIA_PRODUCT_NAME="TAO Toolkit"
-ENV TAO_TOOLKIT_VERSION="6.25.7"
+ENV TAO_TOOLKIT_VERSION="6.25.11"
 ENV NVIDIA_TAO_TOOLKIT_VERSION="${TAO_TOOLKIT_VERSION}-PyTorch"
 
 # Defining the telemetry URL.
