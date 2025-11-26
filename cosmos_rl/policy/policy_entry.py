@@ -22,6 +22,14 @@ from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
+from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
+from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
+from cosmos_rl.policy.config import Config as CosmosConfig
+import torch
+from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.policy.worker.colocated_rl_worker import ColocatedRLControlWorker
 
 
 def policy_entry(**kwargs):
@@ -46,8 +54,24 @@ def policy_entry(**kwargs):
     parallel_dims.build_mesh(device_type="cuda")
 
     policy_type = cosmos_config.train.train_policy.type
-
-    if policy_type == "grpo":
+    if cosmos_config.mode == "colocated":
+        logger.info("Starting colocated RL worker...")
+        control_worker = ColocatedRLControlWorker(
+            config=cosmos_config,
+            parallel_dims=parallel_dims,
+            **kwargs,
+        )
+        control_worker.setup(
+            config=cosmos_config,
+            dataset=kwargs.get("dataset", None),
+            val_dataset=kwargs.get("val_dataset", None),
+            sampler=kwargs.get("sampler", None),
+            batch_sampler=kwargs.get("batch_sampler", None),
+            val_sampler=kwargs.get("val_sampler", None),
+            val_batch_sampler=kwargs.get("val_batch_sampler", None),
+        )
+        control_worker.main_loop()
+    elif policy_type == "grpo":
         policy_worker = RLPolicyWorker(
             config=cosmos_config,
             parallel_dims=parallel_dims,

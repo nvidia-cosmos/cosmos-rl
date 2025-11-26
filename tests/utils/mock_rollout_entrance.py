@@ -18,7 +18,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as RolloutConfig
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
-from cosmos_rl.rollout.worker.rollout_control_worker import (
+from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
 from cosmos_rl.dispatcher.api.client import APIClient

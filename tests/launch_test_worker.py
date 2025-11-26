@@ -31,7 +31,10 @@ from queue import Queue
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.policy.trainer import GRPOTrainer, SFTTrainer, LLMTrainer
 from cosmos_rl.policy.worker import SFTPolicyWorker, RLPolicyWorker
-from cosmos_rl.rollout.worker.rollout_control_worker import (
+from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
+from cosmos_rl.policy.trainer import Trainer
+from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
+from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout

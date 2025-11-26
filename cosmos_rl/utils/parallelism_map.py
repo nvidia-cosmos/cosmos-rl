@@ -482,6 +482,12 @@ class ParallelTopoMapper:
             remove_duplicate=False
         ):
             # `local_name` is local key, not hf key
+            if (
+                isinstance(param, torch.distributed.tensor.DTensor)
+                and param.to_local().numel() == 0
+            ):
+                # empty tensor should skip
+                continue
             global_shape = tuple(param.shape)
             dims_rank_info, dims_map = extract_infomation_from_dtensor(
                 param, local_name
@@ -603,14 +609,14 @@ class ParallelTopoMapper:
                         assert (
                             "Parallel" not in part.__class__.__name__
                         ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
-                        logger.warning(
+                        logger.debug(
                             f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                         )
                 else:
                     assert (
                         "Parallel" not in part.__class__.__name__
                     ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
-                    logger.warning(
+                    logger.debug(
                         f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                     )
         elif self.backend == "trtllm":

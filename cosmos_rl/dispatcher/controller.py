@@ -323,10 +323,10 @@ class Controller:
             current_fetch_count = len(payloads_list)
             for i in range(current_fetch_count):
                 payloads_list[i].weight_version = 0
-
-        self.policy_status_manager.samples_on_the_fly += (
-            current_fetch_count * self.config.rollout.n_generation
-        )
+        if not is_validation:
+            self.policy_status_manager.samples_on_the_fly += (
+                current_fetch_count * self.config.rollout.n_generation
+            )
 
         return payloads_list, is_end
 

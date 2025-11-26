@@ -91,9 +91,23 @@ class RolloutBase(ABC):
         raise NotImplementedError("init_engine is not implemented yet.")
 
     @abstractmethod
-    def get_underlying_model(self):
-        """Get the underlying model"""
+    def get_underlying_model(self) -> torch.nn.Module:
+        """
+        Get the underlying model
+        Returns:
+            model: The underlying model instance.
+        """
         raise NotImplementedError("get_underlying_model is not implemented yet.")
+
+    def set_underlying_model(self, model: torch.nn.Module):
+        """
+        Set the underlying model
+        Only used in where model instance is shared between rollout and policy.
+        For instance sharing colocated rollout and policy case.
+        Args:
+            model: The underlying model instance to set.
+        """
+        raise NotImplementedError("set_underlying_model is not implemented yet.")
 
     def post_init_engine_hook(
         self,
