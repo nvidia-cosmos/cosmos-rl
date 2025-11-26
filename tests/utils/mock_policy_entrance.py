@@ -19,7 +19,6 @@ from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
-from cosmos_rl.utils import util
 from cosmos_rl.dispatcher.api.client import APIClient
 from typing import List
 from cosmos_rl.dispatcher.data.schema import Rollout
