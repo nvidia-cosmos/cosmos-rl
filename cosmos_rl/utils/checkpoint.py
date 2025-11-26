@@ -356,10 +356,6 @@ class CheckpointMananger:
                     logger.info(
                         f"[Policy] Checkpoint loaded successfully from {base_path}."
                     )
-                    if hasattr(model, "reset_named_buffers_from_pretrained"):
-                        model.reset_named_buffers_from_pretrained(
-                            model_name_or_path, revision
-                        )
                     return outputs[0] if len(outputs) == 1 else outputs
             except Exception as e:
                 logger.error(
