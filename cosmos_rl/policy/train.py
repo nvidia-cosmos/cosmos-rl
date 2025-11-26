@@ -21,6 +21,7 @@ from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
 from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.policy.worker.colocated_control_worker import ColocatedGRPOControlWorker
 
 
 def main(*args, **kwargs):
@@ -47,7 +48,24 @@ def main(*args, **kwargs):
     policy_type = cosmos_config.train.train_policy.type
 
     try:
-        if policy_type == "grpo":
+        if cosmos_config.mode == "colocated":
+            logger.info("Starting colocated GRPO worker...")
+            control_worker = ColocatedGRPOControlWorker(
+                config=cosmos_config,
+                parallel_dims=parallel_dims,
+                **kwargs,
+            )
+            control_worker.setup(
+                config=cosmos_config,
+                dataset=kwargs.get("dataset", None),
+                val_dataset=kwargs.get("val_dataset", None),
+                sampler=kwargs.get("sampler", None),
+                batch_sampler=kwargs.get("batch_sampler", None),
+                val_sampler=kwargs.get("val_sampler", None),
+                val_batch_sampler=kwargs.get("val_batch_sampler", None),
+            )
+            control_worker.main_loop()
+        elif policy_type == "grpo":
             logger.info("Starting GRPO training...")
             trainer = GRPOTrainer(
                 config=cosmos_config,

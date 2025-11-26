@@ -20,7 +20,12 @@ import torch.nn as nn
 from torch.distributed._composable.replicate import replicate
 from torch.distributed.tensor.parallel import parallelize_module
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    fully_shard,
+    MixedPrecisionPolicy,
+    register_fsdp_forward_method,
+)
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
@@ -224,7 +229,9 @@ def apply_fsdp(
         logger.info("Applying FSDP to the language model embed_tokens")
         fully_shard(model.embed_tokens, **fsdp_config, reshard_after_forward=True)
     fully_shard(model.language_model, **fsdp_config, reshard_after_forward=True)
-    fully_shard(model, **fsdp_config, reshard_after_forward=True)
+    # fully_shard(model.model, **fsdp_config, reshard_after_forward=True)
+    # For possible generate() calls when this model is also used in rollout, register FSDP forward method
+    register_fsdp_forward_method(model.model, "generate")
 
 
 def apply_ddp(

@@ -651,6 +651,11 @@ class TrainingConfig(BaseModel):
         description="Whether to use local dataset to query sample. If set to True, will use the local dataset.",
     )
 
+    force_use_hf: Optional[bool] = Field(
+        default=False,
+        description="Whether to force using Huggingface dataset even if local dataset is available.",
+    )
+
     # --------- smoke-test helpers ---------
 
     max_num_steps: Optional[int] = Field(
@@ -1044,6 +1049,11 @@ class Config(BaseModel):
         default="",
         description="List of eth ip addresses, format: ip1;ip2;ip3",
         json_schema_extra={"hide_in_doc": True},
+    )
+    mode: str = Field(
+        default="disaggregated",
+        description="Running mode, could be 'disaggregated' or 'colocated'",
+        choices=["disaggregated", "colocated"],
     )
 
     @classmethod

@@ -24,6 +24,7 @@ import torch
 from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.logging import logger
 
 
 """
@@ -68,6 +69,7 @@ class ExampleHFRollout(RolloutBase):
             self.parallel_dims.world_size == 1
         ), "HF Rollout only supports world size of 1"
         response = []
+        self.model.eval()
         for pl in payloads:
             prompt = data_packer.rollout_collate_fn(
                 [data_packer.get_rollout_input(pl.prompt)]
@@ -88,6 +90,8 @@ class ExampleHFRollout(RolloutBase):
                 for output_ids in generated_ids
             ]
             texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            for text in texts:
+                logger.debug(f"[ExampleHFRollout] Generated: {text}")
             response.append(
                 RolloutResult(
                     prompt=pl.prompt,
@@ -121,6 +125,7 @@ class ExampleHFRollout(RolloutBase):
             "repetition_penalty": self.config.rollout.sampling_config.repetition_penalty,  # repetition_penalty=self.config.rollout.sampling_config.repetition_penalty
             "max_new_tokens": self.config.rollout.max_response_length,  # max_tokens=self.config.rollout.max_response_length
             "eos_token_id": self.tokenizer.eos_token_id,  # stop_token_ids=self.eos_token_ids
+            "do_sample": True,
         }
         n_val_generation = self.config.validation.n_generation
         top_p_val = (
@@ -162,3 +167,7 @@ class ExampleHFRollout(RolloutBase):
     def get_underlying_model(self):
         """Get the underlying model"""
         return self.model
+
+    def set_underlying_model(self, model: torch.nn.Module):
+        """Set the underlying model"""
+        self.model = model
