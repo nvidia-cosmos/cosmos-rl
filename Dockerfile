@@ -167,11 +167,11 @@ RUN apt-get update -y && apt-get install -y git
 
 WORKDIR /workspace
 
-RUN git clone --branch v${FLASH_ATTN_VERSION} --single-branch https://github.com/Dao-AILab/flash-attention.git
+# RUN git clone --branch v${FLASH_ATTN_VERSION} --single-branch https://github.com/Dao-AILab/flash-attention.git
 
-WORKDIR /workspace/flash-attention/hopper
+# WORKDIR /workspace/flash-attention/hopper
 
-RUN MAX_JOBS=8 python setup.py bdist_wheel
+# RUN MAX_JOBS=8 python setup.py bdist_wheel
 
 
 FROM no-efa-base AS efa-base
@@ -235,10 +235,10 @@ ENV PATH=/opt/amazon/openmpi/bin/:/opt/amazon/efa/bin:/usr/bin:/usr/local/bin:$P
 # Image target: cosmos_rl
 FROM ${COSMOS_RL_BUILD_MODE}-base AS pre-package
 
-# install fa3
-COPY --from=source-build /workspace/flash-attention/hopper/dist/*.whl /workspace
-RUN pip install /workspace/*.whl
-RUN rm /workspace/*.whl
+# # install fa3 only on Hopper machine
+# COPY --from=source-build /workspace/flash-attention/hopper/dist/*.whl /workspace
+# RUN pip install /workspace/*.whl
+# RUN rm /workspace/*.whl
 
 # Clean up unnecessary packages to reduce image size
 RUN apt-get autoremove -y && \
