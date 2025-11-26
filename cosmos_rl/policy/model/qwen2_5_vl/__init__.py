@@ -122,13 +122,13 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
             if isinstance(device_type, str) and device_type != "mps"
             else "cpu"
         )
-        with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (
-                inv_freq_expanded.float() @ position_ids_expanded.float()
-            ).transpose(2, 3)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
+
+        freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(
+            2, 3
+        )
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos()
+        sin = emb.sin()
 
         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
         cos = cos * self.attention_scaling
@@ -291,11 +291,11 @@ class Qwen2_5_VLAttention(nn.Module):
         xq, xk = apply_multimodal_rotary_pos_emb(xq, xk, cos, sin, self.mrope_section)
 
         input_dtype = xq.dtype
+        input_dtype = xq.dtype
+        # flash_attn only support bfloat16/float16
+        # Cast qkv to torch.bfloat16 if dtype for forward is torch.float32
         if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                target_dtype = torch.get_autocast_gpu_dtype()
-            else:
-                raise ValueError("Flash attention only supports float32 input")
+            target_dtype = torch.bfloat16
             xq = xq.to(target_dtype)
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
@@ -316,7 +316,7 @@ class Qwen2_5_VLAttention(nn.Module):
             )
         else:
             output = self.attn_func(xq, xk, xv, causal=True)
-        output = output.view(bs, seqlen, -1)
+        output = output.view(bs, seqlen, -1).to(input_dtype)
         return self.o_proj(output)
 
 
@@ -480,7 +480,11 @@ class Qwen2_5_VLModel(nn.Module):
                 )
                 is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
                 h = h.full_tensor() if is_a_dist_tensor else h
-                output = h @ embed_tokens_weight.t()
+                # Since call dtensor.full_tensor here,
+                # full_tensor's dtype will equal to shard's dtype which will not be controlled by mp_policy
+                # for run torch.mm on input's dtype
+                with torch.autocast(device_type="cuda", dtype=h.dtype):
+                    output = h @ embed_tokens_weight.t()
             return output
         else:
             return h

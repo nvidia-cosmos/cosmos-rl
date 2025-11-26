@@ -50,7 +50,8 @@ def qwen3_moe_lm_weight_from_hf(
     tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
     assert n_experts % tp_ep_size == 0, "n_experts must be divisible by tp_ep_size"
 
-    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+    load_weight_test = not hasattr(parallel_dims, "mesh")
+    if not load_weight_test:
         dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
         dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
     else:

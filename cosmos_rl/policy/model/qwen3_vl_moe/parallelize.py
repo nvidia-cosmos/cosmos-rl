@@ -98,7 +98,7 @@ def parallelize(
         mp_policy = MixedPrecisionPolicy(
             param_dtype=str2torch_dtype(config.train.param_dtype),
             reduce_dtype=str2torch_dtype(config.train.fsdp_reduce_dtype),
-            cast_forward_inputs=False,
+            cast_forward_inputs=True,
         )
         fsdp_config = {"mesh": world_mesh["dp_cp_tp"], "mp_policy": mp_policy}
         if config.train.fsdp_offload:
@@ -573,7 +573,7 @@ def apply_fsdp(
 
     """
     mp_policy = MixedPrecisionPolicy(
-        param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=False
+        param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
