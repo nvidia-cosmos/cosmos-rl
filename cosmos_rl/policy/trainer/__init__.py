@@ -99,13 +99,10 @@ class Trainer(CommMixin):
 
                 self.model_converter = FP4ModelConverter(config, parallel_dims)
                 self.model_converter.convert_model(model)
-
+        
         if config.train.fsdp_offload:
             model._apply(
-                lambda t: torch.empty_like(t, device="cpu")
-                if t.device.type == "meta"
-                else t.to("cpu"),
-                recurse=True,
+                lambda t: torch.empty_like(t, device='cpu') if t.device.type == 'meta' else t.to('cpu'), recurse=True
             )
 
         try:
@@ -118,10 +115,7 @@ class Trainer(CommMixin):
             )
             if not config.train.fsdp_offload:
                 model._apply(
-                    lambda t: torch.empty_like(t, device=self.device)
-                    if t.device.type == "meta"
-                    else t.to("cuda"),
-                    recurse=True,
+                    lambda t: torch.empty_like(t, device=self.device) if t.device.type == 'meta' else t.to('cuda'), recurse=True
                 )
             model.post_to_empty_hook(config)
             if config.policy.lora is not None:
@@ -563,9 +557,10 @@ class Trainer(CommMixin):
         """
         len_params = 0
         # It's a HFModel, we need to sync the named buffers
-        state_dict = self.model.state_dict()
-        state_dict.update(dict(self.model.named_buffers()))
-        model_state_dict = [state_dict]
+
+        named_buffers_dict = dict(self.model.named_buffers())
+        model_state_dict = [self.model.state_dict().update(named_buffers_dict)]
+        
 
         # If KL-divergence is enabled, we need to also sync the reference model state dict
         if reference_model:

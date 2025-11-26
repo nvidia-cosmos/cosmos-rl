@@ -544,9 +544,11 @@ class ModelRegistry:
                 and hf_config.llm_config.model_type == "gpt_oss"
             ):
                 logger.info(f"Using cuda for model build of {model_name_or_path}.")
-                return torch.device("cuda")
+                return torch.device('cuda')
             else:
-                return init_on_device("meta", include_buffers=False)
+                return init_on_device('meta', include_buffers=False)
+
+            return device
 
         init_context = _get_init_context_for_model_build(hf_config)
         with init_context:
