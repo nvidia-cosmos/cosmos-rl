@@ -41,9 +41,6 @@ from cosmos_rl.dispatcher.command import (
 )
 import atexit
 from cosmos_rl.utils.util import (
-    msgpack_c_long,
-    msgunpack_c_long,
-    fix_data_type_size,
     compute_mfu,
 )
 from cosmos_rl.utils.parallelism_map import (
@@ -76,6 +73,13 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_masks,
 )
 from cosmos_rl.utils.balance_seqlen import rearrange_mini_batches
+import enum
+
+
+class TrainerPhase(enum.Enum):
+    REF_COMPUTE = "ref_compute"
+    OLD_LOGP_COMPUTE = "old_logp_compute"
+    TRAIN = "train"
 
 
 def compute_loss(
@@ -438,187 +442,6 @@ class GRPOTrainer(Trainer):
             for rollout in rollouts:
                 self.data_queue.put_nowait(rollout)
 
-    def wrap_to_cuda_tensor(self, key, obj, in_place=False):
-        """
-        wrap the object to cuda tensor for sync parameters using nccl.
-        """
-        if isinstance(obj, torch.Tensor):
-            if isinstance(obj, torch.distributed.tensor.DTensor):
-                obj = obj.to_local()
-
-            if obj.device != self.device:
-                if in_place:
-                    raise ValueError(
-                        f"Object {key} is not on the same device as the model. Please set in_place to False."
-                    )
-                obj = obj.to(self.device)
-            return obj
-        elif isinstance(obj, np.ndarray):
-            if in_place:
-                raise ValueError(
-                    f"Object {key} is not a tensor. Please set in_place to False."
-                )
-            obj = torch.from_numpy(obj).to(self.device)
-            return obj
-        else:
-            if in_place:
-                raise ValueError(
-                    f"Object {key} is not a tensor. Please set in_place to False."
-                )
-            if isinstance(obj, tuple):
-                obj = tuple(
-                    [x.tolist() if isinstance(x, np.ndarray) else x for x in obj]
-                )
-                obj = fix_data_type_size(obj)
-            bytes = msgpack.packb(obj, default=msgpack_c_long)
-            obj = torch.frombuffer(bytes, dtype=torch.uint8).to(self.device)
-            return obj
-
-    def extract_from_cuda_tensor(self, key, obj, tensor):
-        """
-        Extract the object from cuda tensor for sync parameters using nccl.
-        """
-        if isinstance(obj, torch.distributed.tensor.DTensor):
-            if obj.device != self.device:
-                local_shard = obj.to_local()
-                local_shard.copy_(tensor)
-        elif isinstance(obj, torch.Tensor):
-            if obj.device != self.device:
-                obj.copy_(tensor)
-        elif isinstance(obj, np.ndarray):
-            if obj.shape != tensor.shape:
-                raise ValueError(
-                    f"Object {key} is not the same shape as the tensor. Please check the data consistency."
-                )
-            x = tensor.cpu()
-            obj.copy_(x.numpy())
-        else:
-            np_arr = tensor.cpu()
-            obj_new = msgpack.unpackb(bytes(np_arr.numpy()), ext_hook=msgunpack_c_long)
-            if isinstance(obj, tuple):
-                assert len(obj) == len(obj_new)
-                obj = tuple(
-                    [
-                        np.array(obj_new[idx])
-                        if isinstance(x, np.ndarray)
-                        else tuple(obj_new[idx])
-                        if isinstance(x, tuple)
-                        else obj_new[idx]
-                        for idx, x in enumerate(obj)
-                    ]
-                )
-            else:
-                obj = obj_new
-        return obj
-
-    def sync_all_states(self, is_send: bool, send_hook: callable, recv_hook: callable):
-        """
-        Sync all states of the model and optimizer.
-        """
-        len_params = 0
-        # It's a HFModel, we need to sync the named buffers
-        if hasattr(self.model, "reset_named_buffers"):
-            # Convert the model to the hf_config.torch_dtype, which is param_dtype
-            self.model.model = self.model.model.to(
-                dtype=self.model.hf_config.torch_dtype
-            )
-            named_buffers_dict = dict(self.model.named_buffers())
-            model_state_dict = [self.model.state_dict(), named_buffers_dict]
-        else:
-            model_state_dict = [self.model.state_dict()]
-
-        # If KL-divergence is enabled, we need to also sync the reference model state dict
-        if self.config.train.train_policy.kl_beta != 0.0:
-            if len(self.reference_state_dict) == 0:
-                assert (
-                    not is_send
-                ), "Reference model state dict should be populated before sending"
-                for key, value in model_state_dict[0].items():
-                    self.reference_state_dict[key] = torch.empty_like(
-                        value, device="cpu"
-                    )
-            model_state_dict.append(self.reference_state_dict)
-
-        # 1. Sync all model states
-        for state_to_sync in model_state_dict:
-            for dest_name in sorted(state_to_sync.keys()):
-                obj = state_to_sync[dest_name]
-                assert isinstance(obj, torch.Tensor)
-                local_view = self.wrap_to_cuda_tensor(
-                    dest_name, obj, in_place=obj.is_cuda
-                )
-                if is_send:
-                    send_hook(local_view)
-                else:
-                    recv_hook(local_view)
-                    if isinstance(obj, torch.distributed.tensor.DTensor):
-                        to_write = obj.to_local()
-                    else:
-                        to_write = obj
-
-                    # Copy again for offloaded tensor since it is not inplace received
-                    if not to_write.is_cuda:
-                        to_write.copy_(local_view)
-                len_params += 1
-
-        # 2. Sync optimizer states
-        optimizer_state = self.optimizers.state_dict()
-        for dest_name in sorted(optimizer_state.keys()):
-            obj = optimizer_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            if local_view.data_ptr() is None:
-                # skip the optimizer state if the data pointer is None
-                continue
-            if is_send:
-                # nccl send
-                send_hook(local_view)
-            else:
-                # nccl recv
-                recv_hook(local_view)
-                optimizer_state[dest_name] = self.extract_from_cuda_tensor(
-                    dest_name, obj, local_view
-                )
-            len_params += 1
-        if not is_send:
-            self.optimizers.load_state_dict(optimizer_state)
-
-        # 3. Sync lr_scheduler states
-        lr_sheduler_state = self.lr_schedulers.state_dict()
-        for dest_name in sorted(lr_sheduler_state.keys()):
-            obj = lr_sheduler_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            if is_send:
-                # nccl send
-                send_hook(local_view)
-            else:
-                # nccl recv
-                recv_hook(local_view)
-                lr_sheduler_state[dest_name] = self.extract_from_cuda_tensor(
-                    dest_name, obj, local_view
-                )
-            len_params += 1
-        if not is_send:
-            self.lr_schedulers.load_state_dict(lr_sheduler_state)
-
-        # 4. Sync rng_state
-        rng_state = self.ckpt_manager.get_rng_state()
-        for dest_name in sorted(rng_state.keys()):
-            obj = rng_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            if is_send:
-                # nccl send
-                send_hook(local_view)
-            else:
-                # nccl recv
-                recv_hook(local_view)
-                rng_state[dest_name] = self.extract_from_cuda_tensor(
-                    dest_name, obj, local_view
-                )
-            len_params += 1
-        if not is_send:
-            self.ckpt_manager.set_rng_state(rng_state)
-        return len_params
-
     def pre_P2R_collect_parameters(self):
         needed_tensors = []
         for insts_group in self.policy_to_rollout_insts:
@@ -654,6 +477,7 @@ class GRPOTrainer(Trainer):
             is_send=send,
             send_hook=send_recv_hook,
             recv_hook=send_recv_hook,
+            reference_model=self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -681,6 +505,7 @@ class GRPOTrainer(Trainer):
             is_send=send,
             send_hook=send_hook,
             recv_hook=recv_hook,
+            reference_model=self.config.train.train_policy.kl_beta != 0.0,
         )
         if recv:
             self.model_ready = True
@@ -1343,14 +1168,24 @@ class GRPOTrainer(Trainer):
             ), f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
 
         need_compute_ref, kl_beta = self._swap_model_state_dict()
-
+        need_compute_old_ahead = batch_size > per_optimize_batch_size
         loss_sum = torch.tensor(0.0, device=self.device)
         kl_loss_sum = torch.tensor(0.0, device=self.device)
         grad_norm_sum = torch.tensor(0.0, device=self.device)
         loss_count = 0
-        is_computing_refs = [True, False] if need_compute_ref else [False]
+        grad_norm_count = 0
+
+        trainer_phases = []
+        if need_compute_ref:
+            trainer_phases.append(TrainerPhase.REF_COMPUTE)
+        if need_compute_old_ahead:
+            trainer_phases.append(TrainerPhase.OLD_LOGP_COMPUTE)
+        trainer_phases.append(TrainerPhase.TRAIN)
+
         cached_minibatch_arrangements = []
-        for is_computing_ref in is_computing_refs:
+        for phase in trainer_phases:
+            is_computing_ref = phase == TrainerPhase.REF_COMPUTE
+            is_computing_old_ahead = phase == TrainerPhase.OLD_LOGP_COMPUTE
             # Set model to eval mode if reference model is being used
             if is_computing_ref:
                 self.model.eval()
@@ -1359,10 +1194,17 @@ class GRPOTrainer(Trainer):
                     # Swap model state dict back to the original model
                     need_compute_ref = False
                     self._swap_model_state_dict()
-                self.model.train()
+                if is_computing_old_ahead:
+                    self.model.eval()
+                else:
+                    self.model.train()
 
-            with torch.set_grad_enabled(not is_computing_ref):
-                for i_mu in range(1 if is_computing_ref else self.mu_iterations):
+            with torch.set_grad_enabled(phase == TrainerPhase.TRAIN):
+                for i_mu in range(
+                    1
+                    if (is_computing_ref or is_computing_old_ahead)
+                    else self.mu_iterations
+                ):
                     local_mini_step = 0
                     local_optimize_step = 0
                     with torch.cuda.stream(self.train_stream):
@@ -1612,6 +1454,10 @@ class GRPOTrainer(Trainer):
                                         [is_computing_ref] * mini_batch_size,
                                         dtype=torch.bool,
                                     )
+                                    is_computing_old_ahead_cpu = torch.tensor(
+                                        [is_computing_old_ahead] * mini_batch_size,
+                                        dtype=torch.bool,
+                                    )
                                     # Positive flags for Positive-NLL loss (only if coef >0)
                                     if self._positive_flags_t is not None:
                                         is_pos_cpu = (
@@ -1638,6 +1484,9 @@ class GRPOTrainer(Trainer):
                                         )
                                         user_mini_batch["is_computing_ref"] = (
                                             is_computing_ref_cpu
+                                        )
+                                        user_mini_batch["is_computing_old_ahead"] = (
+                                            is_computing_old_ahead_cpu
                                         )
                                         if self._positive_flags_t is not None:
                                             user_mini_batch["positive_flags"] = (
@@ -1670,7 +1519,7 @@ class GRPOTrainer(Trainer):
                                             position_ids=position_ids
                                         )
 
-                                    if is_computing_ref:
+                                    if is_computing_ref or is_computing_old_ahead:
                                         # Continue to next mini-batch since loss is not needed for reference model
                                         continue
                                     else:
@@ -1748,20 +1597,29 @@ class GRPOTrainer(Trainer):
                                         # Skip the rest of the loop
                                         local_mini_step += 1
                                         continue
+                                    elif is_computing_old_ahead:
+                                        assert (
+                                            i_mu == 0
+                                        ), "Only first iteration should compute old ahead"
+                                        self.old_per_token_logps[local_mini_step] = (
+                                            current_per_token_logprobs.detach()
+                                        )
+                                        local_mini_step += 1
+                                        continue
                                     else:
                                         if (
                                             self.old_per_token_logps[local_mini_step]
                                             is None
                                         ):
                                             assert (
-                                                i_mu == 0
+                                                i_mu == 0 and not need_compute_old_ahead
                                             ), "Only first iteration should append `old_per_token_logps`"
                                             self.old_per_token_logps[
                                                 local_mini_step
                                             ] = current_per_token_logprobs.detach()
                                         else:
                                             assert (
-                                                i_mu > 0
+                                                i_mu > 0 or need_compute_old_ahead
                                             ), "Only inner iteration should reuse `old_per_token_logps`"
 
                                         loss, per_token_loss, kl_loss = compute_loss(
@@ -1818,8 +1676,12 @@ class GRPOTrainer(Trainer):
                                         kl_loss = kl_loss * loss_scaling_factor
 
                                         loss.backward()
-                                        loss_sum += per_token_loss.item()
-                                        kl_loss_sum += kl_loss.item()
+                                        loss_sum += (
+                                            per_token_loss.item() / loss_scaling_factor
+                                        )
+                                        kl_loss_sum += (
+                                            kl_loss.item() / loss_scaling_factor
+                                        )
                                         loss_count += 1
                                 self.mini_step += 1
                                 local_mini_step += 1
@@ -1833,18 +1695,21 @@ class GRPOTrainer(Trainer):
                                 ) and local_mini_step > 1:
                                     all_reduced = True
                                     grad_norm_sum += self.execute_all_reduce()
+                                    grad_norm_count += 1
                                 else:
                                     all_reduced = False
 
-                            if not is_computing_ref and not all_reduced:
+                            if (
+                                not is_computing_ref
+                                and not is_computing_old_ahead
+                                and not all_reduced
+                            ):
                                 grad_norm_sum += self.execute_all_reduce()
+                                grad_norm_count += 1
                             local_optimize_step += 1
         self.old_per_token_logps = []
         self.ref_per_token_logps = []
         end_event.record()
-
-        # Only step lr scheduler when all the mini-batches are processed
-        self.lr_schedulers.step()
 
         loss = (loss_sum / loss_count) if loss_count > 0 else loss_sum
         kl_loss = (kl_loss_sum / loss_count) if loss_count > 0 else kl_loss_sum
@@ -1881,7 +1746,11 @@ class GRPOTrainer(Trainer):
                 if self.config.train.train_policy.kl_beta != 0.0:
                     report_data["train/kl_loss_avg"] = global_avg_kl_loss
                     report_data["train/kl_loss_max"] = global_max_kl_loss
-                report_data["train/grad_norm"] = grad_norm_sum.item()
+                report_data["train/grad_norm"] = (
+                    grad_norm_sum.item() / grad_norm_count
+                    if grad_norm_count > 0
+                    else 0.0
+                )
                 if len(self.metrics) > 0:
                     for k, v in self.metrics.items():
                         report_data[f"train/{k}"] = (
@@ -1900,6 +1769,10 @@ class GRPOTrainer(Trainer):
                     )
                     for k, v in mfu.items():
                         report_data[f"train/{k}"] = v
+
+        # Only step lr scheduler when all the mini-batches are processed
+        self.lr_schedulers.step()
+
         # checkpointing
         if self.is_master_replica and (do_save_checkpoint):
             if self.config.train.ckpt.export_safetensors:
@@ -1966,6 +1839,7 @@ def _swizzle_pp_grpo_forward(
     micro_batch_ids = kwargs.pop("micro_batch_ids")
     loss_scaling = kwargs.pop("loss_scaling")
     is_computing_ref = kwargs.pop("is_computing_ref")
+    is_computing_old_ahead = kwargs.pop("is_computing_old_ahead")
     advantages = kwargs.pop("advantages")
     positive_flags = kwargs.pop("positive_flags", None)
 
@@ -1973,6 +1847,7 @@ def _swizzle_pp_grpo_forward(
     mini_batch_id = mini_batch_ids[0].item()
     loss_scaling = loss_scaling[0].item()
     is_computing_ref = is_computing_ref[0].item()
+    is_computing_old_ahead = is_computing_old_ahead[0].item()
 
     # User defined input
     user_input = kwargs.copy()
@@ -2031,6 +1906,18 @@ def _swizzle_pp_grpo_forward(
                 current_per_token_logprobs.detach()
             ]
         # Skip the rest logic since we are computing ref
+        return None
+    if is_computing_old_ahead:
+        if trainer.old_per_token_logps[mini_batch_id] is not None:
+            assert isinstance(trainer.old_per_token_logps[mini_batch_id], list)
+            trainer.old_per_token_logps[mini_batch_id].append(
+                current_per_token_logprobs.detach()
+            )
+        else:
+            trainer.old_per_token_logps[mini_batch_id] = [
+                current_per_token_logprobs.detach()
+            ]
+        # Skip the rest logic since we are computing old ahead
         return None
 
     if (

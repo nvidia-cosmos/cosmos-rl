@@ -127,6 +127,12 @@ class PolicyStatusManager:
         self.activated_val_iter: Optional[Iterator] = None
         self.val_report_data: Dict[int, List[Any]] = {}
 
+        # Indicate whether on-policy rollout collection has completed for the current policy step
+        self.on_policy_rollout_completed: bool = False
+
+        # Record filter rewards distribution for dynamic sampling
+        self.filter_records = {}
+
     def setup(
         self,
         config: Config,
@@ -680,22 +686,40 @@ class PolicyStatusManager:
         completion_tokens_count = 0
         n_samples = 0
         rollouts_to_put = None
+        if (
+            self.config.train.train_policy.on_policy
+            and self.on_policy_rollout_completed
+        ):
+            # On-policy training has already completed the required samples for this policy step
+            return completion_tokens_count, n_samples
 
         if self.config.train.train_policy.variant == "dapo":
             rollouts_to_put = valid_rollouts
             # In single-thread: invalid rollouts should also be decreased from the total number of samples
             self.remain_samples_num -= len(invalid_rollouts)
+            for rollout in invalid_rollouts:
+                filter_reward = rollout.filter_reward
+                key = "filtered_positive" if filter_reward > 0 else "filtered_negative"
+                if key not in self.filter_records:
+                    self.filter_records[key] = 0
+                self.filter_records[key] += 1
+            for rollout in valid_rollouts:
+                key = "sampled"
+                if key not in self.filter_records:
+                    self.filter_records[key] = 0
+                self.filter_records[key] += 1
         else:
             rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
 
         for rollout in rollouts_to_put:
             completion_tokens_count += len(self.tokenizer.encode(rollout.completion))
             n_samples += 1
+            self.put_rollout(rollout)
             if self.config.train.train_policy.on_policy:
                 self.consumed_samples_num += 1
-                if self.rollouts_enough_for_one_step():
+                if self.total_pending_rollouts() == 0:
+                    self.on_policy_rollout_completed = True
                     break
-            self.put_rollout(rollout)
 
         return completion_tokens_count, n_samples
 
@@ -791,6 +815,14 @@ class PolicyStatusManager:
                         "train/effective_entropy": total_effective_entropy,
                     }
 
+                    if len(self.filter_records) > 0:
+                        total_samples_for_filtering = sum(
+                            v for v in self.filter_records.values()
+                        )
+                        for k, v in self.filter_records.items():
+                            policy_report_data.update(
+                                {f"rollout/{k}_ratio": v / total_samples_for_filtering}
+                            )
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
                     )
@@ -809,8 +841,13 @@ class PolicyStatusManager:
                         )
                     if "console" in self.config.logging.logger:
                         logger.info(
-                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['train/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['train/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
+                            f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['rollout/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['rollout/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Grad Norm: {total_grad_norm:.5f}, KL Loss Avg: {total_kl_loss_avg:.5f}, KL Loss Max: {total_kl_loss_max:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
                         )
+                        if len(self.filter_records) > 0:
+                            logger.info(
+                                f"Dynamic sampling rewards distribution so far: {self.filter_records}."
+                            )
+                    self.filter_records = {}
                     for logger_fn in self.custom_logger_fns:
                         try:
                             logger_fn(self.train_report_data[train_step], train_step)
@@ -842,6 +879,9 @@ class PolicyStatusManager:
                 )
             # Trigger next step training if data is available
             self.try_trigger_data_fetch_and_training()
+            if self.config.train.train_policy.on_policy:
+                # Reset on-policy rollout completed flag for next step
+                self.on_policy_rollout_completed = False
 
     def trigger_weight_sync(
         self,
@@ -1031,8 +1071,14 @@ class PolicyStatusManager:
             if self.config.logging.logger and rollouts_of_this_step:
                 rewards = []
                 completion_lengths = []
+                advantages = []
+                filter_rewards = []
                 for rollout in rollouts_of_this_step:
                     rewards.append(rollout.reward)
+                    advantages.extend(
+                        [rollout.advantage] * rollout.completion_token_length
+                    )
+                    filter_rewards.append(rollout.filter_reward)
                     completion_lengths.append(
                         len(self.tokenizer.encode(rollout.completion))
                     )
@@ -1041,9 +1087,18 @@ class PolicyStatusManager:
                     "train/reward_std": np.std(rewards),
                     "train/reward_max": np.max(rewards),
                     "train/reward_min": np.min(rewards),
-                    "train/completion_length_mean": np.mean(completion_lengths),
-                    "train/completion_length_max": np.max(completion_lengths),
-                    "train/completion_length_min": np.min(completion_lengths),
+                    "rollout/completion_length_mean": np.mean(completion_lengths),
+                    "rollout/completion_length_std": np.std(completion_lengths),
+                    "rollout/completion_length_max": np.max(completion_lengths),
+                    "rollout/completion_length_min": np.min(completion_lengths),
+                    "rollout/advantage_mean": np.mean(advantages),
+                    "rollout/advantage_std": np.std(advantages),
+                    "rollout/advantage_max": np.max(advantages),
+                    "rollout/advantage_min": np.min(advantages),
+                    "rollout/filter_reward_mean": np.mean(filter_rewards),
+                    "rollout/filter_reward_std": np.std(filter_rewards),
+                    "rollout/filter_reward_max": np.max(filter_rewards),
+                    "rollout/filter_reward_min": np.min(filter_rewards),
                 }
                 self.train_report_data[self.current_step] = report_data
 

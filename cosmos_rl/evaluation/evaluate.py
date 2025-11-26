@@ -53,7 +53,6 @@ def parse_args():
         required=True,
         help="Path to evaluation configuration TOML file"
     )
-
     return parser.parse_args()
 
 
@@ -104,6 +103,14 @@ def run_evaluation(args):
             eval_config["evaluation"] = {}
 
         eval_config["evaluation"]["total_shard"] = calculated_total_shard
+
+        if "num_gpus" in eval_config and eval_config["num_gpus"] is not None:
+            # Apply evaluate.num_gpus from config to model.tp_size
+            num_gpus = eval_config["num_gpus"]
+            if "model" not in eval_config:
+                eval_config["model"] = {}
+            eval_config["model"]["tp_size"] = num_gpus
+            logger.info(f"Using {num_gpus} GPUs from evaluate.num_gpus config")
 
         # Create results directory
         results_dir = eval_config.get("results_dir", "/results")

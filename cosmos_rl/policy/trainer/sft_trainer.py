@@ -53,6 +53,7 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_labels,
 )
 from itertools import islice
+import torch.distributed as dist
 
 
 def async_safe_ce(
@@ -335,39 +336,11 @@ class SFTTrainer(Trainer):
             )
 
         self.train_step = 0
-        ckpt_total_steps = 0
+
         self.lr_schedulers = None
         self.start_epoch = 0
-        # Load model
-        if config.train.resume:
-            try:
-                # early init the lr_schedulers to avoid it is not initialized when loading the checkpoint
-                ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
-                    model=self.model,
-                    optimizer=self.optimizers,
-                    scheduler=partial(
-                        build_lr_schedulers, self.optimizers, self.config
-                    ),
-                )
-                ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
-                self.train_step = ckpt_extra_vars.get("step", 0)
-            except Exception as e:
-                logger.error(
-                    f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
-                )
-                self.model.load_hf_weights(
-                    config.policy.model_name_or_path,
-                    parallel_dims,
-                    self.device,
-                    revision=config.policy.model_revision,
-                )
-        else:
-            self.model.load_hf_weights(
-                config.policy.model_name_or_path,
-                parallel_dims,
-                self.device,
-                revision=config.policy.model_revision,
-            )
+
+        ckpt_total_steps = self.load_model()
         self.model.train()
 
         if isinstance(dataset, Callable):
@@ -1283,6 +1256,85 @@ class SFTTrainer(Trainer):
                 - self.parallel_dims.world_size / self.parallel_dims.pp,
             )
         self.unregister_from_controller()
+
+    def load_model(self):
+        """Load model weights from checkpoint if available."""
+        # Load model
+        ckpt_total_steps = None
+        if (
+            not self.parallel_dims.dp_replicate_enabled
+        ) or self.parallel_dims.dp_replicate_coord[0] == 0:
+            if self.config.train.resume:
+                try:
+                    # early init the lr_schedulers to avoid it is not initialized when loading the checkpoint
+                    ckpt_extra_vars, self.lr_schedulers = (
+                        self.ckpt_manager.load_checkpoint(
+                            model=self.model,
+                            optimizer=self.optimizers,
+                            scheduler=partial(
+                                build_lr_schedulers, self.optimizers, self.config
+                            ),
+                        )
+                    )
+                    ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
+                    self.train_step = ckpt_extra_vars.get("step", 0)
+                except Exception as e:
+                    logger.error(
+                        f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
+                    )
+                    self.lr_schedulers = None
+                    self.build_optimizers()
+                    self.model.load_hf_weights(
+                        self.config.policy.model_name_or_path,
+                        self.parallel_dims,
+                        self.device,
+                        revision=self.config.policy.model_revision,
+                    )
+            else:
+                self.model.load_hf_weights(
+                    self.config.policy.model_name_or_path,
+                    self.parallel_dims,
+                    self.device,
+                    revision=self.config.policy.model_revision,
+                )
+
+        if self.parallel_dims.dp_replicate_enabled:
+            if self.config.train.resume:
+                ckpt_total_steps = dist_util.broadcast_object_cpu(
+                    ckpt_total_steps,
+                    group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                    group_src=0,
+                )
+                if (
+                    self.parallel_dims.dp_replicate_coord[0] != 0
+                    and ckpt_total_steps is not None
+                ):
+                    # Initialize lr_schedulers on non-zero dp_replicate ranks when resuming training
+                    # only when ckpt_total_steps > 0, means a checkpoint is loaded
+                    self.lr_schedulers = build_lr_schedulers(
+                        self.optimizers, self.config, ckpt_total_steps
+                    )
+                if ckpt_total_steps is not None:
+                    assert (
+                        self.lr_schedulers is not None
+                    ), "lr_schedulers should not be None after broadcasting when resuming training with data parallel replication."
+
+            send_recv_hook = partial(
+                dist.broadcast,
+                group=self.parallel_dims.mesh["dp_replicate"].get_group(),
+                group_src=0,
+            )
+            len_params = self.sync_all_states(
+                is_send=self.parallel_dims.dp_replicate_coord[0] == 0,
+                send_hook=send_recv_hook,
+                recv_hook=send_recv_hook,
+            )
+            logger.info(
+                f"Synchronized {len_params} parameters across data parallel replicas."
+            )
+        if ckpt_total_steps is None:
+            ckpt_total_steps = 0
+        return ckpt_total_steps
 
     @property
     def pp_loss_fn(self):

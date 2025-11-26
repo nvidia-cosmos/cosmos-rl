@@ -22,13 +22,15 @@ from einops import rearrange
 from transformers.activations import ACT2FN
 from transformers import AutoConfig
 
+from cosmos_rl.utils.logging import logger
+
 try:
     from flash_attn.bert_padding import pad_input, unpad_input
     from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
 
     has_flash_attn = True
 except Exception:
-    print("FlashAttention2 is not installed.")
+    logger.warning("FlashAttention2 is not installed.")
     has_flash_attn = False
 
 

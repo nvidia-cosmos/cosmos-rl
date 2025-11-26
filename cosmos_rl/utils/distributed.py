@@ -50,6 +50,7 @@ from cosmos_rl.utils.pynccl import (
     nccl_recv,
     nccl_allreduce,
 )
+from cosmos_rl.utils.constant import COSMOS_GLOO_TIMEOUT
 
 
 def init_distributed(cpu_enabled: bool = True):
@@ -61,7 +62,7 @@ def init_distributed(cpu_enabled: bool = True):
     else:
         torch.distributed.init_process_group(
             backend="cuda:nccl,cpu:gloo",
-            timeout=timedelta(seconds=600),
+            timeout=timedelta(seconds=COSMOS_GLOO_TIMEOUT),
         )
 
 
@@ -339,7 +340,9 @@ class ReplicateParallel(ParallelStyle):
         )
 
 
-def broadcast_object_cpu(obj, src=0, device=torch.device("cpu"), group=None):
+def broadcast_object_cpu(
+    obj, src=0, device=torch.device("cpu"), group=None, group_src=None
+):
     """
     Broadcast an object from the source process to all processes.
     The object is first converted to a list and then broadcasted.
@@ -350,8 +353,14 @@ def broadcast_object_cpu(obj, src=0, device=torch.device("cpu"), group=None):
     if world_size == 1:
         return obj
 
-    obj_lst = [obj if self_rank == src else None]
-    dist.broadcast_object_list(obj_lst, src=src, device=device, group=group)
+    if group_src is None:
+        obj_lst = [obj if self_rank == src else None]
+    else:
+        src = None  # src is ignored when group_src is specified
+        obj_lst = [obj if group.rank() == group_src else None]
+    dist.broadcast_object_list(
+        obj_lst, src=src, device=device, group=group, group_src=group_src
+    )
     return obj_lst[0]
 
 

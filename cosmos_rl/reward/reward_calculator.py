@@ -311,6 +311,9 @@ class RewardCalculator:
                     ],
                     rewards=[rollout.reward for rollout in rollouts_group],
                     advantages=[rollout.advantage for rollout in rollouts_group],
+                    filter_rewards=[
+                        rollout.filter_reward for rollout in rollouts_group
+                    ],
                     valid=True,
                 )
             )
@@ -366,6 +369,10 @@ class RewardCalculator:
         payload_list: List[RLPayload] = []
         # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
         for rollouts_group in rollouts_list:
+            rollout_tokens = [
+                self.tokenizer(rollout.completion, add_special_tokens=False).input_ids
+                for rollout in rollouts_group
+            ]
             # Only filter_reward is considered for dynamic sampling
             if len(set([rollout.filter_reward for rollout in rollouts_group])) > 1:
                 # Preprocess the valid rollouts to find if shared prefix exists
@@ -375,12 +382,7 @@ class RewardCalculator:
                 # (shared_prefix) -> index of rollouts
                 shared_prefix_groups: Dict[Tuple[int, ...], List[int]] = (
                     util.find_maximal_prefix_groups(
-                        [
-                            self.tokenizer(
-                                rollout.completion, add_special_tokens=False
-                            ).input_ids
-                            for rollout in rollouts_group
-                        ],
+                        rollout_tokens,
                         N=self.config.train.train_policy.min_filter_prefix_tokens,
                     )
                 )
@@ -414,8 +416,14 @@ class RewardCalculator:
                             rollout.n_ignore_prefix_tokens for rollout in rollouts_group
                         ],
                         rewards=[rollout.reward for rollout in rollouts_group],
+                        filter_rewards=[
+                            rollout.filter_reward for rollout in rollouts_group
+                        ],
                         advantages=[rollout.advantage for rollout in rollouts_group],
                         valid=True,
+                        completions_token_length=[
+                            len(rollout_tokens[i]) for i in range(len(rollouts_group))
+                        ],
                     )
                 )
             else:
@@ -433,8 +441,14 @@ class RewardCalculator:
                             rollout.n_ignore_prefix_tokens for rollout in rollouts_group
                         ],
                         rewards=[rollout.reward for rollout in rollouts_group],
+                        filter_rewards=[
+                            rollout.filter_reward for rollout in rollouts_group
+                        ],
                         advantages=[rollout.advantage for rollout in rollouts_group],
                         valid=False,
+                        completions_token_length=[
+                            len(rollout_tokens[i]) for i in range(len(rollouts_group))
+                        ],
                     )
                 )
         return payload_list, False, step
