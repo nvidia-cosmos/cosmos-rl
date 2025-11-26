@@ -86,7 +86,6 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        target_dtype = self.proj.weight.dtype
         hidden_states = hidden_states.view(
             -1,
             self.in_channels,
@@ -94,9 +93,7 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
             self.patch_size,
             self.patch_size,
         )
-        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(
-            -1, self.embed_dim
-        )
+        hidden_states = self.proj(hidden_states).view(-1, self.embed_dim)
         return hidden_states
 
 
@@ -227,11 +224,10 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         k = k.squeeze(0)
 
         input_dtype = q.dtype
+        # flash_attn only support bfloat16/float16
+        # Cast qkv to torch.bfloat16 if dtype for forward is torch.float32
         if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                target_dtype = torch.get_autocast_gpu_dtype()
-            else:
-                raise ValueError("Flash attention only supports float32 input")
+            target_dtype = torch.bfloat16
             q = q.to(target_dtype)
             k = k.to(target_dtype)
             v = v.to(target_dtype)
@@ -246,7 +242,7 @@ class Qwen2_5_VLVisionAttention(nn.Module):
             max_seqlen_k=max_seqlen,
             causal=False,
         ).reshape(seq_length, -1)
-        attn_output = self.proj(attn_output)
+        attn_output = self.proj(attn_output.to(input_dtype))
         return attn_output
 
 

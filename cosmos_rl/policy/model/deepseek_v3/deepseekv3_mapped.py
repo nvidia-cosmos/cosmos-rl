@@ -63,7 +63,7 @@ with importlib_metadata_version_context():
             pass
 
 
-from cosmos_rl.policy.kernel.moe.moe import MoE
+from cosmos_rl.policy.kernel.moe.moe import MoE, MoEArgs
 
 
 @dataclass
@@ -443,7 +443,22 @@ class Block(nn.Module):
         if layer_id < args.n_dense_layers:
             self.mlp = MLP(args.dim, args.inter_dim)
         else:
-            self.mlp = MoE(args)
+            moe_args = MoEArgs(
+                n_routed_experts=args.n_routed_experts,
+                n_shared_experts=args.n_shared_experts,
+                n_activated_experts=args.n_activated_experts,
+                n_expert_groups=args.n_expert_groups,
+                n_limited_groups=args.n_limited_groups,
+                train_gate=args.train_gate,
+                gate_bias_update_factor=args.gate_bias_update_factor,
+                aux_loss_coeff=args.aux_loss_coeff,
+                score_func=args.score_func,
+                route_scale=args.route_scale,
+                dim=args.dim,
+                moe_inter_dim=args.moe_inter_dim,
+                fake_balanced_gate=args.fake_balanced_gate,
+            )
+            self.mlp = MoE(moe_args)
         self.input_layernorm = RMSNorm(args.dim)
         self.post_attention_layernorm = RMSNorm(args.dim)
         self.layer_id = layer_id

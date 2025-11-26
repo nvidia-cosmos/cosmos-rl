@@ -421,6 +421,9 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
+    # reshard_after_forward to keep embedding sharded during other calculations to save memory
+    if model.embed_tokens is not None:
+        fully_shard(model.embed_tokens, **fsdp_config, reshard_after_forward=True)
     fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
 
 

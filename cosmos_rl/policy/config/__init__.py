@@ -566,9 +566,9 @@ class TrainingConfig(BaseModel):
 
     # --------- FSDP ---------
 
-    master_dtype: Optional[str] = Field(
+    master_dtype: str = Field(
         default="float32",
-        description="The master weight data type for optimizers, is orthognal to `param_dtype`.",
+        description="The master weight data type for optimizers, is orthognal to `param_dtype`. Should be high precision for convergence consideration",
         choices=["bfloat16", "float16", "float32"],
     )
     param_dtype: str = Field(
@@ -693,7 +693,7 @@ class ParallelismConfig(BaseModel):
     cp_size: int = Field(default=1, description="Context parallelism size")
     ep_size: int = Field(default=1, description="Expert parallelism size")
     dp_shard_size: int = Field(
-        default=-1, description="Data Parallelism size in sharded mode"
+        default=1, description="Data Parallelism size in sharded mode"
     )
     pp_size: int = Field(default=1, description="Pipeline parallelism size")
     pp_dynamic_shape: bool = Field(
