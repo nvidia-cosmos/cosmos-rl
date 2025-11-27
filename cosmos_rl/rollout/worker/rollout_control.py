@@ -20,7 +20,7 @@ import atexit
 
 from queue import Queue
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
-from typing import List, Optional, Callable, Union
+from typing import List, Optional, Callable, Union, Tuple
 from functools import partial
 from transformers import AutoConfig
 from cosmos_rl.rollout import RolloutWorkerBase, State
@@ -1379,112 +1379,113 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
                     continue
 
-                payloads_list: List[RLPayload] = self._prompt_queue.get()
-
-                rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
-                    payloads=payloads_list,
-                    stream=self.inference_stream,
-                    data_packer=self.data_packer,
-                    is_validation=False,
-                )
-
-                if len(rollout_results) == 0:
-                    continue
-
-                assert (
-                    len(rollout_results) == len(payloads_list)
-                ), f"Error: Rollout engine returned {len(rollout_results)} for {len(payloads_list)}"
-
-                # we need filter the result with valid completions or valid completed_conversations
-                valid_result: List[RolloutResult] = []
-                valid_payloads_list: List[RLPayload] = []
-                if self.rollout.rollout_config.multi_turn_config.enable:
-                    for payload, rr in zip(payloads_list, rollout_results):
-                        valid_conversations: List[ConversationType] = []
-                        # remove those result without valid assistant message
-                        flag = False
-                        for conversation in rr.completed_conversations:
-                            for msg in conversation:
-                                if msg.role == "assistant" and msg.content != "":
-                                    flag = True
-                                    break
-                            if flag:
-                                valid_conversations.append(conversation)
-                        rr.completed_conversations = valid_conversations
-                        if len(rr.completed_conversations) > 0:
-                            valid_result.append(rr)
-                            valid_payloads_list.append(payload)
-                else:
-                    # Remove empty completions
-                    for payload, rr in zip(payloads_list, rollout_results):
-                        completions = rr.completions
-                        skip_output = False
-                        total_generation_count = len(completions)
-                        empty_generation_count = 0
-                        output_texts: List[str] = []
-                        for j in range(total_generation_count):
-                            output_text = completions[j]
-                            # if output_text == "":
-                            #     logger.warning(
-                            #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
-                            #     )
-                            #     empty_generation_count += 1
-                            # else:
-                            #     output_texts.append(output_text)
-
-                            # Note: (jiaxinc)
-                            # We still need to upload the output text, even if it is empty. (replace empty with eos_token)
-                            # Because if fully synchronized mode is enabled, we need to make sure the expected
-                            # number of global_batch_size is reached at exact time.
-                            output_texts.append(
-                                output_text if output_text != "" else self.eos_token
-                            )
-                        # Skip the output if there is one or zero non-empty completions
-                        skip_output = (
-                            total_generation_count - empty_generation_count
-                        ) <= 1
-                        if not skip_output:
-                            rr.completions = output_texts
-                            valid_result.append(rr)
-                            valid_payloads_list.append(payload)
-
-                logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
-
-                should_report = (
-                    self.parallel_dims.tp_coord[0] == 0
-                    and (
-                        self.parallel_dims.pp_coord[0]
-                        == self.parallel_dims.pp_coord[1] - 1
-                    )
-                    and len(valid_result) > 0
-                )
-
-                if should_report:
-                    # only the first tp rank in the rollout replica will post the completion to the controller.
-                    valid_payloads: List[RLPayload] = []
-
-                    for old_payload, result in zip(valid_payloads_list, valid_result):
-                        # update payload
-                        old_payload.completions = result.completions
-                        old_payload.completion_logprobs = result.completion_logprobs
-                        old_payload.completion_token_ids = result.completion_token_ids
-                        if self.rollout.rollout_config.multi_turn_config.enable:
-                            old_payload.completed_conversations = (
-                                result.completed_conversations
-                            )
-                        valid_payloads.append(old_payload)
-
-                    self.reward_dispatcher.enqueue_rewards_cal(
-                        valid_payloads,
-                        False,
-                        self.current_weight_version,
-                    )
+                self.one_step_generation()
 
                 if self.state.prompt_fetch_end() and self._prompt_queue.empty():
                     self.state.set_prompt_consume_end()
                     if self.global_rank == 0:
                         self.send_end_signal()
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
+
+    def one_step_generation(
+        self,
+    ) -> Tuple[List[RLPayload], List[RolloutResult]]:
+        """
+        Perform one step of rollout generation.
+        Returns the number of valid payloads generated.
+        """
+        payloads_list: List[RLPayload] = self._prompt_queue.get()
+
+        rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
+            payloads=payloads_list,
+            stream=self.inference_stream,
+            data_packer=self.data_packer,
+            is_validation=False,
+        )
+
+        if len(rollout_results) == 0:
+            return False
+
+        assert (
+            len(rollout_results) == len(payloads_list)
+        ), f"Error: Rollout engine returned {len(rollout_results)} for {len(payloads_list)}"
+
+        # we need filter the result with valid completions or valid completed_conversations
+        valid_result: List[RolloutResult] = []
+        valid_payloads_list: List[RLPayload] = []
+        if self.rollout.rollout_config.multi_turn_config.enable:
+            for payload, rr in zip(payloads_list, rollout_results):
+                valid_conversations: List[ConversationType] = []
+                # remove those result without valid assistant message
+                flag = False
+                for conversation in rr.completed_conversations:
+                    for msg in conversation:
+                        if msg.role == "assistant" and msg.content != "":
+                            flag = True
+                            break
+                    if flag:
+                        valid_conversations.append(conversation)
+                rr.completed_conversations = valid_conversations
+                if len(rr.completed_conversations) > 0:
+                    valid_result.append(rr)
+                    valid_payloads_list.append(payload)
+        else:
+            # Remove empty completions
+            for payload, rr in zip(payloads_list, rollout_results):
+                completions = rr.completions
+                skip_output = False
+                total_generation_count = len(completions)
+                empty_generation_count = 0
+                output_texts: List[str] = []
+                for j in range(total_generation_count):
+                    output_text = completions[j]
+                    # if output_text == "":
+                    #     logger.warning(
+                    #         f"[Rollout] Got empty completion for {i}th prompt {j}th generation"
+                    #     )
+                    #     empty_generation_count += 1
+                    # else:
+                    #     output_texts.append(output_text)
+
+                    # Note: (jiaxinc)
+                    # We still need to upload the output text, even if it is empty. (replace empty with eos_token)
+                    # Because if fully synchronized mode is enabled, we need to make sure the expected
+                    # number of global_batch_size is reached at exact time.
+                    output_texts.append(
+                        output_text if output_text != "" else self.eos_token
+                    )
+                # Skip the output if there is one or zero non-empty completions
+                skip_output = (total_generation_count - empty_generation_count) <= 1
+                if not skip_output:
+                    rr.completions = output_texts
+                    valid_result.append(rr)
+                    valid_payloads_list.append(payload)
+
+        logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
+
+        should_report = (
+            self.parallel_dims.tp_coord[0] == 0
+            and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
+            and len(valid_result) > 0
+        )
+        if should_report:
+            valid_payloads: List[RLPayload] = []
+            # only the first tp rank in the rollout replica will post the completion to the controller.
+            for old_payload, result in zip(valid_payloads_list, valid_result):
+                # update payload
+                old_payload.completions = result.completions
+                old_payload.completion_logprobs = result.completion_logprobs
+                old_payload.completion_token_ids = result.completion_token_ids
+                if self.rollout.rollout_config.multi_turn_config.enable:
+                    old_payload.completed_conversations = result.completed_conversations
+                valid_payloads.append(old_payload)
+
+            self.reward_dispatcher.enqueue_rewards_cal(
+                valid_payloads,
+                False,
+                self.current_weight_version,
+            )
+        return valid_payloads_list, valid_result
 
     def work(self):
         # Start the thread with daemon=True, so it will exit when the main program exits.

@@ -41,7 +41,7 @@ import cosmos_rl.utils.util as util
 from transformers import AutoConfig
 import multiprocessing as mp
 from cosmos_rl.dispatcher.api.client import APIClient
-from cosmos_rl.dispatcher.api.colocated_client import ColocatedAPIClient
+from cosmos_rl.colocated.api_client import ColocatedAPIClient
 
 
 class CommMixin:

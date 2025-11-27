@@ -21,7 +21,7 @@ from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
 from cosmos_rl.dispatcher.api.client import APIClient
-from cosmos_rl.policy.worker.colocated_control_worker import ColocatedGRPOControlWorker
+from cosmos_rl.policy.worker.colocated_rl_worker import ColocatedRLControlWorker
 
 
 def main(*args, **kwargs):
@@ -49,8 +49,8 @@ def main(*args, **kwargs):
 
     try:
         if cosmos_config.mode == "colocated":
-            logger.info("Starting colocated GRPO worker...")
-            control_worker = ColocatedGRPOControlWorker(
+            logger.info("Starting colocated RL worker...")
+            control_worker = ColocatedRLControlWorker(
                 config=cosmos_config,
                 parallel_dims=parallel_dims,
                 **kwargs,

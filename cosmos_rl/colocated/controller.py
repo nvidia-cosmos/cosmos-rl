@@ -28,7 +28,7 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.rollout.worker.rollout_control_worker import (
+from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
 from cosmos_rl.dispatcher.command import (
