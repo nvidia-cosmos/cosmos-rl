@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-
+import asyncio
 import torch
 import copy
+import types
 from typing import List, Optional, Dict, Any
 from transformers import AutoConfig
 from transformers import GenerationConfig
@@ -26,13 +26,12 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.packer import DataPacker
-from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
     ConversationType,
 )
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
-from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vllm_version_check
+from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vllm_version_check, vLLMRollout
 from cosmos_rl.utils.ipc import (
     ModuleLike,
     named_tensors_to_serialize,
@@ -87,6 +86,17 @@ class vLLMRolloutAsync(RolloutBase):
             model_hf_config: the huggingface config to initiallize the generating model in vllm
         """
         super().__init__(config)
+
+        # TODO(zjx): refactor those methods to common methods in RolloutBase
+        # reuse some of the vLLMRollout methods
+        self.fp8_quantization = types.MethodType(vLLMRollout.fp8_quantization, self)
+        self.mxfp4_quantization = types.MethodType(vLLMRollout.mxfp4_quantization, self)
+        self.model_param_map = types.MethodType(vLLMRollout.model_param_map, self)
+        self.preset_vllm_env = types.MethodType(vLLMRollout.preset_vllm_env, self)
+        self.get_quantized_tensors = types.MethodType(
+            vLLMRollout.get_quantized_tensors, self
+        )
+
         policy_config = self.config.policy
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
@@ -122,7 +132,7 @@ class vLLMRolloutAsync(RolloutBase):
 
         self.preset_vllm_env()
 
-    async def init_engine(
+    def init_engine(
         self,
         quantization: Optional[str] = None,
         seed: int = 42,
@@ -201,7 +211,9 @@ class vLLMRolloutAsync(RolloutBase):
 
             # patch the vllm model to use rowwise fp8
             if self.quantization == "fp8":
-                await self.rollout_engine.collective_rpc("apply_fp8_linear_patch")
+                asyncio.run(
+                    self.rollout_engine.collective_rpc("apply_fp8_linear_patch")
+                )
 
     def shutdown(self):
         if self._engine_initialized:
@@ -385,7 +397,7 @@ class vLLMRolloutAsync(RolloutBase):
                 payloads, stream, data_packer, sampling_params
             )
 
-    async def get_underlying_model(self):
+    def get_underlying_model(self):
         """
         Get the underlying parallelized model in vLLM internal.
         """
@@ -399,7 +411,9 @@ class vLLMRolloutAsync(RolloutBase):
         # Note: state dict rather than serialize the whole model, have two benefits:
         # 1. Avoid unexpected object behavior when serializing the whole model.
         # 2. Avoid call `forward()` in the worker process, which is not safe.
-        rpc_results = await self.rollout_engine.collective_rpc("get_state_dict_ipc")
+        rpc_results = asyncio.run(
+            self.rollout_engine.collective_rpc("get_state_dict_ipc")
+        )
         # vllm backend may have multiple workers, we use the first worker's state dict to initialize the underlying model.
         sd_ipc_worker0, not_parameter_names = rpc_results[0]
         state_dict = named_tensors_from_serialize(sd_ipc_worker0)
@@ -415,171 +429,3 @@ class vLLMRolloutAsync(RolloutBase):
 
     def is_engine_initialized(self):
         return self._engine_initialized
-
-    def fp8_quantization(self, weight: torch.Tensor):
-        # convert to fp8
-        from vllm import _custom_ops as ops
-
-        # quantization of rowwise torch scaled_mm.
-        # weight has shape [out_dim, in_dim]
-        qweight, weight_scale = ops.scaled_fp8_quant(
-            weight, scale=None, use_per_token_if_dynamic=True
-        )
-
-        return qweight.t(), weight_scale
-
-    def mxfp4_quantization(self, weight: torch.Tensor):
-        """
-        Quantize the original bf16 weight sent by policy to mxfp4 weight.
-        """
-        # https://github.com/vllm-project/vllm/pull/22259
-        # Note: vLLM use triton kernel for mxfp4 moe when ep not specified.
-        # We temporarily support this case first.
-        # Reference: https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L493
-
-        # Note: For mxfp4 quantizaiton, vLLM will load original mxfp4 weight from hf fp4 weight, and do some post processing like padding and swizzle.
-        # So we have two phases for quantization:
-        # 1. Quantize the original bf16 weight sent by policy:
-        # We use: https://github.com/openai/gpt-oss/blob/d0a300a40d6502a1bdd73d18464f3d69440656e0/gpt_oss/triton/model.py#L302
-
-        # 2. Post process the quantized weight as vLLM did for triton kernel:
-        # https://github.com/zyongye/vllm/blob/6a70830065701b163e36a86fd331b41b5feac401/vllm/model_executor/layers/quantization/mxfp4.py#L173
-        # mxfp4_block_size = 32
-        weight = weight.transpose(-2, -1).contiguous()
-        # weight is bf16 moe weight with shape:
-        # gate_up_proj: [num_experts, hidden_size, 2 * intermediate_size]
-        # donw_proj:    [num_experts, intermediate_size, hidden_size]
-
-        # 1. Quantize the original bf16 weight sent by policy:
-        from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import quantize_mx4
-
-        # weight_mxfp4 and weight_scale_mxfp4 are torch.Tensor
-        weight_mxfp4, weight_scale_mxfp4 = quantize_mx4(weight.to(torch.bfloat16))
-        weight_mxfp4 = weight_mxfp4.transpose(-2, -1).contiguous()  # Now torch.Tensor
-        weight_scale_mxfp4 = weight_scale_mxfp4.transpose(-2, -1).contiguous()
-        # For weight_mxfp4:
-        # [num_experts, 2 * intermediate_size, hidden_size // mxfp4_block_size, 16] for gate_up_proj
-        # [num_experts, hidden_size, intermediate_size // mxfp4_block_size, 16] for down_proj
-        # For weight_scale_mxfp4:
-        # [num_experts, 2 * intermediate_size, hidden_size // mxfp4_block_size] for gate_up_proj
-        # [num_experts, hidden_size, intermediate_size // mxfp4_block_size] for down_proj
-
-        # 2. Post process
-        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-            _swizzle_mxfp4,
-        )
-
-        num_warps = 8
-        swizzled_weight_mxfp4, _, swizzled_weight_scale_mxfp4 = _swizzle_mxfp4(
-            weight_mxfp4, weight_scale_mxfp4, num_warps
-        )
-        return (
-            swizzled_weight_mxfp4.storage.data,
-            swizzled_weight_scale_mxfp4.storage.data,
-        )
-
-    async def model_param_map(
-        self, weight_mapper: WeightMapper
-    ) -> Dict[str, torch.Tensor]:
-        """
-        All the parameters of the rollout model:
-            - All the parameters of the model.
-            - All the scales of quantized weights.
-        """
-        if not self._engine_initialized:
-            raise RuntimeError(
-                "[Rollout] Engine is not initialized, please call init_engine first."
-            )
-
-        if self._model_param_map:
-            return self._model_param_map
-        state_dict = await self.get_underlying_model_state_dict()
-        param_map = {}
-        for name, param in state_dict.items():
-            compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
-            param_map[compatible_name] = param
-
-        quantized_tensors = await self.get_quantized_tensors(weight_mapper)
-        param_map.update(quantized_tensors)
-
-        self._model_param_map = param_map
-        return self._model_param_map
-
-    def preset_vllm_env(self):
-        def log_env(env_name: str, env_value: str):
-            logger.info(f"[Rollout] Setting vLLM {env_name} to {env_value}")
-            os.environ[env_name] = env_value
-
-        # disable VLLM_DISABLE_COMPILE_CACHE
-        log_env("VLLM_DISABLE_COMPILE_CACHE", "1")
-
-        # if flashinfer config is not enabled, avoid importing flashinfer
-        if self.config.rollout.vllm_use_flashinfer:
-            try:
-                import flashinfer  # noqa: F401
-            except ImportError:
-                logger.warning(
-                    "[Rollout] flashinfer is not installed, ignore rollout.vllm_use_flashinfer setting."
-                )
-            else:
-                log_env("VLLM_ATTENTION_BACKEND", "FLASHINFER")
-
-        if self.config.rollout.sampling_config.use_flashinfer:
-            try:
-                import flashinfer  # noqa: F401
-            except ImportError:
-                logger.warning(
-                    "[Rollout] flashinfer is not installed, ignore rollout.sampling_config.use_flashinfer setting."
-                )
-            else:
-                log_env("VLLM_USE_FLASHINFER_SAMPLER", "1")
-
-        # Model specific logic
-        model_type = self.model_config.model_type
-        if model_type == "gpt_oss" and self.config.rollout.quantization == "mxfp4":
-            # We disable flashinfer kernel for now temporarily in mxfp4 quantization
-            log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0")
-            log_env("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0")
-            log_env("VLLM_MXFP4_USE_MARLIN", "0")
-
-    async def get_quantized_tensors(
-        self, weight_mapper: WeightMapper
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Get the quantized tensors of the rollout model.
-        """
-        if not self._engine_initialized:
-            raise RuntimeError(
-                "[Rollout] Engine is not initialized, please call init_engine first."
-            )
-        model = await self.get_underlying_model()
-        quantized_tensors = {}
-        # Handle special cases for some quantized models
-        if "gpt_oss" in self.model_config.model_type and self.quantization == "mxfp4":
-            # FIXME: (lms) generally handle all quantized cases when refactoring the rollout param cache.
-            # iterate all the modules in the model
-            for module_name, module in model.named_modules():
-                if hasattr(module, "w13_bias"):
-                    # this is a mxfp4 quant layer
-                    w13_weight_name = f"{module_name}.w13_weight"
-                    w2_weight_name = f"{module_name}.w2_weight"
-                    w13_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
-                        w13_weight_name
-                    )
-                    w2_compatible_name = weight_mapper._rollout_vllm_name_to_hf(
-                        w2_weight_name
-                    )
-                    quantized_tensors[w13_compatible_name] = (
-                        module.quant_method.w13_weight_triton_tensor.storage.data
-                    )
-                    quantized_tensors[w2_compatible_name] = (
-                        module.quant_method.w2_weight_triton_tensor.storage.data
-                    )
-                    quantized_tensors[w13_compatible_name + "_scale"] = (
-                        module.quant_method.w13_precision_config.weight_scale.storage.data
-                    )
-                    quantized_tensors[w2_compatible_name + "_scale"] = (
-                        module.quant_method.w2_precision_config.weight_scale.storage.data
-                    )
-
-        return quantized_tensors

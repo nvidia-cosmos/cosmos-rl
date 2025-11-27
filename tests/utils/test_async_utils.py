@@ -16,7 +16,7 @@
 import asyncio
 import unittest
 
-from cosmos_rl.utils.async_utils import is_async_callable, nested_run_until_complete
+from cosmos_rl.utils.async_utils import is_async_callable
 
 
 class TestAsyncUtils(unittest.TestCase):
@@ -39,18 +39,3 @@ class TestAsyncUtils(unittest.TestCase):
 
         self.assertTrue(is_async_callable(async_func))
         self.assertFalse(is_async_callable(lambda: 1))
-
-    def test_nested_run_until_complete(self):
-        """Test nested_run_until_complete function."""
-
-        # Test call async function in a sync function
-        async def async_internal_func():
-            return 1
-
-        def sync_func():
-            return nested_run_until_complete(async_internal_func)
-
-        async def async_outern_func():
-            return sync_func()
-
-        self.assertEqual(asyncio.run(async_outern_func()), 1)

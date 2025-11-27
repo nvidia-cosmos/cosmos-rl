@@ -39,9 +39,12 @@ from cosmos_rl.dispatcher.protocol import RolloutRequest, ValidationReportReques
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
+from cosmos_rl.utils import async_utils
 
 
 def override_environment(port: int = 29500) -> dict[str, str]:
+    async_utils.unsafe_enable_nest_asyncio()
+
     old_env = os.environ.copy()
     os.environ["RANK"] = "0"
     os.environ["WORLD_SIZE"] = "1"
@@ -143,21 +146,36 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         os.environ.update(self.old_env)
         destroy_distributed()
 
-    async def get_rollout_engine_and_data_packer(
+    def get_rollout_engine_and_data_packer(
         self, config: CosmosConfig
     ) -> Tuple[vLLMRolloutAsync, DataPacker]:
         # initialize tokenizer
         tokenizer = AutoTokenizer.from_pretrained(config.policy.model_name_or_path)
         # initialize rollout engine
         rollout_engine = vLLMRolloutAsync(config)
-        await rollout_engine.init_engine(
-            quantization="none", seed=42, load_format="auto"
-        )
+        rollout_engine.init_engine(quantization="none", seed=42, load_format="auto")
 
         # create data packer
         data_packer = DecoderOnlyLLMDataPacker()
         data_packer.setup(config=config, tokenizer=tokenizer)
         return rollout_engine, data_packer
+
+    def test_rollout_engine_rpc(self):
+        """Test rollout engine rpc."""
+        cosmos_config = getMockConfig()
+        cosmos_config.rollout.parallelism.tp_size = 1
+
+        async def test_helper():
+            rollout_engine, _ = self.get_rollout_engine_and_data_packer(cosmos_config)
+            # Test use sync function to call the async function
+            results = asyncio.run(
+                rollout_engine.rollout_engine.collective_rpc("get_state_dict_ipc")
+            )
+            rollout_engine.get_engine().shutdown()
+            return results
+
+        results = asyncio.run(test_helper())
+        self.assertGreater(len(results), 0)
 
     def test_async_rollout_single_generate(self):
         """Test async rollout."""
@@ -180,7 +198,7 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         )
 
         async def test_helper():
-            rollout_engine, data_packer = await self.get_rollout_engine_and_data_packer(
+            rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(
                 cosmos_config
             )
             results = await rollout_engine.rollout_generation(
@@ -224,7 +242,7 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         )
 
         async def test_helper():
-            rollout_engine, data_packer = await self.get_rollout_engine_and_data_packer(
+            rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(
                 cosmos_config
             )
             results = await rollout_engine.rollout_generation(
