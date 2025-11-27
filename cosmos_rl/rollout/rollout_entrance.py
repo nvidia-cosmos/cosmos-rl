@@ -23,6 +23,7 @@ from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker_async import (
     vLLMRolloutWorkerAsync,
 )
 from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.utils.async_utils import unsafe_enable_nest_asyncio
 
 
 def run_rollout(*args, **kwargs):
@@ -62,6 +63,7 @@ def run_rollout(*args, **kwargs):
                 cosmos_rollout_config, parallel_dims, **kwargs
             )
         elif rollout_backend == "vllm_async":
+            unsafe_enable_nest_asyncio()
             parallel_dims = ParallelDims.from_config(
                 parallesim_config=cosmos_rollout_config.rollout.parallelism
             )
