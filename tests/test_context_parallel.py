@@ -19,6 +19,7 @@ from datetime import timedelta
 import torch.distributed as dist
 
 from transformers import AutoConfig
+from accelerate import init_on_device
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils import util
@@ -229,7 +230,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
 
     # 1. CP part.
     # Only DP and CP to simpify test. So each rank will load all the model weights.
-    with torch.device("meta"):
+    with init_on_device(device='meta', include_buffers=False):
         with util.cosmos_default_dtype(torch.bfloat16):
             model = GPT.from_pretrained(
                 hf_config,
@@ -237,7 +238,12 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
                 max_position_embeddings=4096,
             )
 
-    model.to_empty(device=device)
+    model._apply(
+        lambda t: torch.empty_like(t, device="cuda")
+        if t.device.type == "meta"
+        else t.to("cuda"),
+        recurse=True,
+    )
 
     # parallel model
     try:
@@ -313,7 +319,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
     )
     parallel_dims.build_mesh(device_type="cuda")
 
-    with torch.device("meta"):
+    with init_on_device("meta", include_buffers=False):
         with util.cosmos_default_dtype(torch.bfloat16):
             model = GPT.from_pretrained(
                 hf_config,
@@ -321,7 +327,12 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
                 max_position_embeddings=4096,
             )
 
-    model.to_empty(device=device)
+    model._apply(
+        lambda t: torch.empty_like(t, device="cuda")
+        if t.device.type == "meta"
+        else t.to("cuda"),
+        recurse=True,
+    )
 
     # parallel model
     try:
