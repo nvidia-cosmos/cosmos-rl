@@ -13,84 +13,57 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-import os
 import torch
+import os
+import json
 import threading
-import random
-import numpy as np
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.checkpoint import (
-    upload_folder_to_s3,
-    CheckpointMananger,
-)
-from typing import Union
+from typing import Optional, Dict
 from transformers import AutoConfig, GenerationConfig
-from cosmos_rl.policy.trainer.optm import build_optimizers
-from cosmos_rl.policy.model import ModelRegistry
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.config.diffusion import CosmosVisionGenConfig
-from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.dispatcher.protocol import Role
-from cosmos_rl.comm.base import CommMixin
+
 from safetensors.torch import save_file
 from huggingface_hub import create_repo, upload_folder, whoami
 from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
-from typing import Dict, Optional
+from cosmos_rl.utils.checkpoint import upload_folder_to_s3
+
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.policy.trainer.optm import build_optimizers
+from cosmos_rl.policy.model import ModelRegistry
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.parallelism import ParallelDims
 import cosmos_rl.utils.util as util
-from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
 from cosmos_rl.utils.fp4.fp4_util import FP4ModelConverter
 from cosmos_rl.policy.kernel.modeling_utils import init_flash_attn_meta
 from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
-from cosmos_rl.utils.util import (
-    msgpack_c_long,
-    msgunpack_c_long,
-    fix_data_type_size,
-)
-import msgpack
+from cosmos_rl.policy.trainer.base import Trainer
+from cosmos_rl.policy.trainer.base import extract_from_cuda_tensor, wrap_to_cuda_tensor
+from cosmos_rl.utils.checkpoint import CheckpointMananger
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 
 
-class Trainer(CommMixin):
+class LLMTrainer(Trainer):
     def __init__(
         self,
-        config: Union[CosmosConfig, CosmosVisionGenConfig],
+        config: CosmosConfig,
         parallel_dims: ParallelDims,
+        train_stream: torch.cuda.Stream,
+        data_packer: BaseDataPacker,
+        val_data_packer: BaseDataPacker,
+        **kwargs,
     ):
-        super().__init__()
-        self.config = config
-        self.trainer_init(self.config, parallel_dims)
+        super(LLMTrainer, self).__init__(
+            config,
+            parallel_dims,
+            train_stream=train_stream,
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+            **kwargs,
+        )
 
-    def trainer_init(self, config: CosmosConfig, parallel_dims: ParallelDims):
-        assert isinstance(
-            config, CosmosConfig
-        ), "config must be a CosmosConfig object for this trainer"
-        if config.train.seed:
-            torch.manual_seed(config.train.seed)
-            torch.cuda.manual_seed(config.train.seed)
-            torch.cuda.manual_seed_all(config.train.seed)
-            random.seed(config.train.seed)
-            np.random.seed(config.train.seed)
-
-        if config.train.deterministic:
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            torch.use_deterministic_algorithms(mode=True, warn_only=True)
-
+    def trainer_init(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
         init_flash_attn_meta(
             config.train.deterministic, config.train.compile, config.train.fa_version
         )
-
-        if self.config.policy.parallelism.dp_shard_size == -1:
-            self.config.policy.parallelism.dp_shard_size = parallel_dims.dp_shard
-        self.parallel_dims = parallel_dims
-        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        self.global_rank = int(os.environ.get("RANK", 0))
-        self.role = Role.POLICY
-        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
-        self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
-        self.check_config()
 
         self.hf_config = util.retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path,
@@ -98,7 +71,6 @@ class Trainer(CommMixin):
         )
 
         self.train_stream = torch.cuda.current_stream()
-        self.init_comm()
 
         model = ModelRegistry.build_model(config)
 
@@ -112,12 +84,7 @@ class Trainer(CommMixin):
                 self.model_converter.convert_model(model)
 
         if config.train.fsdp_offload:
-            model._apply(
-                lambda t: torch.empty_like(t, device="cpu")
-                if t.device.type == "meta"
-                else t.to("cpu"),
-                recurse=True,
-            )
+            model.to_empty(device="cpu")
 
         try:
             # Apply parallelism to the model
@@ -128,12 +95,7 @@ class Trainer(CommMixin):
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )
             if not config.train.fsdp_offload:
-                model._apply(
-                    lambda t: torch.empty_like(t, device=self.device)
-                    if t.device.type == "meta"
-                    else t.to("cuda"),
-                    recurse=True,
-                )
+                model.to_empty(device=self.device)
             model.post_to_empty_hook(config)
             if config.policy.lora is not None:
                 from cosmos_rl.policy.lora.plugin import reinitialize_lora_params
@@ -155,22 +117,12 @@ class Trainer(CommMixin):
             raise e
 
         self.ckpt_manager = CheckpointMananger(
-            config, self.parallel_dims, self.global_rank
+            self.config, self.parallel_dims, self.global_rank
         )
         # FIXME: (lms) use_streams=True could cause NaN in backward. Fix this later.
         self.act_offloading_ctx_manager = get_act_offloading_ctx_manager(
             self.model, config.train.activation_offload, use_streams=False
         )
-
-        # profiler is initialized after the init_comm()
-        self.profiler = CosmosProfiler(
-            config,
-            parallel_dims,
-            replica_name=self.replica_name,
-            api_client=self.api_client,
-        )
-
-        self.report_data = {}
 
         self.build_optimizers()
 
@@ -187,34 +139,6 @@ class Trainer(CommMixin):
         logger.info(
             f"Trainer initialized at local rank {self.local_rank}, with seq_len_multiple: {self.seq_len_multiple}"
         )
-        self.upload_thread = None
-
-    def check_config(self):
-        mini_batch = 1
-        policy_type = self.config.train.train_policy.type
-        train_batch_per_replica = self.config.train.train_batch_per_replica
-        dp_shard_size = self.config.policy.parallelism.dp_shard_size
-        error_msg = f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by dp_shard_size({dp_shard_size})"
-        mini_batch = self.config.train.train_policy.mini_batch
-        if policy_type == "grpo":
-            error_msg += f" * mini_batch({mini_batch})"
-            assert dp_shard_size == self.parallel_dims.dp_shard
-            assert dp_shard_size > 0, "dp_shard_size must be greater than 0"
-            assert (
-                train_batch_per_replica % (dp_shard_size * mini_batch) == 0
-            ), error_msg
-        else:
-            # TODO(jiaxinc): Optimize this:
-            #  for SFT,`train_batch_per_replica` stands for the batch_size for a DP worker,
-            #  not really for a training replica
-            assert (
-                train_batch_per_replica % mini_batch == 0
-            ), f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by mini_batch({mini_batch})"
-        logger.info("Config checked successfully")
-
-    @property
-    def pp_loss_fn(self):
-        raise NotImplementedError("pp_loss_fn must be provided by subclass")
 
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
@@ -225,6 +149,134 @@ class Trainer(CommMixin):
                     self.model_parts
                 )
             )
+
+    def sync_all_states(
+        self,
+        is_send: bool,
+        send_hook: callable,
+        recv_hook: callable,
+        has_reference_model: bool = False,
+    ) -> int:
+        """
+        Sync all states of the model and optimizer.
+        Args:
+            is_send (bool): Whether to send or receive the states.
+            send_hook (callable): The hook function to send the states.
+            recv_hook (callable): The hook function to receive the states.
+            reference_model (bool): Whether to sync the reference model state dict.
+        Returns:
+            len_params (int): The number of parameters synced.
+        """
+        len_params = 0
+        # It's a HFModel, we need to sync the named buffers
+        if hasattr(self.model, "reset_named_buffers"):
+            # Convert the model to the hf_config.torch_dtype, which is param_dtype
+            self.model.model = self.model.model.to(
+                dtype=self.model.hf_config.torch_dtype
+            )
+            named_buffers_dict = dict(self.model.named_buffers())
+            model_state_dict = [self.model.state_dict(), named_buffers_dict]
+        else:
+            model_state_dict = [self.model.state_dict()]
+
+        if has_reference_model:
+            if len(self.reference_state_dict) == 0:
+                assert (
+                    not is_send
+                ), "Reference model state dict should be populated before sending"
+                for key, value in model_state_dict[0].items():
+                    self.reference_state_dict[key] = torch.empty_like(
+                        value, device="cpu"
+                    )
+            model_state_dict.append(self.reference_state_dict)
+
+        # 1. Sync all model states
+        for state_to_sync in model_state_dict:
+            for dest_name in sorted(state_to_sync.keys()):
+                obj = state_to_sync[dest_name]
+                assert isinstance(obj, torch.Tensor)
+                local_view = wrap_to_cuda_tensor(
+                    self.device, dest_name, obj, in_place=obj.is_cuda
+                )
+                if is_send:
+                    send_hook(local_view)
+                else:
+                    recv_hook(local_view)
+                    if isinstance(obj, torch.distributed.tensor.DTensor):
+                        to_write = obj.to_local()
+                    else:
+                        to_write = obj
+
+                    # Copy again for offloaded tensor since it is not inplace received
+                    if not to_write.is_cuda:
+                        to_write.copy_(local_view)
+                len_params += 1
+
+        # 2. Sync optimizer states
+        optimizer_state = self.optimizers.state_dict()
+        for dest_name in sorted(optimizer_state.keys()):
+            obj = optimizer_state[dest_name]
+            local_view = wrap_to_cuda_tensor(self.device, dest_name, obj)
+            if local_view.data_ptr() is None:
+                # skip the optimizer state if the data pointer is None
+                continue
+            if is_send:
+                # nccl send
+                send_hook(local_view)
+            else:
+                # nccl recv
+                recv_hook(local_view)
+                optimizer_state[dest_name] = extract_from_cuda_tensor(
+                    self.device,
+                    dest_name,
+                    obj,
+                    local_view,
+                )
+            len_params += 1
+
+        if not is_send:
+            self.optimizers.load_state_dict(optimizer_state)
+
+        # 3. Sync lr_scheduler states
+        if self.lr_schedulers is not None:
+            lr_sheduler_state = self.lr_schedulers.state_dict()
+            for dest_name in sorted(lr_sheduler_state.keys()):
+                obj = lr_sheduler_state[dest_name]
+                local_view = wrap_to_cuda_tensor(self.device, dest_name, obj)
+                if is_send:
+                    # nccl send
+                    send_hook(local_view)
+                else:
+                    # nccl recv
+                    recv_hook(local_view)
+                    lr_sheduler_state[dest_name] = extract_from_cuda_tensor(
+                        self.device,
+                        dest_name,
+                        obj,
+                        local_view,
+                    )
+                len_params += 1
+            if not is_send:
+                self.lr_schedulers.load_state_dict(lr_sheduler_state)
+
+        # 4. Sync rng_state
+        rng_state = self.ckpt_manager.get_rng_state()
+        for dest_name in sorted(rng_state.keys()):
+            obj = rng_state[dest_name]
+            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
+            if is_send:
+                # nccl send
+                send_hook(local_view)
+            else:
+                # nccl recv
+                recv_hook(local_view)
+                rng_state[dest_name] = extract_from_cuda_tensor(
+                    self.device, dest_name, obj, local_view
+                )
+            len_params += 1
+        if not is_send:
+            self.ckpt_manager.set_rng_state(rng_state)
+        return len_params
 
     def export_safetensors(
         self,
@@ -481,198 +533,3 @@ class Trainer(CommMixin):
                     daemon=True,
                 )
                 self.upload_thread.start()
-
-    def wrap_to_cuda_tensor(self, key, obj, in_place=False):
-        """
-        wrap the object to cuda tensor for sync parameters using nccl.
-        """
-        if isinstance(obj, torch.Tensor):
-            if isinstance(obj, torch.distributed.tensor.DTensor):
-                obj = obj.to_local()
-
-            if obj.device != self.device:
-                if in_place:
-                    raise ValueError(
-                        f"Object {key} is not on the same device as the model. Please set in_place to False."
-                    )
-                obj = obj.to(self.device)
-            return obj
-        elif isinstance(obj, np.ndarray):
-            if in_place:
-                raise ValueError(
-                    f"Object {key} is not a tensor. Please set in_place to False."
-                )
-            obj = torch.from_numpy(obj).to(self.device)
-            return obj
-        else:
-            if in_place:
-                raise ValueError(
-                    f"Object {key} is not a tensor. Please set in_place to False."
-                )
-            if isinstance(obj, tuple):
-                obj = tuple(
-                    [x.tolist() if isinstance(x, np.ndarray) else x for x in obj]
-                )
-                obj = fix_data_type_size(obj)
-            bytes = msgpack.packb(obj, default=msgpack_c_long)
-            obj = torch.frombuffer(bytes, dtype=torch.uint8).to(self.device)
-            return obj
-
-    def extract_from_cuda_tensor(self, key, obj, tensor):
-        """
-        Extract the object from cuda tensor for sync parameters using nccl.
-        """
-        if isinstance(obj, torch.distributed.tensor.DTensor):
-            if obj.device != self.device:
-                local_shard = obj.to_local()
-                local_shard.copy_(tensor)
-        elif isinstance(obj, torch.Tensor):
-            if obj.device != self.device:
-                obj.copy_(tensor)
-        elif isinstance(obj, np.ndarray):
-            if obj.shape != tensor.shape:
-                raise ValueError(
-                    f"Object {key} is not the same shape as the tensor. Please check the data consistency."
-                )
-            x = tensor.cpu()
-            obj.copy_(x.numpy())
-        else:
-            np_arr = tensor.cpu()
-            obj_new = msgpack.unpackb(bytes(np_arr.numpy()), ext_hook=msgunpack_c_long)
-            if isinstance(obj, tuple):
-                assert len(obj) == len(obj_new)
-                obj = tuple(
-                    [
-                        np.array(obj_new[idx])
-                        if isinstance(x, np.ndarray)
-                        else tuple(obj_new[idx])
-                        if isinstance(x, tuple)
-                        else obj_new[idx]
-                        for idx, x in enumerate(obj)
-                    ]
-                )
-            else:
-                obj = obj_new
-        return obj
-
-    def sync_all_states(
-        self,
-        is_send: bool,
-        send_hook: callable,
-        recv_hook: callable,
-        reference_model: bool = False,
-    ) -> int:
-        """
-        Sync all states of the model and optimizer.
-        Args:
-            is_send (bool): Whether to send or receive the states.
-            send_hook (callable): The hook function to send the states.
-            recv_hook (callable): The hook function to receive the states.
-            reference_model (bool): Whether to sync the reference model state dict.
-        Returns:
-            len_params (int): The number of parameters synced.
-        """
-        len_params = 0
-        # It's a HFModel, we need to sync the named buffers
-        state_dict = self.model.state_dict()
-        state_dict.update(dict(self.model.named_buffers()))
-        model_state_dict = [state_dict]
-
-        # If KL-divergence is enabled, we need to also sync the reference model state dict
-        if reference_model:
-            if len(self.reference_state_dict) == 0:
-                assert (
-                    not is_send
-                ), "Reference model state dict should be populated before sending"
-                for key, value in model_state_dict[0].items():
-                    self.reference_state_dict[key] = torch.empty_like(
-                        value, device="cpu"
-                    )
-            model_state_dict.append(self.reference_state_dict)
-
-        # 1. Sync all model states
-        for state_to_sync in model_state_dict:
-            for dest_name in sorted(state_to_sync.keys()):
-                obj = state_to_sync[dest_name]
-                assert isinstance(obj, torch.Tensor)
-                local_view = self.wrap_to_cuda_tensor(
-                    dest_name, obj, in_place=obj.is_cuda
-                )
-                if is_send:
-                    send_hook(local_view)
-                else:
-                    recv_hook(local_view)
-                    if isinstance(obj, torch.distributed.tensor.DTensor):
-                        to_write = obj.to_local()
-                    else:
-                        to_write = obj
-
-                    # Copy again for offloaded tensor since it is not inplace received
-                    if not to_write.is_cuda:
-                        to_write.copy_(local_view)
-                len_params += 1
-
-        # 2. Sync optimizer states
-        optimizer_state = self.optimizers.state_dict()
-        for dest_name in sorted(optimizer_state.keys()):
-            obj = optimizer_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            if local_view.data_ptr() is None:
-                # skip the optimizer state if the data pointer is None
-                continue
-            if is_send:
-                # nccl send
-                send_hook(local_view)
-            else:
-                # nccl recv
-                recv_hook(local_view)
-                optimizer_state[dest_name] = self.extract_from_cuda_tensor(
-                    dest_name, obj, local_view
-                )
-            len_params += 1
-        if not is_send:
-            self.optimizers.load_state_dict(optimizer_state)
-
-        # 3. Sync lr_scheduler states
-        if self.lr_schedulers is not None:
-            lr_sheduler_state = self.lr_schedulers.state_dict()
-            for dest_name in sorted(lr_sheduler_state.keys()):
-                obj = lr_sheduler_state[dest_name]
-                local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-                if is_send:
-                    # nccl send
-                    send_hook(local_view)
-                else:
-                    # nccl recv
-                    recv_hook(local_view)
-                    lr_sheduler_state[dest_name] = self.extract_from_cuda_tensor(
-                        dest_name, obj, local_view
-                    )
-                len_params += 1
-            if not is_send:
-                self.lr_schedulers.load_state_dict(lr_sheduler_state)
-
-        # 4. Sync rng_state
-        rng_state = self.ckpt_manager.get_rng_state()
-        for dest_name in sorted(rng_state.keys()):
-            obj = rng_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
-            if is_send:
-                # nccl send
-                send_hook(local_view)
-            else:
-                # nccl recv
-                recv_hook(local_view)
-                rng_state[dest_name] = self.extract_from_cuda_tensor(
-                    dest_name, obj, local_view
-                )
-            len_params += 1
-        if not is_send:
-            self.ckpt_manager.set_rng_state(rng_state)
-        return len_params
-
-    def main_loop(self):
-        """
-        Main loop of the trainer.
-        """
-        pass
