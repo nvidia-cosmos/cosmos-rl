@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import gc
 
 # Set the environment variable to use HF rotary implementation
 os.environ["COSMOS_USE_HF_IMPL"] = "1"
@@ -243,7 +244,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
             "train": {
                 "fsdp_offload": False,
                 "compile": False,
-                "master_dtype": None,
+                "master_dtype": "float32",
                 "param_dtype": "bfloat16",
                 "fsdp_reduce_dtype": "float32",
                 "fsdp_reshard_after_forward": "default",
@@ -311,6 +312,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
             ).logits
             print(f"before logits_hf: {logits_hf.shape}")
         del hf_model
+        gc.collect()
         torch.cuda.empty_cache()
         ce_loss_hf = torch.nn.functional.cross_entropy(
             input=logits_hf[:, :-1].flatten(0, 1),
@@ -342,6 +344,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
         )
         cs_loss_mean = ce_loss.mean()
         logits_cosmos_rl = logits_cosmos_rl[:, -1, :]
+        gc.collect()
         torch.cuda.empty_cache()
 
         if torch.distributed.get_rank() == 0:
