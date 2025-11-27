@@ -219,6 +219,7 @@ class DeepseekV3MoEModel(BaseModel):
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
+        save_dcp: bool=False,
         revision: Optional[str] = None,
     ):
         dcp_checkpoint_path = os.path.join(
@@ -383,16 +384,16 @@ class DeepseekV3MoEModel(BaseModel):
                     ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
                     with torch.no_grad():
                         local_view.data.copy_(shared_weight)
-
-            logger.info(f"Dumping the tensors to DCP folder {dcp_checkpoint_path}")
-            os.makedirs(dcp_checkpoint_path, exist_ok=True)
-            fs_storage_writer = torch.distributed.checkpoint.FileSystemWriter(
-                dcp_checkpoint_path
-            )
-            torch.distributed.checkpoint.save(
-                state_dict=self_state_dict,
-                storage_writer=fs_storage_writer,
-            )
+            if save_dcp:
+                logger.info(f"Dumping the tensors to DCP folder {dcp_checkpoint_path}")
+                os.makedirs(dcp_checkpoint_path, exist_ok=True)
+                fs_storage_writer = torch.distributed.checkpoint.FileSystemWriter(
+                    dcp_checkpoint_path
+                )
+                torch.distributed.checkpoint.save(
+                    state_dict=self_state_dict,
+                    storage_writer=fs_storage_writer,
+                )
         else:
             logger.info("Loading from distributed checkpoints...")
             model_name_or_path = model_name_or_path.rstrip("/")
