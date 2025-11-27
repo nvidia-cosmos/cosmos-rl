@@ -212,7 +212,7 @@ def _apply_fsdp(
                 fully_shard(
                     block.mlp.experts,
                     mesh=meshes["moe"]["dp_shard_with_ep"],
-                    shard_placement_fn=lambda _: Shard(1),
+                    shard_placement_fn=lambda _: Shard(0),
                     reshard_after_forward=not pp_enabled,
                 )
 
