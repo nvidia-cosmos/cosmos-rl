@@ -16,10 +16,9 @@
 import os
 import torch
 import numpy as np
-from typing import Union, Type, Dict, Optional
+from typing import Type, Dict, Optional
 
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.config.diffusion import CosmosVisionGenConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import (
     msgpack_c_long,
@@ -106,7 +105,7 @@ def extract_from_cuda_tensor(device, key, obj, tensor):
 class Trainer(ABC):
     def __init__(
         self,
-        config: Union[CosmosConfig, CosmosVisionGenConfig],
+        config: CosmosConfig,
         parallel_dims: ParallelDims,
         train_stream: torch.cuda.Stream,
         **kwargs,

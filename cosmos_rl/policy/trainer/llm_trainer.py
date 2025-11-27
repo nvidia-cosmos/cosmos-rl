@@ -84,7 +84,12 @@ class LLMTrainer(Trainer):
                 self.model_converter.convert_model(model)
 
         if config.train.fsdp_offload:
-            model.to_empty(device="cpu")
+            model._apply(
+                lambda t: torch.empty_like(t, device="cpu")
+                if t.device.type == "meta"
+                else t.to("cpu"),
+                recurse=True,
+            )
 
         try:
             # Apply parallelism to the model
@@ -95,7 +100,12 @@ class LLMTrainer(Trainer):
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )
             if not config.train.fsdp_offload:
-                model.to_empty(device=self.device)
+                model._apply(
+                    lambda t: torch.empty_like(t, device=self.device)
+                    if t.device.type == "meta"
+                    else t.to("cuda"),
+                    recurse=True,
+                )
             model.post_to_empty_hook(config)
             if config.policy.lora is not None:
                 from cosmos_rl.policy.lora.plugin import reinitialize_lora_params
@@ -169,15 +179,9 @@ class LLMTrainer(Trainer):
         """
         len_params = 0
         # It's a HFModel, we need to sync the named buffers
-        if hasattr(self.model, "reset_named_buffers"):
-            # Convert the model to the hf_config.torch_dtype, which is param_dtype
-            self.model.model = self.model.model.to(
-                dtype=self.model.hf_config.torch_dtype
-            )
-            named_buffers_dict = dict(self.model.named_buffers())
-            model_state_dict = [self.model.state_dict(), named_buffers_dict]
-        else:
-            model_state_dict = [self.model.state_dict()]
+        state_dict = self.model.state_dict()
+        state_dict.update(dict(self.model.named_buffers()))
+        model_state_dict = [state_dict]
 
         if has_reference_model:
             if len(self.reference_state_dict) == 0:
