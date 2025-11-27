@@ -563,9 +563,9 @@ class Trainer(CommMixin):
         """
         len_params = 0
         # It's a HFModel, we need to sync the named buffers
-
-        named_buffers_dict = dict(self.model.named_buffers())
-        model_state_dict = [self.model.state_dict().update(named_buffers_dict)]
+        state_dict = self.model.state_dict()
+        state_dict.update(dict(self.model.named_buffers()))
+        model_state_dict = [state_dict]
 
         # If KL-divergence is enabled, we need to also sync the reference model state dict
         if reference_model:
