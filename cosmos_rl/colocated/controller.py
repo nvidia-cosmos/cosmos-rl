@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Dict, Optional, Callable, Any, Type, Union
+from typing import List, Optional, Callable, Any, Type, Union
 from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.replica import Replica
 from cosmos_rl.dispatcher.protocol import Role, RolloutRequest
@@ -171,17 +171,6 @@ class ColocatedController(Controller):
         self.custom_logger_fns = (
             custom_logger_fns if custom_logger_fns is not None else []
         )
-
-    def get_batched_prompt(self, n, validation_step=None):
-        """
-        Get batched prompts from data fetcher.
-        Args:
-            n (int): Number of prompts to fetch.
-            validation_step (Optional[int]): Current validation step, if any.
-        Returns:
-            Tuple[List[RLPayload], bool]: A tuple of (list of prompts as RLPayload, is_end flag).
-        """
-        return self.data_fetcher.get_batched_prompt(n, validation_step)
 
     def wait_for_remote_command(
         self,
@@ -410,59 +399,6 @@ class ColocatedController(Controller):
                 "rollout/filter_reward_min": np.min(filter_rewards).item(),
             }
             self.train_report_data[self.current_step] = report_data
-
-    def train_ack(
-        self,
-        replica_name: str,
-        step: int,
-        total_steps: int,
-        profile_finished: bool,
-        report_data: Dict[str, Any],
-    ):
-        """
-        Handle training acknowledgment from policy replica.
-        This method records the training step, triggers weight synchronization if needed,
-        and logs training metrics.
-        Args:
-            replica_name (str): The name of the replica sending the acknowledgment.
-            step (int): The current training step of the replica.
-            total_steps (int): The total number of training steps.
-            profile_finished (bool): Whether profiling has finished.
-            report_data (Dict[str, Any]): The training metrics to report.
-        """
-        if replica_name == self.policy.replica_name:
-            assert self.current_step == step
-        else:
-            raise ValueError(
-                f"[Controller] train_ack received from unknown replica: {replica_name}"
-            )
-        # All replicas have been reduced, trigger allreduce
-        need_sync_weight = step % self.config.train.sync_weight_interval == 0
-        # If the current step is the last step, we need to sync weight always to act as ending signal
-        need_sync_weight = need_sync_weight or step == total_steps
-        # If validation is enabled, we need to sync weight every validation step
-        if self.config.validation.enable:
-            need_sync_weight = need_sync_weight or (
-                step % self.config.validation.freq == 0
-            )
-        # P->R & R->R
-        if need_sync_weight:
-            PolicyToRolloutUnicastCommand.trigger(
-                src_replica=self.policy_replica,
-                dst_replica=self.rollout_replica,
-                src_replica_size=self.policy.world_size,
-                dst_replica_size=self.rollout.world_size,
-                weight_step=self.current_step,
-                total_steps=self.total_steps,
-                redis_handler=self.command_dispatcher,
-            )
-            RolloutToRolloutBroadcastCommand.trigger(
-                src_replica=self.rollout_replica,
-                dst_replicas=[self.rollout_replica],
-                weight_step=self.current_step,
-                total_steps=self.total_steps,
-                redis_handler=self.command_dispatcher,
-            )
 
     def put_rollouts(self, rollout: RolloutRequest):
         """
