@@ -25,7 +25,7 @@ from transformers import AutoConfig, AutoProcessor
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.model.hf_models import HFModel
 from cosmos_rl.policy.config import Config as CosmosConfig, ParallelismConfig
-
+from accelerate import init_on_device
 
 @contextmanager
 def cosmos_default_dtype(dtype: torch.dtype):
@@ -57,7 +57,6 @@ def test_cosmos_hf_model(model, inputs):
     with torch.no_grad():
         logits = model(**inputs)
         return logits[:, -1, :]
-
 
 class TestHFModel(unittest.TestCase):
     def test_post_to_empty_hook(self):
@@ -91,14 +90,19 @@ class TestHFModel(unittest.TestCase):
                 config.torch_dtype = dtype
                 # Load cosmos hf model
                 cosmos_hf_model = None
-                with torch.device("meta"):
+                with init_on_device("meta", include_buffers=False):
                     with cosmos_default_dtype(dtype):
                         cosmos_hf_model = HFModel.from_pretrained(
                             config,
                             model_id,
                             max_position_embeddings=max_position_embeddings,
                         )
-                cosmos_hf_model.to_empty(device="cuda")
+                cosmos_hf_model._apply(
+                    lambda t: torch.empty_like(t, device="cuda")
+                    if t.device.type == "meta"
+                    else t.to("cuda"),
+                    recurse=True,
+                )
                 cosmos_hf_model.post_to_empty_hook(CosmosConfig())
                 parallel_dims = ParallelDims.from_config(ParallelismConfig(tp_size=1))
                 cosmos_hf_model.load_hf_weights(
@@ -157,14 +161,19 @@ class TestHFModel(unittest.TestCase):
             config._attn_implementation = "eager"
             config.torch_dtype = dtype
             cosmos_hf_model = None
-            with torch.device("meta"):
+            with init_on_device("meta", include_buffers=False):
                 with cosmos_default_dtype(dtype):
                     cosmos_hf_model = HFModel.from_pretrained(
                         config,
                         model_id,
                         max_position_embeddings=max_position_embeddings,
                     )
-            cosmos_hf_model.to_empty(device="cuda")
+            cosmos_hf_model._apply(
+                    lambda t: torch.empty_like(t, device="cuda")
+                    if t.device.type == "meta"
+                    else t.to("cuda"),
+                    recurse=True,
+                )
             cosmos_hf_model.post_to_empty_hook(CosmosConfig())
             parallel_dims = ParallelDims.from_config(ParallelismConfig(tp_size=1))
             cosmos_hf_model.load_hf_weights(

@@ -27,6 +27,7 @@ from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import collections
 from functools import partial
 from typing import Mapping
+from accelerate import init_on_device
 from cosmos_rl.policy.lora.plugin import LoraInjectedLinear
 from cosmos_rl.utils.dim_slice_info import (
     DimSliceInfo,
@@ -535,8 +536,7 @@ class ModelRegistry:
             )
             return _apply_model_post_processing(model, config)
 
-        def _get_device_for_model_build(hf_config):
-            device = "meta"
+        def _get_init_context_for_model_build(hf_config):
             # Workaround for OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview
             if (
                 hf_config.model_type == "internvl_chat"
@@ -544,11 +544,12 @@ class ModelRegistry:
                 and hf_config.llm_config.model_type == "gpt_oss"
             ):
                 logger.info(f"Using cuda for model build of {model_name_or_path}.")
-                device = "cuda"
-            return device
+                return torch.device("cuda")
+            else:
+                return init_on_device("meta", include_buffers=False)
 
-        build_model_device = _get_device_for_model_build(hf_config)
-        with torch.device(build_model_device):
+        init_context = _get_init_context_for_model_build(hf_config)
+        with init_context:
             with util.cosmos_default_dtype(cosmos_default_dtype):
                 try:
                     model = _load_model_with_config(

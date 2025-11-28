@@ -115,7 +115,12 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     assert pp_scheduler is None, "pp_scheduler should be None"
     assert pp_scheduler_val is None, "pp_scheduler_val should be None"
     if not config.train.fsdp_offload:
-        model.to_empty(device=device)
+        model._apply(
+            lambda t: torch.empty_like(t, device="cuda")
+            if t.device.type == "meta"
+            else t.to("cuda"),
+            recurse=True,
+        )
     model.post_to_empty_hook(config)
 
     torch.cuda.empty_cache()
