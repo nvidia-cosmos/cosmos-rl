@@ -28,6 +28,7 @@ from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 import msgpack
 import threading
 from queue import Queue
+from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.policy.trainer import GRPOTrainer, SFTTrainer, LLMTrainer
 from cosmos_rl.policy.worker import SFTPolicyWorker, RLPolicyWorker
 from cosmos_rl.rollout.worker.rollout_control_worker import (
@@ -849,6 +850,16 @@ def run_overfitting_policy(args: argparse.Namespace):
     from cosmos_rl.policy.train import main as policy_main
     from cosmos_rl.utils.ulysses import slice_inputs_for_ulysses
 
+    def _log_in_master(worker_or_trainer, msg):
+        if (
+            worker_or_trainer.config.logging.logger
+            and util.is_master_rank(
+                worker_or_trainer.parallel_dims, worker_or_trainer.global_rank
+            )
+            and "console" in worker_or_trainer.config.logging.logger
+        ):
+            logger.info(msg)
+
     N_STEPS = 30
     training_loss = []
 
@@ -860,6 +871,30 @@ def run_overfitting_policy(args: argparse.Namespace):
         save_freq: int,
         pp_last_stage: bool = False,
     ):
+        if self.lr_schedulers is None:
+            assert (
+                train_step == 0
+            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            self.lr_schedulers = build_lr_schedulers(
+                self.optimizers, self.config, total_steps
+            )
+        max_len = min(
+            self.config.policy.model_max_length,
+            self.data_packer.sft_compute_max_len(global_batch),
+        )
+
+        if self.seq_len_multiple > 1:
+            max_len = (
+                (max_len + self.seq_len_multiple - 1)
+                // self.seq_len_multiple
+                * self.seq_len_multiple
+            )
+        global_batch = self.data_packer.sft_collate_fn(
+            global_batch,
+            computed_max_len=max_len,
+            ignore_label_id=-100,
+        )
+
         for k, v in global_batch.items():
             global_batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
 
@@ -930,52 +965,29 @@ def run_overfitting_policy(args: argparse.Namespace):
         else:
             global_avg_loss = acc_loss.item()
 
+        _log_in_master(
+            self,
+            f"Step: {train_step}/{N_STEPS}, Loss: {global_avg_loss:.5f}, Grad norm: {grad_norm:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}",
+        )
         return global_avg_loss, grad_norm
 
-    def mail_loop(self):
-        def _log_in_master(msg):
-            if (
-                self.config.logging.logger
-                and util.is_master_rank(self.parallel_dims, self.global_rank)
-                and "console" in self.config.logging.logger
-            ):
-                logger.info(msg)
-
+    def main_loop(self):
         global_batch = next(iter(self.train_data_loader))
         raw_batch = global_batch[0 : self.config.train.train_policy.mini_batch]
 
-        max_len = min(
-            self.config.policy.model_max_length,
-            self.data_packer.sft_compute_max_len(raw_batch),
-        )
-
-        if self.seq_len_multiple > 1:
-            max_len = (
-                (max_len + self.seq_len_multiple - 1)
-                // self.seq_len_multiple
-                * self.seq_len_multiple
-            )
-        global_batch = self.data_packer.sft_collate_fn(
-            raw_batch,
-            computed_max_len=max_len,
-            ignore_label_id=-100,
-        )
         for step in range(N_STEPS):
-            _log_in_master(f"Training step {step + 1}/{N_STEPS}")
+            _log_in_master(self, f"Training step {step + 1}/{N_STEPS}")
 
             global_avg_loss, grad_norm = self.trainer.train(
-                self, global_batch, N_STEPS, step, 0, False
+                raw_batch, N_STEPS, step, 0, False
             )
 
-            _log_in_master(
-                f"Step: {step}/{N_STEPS}, Loss: {global_avg_loss:.5f}, Grad norm: {grad_norm:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}"
-            )
             training_loss.append(global_avg_loss)
 
         self.unregister_from_controller()
 
     SFTTrainer.train = train
-    SFTPolicyWorker.mail_loop = mail_loop
+    SFTPolicyWorker.main_loop = main_loop
 
     assert args is not None
     policy_main(args=args)
@@ -2044,10 +2056,14 @@ def run_gspo_test():
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
+            inter_policy_nccl=rl_worker.inter_policy_nccl,
+            is_master_replica=rl_worker.is_master_replica,
         )
         if rl_worker.global_rank == 0:
             logger.info(f"Step {i} report {report['train/loss_avg']}")
-            assert report["train/loss_avg"] < -0.1 and report["train/loss_avg"] > -0.8
+            assert (
+                report["train/loss_avg"] < -0.1 and report["train/loss_avg"] > -0.8
+            ), f"Expected loss avg to be between -0.1 and -0.8, but got {report['train/loss_avg']} for step {i}"
     rl_worker.handle_shutdown()
     destroy_distributed()
 
@@ -2112,10 +2128,12 @@ def run_reference_reset_test():
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
+            inter_policy_nccl=rl_worker.inter_policy_nccl,
+            is_master_replica=rl_worker.is_master_replica,
         )
         if rl_worker.global_rank == 0:
             logger.info(
-                f"Step {i} report {report['train/kl_loss_avg']} {report['train/kl_loss_max']}"
+                f"Step {i} report train/kl_loss_avg {report['train/kl_loss_avg']}, train/kl_loss_max {report['train/kl_loss_max']}"
             )
             if i % 2 == 0:
                 assert report["train/kl_loss_avg"] == 0.0
@@ -2203,6 +2221,8 @@ def run_dynamic_batchsize_test(
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
+            inter_policy_nccl=rl_worker.inter_policy_nccl,
+            is_master_replica=rl_worker.is_master_replica,
         )
 
     assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 2
@@ -2218,6 +2238,8 @@ def run_dynamic_batchsize_test(
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
+            inter_policy_nccl=rl_worker.inter_policy_nccl,
+            is_master_replica=rl_worker.is_master_replica,
         )
     assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 8
     assert rl_worker.trainer.test_hooked_all_reduce_cnt == 2
@@ -2231,6 +2253,8 @@ def run_dynamic_batchsize_test(
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
+            inter_policy_nccl=rl_worker.inter_policy_nccl,
+            is_master_replica=rl_worker.is_master_replica,
         )
     assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 16
     assert rl_worker.trainer.test_hooked_all_reduce_cnt == 4
@@ -2245,6 +2269,8 @@ def run_dynamic_batchsize_test(
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
+            inter_policy_nccl=rl_worker.inter_policy_nccl,
+            is_master_replica=rl_worker.is_master_replica,
         )
     assert rl_worker.trainer.test_hooked_all_reduce_cnt == 1
     assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 1
@@ -2259,6 +2285,8 @@ def run_dynamic_batchsize_test(
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
+            inter_policy_nccl=rl_worker.inter_policy_nccl,
+            is_master_replica=rl_worker.is_master_replica,
         )
     assert rl_worker.trainer.test_hooked_all_reduce_cnt == 1
     assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 2

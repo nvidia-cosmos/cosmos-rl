@@ -17,6 +17,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
+from cosmos_rl.policy.worker.llm_worker import RLPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
 from cosmos_rl.dispatcher.api.client import APIClient
@@ -26,7 +27,7 @@ import math
 
 
 def mock_for_decoupled_loss():
-    orig_dispatch_rollouts = GRPOTrainer.dispatch_rollouts
+    orig_dispatch_rollouts = RLPolicyWorker.dispatch_rollouts
 
     def dispatch_rollouts(self):
         ret: List[Rollout] = orig_dispatch_rollouts(self)
@@ -36,7 +37,7 @@ def mock_for_decoupled_loss():
             assert len(rollout.completion_token_ids) > 0
         return ret
 
-    GRPOTrainer.dispatch_rollouts = dispatch_rollouts
+    RLPolicyWorker.dispatch_rollouts = dispatch_rollouts
 
     orig_compute_logprobs = GRPOTrainer.compute_logprobs
 
@@ -75,7 +76,7 @@ def mock_for_decoupled_loss():
 
 
 def mock_for_custom_rollout():
-    orig_dispatch_rollouts = GRPOTrainer.dispatch_rollouts
+    orig_dispatch_rollouts = RLPolicyWorker.dispatch_rollouts
 
     def dispatch_rollouts(self):
         ret: List[Rollout] = orig_dispatch_rollouts(self)
@@ -85,7 +86,7 @@ def mock_for_custom_rollout():
             assert len(rollout.completion) > 0
         return ret
 
-    GRPOTrainer.dispatch_rollouts = dispatch_rollouts
+    RLPolicyWorker.dispatch_rollouts = dispatch_rollouts
 
     orig_compute_logprobs = GRPOTrainer.compute_logprobs
 
@@ -149,7 +150,7 @@ def main(*args, **kwargs):
     try:
         if policy_type == "grpo":
             logger.info("Starting GRPO training...")
-            trainer = GRPOTrainer(
+            worker = RLPolicyWorker(
                 config=cosmos_config,
                 parallel_dims=parallel_dims,
                 dataset=kwargs.get("dataset", None),
@@ -157,9 +158,9 @@ def main(*args, **kwargs):
                 val_dataset=kwargs.get("val_dataset", None),
                 val_data_packer=kwargs.get("val_data_packer", None),
             )
-            trainer.main_loop()
+            worker.main_loop()
             if args.test == "custom_rollout":
-                assert trainer.computed_cnt == 4
+                assert worker.trainer.computed_cnt == 4
         else:
             raise ValueError(f"Unknown policy type: {policy_type}")
     except Exception as e:
