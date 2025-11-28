@@ -603,14 +603,14 @@ class ParallelTopoMapper:
                         assert (
                             "Parallel" not in part.__class__.__name__
                         ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
-                        logger.warning(
+                        logger.debug(
                             f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                         )
                 else:
                     assert (
                         "Parallel" not in part.__class__.__name__
                     ), f"Part {part.__class__.__name__} is not a parallel layer. Skipping."
-                    logger.warning(
+                    logger.debug(
                         f"Name {param_name} with leaf {leaf_name} of type {part.__class__.__name__} is not parallelizable, treated as Replicate."
                     )
         elif self.backend == "trtllm":

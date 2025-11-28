@@ -364,7 +364,7 @@ class ControllerDataFetcher(DataFetcherBase):
 
     def get_batched_prompt(
         self, n: int, validation_step: Optional[int] = None
-    ) -> Tuple[bool, List[RLPayload]]:
+    ) -> Tuple[List[RLPayload], bool]:
         add_answer = (
             self.config.rollout.multi_turn_config.enable
             or not self.config.train.local_dataset

@@ -462,10 +462,7 @@ class CommandRegistry:
         self.registry: Dict[Type[Command], Callable] = {}
 
     def register(self, key: Type[Command], func: Callable):
-        if key not in self.registry:
-            self.registry[key] = func
-        else:
-            raise ValueError(f"Command handler for {key} already registered")
+        self.registry[key] = func
 
     def get_command_handler(self, key: Type[Command]) -> Optional[Callable]:
         return self.registry.get(key, None)

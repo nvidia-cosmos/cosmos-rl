@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+from cosmos_rl.rollout.rollout_base import RolloutBase
 import torch
 from typing import Union
 
@@ -99,6 +100,9 @@ class RolloutWorkerBase(CommMixin):
         # Initialize the communication to controller.
         self.init_comm()
         self.init_redis()
+
+    def set_rollout(self, rollout: RolloutBase):
+        self.rollout = rollout
 
 
 class TRTLLMRolloutWorkerBase(CommMixin):
