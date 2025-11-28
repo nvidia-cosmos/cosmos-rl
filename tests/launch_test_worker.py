@@ -311,6 +311,7 @@ class TestPolicyWorker:
             config=self.config,
             parallel_dims=self.parallel_dims,
             train_stream=self.train_stream,
+            freeze_params=freeze_params,
         )
         self.parallel_mapper = ParallelTopoMapperGroup(
             self.parallel_dims,
@@ -321,11 +322,6 @@ class TestPolicyWorker:
         )
 
         self.prepare_trainable_params()
-
-    def build_runner(self, **kwargs):
-        self.trainer = TestPolicyTrainer(
-            self.config, self.parallel_dims, self.train_stream, **kwargs
-        )
 
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
