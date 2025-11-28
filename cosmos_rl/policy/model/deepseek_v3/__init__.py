@@ -44,7 +44,9 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import clear_weight_name, resolve_model_path, retry
 
-DCP_CHECKPOINT_PATH_PREFIX = "/root/.cache"
+DCP_CHECKPOINT_PATH_PREFIX = os.environ.get(
+    "DCP_CHECKPOINT_PATH_PREFIX", "/root/.cache"
+)
 DCP_CHECKPOINT_PATH_SUFFIX = "dcp"
 
 

@@ -52,9 +52,6 @@ def simplify_process_weights_after_loading():
     )
 
 
-simplify_process_weights_after_loading()
-
-
 # patch the Linear layer.
 def apply_fp8_linear_patch(model: torch.nn.Module):
     for name, module in model.named_modules():
