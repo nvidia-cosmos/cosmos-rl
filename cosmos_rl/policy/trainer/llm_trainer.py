@@ -267,7 +267,7 @@ class LLMTrainer(Trainer):
         rng_state = self.ckpt_manager.get_rng_state()
         for dest_name in sorted(rng_state.keys()):
             obj = rng_state[dest_name]
-            local_view = self.wrap_to_cuda_tensor(dest_name, obj)
+            local_view = wrap_to_cuda_tensor(self.device, dest_name, obj)
             if is_send:
                 # nccl send
                 send_hook(local_view)
