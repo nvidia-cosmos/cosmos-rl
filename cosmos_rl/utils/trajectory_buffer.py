@@ -83,7 +83,7 @@ class TrajectoryBuffer:
             file_size_mb = filepath.stat().st_size / (1024 * 1024)
             num_chunks = len(trajectory_data.get('input_ids', []))
             
-            logger.info(f"[TrajectoryBuffer] Saved trajectory {trajectory_id}: {num_chunks} chunks, {file_size_mb:.1f} MB")
+            #logger.info(f"[TrajectoryBuffer] Saved trajectory {trajectory_id}: {num_chunks} chunks, {file_size_mb:.1f} MB")
             
             return trajectory_id
         except Exception as e:
@@ -123,7 +123,7 @@ class TrajectoryBuffer:
             else:
                 num_chunks = 0
             
-            logger.info(f"[TrajectoryBuffer] Loaded trajectory {trajectory_id}: {num_chunks} chunks")
+            #logger.info(f"[TrajectoryBuffer] Loaded trajectory {trajectory_id}: {num_chunks} chunks")
             
             if remove_after_load:
                 filepath.unlink()

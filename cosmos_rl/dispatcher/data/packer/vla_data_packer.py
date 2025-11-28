@@ -118,6 +118,7 @@ class VLADataPacker(DataPacker):
         # Extract trajectory data from Rollout metadata (if available)
         from cosmos_rl.dispatcher.data.schema import Rollout
         
+        episode_length = sample.metadata.get('episode_length', 0)
         trajectory = None
         if isinstance(sample, Rollout) and sample.metadata:
             # Check if we have a trajectory_id (new filesystem buffer approach)
@@ -213,25 +214,20 @@ class VLADataPacker(DataPacker):
                 
                 # Create logprob mask for action tokens only (56 values)
                 # This will be aligned with the model's output logits (56 tokens)
-                logprob_mask = torch.ones(len(response_tokens), dtype=torch.long)
+                ACTION_CHUNK_SIZE = 8
+                ACTION_DIM_SIZE = 7
+                mini_step_start = step_idx * ACTION_CHUNK_SIZE
+                mini_step_mask = (mini_step_start + torch.arange(ACTION_CHUNK_SIZE)) < episode_length  # (8,)
+                logprob_mask = mini_step_mask.unsqueeze(-1).repeat(1, ACTION_DIM_SIZE).flatten()  # (56,) = repeat 7 times
                 
                 per_step_data.append({
                     'input_ids': prompt_tokens,  # Prompt only (31 tokens)
                     'attention_mask': attention_mask,  # Mask for prompt (31 values)
-                    'logprob_mask': logprob_mask,  # Mask for actions (56 values) - matches model output
+                    'logprob_mask': logprob_mask,
                     'responses': response_tokens,  # Action labels for loss computation (56 tokens)
                     'old_log_prob': old_log_prob,  # Old log probs from rollout (56 values)
                 })
                 
-            num_steps = len(per_step_data)
-            total_tokens = sum(len(s['input_ids']) for s in per_step_data)
-            total_action_tokens = sum(s['logprob_mask'].sum().item() for s in per_step_data)
-            
-            logger.info(
-                f"[VLA Policy Input] Trajectory: {num_steps} steps, "
-                f"total_tokens={total_tokens}, action_tokens={total_action_tokens}"
-            )
-            
             # Return full episode without chunking
             # Chunking will be handled in train_vla() for gradient accumulation
             class RLPolicyInput:

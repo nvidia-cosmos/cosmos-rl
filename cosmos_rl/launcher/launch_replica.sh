@@ -103,6 +103,10 @@ fi
 # Torch related
 set_env "TORCH_CPP_LOG_LEVEL" "ERROR"
 
+# Run ldconfig to refresh library cache
+ldconfig 2>/dev/null || echo "Warning: ldconfig failed (might need sudo)"
+env
+
 LAUNCH_BINARY="torchrun"
 
 if [ "$TYPE" == "rollout" ]; then
