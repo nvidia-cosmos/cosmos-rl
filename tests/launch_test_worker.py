@@ -1020,6 +1020,7 @@ def run_dummy_policy(args: argparse.Namespace):
     RLPolicyWorker.prepare_shard_infos_for_weight_sync_insts = dummy
     RLPolicyWorker.get_policy_command_handler = get_policy_command_handler
     SFTTrainer.train = dummy
+    SFTPolicyWorker.main_loop = dummy
     assert args is not None
     policy_main(args=args)
 
@@ -2377,7 +2378,7 @@ def run_sft_ddp_load_check():
         config=config, parallel_dims=parallel_dims, dataset=TestDataset
     )
 
-    assert sft_worker.sync_cnt == 1
+    assert sft_worker.trainer.sync_cnt == 1
     destroy_distributed()
 
 
