@@ -82,7 +82,6 @@ class Qwen3MoE(nn.Module):
             n_shared_experts=getattr(model_args.hf_config, "n_shared_experts", 0),
             n_activated_experts=model_args.hf_config.num_experts_per_tok,
             n_expert_groups=getattr(model_args.hf_config, "n_group", 0),
-            norm_topk_prob=getattr(model_args.hf_config, "norm_topk_prob", False),
             n_limited_groups=getattr(model_args.hf_config, "topk_group", 0),
             train_gate=model_args.train_gate,
             gate_bias_update_factor=model_args.gate_bias_update_factor,
