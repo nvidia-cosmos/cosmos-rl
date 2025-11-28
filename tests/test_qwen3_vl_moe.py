@@ -243,7 +243,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
             "train": {
                 "fsdp_offload": False,
                 "compile": False,
-                "master_dtype": None,
+                "master_dtype": "float32",
                 "param_dtype": "bfloat16",
                 "fsdp_reduce_dtype": "float32",
                 "fsdp_reshard_after_forward": "default",
@@ -312,6 +312,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
             print(f"before logits_hf: {logits_hf.shape}")
         del hf_model
         torch.cuda.empty_cache()
+
         ce_loss_hf = torch.nn.functional.cross_entropy(
             input=logits_hf[:, :-1].flatten(0, 1),
             target=data_batch["labels"][:, 1:].flatten(0, 1),
@@ -333,6 +334,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
                 position_ids=data_batch.get("position_ids", None),
             )
         del cosmos_model
+        torch.cuda.empty_cache()
 
         ce_loss = torch.nn.functional.cross_entropy(
             input=logits_cosmos_rl[:, :-1].flatten(0, 1),
@@ -342,7 +344,6 @@ class TestCosmosHfPrecision(unittest.TestCase):
         )
         cs_loss_mean = ce_loss.mean()
         logits_cosmos_rl = logits_cosmos_rl[:, -1, :]
-        torch.cuda.empty_cache()
 
         if torch.distributed.get_rank() == 0:
             max_index_hf = logits_hf.argmax(dim=-1)

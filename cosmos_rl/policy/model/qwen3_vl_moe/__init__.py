@@ -139,6 +139,7 @@ class Qwen3MoE(nn.Module):
         self.rotary_emb = Qwen3VLMoeTextRotaryEmbedding(model_args)
         self.embed_tokens = nn.Embedding(model_args.vocab_size, model_args.dim)
         self.moe_args = MoEArgs(
+            norm_topk_prob=getattr(model_args.hf_config, "norm_topk_prob", False),
             n_routed_experts=model_args.n_experts,
             n_shared_experts=getattr(model_args.hf_config, "n_shared_experts", 0),
             n_activated_experts=model_args.hf_config.num_experts_per_tok,
