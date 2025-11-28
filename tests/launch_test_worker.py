@@ -28,9 +28,8 @@ from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 import msgpack
 import threading
 from queue import Queue
-from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.policy.trainer import Trainer
-from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
+from cosmos_rl.policy.trainer import GRPOTrainer, SFTTrainer, LLMTrainer
+from cosmos_rl.policy.worker import SFTPolicyWorker, RLPolicyWorker
 from cosmos_rl.rollout.worker.rollout_control_worker import (
     DisaggregatedRolloutControlWorker,
 )
@@ -85,7 +84,7 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_labels,
 )
 from torch.utils.data import DataLoader, DistributedSampler, Sampler, BatchSampler
-from cosmos_rl.policy.trainer.sft_trainer import collate_fn, construct_dataset
+from cosmos_rl.policy.worker.sft_worker import collate_fn, construct_dataset
 from torch.utils.data import Dataset
 from datasets import concatenate_datasets
 from typing import List
@@ -248,7 +247,39 @@ class TestModel:
         return trainable_params
 
 
-class TestPolicy:
+class TestPolicyTrainer:
+    def __init__(
+        self, config, parallel_dims, train_stream: torch.cuda.Stream, **kwargs
+    ):
+        self.config = config
+        self.parallel_dims = parallel_dims
+        self.train_stream = train_stream
+        self.trainer_init(config, parallel_dims, **kwargs)
+
+    def trainer_init(
+        self, config, parallel_dims, freeze_params: bool = False, **kwargs
+    ):
+        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        self.device = torch.device(f"cuda:{self.local_rank}")
+        self.global_rank = int(os.environ.get("RANK", 0))
+        self.model = TestModel(self.device, self.parallel_dims, freeze_params)
+        self.map_w_from_policy_to_rollout = self.model.sharded_tensors
+        self.model.sorted_hf_key_n_rank = self.model.sorted_sharded_params
+
+    def build_optimizers(self):
+        pass
+
+    def build_lr_schedulers(self):
+        pass
+
+    def prepare_trainable_params(self):
+        self.trainable_params = self.model.get_trainable_params()
+
+    def train(self):
+        pass
+
+
+class TestPolicyWorker:
     def __init__(
         self, name, policy_world_size, rollouts_comm, freeze_params: bool = False
     ):
@@ -264,19 +295,10 @@ class TestPolicy:
             policy_parallelism_dims,
         )
         self.parallel_dims.build_mesh(device_type="cuda")
-        self.model = TestModel(self.device, self.parallel_dims, freeze_params)
-        self.parallel_mapper = ParallelTopoMapperGroup(
-            self.parallel_dims,
-            self.model.config,
-            True,
-            self.model,
-            self.model.weight_mapper,
-        )
         self.replica_name = name
         self.rollouts_comm = rollouts_comm
         self.policy_to_rollout_insts = None
-        self.map_w_from_policy_to_rollout = self.model.sharded_tensors
-        self.model.sorted_hf_key_n_rank = self.model.sorted_sharded_params
+
         self.p2r_nccl_uuids = rollouts_comm
         self.train_stream = torch.cuda.Stream()
         self.config = CosmosConfig()
@@ -285,8 +307,25 @@ class TestPolicy:
         self.config.train.train_policy.dataset.name = os.path.join(
             cur_dir, "data_fixtures", "test_dataset"
         )
+        self.trainer = TestPolicyTrainer(
+            config=self.config,
+            parallel_dims=self.parallel_dims,
+            train_stream=self.train_stream,
+        )
+        self.parallel_mapper = ParallelTopoMapperGroup(
+            self.parallel_dims,
+            self.trainer.model.config,
+            True,
+            self.trainer.model,
+            self.trainer.model.weight_mapper,
+        )
 
         self.prepare_trainable_params()
+
+    def build_runner(self, **kwargs):
+        self.trainer = TestPolicyTrainer(
+            self.config, self.parallel_dims, self.train_stream, **kwargs
+        )
 
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         pass
@@ -295,7 +334,26 @@ class TestPolicy:
         return {}
 
     def prepare_trainable_params(self):
-        self.trainable_params = self.model.get_trainable_params()
+        self.trainable_params = self.trainer.model.get_trainable_params()
+
+    def execute(self):
+        assert self.trainer is not None, "[Policy] Trainer has not been built."
+        try:
+            with torch.autocast(
+                device_type="cuda",
+                dtype=util.str2torch_dtype(self.config.train.param_dtype),
+            ):
+                self.trainer.train()
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            raise e
+        finally:
+            self.destroy_worker()
+
+    def destroy_worker(self):
+        destroy_distributed()
 
 
 class TestRollout:
@@ -521,20 +579,20 @@ async def run_policy_send_to_rollout(shm_name, shm_size, rank, trainable_param_s
         comm_idx = create_nccl_comm(
             nccl_uid, rank, POLICY_WORLD_SIZE + ROLLOUT_WORLD_SIZE
         )
-        policy = TestPolicy(
+        policy_worker = TestPolicyWorker(
             policy_name,
             POLICY_WORLD_SIZE,
             {policy_name + "_" + rollout_name: comm_idx},
             trainable_param_sync,
         )
-        policy.policy_to_rollout_insts = await generate_send_recv_insts(
-            policy.model, True, rank
+        policy_worker.policy_to_rollout_insts = await generate_send_recv_insts(
+            policy_worker.trainer.model, True, rank
         )
-        policy.execute_policy_to_rollout_unicast = types.MethodType(
-            GRPOTrainer.execute_policy_to_rollout_unicast, policy
+        policy_worker.execute_policy_to_rollout_unicast = types.MethodType(
+            RLPolicyWorker.execute_policy_to_rollout_unicast, policy_worker
         )
-        policy.execute_policy_to_rollout_unicast(command)
-        policy.train_stream.synchronize()
+        policy_worker.execute_policy_to_rollout_unicast(command)
+        policy_worker.train_stream.synchronize()
 
     finally:
         # Detach from shared memory
@@ -678,32 +736,31 @@ def policy_to_policy_sync_common(
             def shutdown(self):
                 pass
 
-        Trainer.init_comm = dummy_init_comm
+        CommMixin.init_comm = dummy_init_comm
         CommMixin.init_redis = dummy
         CommMixin.start_heartbeat = dummy
         CommMixin.replica_name = policy_name
         CommMixin.shutdown_signal = threading.Event()
-        GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = dummy
+        RLPolicyWorker.prepare_shard_infos_for_weight_sync_insts = dummy
         # Fake the dataset
 
-        policy = GRPOTrainer(cosmos_config, parallel_dims)
-        policy.model_load_from_hf()
-        policy.replica_name = policy_name
-        policy.inter_policy_nccl = FakeNCCL(comm_idx)
-        policy.mesh_ready = True
-        policy.replica_name_to_rank = replica_name_to_rank
+        policy_worker = RLPolicyWorker(cosmos_config, parallel_dims)
+        policy_worker.replica_name = policy_name
+        policy_worker.inter_policy_nccl = FakeNCCL(comm_idx)
+        policy_worker.mesh_ready = True
+        policy_worker.replica_name_to_rank = replica_name_to_rank
 
         def sample_tensor():
             sample_tensors = []
-            self_state_dict = policy.model.state_dict()
+            self_state_dict = policy_worker.trainer.model.state_dict()
             sample_tensors.append(self_state_dict[sorted(self_state_dict.keys())[0]])
             sample_tensors.append(self_state_dict[sorted(self_state_dict.keys())[-1]])
 
-            optimizer_state = policy.optimizers.state_dict()
+            optimizer_state = policy_worker.trainer.optimizers.state_dict()
             sample_tensors.append(optimizer_state[sorted(optimizer_state.keys())[0]])
             sample_tensors.append(optimizer_state[sorted(optimizer_state.keys())[-1]])
 
-            lr_sheduler_state = policy.lr_schedulers.state_dict()
+            lr_sheduler_state = policy_worker.trainer.lr_schedulers.state_dict()
             sample_tensors.append(
                 lr_sheduler_state[sorted(lr_sheduler_state.keys())[0]]
             )
@@ -724,9 +781,9 @@ def policy_to_policy_sync_common(
             sample_tensors = sample_tensor()
 
         if isinstance(command, PolicyToPolicyUnicastCommand):
-            policy.execute_policy_to_policy_unicast(command)
+            policy_worker.execute_policy_to_policy_unicast(command)
         elif isinstance(command, PolicyToPolicyBroadcastCommand):
-            policy.execute_policy_to_policy_broadcast(command)
+            policy_worker.execute_policy_to_policy_broadcast(command)
 
         if not send:
             origin_sample_tensors = sample_tensors
@@ -799,7 +856,87 @@ def run_overfitting_policy(args: argparse.Namespace):
     N_STEPS = 30
     training_loss = []
 
-    def train(self):
+    def train(
+        self,
+        global_batch,
+        total_steps: int,
+        train_step: int,
+        save_freq: int,
+        pp_last_stage: bool = False,
+    ):
+        for k, v in global_batch.items():
+            global_batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
+
+        labels = global_batch.pop("label_ids")
+
+        position_ids, input_ids, _ = self.model.get_position_ids(**global_batch)
+
+        global_batch["position_ids"] = position_ids
+        padding_mask = global_batch.get("padding_mask", None)
+
+        if self.parallel_dims.cp_enabled:
+            [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
+                [input_ids, position_ids, padding_mask],
+                self.parallel_dims.mesh["cp"],
+            )
+
+            global_batch["input_ids"] = input_ids
+            global_batch["position_ids"] = position_ids
+            if padding_mask is not None:
+                global_batch["padding_mask"] = padding_mask
+
+        assert not self.parallel_dims.pp_enabled
+
+        self.optimizers.zero_grad()
+        self.model.train()
+        logits = self.model(**global_batch)
+        loss = self.loss_fn(
+            logits,
+            labels,
+        )
+        loss.backward()
+        acc_loss = loss.detach()
+
+        """
+        Compute the global grad norm on all parameters and then apply
+        gradient clipping using the global grad norm.
+        """
+        grad_norm = None
+        if self.config.train.optm_grad_norm_clip > 0:
+            # Must pass empty list even if model_part is None,
+            # GradNorm across pp stages will fail if some rank does not join the barrier
+            all_params = [
+                p
+                for m in [model for model in self.model_parts if model is not None]
+                for p in m.parameters()
+            ]
+            grad_norm = dist_util.gradient_norm_clipping(
+                all_params,
+                self.config.train.optm_grad_norm_clip,
+                foreach=True,
+                pp_mesh=self.parallel_dims.mesh["pp"]
+                if self.parallel_dims.pp_enabled
+                else None,
+            )
+
+        self.optimizers.step()
+        self.lr_schedulers.step()
+
+        if (
+            self.parallel_dims.dp_replicate_enabled
+            or self.parallel_dims.dp_shard_enabled
+            or self.parallel_dims.cp_enabled
+        ):
+            global_avg_loss, _ = (
+                dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+            )
+        else:
+            global_avg_loss = acc_loss.item()
+
+        return global_avg_loss, grad_norm
+
+    def mail_loop(self):
         def _log_in_master(msg):
             if (
                 self.config.logging.logger
@@ -822,84 +959,17 @@ def run_overfitting_policy(args: argparse.Namespace):
                 // self.seq_len_multiple
                 * self.seq_len_multiple
             )
-        batch = self.data_packer.sft_collate_fn(
+        global_batch = self.data_packer.sft_collate_fn(
             raw_batch,
             computed_max_len=max_len,
             ignore_label_id=-100,
         )
-
-        for k, v in batch.items():
-            batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
-
-        labels = batch.pop("label_ids")
-
-        position_ids, input_ids, _ = self.model.get_position_ids(**batch)
-
-        batch["position_ids"] = position_ids
-        padding_mask = batch.get("padding_mask", None)
-
-        if self.parallel_dims.cp_enabled:
-            [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
-                [input_ids, position_ids, padding_mask],
-                self.parallel_dims.mesh["cp"],
-            )
-
-            batch["input_ids"] = input_ids
-            batch["position_ids"] = position_ids
-            if padding_mask is not None:
-                batch["padding_mask"] = padding_mask
-
-        assert not self.parallel_dims.pp_enabled
-
         for step in range(N_STEPS):
             _log_in_master(f"Training step {step + 1}/{N_STEPS}")
 
-            self.optimizers.zero_grad()
-            self.model.train()
-            logits = self.model(**batch)
-            loss = self.loss_fn(
-                logits,
-                labels,
+            global_avg_loss, grad_norm = self.trainer.train(
+                self, global_batch, N_STEPS, step, 0, False
             )
-            loss.backward()
-            acc_loss = loss.detach()
-
-            """
-            Compute the global grad norm on all parameters and then apply
-            gradient clipping using the global grad norm.
-            """
-            grad_norm = None
-            if self.config.train.optm_grad_norm_clip > 0:
-                # Must pass empty list even if model_part is None,
-                # GradNorm across pp stages will fail if some rank does not join the barrier
-                all_params = [
-                    p
-                    for m in [model for model in self.model_parts if model is not None]
-                    for p in m.parameters()
-                ]
-                grad_norm = dist_util.gradient_norm_clipping(
-                    all_params,
-                    self.config.train.optm_grad_norm_clip,
-                    foreach=True,
-                    pp_mesh=self.parallel_dims.mesh["pp"]
-                    if self.parallel_dims.pp_enabled
-                    else None,
-                )
-
-            self.optimizers.step()
-            self.lr_schedulers.step()
-
-            if (
-                self.parallel_dims.dp_replicate_enabled
-                or self.parallel_dims.dp_shard_enabled
-                or self.parallel_dims.cp_enabled
-            ):
-                global_avg_loss, _ = (
-                    dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
-                    dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
-                )
-            else:
-                global_avg_loss = acc_loss.item()
 
             _log_in_master(
                 f"Step: {step}/{N_STEPS}, Loss: {global_avg_loss:.5f}, Grad norm: {grad_norm:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}"
@@ -909,6 +979,7 @@ def run_overfitting_policy(args: argparse.Namespace):
         self.unregister_from_controller()
 
     SFTTrainer.train = train
+    SFTPolicyWorker.mail_loop = mail_loop
 
     assert args is not None
     policy_main(args=args)
@@ -925,7 +996,11 @@ def run_dummy_policy(args: argparse.Namespace):
     from cosmos_rl.policy.train import main as policy_main
 
     def dummy_train_grpo(
-        self, current_step: int, total_steps: int, remain_samples_num: int
+        self,
+        rollouts: List[Rollout],
+        current_step: int,
+        total_steps: int,
+        remain_samples_num: int,
     ):
         return {}
 
@@ -946,8 +1021,8 @@ def run_dummy_policy(args: argparse.Namespace):
             return dummy_execute_policy_to_rollout_unicast
         return cls.policy_command_handler_registry.get_command_handler(command_type)
 
-    GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = dummy
-    GRPOTrainer.get_policy_command_handler = get_policy_command_handler
+    RLPolicyWorker.prepare_shard_infos_for_weight_sync_insts = dummy
+    RLPolicyWorker.get_policy_command_handler = get_policy_command_handler
     SFTTrainer.train = dummy
     assert args is not None
     policy_main(args=args)
@@ -1310,16 +1385,16 @@ async def parallel_map_check():
 
 
 def run_sft_for_sequence_packing(fsdp, tp, cp):
-    def train_test(self, packing_seq):
+    def train_test(sft_worker, packing_seq):
         train_dataset, _ = construct_dataset(
             config,
-            data_packer=self.data_packer,
+            data_packer=sft_worker.data_packer,
             user_provided_dataset=None,
         )
         train_sampler = DistributedSampler(
             train_dataset,
-            num_replicas=self.dp_world_size,
-            rank=self.dp_rank,
+            num_replicas=sft_worker.dp_world_size,
+            rank=sft_worker.dp_rank,
             shuffle=False,
             drop_last=False,
         )
@@ -1336,45 +1411,47 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                 drop_last=False,
             )
 
-        self.train_data_loader = get_train_data_loader(train_sampler)
+        sft_worker.train_data_loader = get_train_data_loader(train_sampler)
         losses = []
-        for global_batch in self.train_data_loader:
-            acc_loss = torch.zeros(1, device=self.device)
-            self.optimizers.zero_grad()
+        for global_batch in sft_worker.train_data_loader:
+            acc_loss = torch.zeros(1, device=sft_worker.device)
+            sft_worker.trainer.optimizers.zero_grad()
             global_batch_size = len(global_batch)
             # split global_batch into mini_batches
             mini_batch_begin_idxs = list(
                 range(
                     0,
                     global_batch_size,
-                    self.config.train.train_policy.mini_batch,
+                    sft_worker.config.train.train_policy.mini_batch,
                 )
             )
             for i in mini_batch_begin_idxs:
                 raw_batch = global_batch[
-                    i : i + self.config.train.train_policy.mini_batch
+                    i : i + sft_worker.config.train.train_policy.mini_batch
                 ]
                 max_len = min(
-                    self.config.policy.model_max_length,
-                    self.data_packer.sft_compute_max_len(raw_batch),
+                    sft_worker.config.policy.model_max_length,
+                    sft_worker.data_packer.sft_compute_max_len(raw_batch),
                 )
-                if self.seq_len_multiple > 1:
+                if sft_worker.seq_len_multiple > 1:
                     max_len = (
-                        (max_len + self.seq_len_multiple - 1)
-                        // self.seq_len_multiple
-                        * self.seq_len_multiple
+                        (max_len + sft_worker.seq_len_multiple - 1)
+                        // sft_worker.seq_len_multiple
+                        * sft_worker.seq_len_multiple
                     )
-                batch = self.data_packer.sft_collate_fn(
+                batch = sft_worker.data_packer.sft_collate_fn(
                     raw_batch,
                     computed_max_len=max_len,
                     ignore_label_id=-100,
                 )
-                self.model.train()
+                sft_worker.trainer.model.train()
                 for k, v in batch.items():
-                    batch[k] = v.to(self.device) if isinstance(v, torch.Tensor) else v
+                    batch[k] = (
+                        v.to(sft_worker.device) if isinstance(v, torch.Tensor) else v
+                    )
                 labels = batch.pop("label_ids")
-                position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
-                    **batch
+                position_ids, input_ids, pos_seq_dim = (
+                    sft_worker.trainer.model.get_position_ids(**batch)
                 )
                 batch["position_ids"] = position_ids
                 padding_mask = batch.get("padding_mask", None)
@@ -1382,10 +1459,10 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                     # Prepare for the sequence packing information.
                     packed_args = pack_sequences_info_collect(
                         batch["input_ids"],
-                        pad_token_id=self.data_packer.pad_token_id,
+                        pad_token_id=sft_worker.data_packer.pad_token_id,
                         label_ids=labels,
                         ignore_label_id=-100,
-                        seq_len_multiple=self.seq_len_multiple,
+                        seq_len_multiple=sft_worker.seq_len_multiple,
                     )
                     batch.update(packed_args)
                     labels = pack_sequences_for_labels(labels, batch["valid_input_len"])
@@ -1394,10 +1471,10 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                     )
                     batch.update(packed_args)
 
-                if self.parallel_dims.cp_enabled and not packing_seq:
+                if sft_worker.parallel_dims.cp_enabled and not packing_seq:
                     [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
                         [input_ids, position_ids, padding_mask],
-                        self.parallel_dims.mesh["cp"],
+                        sft_worker.parallel_dims.mesh["cp"],
                         seq_dims=[1, pos_seq_dim, 1],
                     )
                     batch["input_ids"] = input_ids
@@ -1405,12 +1482,12 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                     if padding_mask is not None:
                         batch["padding_mask"] = padding_mask
 
-                if self.parallel_dims.cp_enabled and packing_seq:
+                if sft_worker.parallel_dims.cp_enabled and packing_seq:
                     # Slice for cp after embedding generation and sequence packing in the model forward later.
-                    batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
-                logits = self.model(**batch)
+                    batch["cp_mesh"] = sft_worker.parallel_dims.mesh["cp"]
+                logits = sft_worker.trainer.model(**batch)
 
-                loss = self.loss_fn(
+                loss = sft_worker.trainer.loss_fn(
                     logits,
                     labels,
                     output_packing_mask=batch.get("input_packing_mask", None),
@@ -1421,36 +1498,48 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                 acc_loss += loss.detach()
                 all_params = [
                     p
-                    for m in [model for model in self.model_parts if model is not None]
+                    for m in [
+                        model
+                        for model in sft_worker.trainer.model_parts
+                        if model is not None
+                    ]
                     for p in m.parameters()
                 ]
                 dist_util.gradient_norm_clipping(
                     all_params,
-                    self.config.train.optm_grad_norm_clip,
+                    sft_worker.config.train.optm_grad_norm_clip,
                     foreach=True,
-                    pp_mesh=self.parallel_dims.mesh["pp"]
-                    if self.parallel_dims.pp_enabled
+                    pp_mesh=sft_worker.parallel_dims.mesh["pp"]
+                    if sft_worker.parallel_dims.pp_enabled
                     else None,
-                    return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+                    return_norm_only=(
+                        sft_worker.config.train.optm_grad_norm_clip <= 0.0
+                    ),
                 )
-                self.optimizers.step()
-                self.lr_schedulers.step()
-                self.train_step += 1
+                sft_worker.trainer.optimizers.step()
+                sft_worker.trainer.lr_schedulers.step()
+                sft_worker.train_step += 1
                 if (
-                    self.parallel_dims.dp_replicate_enabled
-                    or self.parallel_dims.dp_shard_enabled
-                    or self.parallel_dims.cp_enabled
+                    sft_worker.parallel_dims.dp_replicate_enabled
+                    or sft_worker.parallel_dims.dp_shard_enabled
+                    or sft_worker.parallel_dims.cp_enabled
                 ):
                     global_avg_loss, global_max_loss = (  # noqa: F841
-                        dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
-                        dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                        dist_util.dist_mean(
+                            acc_loss, sft_worker.parallel_dims.mesh["dp_cp"]
+                        ),
+                        dist_util.dist_max(
+                            acc_loss, sft_worker.parallel_dims.mesh["dp_cp"]
+                        ),
                     )
                 else:
                     global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
 
-                if util.is_master_rank(self.parallel_dims, self.global_rank):
+                if util.is_master_rank(
+                    sft_worker.parallel_dims, sft_worker.global_rank
+                ):
                     losses.append(global_avg_loss)
-                if self.train_step >= 8:
+                if sft_worker.train_step >= 8:
                     return losses
         return losses
 
@@ -1481,11 +1570,10 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
         pass
 
     CommMixin.init_comm = dummy
-    trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
-    non_packing_losses = train_test(trainer, False)
-    trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
-    packing_losses = train_test(trainer, True)
-    if util.is_master_rank(trainer.parallel_dims, trainer.global_rank):
+    sft_worker = SFTPolicyWorker(config=config, parallel_dims=parallel_dims)
+    non_packing_losses = train_test(sft_worker, False)
+    packing_losses = train_test(sft_worker, True)
+    if util.is_master_rank(sft_worker.parallel_dims, sft_worker.global_rank):
         assert len(non_packing_losses) == 8
         assert len(packing_losses) == 8
         logger.info(f"[Test] non_packing_losses: {non_packing_losses}")
@@ -1525,8 +1613,8 @@ def run_sft_validation():
         pass
 
     CommMixin.init_comm = dummy
-    trainer = SFTTrainer(config=config, parallel_dims=parallel_dims)
-    assert len(trainer.val_data_loader) == 29195
+    sft_worker = SFTPolicyWorker(config=config, parallel_dims=parallel_dims)
+    assert len(sft_worker.val_data_loader) == 29195
 
     class TestDatasetSFTVal(TestDataset):
         def setup(
@@ -1546,14 +1634,14 @@ def run_sft_validation():
         def __len__(self):
             return 1
 
-    trainer = SFTTrainer(
+    sft_worker = SFTPolicyWorker(
         config=config,
         parallel_dims=parallel_dims,
         val_dataset=TestDatasetSFTVal,
         val_data_packer=DecoderOnlyLLMDataPacker(),
     )
-    assert len(trainer.val_data_loader) == 1
-    trainer.validate()
+    assert len(sft_worker.val_data_loader) == 1
+    sft_worker.validate(is_last_step=True)
 
 
 def run_reward_check():
@@ -1763,7 +1851,7 @@ def run_sft_custom_sampler():
         shuffle=False,
         drop_last=False,
     )
-    trainer = SFTTrainer(
+    sft_worker = SFTPolicyWorker(
         config=config,
         parallel_dims=parallel_dims,
         dataset=dataset,
@@ -1773,17 +1861,17 @@ def run_sft_custom_sampler():
         val_sampler=test_sampler,
     )
     cnt = 0
-    for it in trainer.train_data_loader:
+    for it in sft_worker.train_data_loader:
         assert len(it) == 8
         cnt += 1
     assert cnt == 1
     cnt = 0
-    for it in trainer.val_data_loader:
+    for it in sft_worker.val_data_loader:
         assert len(it) == 1
         cnt += 1
     assert cnt == 8
 
-    trainer = SFTTrainer(
+    sft_worker = SFTPolicyWorker(
         config=config,
         parallel_dims=parallel_dims,
         dataset=dataset,
@@ -1793,12 +1881,12 @@ def run_sft_custom_sampler():
         val_sampler=TestSampler,
     )
     cnt = 0
-    for it in trainer.train_data_loader:
+    for it in sft_worker.train_data_loader:
         assert len(it) == 8
         cnt += 1
     assert cnt == 1
     cnt = 0
-    for it in trainer.val_data_loader:
+    for it in sft_worker.val_data_loader:
         assert len(it) == 1
         cnt += 1
     assert cnt == 8
@@ -1808,7 +1896,7 @@ def run_sft_custom_sampler():
         batch_size=config.train.train_batch_per_replica,
         drop_last=False,
     )
-    trainer = SFTTrainer(
+    sft_worker = SFTPolicyWorker(
         config=config,
         parallel_dims=parallel_dims,
         dataset=dataset,
@@ -1818,17 +1906,17 @@ def run_sft_custom_sampler():
         val_batch_sampler=batch_sampler,
     )
     cnt = 0
-    for it in trainer.train_data_loader:
+    for it in sft_worker.train_data_loader:
         assert len(it) == 8
         cnt += 1
     assert cnt == 1
     cnt = 0
-    for it in trainer.val_data_loader:
+    for it in sft_worker.val_data_loader:
         assert len(it) == 8
         cnt += 1
     assert cnt == 1
 
-    trainer = SFTTrainer(
+    sft_worker = SFTPolicyWorker(
         config=config,
         parallel_dims=parallel_dims,
         dataset=dataset,
@@ -1840,17 +1928,17 @@ def run_sft_custom_sampler():
         val_batch_sampler=BatchSampler,
     )
     cnt = 0
-    for it in trainer.train_data_loader:
+    for it in sft_worker.train_data_loader:
         assert len(it) == 8
         cnt += 1
     assert cnt == 1
     cnt = 0
-    for it in trainer.val_data_loader:
+    for it in sft_worker.val_data_loader:
         assert len(it) == 1
         cnt += 1
     assert cnt == 8
 
-    trainer = SFTTrainer(
+    sft_worker = SFTPolicyWorker(
         config=config,
         parallel_dims=parallel_dims,
         dataset=dataset,
@@ -1862,12 +1950,12 @@ def run_sft_custom_sampler():
         val_batch_sampler=BatchSampler,
     )
     cnt = 0
-    for it in trainer.train_data_loader:
+    for it in sft_worker.train_data_loader:
         assert len(it) == 8
         cnt += 1
     assert cnt == 1
     cnt = 0
-    for it in trainer.val_data_loader:
+    for it in sft_worker.val_data_loader:
         assert len(it) == 1
         cnt += 1
     assert cnt == 8
@@ -1902,29 +1990,28 @@ def run_gspo_test():
 
     CommMixin.init_comm = dummy
     CommMixin.init_redis = lambda self: None
-    GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = lambda self: None
+    RLPolicyWorker.prepare_shard_infos_for_weight_sync_insts = lambda self: None
 
-    trainer = GRPOTrainer(config=config, parallel_dims=parallel_dims)
-    trainer.model_load_from_hf()
-    trainer.replica_batch_for_this_step = 8
-    trainer.inter_policy_nccl.is_single_peer.set()
-    trainer.inter_policy_nccl.is_comm_ready.set()
+    rl_worker = RLPolicyWorker(config=config, parallel_dims=parallel_dims)
+    rl_worker.replica_batch_for_this_step = 8
+    rl_worker.inter_policy_nccl.is_single_peer.set()
+    rl_worker.inter_policy_nccl.is_comm_ready.set()
     total_steps = 8
     dataset = TestDataset(config)
     dataset.setup(config=config)
     length = []
-    for i in range(total_steps * trainer.replica_batch_for_this_step):
+    for i in range(total_steps * rl_worker.replica_batch_for_this_step):
         index = i % len(dataset)
         prompt = dataset[index][config.train.train_policy.prompt_column_name]
         completion = dataset[index][config.train.train_policy.response_column_name]
-        completion_ids = trainer.tokenizer(
+        completion_ids = rl_worker.trainer.tokenizer(
             completion, add_special_tokens=False
         ).input_ids
         if (
             i % 2 == 0
-            and trainer.global_rank // 2 == 0
+            and rl_worker.global_rank // 2 == 0
             or i % 2 == 1
-            and trainer.global_rank // 2 == 1
+            and rl_worker.global_rank // 2 == 1
         ):
             length.append(len(completion_ids))
         rollout = Rollout(
@@ -1933,10 +2020,10 @@ def run_gspo_test():
             advantage=0.05 * (i % 20),
             prompt_idx=index,
         )
-        trainer.data_queue.put(rollout)
+        rl_worker.data_queue.put(rollout)
 
-    def hooked_execute_all_reduce(self):
-        ret = GRPOTrainer.execute_all_reduce(self)
+    def hooked_execute_all_reduce(self, inter_policy_nccl):
+        ret = GRPOTrainer.all_reduce_states(self, inter_policy_nccl)
         if not hasattr(self, "test_hooked_cnt"):
             self.test_hooked_cnt = 0
         for old in self.old_per_token_logps:
@@ -1947,18 +2034,24 @@ def run_gspo_test():
             self.test_hooked_cnt += 2
         return ret
 
-    trainer.execute_all_reduce = types.MethodType(hooked_execute_all_reduce, trainer)
+    rl_worker.trainer.all_reduce_states = types.MethodType(
+        hooked_execute_all_reduce, rl_worker.trainer
+    )
+    rl_worker.total_steps = total_steps
+
     for i in range(total_steps):
-        report = trainer.train(
+        rollouts = rl_worker.dispatch_rollouts()
+        report = rl_worker.trainer.train(
+            rollouts=rollouts,
             current_step=i,
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
         )
-        if trainer.global_rank == 0:
+        if rl_worker.global_rank == 0:
             logger.info(f"Step {i} report {report['train/loss_avg']}")
             assert report["train/loss_avg"] < -0.1 and report["train/loss_avg"] > -0.8
-    trainer.handle_shutdown()
+    rl_worker.handle_shutdown()
     destroy_distributed()
 
 
@@ -1992,37 +2085,38 @@ def run_reference_reset_test():
 
     CommMixin.init_comm = dummy
     CommMixin.init_redis = lambda self: None
-    GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = lambda self: None
+    RLPolicyWorker.prepare_shard_infos_for_weight_sync_insts = lambda self: None
 
-    trainer = GRPOTrainer(config=config, parallel_dims=parallel_dims)
-    trainer.model_load_from_hf()
-    state_dict = trainer.model.state_dict()
+    rl_worker = RLPolicyWorker(config=config, parallel_dims=parallel_dims)
+    state_dict = rl_worker.trainer.model.state_dict()
     for key, value in state_dict.items():
-        trainer.reference_state_dict[key] = value.detach().cpu()
+        rl_worker.trainer.reference_state_dict[key] = value.detach().cpu()
 
-    trainer.replica_batch_for_this_step = 8
-    trainer.inter_policy_nccl.is_single_peer.set()
-    trainer.inter_policy_nccl.is_comm_ready.set()
+    rl_worker.replica_batch_for_this_step = 8
+    rl_worker.inter_policy_nccl.is_single_peer.set()
+    rl_worker.inter_policy_nccl.is_comm_ready.set()
     total_steps = 8
     dataset = TestDataset(config)
     dataset.setup(config=config)
-    for i in range(total_steps * trainer.replica_batch_for_this_step):
+    for i in range(total_steps * rl_worker.replica_batch_for_this_step):
         index = i % len(dataset)
         prompt = dataset[index][config.train.train_policy.prompt_column_name]
         completion = dataset[index][config.train.train_policy.response_column_name]
         rollout = Rollout(
             prompt=prompt, completion=completion, advantage=1.0, prompt_idx=index
         )
-        trainer.data_queue.put(rollout)
+        rl_worker.data_queue.put(rollout)
 
     for i in range(total_steps):
-        report = trainer.train(
+        rollouts = rl_worker.dispatch_rollouts()
+        report = rl_worker.trainer.train(
+            rollouts=rollouts,
             current_step=i + 1,
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
         )
-        if trainer.global_rank == 0:
+        if rl_worker.global_rank == 0:
             logger.info(
                 f"Step {i} report {report['train/kl_loss_avg']} {report['train/kl_loss_max']}"
             )
@@ -2032,7 +2126,7 @@ def run_reference_reset_test():
             else:
                 assert report["train/kl_loss_avg"] > 0.0
                 assert report["train/kl_loss_max"] > 0.0
-    trainer.handle_shutdown()
+    rl_worker.handle_shutdown()
     destroy_distributed()
 
 
@@ -2063,21 +2157,20 @@ def run_dynamic_batchsize_test(
 
     CommMixin.init_comm = dummy
     CommMixin.init_redis = lambda self: None
-    GRPOTrainer.prepare_shard_infos_for_weight_sync_insts = lambda self: None
+    RLPolicyWorker.prepare_shard_infos_for_weight_sync_insts = lambda self: None
 
-    trainer = GRPOTrainer(config=config, parallel_dims=parallel_dims)
-    trainer.model_load_from_hf()
-    state_dict = trainer.model.state_dict()
+    rl_worker = RLPolicyWorker(config=config, parallel_dims=parallel_dims)
+    state_dict = rl_worker.trainer.model.state_dict()
     for key, value in state_dict.items():
-        trainer.reference_state_dict[key] = value.detach().cpu()
+        rl_worker.trainer.reference_state_dict[key] = value.detach().cpu()
 
-    trainer.replica_batch_for_this_step = 8
-    trainer.inter_policy_nccl.is_single_peer.set()
-    trainer.inter_policy_nccl.is_comm_ready.set()
+    rl_worker.replica_batch_for_this_step = 8
+    rl_worker.inter_policy_nccl.is_single_peer.set()
+    rl_worker.inter_policy_nccl.is_comm_ready.set()
     total_steps = 8
     dataset = TestDataset(config)
     dataset.setup(config=config)
-    for i in range(total_steps * trainer.replica_batch_for_this_step):
+    for i in range(total_steps * rl_worker.replica_batch_for_this_step):
         index = i % len(dataset)
         prompt = dataset[index][config.train.train_policy.prompt_column_name]
         completion = dataset[i % len(dataset)][
@@ -2086,10 +2179,10 @@ def run_dynamic_batchsize_test(
         rollout = Rollout(
             prompt=prompt, completion=completion, advantage=1.0, prompt_idx=index
         )
-        trainer.data_queue.put(rollout)
+        rl_worker.data_queue.put(rollout)
 
-    def hooked_execute_all_reduce(self):
-        ret = GRPOTrainer.execute_all_reduce(self)
+    def hooked_execute_all_reduce(self, inter_policy_nccl):
+        ret = GRPOTrainer.all_reduce_states(self, inter_policy_nccl)
         self.test_hooked_all_reduce_cnt += 1
         return ret
 
@@ -2098,72 +2191,82 @@ def run_dynamic_batchsize_test(
         self.test_hooked_compute_logprobs_cnt += 1
         return ret
 
-    trainer.execute_all_reduce = types.MethodType(hooked_execute_all_reduce, trainer)
-    trainer.compute_logprobs = types.MethodType(hooked_compute_logprobs, trainer)
-    trainer.test_hooked_compute_logprobs_cnt = 0
-    trainer.test_hooked_all_reduce_cnt = 0
+    rl_worker.trainer.all_reduce_states = types.MethodType(
+        hooked_execute_all_reduce, rl_worker.trainer
+    )
+    rl_worker.trainer.compute_logprobs = types.MethodType(
+        hooked_compute_logprobs, rl_worker.trainer
+    )
+    rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
+    rl_worker.trainer.test_hooked_all_reduce_cnt = 0
     for i in range(total_steps // 4):
-        trainer.train(
+        rl_worker.trainer.train(
+            rollouts=rl_worker.dispatch_rollouts(),
             current_step=i + 1,
             total_steps=total_steps,
             remain_samples_num=-1,
             do_save_checkpoint=False,
         )
-    assert trainer.test_hooked_compute_logprobs_cnt == 2
-    assert trainer.test_hooked_all_reduce_cnt == 2
-    trainer.batch_size_per_optimize = 4
-    trainer.mini_batch = 1
-    trainer.test_hooked_compute_logprobs_cnt = 0
-    trainer.test_hooked_all_reduce_cnt = 0
-    for i in range(total_steps // 4, total_steps // 2):
-        trainer.train(
-            current_step=i + 1,
-            total_steps=total_steps,
-            remain_samples_num=-1,
-            do_save_checkpoint=False,
-        )
-    assert trainer.test_hooked_compute_logprobs_cnt == 8
-    assert trainer.test_hooked_all_reduce_cnt == 2
-    trainer.batch_size_per_optimize = 2
-    trainer.test_hooked_compute_logprobs_cnt = 0
-    trainer.test_hooked_all_reduce_cnt = 0
-    for i in range(total_steps // 2, total_steps * 3 // 4):
-        trainer.train(
-            current_step=i + 1,
-            total_steps=total_steps,
-            remain_samples_num=-1,
-            do_save_checkpoint=False,
-        )
-    assert trainer.test_hooked_compute_logprobs_cnt == 16
-    assert trainer.test_hooked_all_reduce_cnt == 4
-    trainer.batch_size_per_optimize = 4
-    trainer.config.train.train_policy.max_token_len_per_mini_batch = 4096
-    trainer.test_hooked_compute_logprobs_cnt = 0
-    trainer.test_hooked_all_reduce_cnt = 0
-    for i in range(total_steps * 3 // 4, total_steps * 7 // 8):
-        trainer.train(
-            current_step=i + 1,
-            total_steps=total_steps,
-            remain_samples_num=-1,
-            do_save_checkpoint=False,
-        )
-    assert trainer.test_hooked_all_reduce_cnt == 1
-    assert trainer.test_hooked_compute_logprobs_cnt == 1
-    trainer.batch_size_per_optimize = 4
-    trainer.config.train.train_policy.max_token_len_per_mini_batch = 2048
-    trainer.test_hooked_compute_logprobs_cnt = 0
-    trainer.test_hooked_all_reduce_cnt = 0
-    for i in range(total_steps * 7 // 8, total_steps):
-        trainer.train(
-            current_step=i + 1,
-            total_steps=total_steps,
-            remain_samples_num=-1,
-            do_save_checkpoint=False,
-        )
-    assert trainer.test_hooked_all_reduce_cnt == 1
-    assert trainer.test_hooked_compute_logprobs_cnt == 2
 
-    trainer.handle_shutdown()
+    assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 2
+    assert rl_worker.trainer.test_hooked_all_reduce_cnt == 2
+    rl_worker.trainer.batch_size_per_optimize = 4
+    rl_worker.trainer.mini_batch = 1
+    rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
+    rl_worker.trainer.test_hooked_all_reduce_cnt = 0
+    for i in range(total_steps // 4, total_steps // 2):
+        rl_worker.trainer.train(
+            rollouts=rl_worker.dispatch_rollouts(),
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+    assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 8
+    assert rl_worker.trainer.test_hooked_all_reduce_cnt == 2
+    rl_worker.trainer.batch_size_per_optimize = 2
+    rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
+    rl_worker.trainer.test_hooked_all_reduce_cnt = 0
+    for i in range(total_steps // 2, total_steps * 3 // 4):
+        rl_worker.trainer.train(
+            rollouts=rl_worker.dispatch_rollouts(),
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+    assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 16
+    assert rl_worker.trainer.test_hooked_all_reduce_cnt == 4
+    rl_worker.trainer.batch_size_per_optimize = 4
+    rl_worker.trainer.config.train.train_policy.max_token_len_per_mini_batch = 4096
+    rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
+    rl_worker.trainer.test_hooked_all_reduce_cnt = 0
+    for i in range(total_steps * 3 // 4, total_steps * 7 // 8):
+        rl_worker.trainer.train(
+            rollouts=rl_worker.dispatch_rollouts(),
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+    assert rl_worker.trainer.test_hooked_all_reduce_cnt == 1
+    assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 1
+    rl_worker.trainer.batch_size_per_optimize = 4
+    rl_worker.trainer.config.train.train_policy.max_token_len_per_mini_batch = 2048
+    rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
+    rl_worker.trainer.test_hooked_all_reduce_cnt = 0
+    for i in range(total_steps * 7 // 8, total_steps):
+        rl_worker.trainer.train(
+            rollouts=rl_worker.dispatch_rollouts(),
+            current_step=i + 1,
+            total_steps=total_steps,
+            remain_samples_num=-1,
+            do_save_checkpoint=False,
+        )
+    assert rl_worker.trainer.test_hooked_all_reduce_cnt == 1
+    assert rl_worker.trainer.test_hooked_compute_logprobs_cnt == 2
+
+    rl_worker.handle_shutdown()
     destroy_distributed()
 
 
@@ -2272,15 +2375,13 @@ def run_sft_ddp_load_check():
         self.sync_cnt += 1
         return ret
 
-    Trainer.original_sync_all_states = Trainer.sync_all_states
-    Trainer.sync_all_states = dummy_sync_all_states
-    trainer = SFTTrainer(
-        config=config,
-        parallel_dims=parallel_dims,
-        dataset=TestDataset,
+    LLMTrainer.original_sync_all_states = LLMTrainer.sync_all_states
+    LLMTrainer.sync_all_states = dummy_sync_all_states
+    sft_worker = SFTPolicyWorker(
+        config=config, parallel_dims=parallel_dims, dataset=TestDataset
     )
 
-    assert trainer.sync_cnt == 1
+    assert sft_worker.sync_cnt == 1
     destroy_distributed()
 
 
