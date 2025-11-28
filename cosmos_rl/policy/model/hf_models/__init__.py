@@ -356,140 +356,6 @@ class HFModel(BaseModel):
         """
         assert False, "Pipeline split is not supported for HFModel"
 
-    def reset_named_buffers(self, hf_model=None, model_name_or_path=None):
-        reset_success = False
-        if hf_model is not None:
-            # copy named buffers from hf_model to self.model
-            hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
-            for name, cosmos_hf_buffer in self.model.named_buffers():
-                assert name in hf_named_buffers, f"Buffer {name} not found in hf model"
-                hf_buf = hf_named_buffers[name].to(
-                    device=cosmos_hf_buffer.device, dtype=cosmos_hf_buffer.dtype
-                )
-                cosmos_hf_buffer.data.copy_(hf_buf.data)
-            reset_success = True
-        else:
-            assert (
-                model_name_or_path is not None
-            ), "model_name_or_path is required for resetting named buffers"
-            config = AutoConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=True
-            )
-
-            # Load only first 2 layers instead of full model to extract named buffers efficiently.
-            # Most buffers (e.g., inv_freq) are initialized in the model constructor, making this approach sufficient.
-            num_lm_layers_to_load = 2
-            if self.is_vlm:
-                if hasattr(config, "text_config") and hasattr(
-                    config.text_config, "num_hidden_layers"
-                ):
-                    config.text_config.num_hidden_layers = num_lm_layers_to_load
-                    config.text_config.max_position_embeddings = (
-                        self.hf_config.max_position_embeddings
-                    )
-                elif hasattr(config, "llm_config") and hasattr(
-                    config.llm_config, "num_hidden_layers"
-                ):
-                    config.llm_config.num_hidden_layers = num_lm_layers_to_load
-                    config.llm_config.max_position_embeddings = (
-                        self.hf_config.max_position_embeddings
-                    )
-                else:
-                    raise ValueError(f"Can not get text config from {config}")
-            else:
-                if hasattr(config, "num_hidden_layers"):
-                    config.num_hidden_layers = num_lm_layers_to_load
-                    config.max_position_embeddings = (
-                        self.hf_config.max_position_embeddings
-                    )
-                else:
-                    raise ValueError(f"Can not get num of llm layers from {config}")
-            # Attempt to load partial model to extract all named buffers
-            try:
-                if self.model_class in [AutoModelForCausalLM, AutoModel]:
-                    hf_model = self.model_class.from_config(config)
-                else:
-                    hf_model = self.model_class._from_config(config)
-                hf_named_buffers = [name for name, _ in hf_model.named_buffers()]
-                self_named_buffers = [name for name, _ in self.model.named_buffers()]
-                num_equal = len(hf_named_buffers) == len(self_named_buffers)
-                if not num_equal:
-                    # Check if the buffers are registered in the layers
-                    is_buffer_registered_in_layers = any(
-                        "layers." in name for name in hf_named_buffers
-                    )
-                    if (self.n_lm_layers - num_lm_layers_to_load) == (
-                        len(self_named_buffers) - len(hf_named_buffers)
-                    ) and is_buffer_registered_in_layers:
-                        hf_buffer_in_layers = [
-                            buffer
-                            for name, buffer in hf_model.named_buffers()
-                            if "layers." in name
-                        ]
-                        first_buffer = hf_buffer_in_layers[0]
-                        all_same = True
-                        # Verify that all layer buffers contain identical values
-                        for buffer in hf_buffer_in_layers[1:]:
-                            if not torch.equal(
-                                buffer,
-                                first_buffer.to(
-                                    device=buffer.device, dtype=buffer.dtype
-                                ),
-                            ):
-                                all_same = False
-                                break
-                        # If all buffers in the layers are the same, we can repeat the first layer's
-                        # buffer to the rest of the layers
-                        if all_same:
-                            cosmos_buffer_in_layers = [
-                                buffer
-                                for name, buffer in self.model.named_buffers()
-                                if "layers." in name
-                            ]
-                            hf_first_layer_buffer = first_buffer.to(
-                                device=cosmos_buffer_in_layers[0].device,
-                                dtype=cosmos_buffer_in_layers[0].dtype,
-                            )
-                            for buffer in cosmos_buffer_in_layers:
-                                buffer.data.copy_(hf_first_layer_buffer.data)
-
-                            hf_named_buffers_not_in_layers = {
-                                k: v
-                                for k, v in hf_model.named_buffers()
-                                if "layers." not in k
-                            }
-                            for name, cosmos_hf_buffer in self.model.named_buffers():
-                                if "layers." in name:
-                                    continue
-                                assert (
-                                    name in hf_named_buffers_not_in_layers
-                                ), f"Buffer {name} not found in hf model"
-                                hf_buf = hf_named_buffers_not_in_layers[name].to(
-                                    device=cosmos_hf_buffer.device,
-                                    dtype=cosmos_hf_buffer.dtype,
-                                )
-                                cosmos_hf_buffer.data.copy_(hf_buf.data)
-
-                            return True
-                        else:
-                            logger.warning(
-                                f"Failed to reset named buffers from {model_name_or_path}: buffer names mismatch {self_named_buffers} != {hf_named_buffers}"
-                            )
-                    else:
-                        logger.warning(
-                            f"Failed to reset named buffers from {model_name_or_path}: num of buffers mismatch {len(self_named_buffers)} != {len(hf_named_buffers)}"
-                        )
-                        return False
-
-                reset_success = self.reset_named_buffers(hf_model=hf_model)
-            except Exception as e:
-                logger.error(
-                    f"Failed to reset named buffers from {model_name_or_path}: {e}"
-                )
-                reset_success = False
-
-        return reset_success
-
     def load_hf_weights_from_safetensors(
         self,
         model_name_or_path: str,
@@ -598,22 +464,6 @@ class HFModel(BaseModel):
                 with torch.no_grad():
                     local_view.data.copy_(shared_weight.to(device))
 
-    def reset_named_buffers_from_pretrained(
-        self, model_name_or_path: str, revision: Optional[str] = None
-    ):
-        dtype = self.hf_config.torch_dtype
-        kwargs = {
-            "config": self.hf_config,
-            "revision": revision,
-            "trust_remote_code": True,
-        }
-        hf_model = self.model_class.from_pretrained(
-            model_name_or_path,
-            **kwargs,
-        ).to(device="cpu", dtype=dtype)
-
-        self.reset_named_buffers(hf_model=hf_model)
-
     def load_hf_weights(
         self,
         model_name_or_path: str,
@@ -646,10 +496,7 @@ class HFModel(BaseModel):
         # Use from_pretrained loading in two scenarios:
         # 1. Model requires dequantization (e.g., gpt-oss)
         # 2. Named buffer reinitialization failed
-        load_hf_weights_from_pretrained = (
-            self.need_dequantization
-            or not self.reset_named_buffers(model_name_or_path=model_name_or_path)
-        )
+        load_hf_weights_from_pretrained = self.need_dequantization
 
         if not load_hf_weights_from_pretrained:
             return self.load_hf_weights_from_safetensors(
@@ -667,8 +514,6 @@ class HFModel(BaseModel):
             model_name_or_path,
             **kwargs,
         ).to(device="cpu", dtype=dtype)
-
-        self.reset_named_buffers(hf_model=hf_model)
 
         hf_state_dict = hf_model.state_dict()
 
