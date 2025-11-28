@@ -63,6 +63,8 @@ class DummyReplica(Replica):
             role (Role): The role of the replica (POLICY or ROLLOUT).
         """
         super().__init__(name=name, role=role, atoms=[])
+        # In colocated mode, mesh_rank is always 0
+        self.status.mesh_rank = 0
 
     @property
     def all_atoms_arrived(self) -> bool:

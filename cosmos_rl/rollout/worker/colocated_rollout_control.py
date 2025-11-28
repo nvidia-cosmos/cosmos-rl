@@ -163,7 +163,6 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
 
         for instruction in commands:
             command = Command.depack(instruction)
-            logger.info(f"[Rollout] Received command: {command}")
             self._command_queue.put(command)
         executed_cmd = super().consume_one_command(cmd_pred)
         logger.info(f"[Rollout] Executing command: {executed_cmd}")
