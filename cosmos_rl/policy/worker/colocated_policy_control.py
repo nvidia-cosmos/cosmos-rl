@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from cosmos_rl.colocated.utils import CommandDispatcher
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.utils.logging import logger
 import copy
@@ -21,6 +22,7 @@ from cosmos_rl.dispatcher.command import (
     BuildMeshCommand,
     PolicyToRolloutUnicastCommand,
 )
+from typing import Type
 
 
 class ColocatedPolicyControlWorker(GRPOTrainer):
@@ -35,11 +37,29 @@ class ColocatedPolicyControlWorker(GRPOTrainer):
         GRPOTrainer.policy_command_handler_registry
     )
 
-    def init_redis(self):
+    def set_command_dispatcher(self, dispatcher: CommandDispatcher):
         """
-        No need to init redis in colocated mode.
+        Set the command dispatcher for the policy worker.
+        Record the remote dispatcher for communication with all replicas.
+        Args:
+            dispatcher (CommandDispatcher): The command dispatcher.
         """
-        pass
+        self.redis_for_remote = self.redis_controller
+        self.redis_controller = dispatcher
+
+    def subscribe_remote_commands(self):
+        """
+        Subscribe and get commands from remote controller.
+        """
+        commands = []
+        try:
+            commands = self.redis_for_remote.subscribe_command(self.replica_name)
+        except Exception as e:
+            logger.debug(
+                f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+            )
+        commands = [Command.depack(x) for x in commands]
+        return commands
 
     def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
         """
@@ -53,19 +73,7 @@ class ColocatedPolicyControlWorker(GRPOTrainer):
             return False
         return False
 
-    def build_global_mesh(self, command: BuildMeshCommand):
-        """
-        Build the global mesh for inter-policy communication.
-        In colocated mode, just set the replica_name_to_rank directly and set the is_single_peer and is_comm_ready events.
-        """
-        assert len(command.replica_name_to_rank) == 1
-        self.inter_policy_nccl.replica_name_to_rank = command.replica_name_to_rank
-        assert self.replica_name in command.replica_name_to_rank
-        self.inter_policy_nccl.is_single_peer.set()
-        self.inter_policy_nccl.is_comm_ready.set()
-        return
-
-    def consume_command(self):
+    def consume_command(self, command_type: Type[Command] = Command) -> bool:
         """
         Consume one command from controller.
         """
@@ -79,11 +87,35 @@ class ColocatedPolicyControlWorker(GRPOTrainer):
                 )
             for x in commands:
                 command = Command.depack(x)
+                if isinstance(command, BuildMeshCommand):
+                    """ directly push the buildmesh command to the nccl comm, will not block main thread """
+                    # broadcast the buildmesh command to all ranks
+                    cmd = self.kv_store.broadcast_command(command, src=0)
+                    self.is_master_replica = (
+                        cmd.replica_name_to_rank[self.replica_name] == 0
+                    )
+                    self.inter_policy_nccl.push_cmd(cmd)
+                    continue
                 self.fetch_command_buffer.put_nowait(command)
+        else:
+            try:
+                bmcmd = self.kv_store.broadcast_command(None, src=0)
+                if bmcmd:
+                    assert isinstance(
+                        bmcmd, BuildMeshCommand
+                    ), "Only buildmesh command is supported"
+                    self.is_master_replica = (
+                        bmcmd.replica_name_to_rank[self.replica_name] == 0
+                    )
+                    self.inter_policy_nccl.push_cmd(bmcmd)
+            except Exception as e:
+                raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
+
         self.broadcast_command()
         if self.command_buffer.empty():
             return False
         cmd = self.command_buffer.get_nowait()
+        assert isinstance(cmd, command_type), f"Invalid command type: {type(cmd)}"
         logger.info(f"[Policy] Executing command: {cmd}")
         abort = self.execute_command(cmd)
         return abort
@@ -93,6 +125,3 @@ class ColocatedPolicyControlWorker(GRPOTrainer):
 ColocatedPolicyControlWorker.register_policy_command_handler(
     PolicyToRolloutUnicastCommand
 )(ColocatedPolicyControlWorker.execute_policy_to_rollout_unicast)
-ColocatedPolicyControlWorker.register_policy_command_handler(BuildMeshCommand)(
-    ColocatedPolicyControlWorker.build_global_mesh
-)

@@ -844,8 +844,8 @@ def main():
     is_colocated = cosmos_config.get("mode", "disaggregated") == "colocated"
     if is_colocated:
         assert (
-            n_policy == n_rollouts == 1
-        ), "Colocated mode only supports 1 policy and 1 rollout replica"
+            n_policy == n_rollouts
+        ), "Colocated mode only supports equal number of policy and rollout replicas"
         assert (
             min_n_gpus_policy == min_n_gpus_rollout
         ), "Colocated mode requires policy and rollout to have the same GPU requirements"

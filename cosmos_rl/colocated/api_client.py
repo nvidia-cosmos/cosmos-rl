@@ -41,21 +41,26 @@ class ColocatedAPIClient(APIClient):
         self.controller = controller
 
     def get_next_prompt(
-        self, batch_size: int, validation_step: Optional[int] = None
+        self,
+        batch_size: int,
+        validation_step: Optional[int] = None,
+        local_control: bool = False,
     ) -> Tuple[List[Dict[str, Any]], bool]:
         """
         Get the next batch of prompts from the controller.
         Args:
             batch_size: The number of prompts to fetch.
             validation_step: The current validation step, if any.
+            local_control: Whether to use local communication only.
         Returns:
             A tuple of (list of prompts as dicts, is_end flag).
         """
-
-        payload_list, is_end = self.controller.get_batched_prompt(
-            batch_size, validation_step
-        )
-        return [p.model_dump() for p in payload_list], is_end
+        if local_control:
+            payload_list, is_end = self.controller.get_batched_prompt(
+                batch_size, validation_step
+            )
+            return [p.model_dump() for p in payload_list], is_end
+        return super().get_next_prompt(batch_size, validation_step)
 
     def post_rollout_completion(self, response: RolloutRequest):
         """
@@ -72,6 +77,7 @@ class ColocatedAPIClient(APIClient):
         total_steps: int,
         profile_finished: bool,
         report_data: Dict[str, Any],
+        local_control: bool = False,
     ):
         """
         Post the policy training acknowledgment to the controller.
@@ -81,10 +87,17 @@ class ColocatedAPIClient(APIClient):
             total_steps: The total number of steps.
             profile_finished: Whether profiling is finished.
             report_data: The report data.
+            local_control: Whether to use local communication only.
         """
-        self.controller.train_ack(
-            replica_name, weight_step, total_steps, profile_finished, report_data
-        )
+        if local_control:
+            self.controller.train_ack(
+                replica_name, weight_step, total_steps, profile_finished, report_data
+            )
+        else:
+            report_data.update(self.controller.train_report_data.get(weight_step, {}))
+            super().post_policy_train_ack(
+                replica_name, weight_step, total_steps, profile_finished, report_data
+            )
 
     def get_policy_model(self) -> Any:
         """

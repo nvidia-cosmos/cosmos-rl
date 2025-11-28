@@ -30,6 +30,11 @@ from cosmos_rl.policy.worker.colocated_policy_control import (
 from cosmos_rl.rollout.worker.colocated_rollout_control import (
     ColocatedRolloutControlWorker,
 )
+from cosmos_rl.dispatcher.command import (
+    PolicyToRolloutUnicastCommand,
+    RolloutToRolloutBroadcastCommand,
+    DataFetchCommand,
+)
 
 
 class ColocatedRLControlWorker:
@@ -63,8 +68,8 @@ class ColocatedRLControlWorker:
             is_master=self.policy.global_rank == 0,
         )
         # Link the command dispatcher to policy and rollout workers
-        self.rollout.redis_controller = self.command_dispatcher
-        self.policy.redis_controller = self.command_dispatcher
+        self.policy.set_command_dispatcher(self.command_dispatcher)
+        self.rollout.set_command_dispatcher(self.command_dispatcher)
 
     def setup(
         self,
@@ -113,24 +118,14 @@ class ColocatedRLControlWorker:
         """
 
         # Generate the initial commands such as WeightResume, PolicyToRolloutUnicast, etc.
-        self.controller.init()
-
-        # Process the initial BuildMeshCommand at policy side
-        self.policy.consume_command()
-        # Process the initial BuildMeshCommand at rollout side
-        self.rollout.consume_command()
-
-        # Process the initial WeightResume command
-        self.policy.consume_command()
+        self.controller.init_commands()
 
         # Process the initial PolicyToRolloutUnicast command
-        self.rollout.consume_command()
-
+        self.rollout.consume_command(PolicyToRolloutUnicastCommand)
         # Process the initial RolloutToRolloutBroadcast command
-        self.rollout.consume_command()
-
+        self.rollout.consume_command(RolloutToRolloutBroadcastCommand)
         # Process the initial PolicyToRolloutUnicast command
-        self.policy.consume_command()
+        self.policy.consume_command(PolicyToRolloutUnicastCommand)
 
         is_end = False
         while not is_end:
@@ -163,13 +158,21 @@ class ColocatedRLControlWorker:
                     break
             if self.controller.pending_policy_samples() <= 0:
                 break
-            self.controller.rollout_completed(self.controller.pending_policy_samples())
 
-            # Process the PolicyToRolloutUnicast command at policy side
-            self.policy.consume_command()
+            self.controller.rollout_completed_for_data_fetch_n_training(
+                self.controller.pending_policy_samples()
+            )
+            self.policy.consume_command(DataFetchCommand)
 
-            # Process the PolicyToRolloutUnicast command at rollout side
-            self.rollout.consume_command()
+            need_sync_weight = (
+                self.controller.rollout_consume_one_step_commands_util_r2r()
+            )
+            if need_sync_weight:
+                # Process the PolicyToRolloutUnicast command at policy side
+                self.policy.consume_command(PolicyToRolloutUnicastCommand)
 
-            # Process the RolloutToRolloutBroadcast command
-            self.rollout.consume_command()
+                # Process the PolicyToRolloutUnicast command at rollout side
+                self.rollout.consume_command(PolicyToRolloutUnicastCommand)
+
+                # Process the RolloutToRolloutBroadcast command
+                self.rollout.consume_command(RolloutToRolloutBroadcastCommand)

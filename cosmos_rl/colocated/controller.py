@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Dict, Optional, Callable, Any
+from typing import List, Dict, Optional, Callable, Any, Type, Union
 from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.replica import Replica
 from cosmos_rl.dispatcher.protocol import Role, RolloutRequest
@@ -27,21 +27,24 @@ from torch.utils.data import Dataset
 from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
-from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.rollout.worker.rollout_control import (
-    DisaggregatedRolloutControlWorker,
+from cosmos_rl.policy.worker.colocated_policy_control import (
+    ColocatedPolicyControlWorker,
 )
+from cosmos_rl.rollout.worker.colocated_rollout_control import (
+    ColocatedRolloutControlWorker,
+)
+from cosmos_rl.colocated.utils import CommandDispatcher
 from cosmos_rl.dispatcher.command import (
     WeightResumeCommand,
     PolicyToRolloutUnicastCommand,
     DataFetchCommand,
     RolloutToRolloutBroadcastCommand,
     BuildMeshCommand,
+    Command,
+    PolicyToPolicyUnicastCommand,
+    PolicyToPolicyBroadcastCommand,
 )
 import numpy as np
-from cosmos_rl.utils.wandb_logger import (
-    log_wandb,
-)
 from cosmos_rl.utils.payload import extract_rollouts
 from cosmos_rl.utils.util import RollingDict
 from cosmos_rl.policy.model.hf_models import HFModel
@@ -75,9 +78,9 @@ class ColocatedController(Controller):
 
     def setup(
         self,
-        policy: GRPOTrainer,
-        rollout: DisaggregatedRolloutControlWorker,
-        command_dispatcher: Any,
+        policy: ColocatedPolicyControlWorker,
+        rollout: ColocatedRolloutControlWorker,
+        command_dispatcher: CommandDispatcher,
         config: Config,
         dataset: Optional[Dataset] = None,
         val_dataset: Optional[Dataset] = None,
@@ -90,9 +93,9 @@ class ColocatedController(Controller):
         """
         Setup the colocated controller with policy and rollout workers.
         Args:
-            policy (GRPOTrainer): The policy trainer instance.
-            rollout (DisaggregatedRolloutControlWorker): The rollout worker instance.
-            command_dispatcher (Any): The command dispatcher for issuing commands.
+            policy (ColocatedPolicyControlWorker): The policy trainer instance.
+            rollout (ColocatedRolloutControlWorker): The rollout worker instance.
+            command_dispatcher (CommandDispatcher): The command dispatcher for issuing commands.
             config (Config): The configuration for the controller.
             dataset (Optional[Dataset]): The training dataset.
             val_dataset (Optional[Dataset]): The validation dataset.
@@ -102,6 +105,10 @@ class ColocatedController(Controller):
             val_sampler (Optional[Callable]): The validation data sampler.
             val_batch_sampler (Optional[Callable]): The validation data batch sampler.
         """
+        self.remote_command_manager = CommandDispatcher(
+            [policy.replica_name, rollout.replica_name],
+            is_master=policy.global_rank == 0,
+        )
         self._init_status()
         if self.config is not None:
             raise Exception(
@@ -141,8 +148,6 @@ class ColocatedController(Controller):
         if len(ips) > 0:
             self.config.eth_ips = ";".join(ips)
 
-        self.policy_step = None
-        self.rollout_step = None
         self.policy_replica = DummyReplica(
             name=self.policy.replica_name,
             role=Role.POLICY,
@@ -178,44 +183,138 @@ class ColocatedController(Controller):
         """
         return self.data_fetcher.get_batched_prompt(n, validation_step)
 
-    def init(self):
+    def wait_for_remote_command(
+        self,
+        replica: Union[ColocatedPolicyControlWorker, ColocatedRolloutControlWorker],
+        command_type: List[Type] = [],
+        ignore_type: List[Type] = [],
+        remove: bool = True,
+    ) -> Command:
+        """
+        Wait for a specific command from the policy worker.
+        Args:
+            command_type (Type): The type of command to wait for.
+            replica (Union[ColocatedPolicyControlWorker, ColocatedRolloutControlWorker]): The replica to wait for command from.
+        Returns:
+            Tuple[Command, bool]: The received command and a boolean indicating if it matches the expected type.
+        """
+        while True:
+            command = self.remote_command_manager.front_command(replica.replica_name)
+            if remove and command is not None:
+                self.remote_command_manager.pop_command(replica.replica_name)
+            if command is not None and (
+                len(command_type) == 0
+                or any([isinstance(command, ct) for ct in command_type])
+            ):
+                return command
+            if any([isinstance(command, it) for it in ignore_type]):
+                continue
+            if command is not None:
+                logger.error(
+                    f"Expected command of type {command_type}, but got {type(command)} for {replica.role} replica {replica.replica_name}"
+                )
+                raise ValueError
+            commands = replica.subscribe_remote_commands()
+            for command in commands:
+                self.remote_command_manager.publish_command(
+                    command.pack(), replica.replica_name
+                )
+
+    def init_commands(self):
         """
         Initialize the system by building meshes and triggering weight resume and policy-rollout commands.
         This is called once at the beginning to prepare the initial state including model weights.
         """
-        BuildMeshCommand.trigger(
-            [self.policy_replica], redis_handler=self.command_dispatcher
-        )
-        BuildMeshCommand.trigger(
-            [self.rollout_replica], redis_handler=self.command_dispatcher
-        )
+        data_fetch_cmd = self.policy_consume_one_step_commands_util_data_fetch()
+        self.rollout_consume_one_step_commands_util_r2r()
+        assert isinstance(data_fetch_cmd, DataFetchCommand)
+        self.init_data_fetch_command = data_fetch_cmd
 
-        if self.policy_step is None:
-            self.policy_step = 0
-            WeightResumeCommand.trigger(
-                replica=self.policy_replica, redis_handler=self.command_dispatcher
+    def policy_consume_one_step_commands_util_data_fetch(self) -> DataFetchCommand:
+        """
+        Consume one step commands for policy replica until DataFetchCommand is received.
+        Execute necessary commands like BuildMeshCommand, WeightResumeCommand, and PolicyToPolicy commands.
+        Skips other commands until DataFetchCommand is encountered.
+        DataFetchCommand is returned for further processing and not executed here.
+        Returns:
+            DataFetchCommand: The received DataFetchCommand.
+        """
+        # Commands that should be executed from remote dispatcher
+        should_excuted = [
+            BuildMeshCommand,
+            WeightResumeCommand,
+            PolicyToPolicyUnicastCommand,
+            PolicyToPolicyBroadcastCommand,
+        ]
+
+        # DataFetchCommand is the stopping point for each step so break when we see it
+        should_stop = [DataFetchCommand]
+
+        # PolicyToRolloutUnicastCommand is self triggered separately in colocated mode so ignore it.
+        others = [PolicyToRolloutUnicastCommand]
+        executed = False
+        while True:
+            cmd = self.wait_for_remote_command(self.policy)
+            if any(isinstance(cmd, t) for t in should_excuted):
+                self.command_dispatcher.publish_command(
+                    cmd.pack(), self.policy.replica_name
+                )
+                self.policy.consume_command()
+                executed = True
+            if any(isinstance(cmd, t) for t in should_stop):
+                return cmd
+            if not executed:
+                assert any(
+                    isinstance(cmd, t) for t in others
+                ), f"Unexpected command {cmd}"
+
+    def rollout_consume_one_step_commands_util_r2r(self) -> bool:
+        """
+        Consume one step commands for rollout replica until RolloutToRolloutBroadcastCommand is received.
+        Skips all commands and return until RolloutToRolloutBroadcastCommand is encountered.
+        Determines if weight synchronization is needed based on the current step and configuration.
+        If weight synchronization is needed, triggers PolicyToRolloutUnicastCommand and RolloutToRolloutBroadcastCommand.
+        Returns:
+            bool: Whether weight synchronization is needed.
+        """
+        step = self.current_step
+        # All replicas have been reduced, trigger allreduce
+        need_sync_weight = step % self.config.train.sync_weight_interval == 0
+        # If the current step is the last step, we need to sync weight always to act as ending signal
+        need_sync_weight = need_sync_weight or step == self.total_steps
+        # If validation is enabled, we need to sync weight every validation step
+        if self.config.validation.enable:
+            need_sync_weight = need_sync_weight or (
+                step % self.config.validation.freq == 0
             )
-
-        if self.rollout_step is None:
+        # P->R & R->R
+        if need_sync_weight:
+            # Drain all commands
+            # R2R command is the stopping point for each step so break when we see it
+            while True:
+                cmd = self.wait_for_remote_command(self.rollout)
+                if isinstance(cmd, RolloutToRolloutBroadcastCommand):
+                    break
+            # Further trigger P2R & R2R commands locally
             PolicyToRolloutUnicastCommand.trigger(
                 src_replica=self.policy_replica,
                 dst_replica=self.rollout_replica,
                 src_replica_size=self.policy.world_size,
                 dst_replica_size=self.rollout.world_size,
-                weight_step=0,
+                weight_step=self.current_step,
                 total_steps=self.total_steps,
                 redis_handler=self.command_dispatcher,
             )
             RolloutToRolloutBroadcastCommand.trigger(
                 src_replica=self.rollout_replica,
                 dst_replicas=[self.rollout_replica],
-                weight_step=0,
+                weight_step=self.current_step,
                 total_steps=self.total_steps,
                 redis_handler=self.command_dispatcher,
             )
-            self.rollout_step = 0
+        return need_sync_weight
 
-    def rollout_completed(self, required_rollouts: int):
+    def rollout_completed_for_data_fetch_n_training(self, required_rollouts: int):
         """
         Notify the controller that rollouts have been completed and trigger data fetch command.
         DataFetchCommand is triggered to fetch new data for the policy and start one training iteration.
@@ -253,6 +352,30 @@ class ColocatedController(Controller):
                 self.current_step % self.config.train.ckpt.save_freq == 0
                 and self.current_step > 0
             )
+
+        if hasattr(self, "init_data_fetch_command"):
+            data_fetch_cmd = self.init_data_fetch_command
+            delattr(self, "init_data_fetch_command")
+        else:
+            data_fetch_cmd = self.policy_consume_one_step_commands_util_data_fetch()
+            logger.debug(
+                f"[Controller] DataFetchCommand details: {data_fetch_cmd} at step {self.current_step}"
+            )
+            if not self.config.train.resume:
+                assert (
+                    data_fetch_cmd.do_save == do_save
+                ), f"Expected do_save {do_save} but got {data_fetch_cmd.do_save}"
+                assert (
+                    self.current_step == data_fetch_cmd.global_step
+                ), f"Expected global_step {self.current_step} but got {data_fetch_cmd.global_step}"
+
+        self.current_step = data_fetch_cmd.global_step
+        self.total_steps = data_fetch_cmd.total_steps
+        self.remain_samples_num = data_fetch_cmd.remain_samples_num
+        self.command_dispatcher.publish_command(
+            data_fetch_cmd.pack(), self.policy.replica_name
+        )
+
         if self.config.logging.logger and len(self.policy.data_queue.queue) > 0:
             rewards = []
             completion_lengths = []
@@ -269,35 +392,24 @@ class ColocatedController(Controller):
                 filter_rewards.append(rollout.filter_reward)
                 completion_lengths.append(completion_length)
             report_data = {
-                "train/reward_mean": np.mean(rewards),
-                "train/reward_std": np.std(rewards),
-                "train/reward_max": np.max(rewards),
-                "train/reward_min": np.min(rewards),
-                "rollout/completion_length_mean": np.mean(completion_lengths),
-                "rollout/completion_length_std": np.std(completion_lengths),
-                "rollout/completion_length_max": np.max(completion_lengths),
-                "rollout/completion_length_min": np.min(completion_lengths),
-                "rollout/advantage_mean": np.mean(advantages),
-                "rollout/advantage_std": np.std(advantages),
-                "rollout/advantage_max": np.max(advantages),
-                "rollout/advantage_min": np.min(advantages),
-                "rollout/filter_reward_mean": np.mean(filter_rewards),
-                "rollout/filter_reward_std": np.std(filter_rewards),
-                "rollout/filter_reward_max": np.max(filter_rewards),
-                "rollout/filter_reward_min": np.min(filter_rewards),
+                "train/reward_mean": np.mean(rewards).item(),
+                "train/reward_std": np.std(rewards).item(),
+                "train/reward_max": np.max(rewards).item(),
+                "train/reward_min": np.min(rewards).item(),
+                "rollout/completion_length_mean": np.mean(completion_lengths).item(),
+                "rollout/completion_length_std": np.std(completion_lengths).item(),
+                "rollout/completion_length_max": np.max(completion_lengths).item(),
+                "rollout/completion_length_min": np.min(completion_lengths).item(),
+                "rollout/advantage_mean": np.mean(advantages).item(),
+                "rollout/advantage_std": np.std(advantages).item(),
+                "rollout/advantage_max": np.max(advantages).item(),
+                "rollout/advantage_min": np.min(advantages).item(),
+                "rollout/filter_reward_mean": np.mean(filter_rewards).item(),
+                "rollout/filter_reward_std": np.std(filter_rewards).item(),
+                "rollout/filter_reward_max": np.max(filter_rewards).item(),
+                "rollout/filter_reward_min": np.min(filter_rewards).item(),
             }
             self.train_report_data[self.current_step] = report_data
-
-        DataFetchCommand.trigger(
-            replica=self.policy_replica,
-            items_count=required_rollouts,
-            global_step=self.policy_step + 1,
-            total_steps=self.total_steps,
-            remain_samples_num=self.remain_samples_num,
-            # Only `do_save` when checkpointing is enabled
-            do_save=do_save and self.config.train.ckpt.enable_checkpoint,
-            redis_handler=self.command_dispatcher,
-        )
 
     def train_ack(
         self,
@@ -319,16 +431,11 @@ class ColocatedController(Controller):
             report_data (Dict[str, Any]): The training metrics to report.
         """
         if replica_name == self.policy.replica_name:
-            self.policy_step = step
+            assert self.current_step == step
         else:
             raise ValueError(
                 f"[Controller] train_ack received from unknown replica: {replica_name}"
             )
-
-        if not hasattr(self, "report_data_list"):
-            self.report_data_list = []
-        self.report_data_list.append(report_data)
-
         # All replicas have been reduced, trigger allreduce
         need_sync_weight = step % self.config.train.sync_weight_interval == 0
         # If the current step is the last step, we need to sync weight always to act as ending signal
@@ -338,95 +445,6 @@ class ColocatedController(Controller):
             need_sync_weight = need_sync_weight or (
                 step % self.config.validation.freq == 0
             )
-
-        # Sum and report data
-        if self.config.logging.logger and not all(
-            [not data for data in self.report_data_list]
-        ):
-            try:
-                total_loss_avg = np.mean(
-                    [data["train/loss_avg"] for data in self.report_data_list]
-                )
-                total_loss_max = np.max(
-                    [data["train/loss_max"] for data in self.report_data_list]
-                )
-                total_learning_rate = self.report_data_list[0]["train/learning_rate"]
-                total_iter_time_avg = np.mean(
-                    [data["train/iteration_time"] for data in self.report_data_list]
-                )
-                # KL loss
-                total_kl_loss_avg = np.mean(
-                    [data.get("train/kl_loss_avg", 0) for data in self.report_data_list]
-                )
-                total_kl_loss_max = np.max(
-                    [data.get("train/kl_loss_max", 0) for data in self.report_data_list]
-                )
-                total_grad_norm = np.mean(
-                    [data.get("train/grad_norm", 0) for data in self.report_data_list]
-                )
-                total_entropy = np.mean(
-                    [data.get("train/entropy", 0) for data in self.report_data_list]
-                )
-                total_effective_entropy = np.mean(
-                    [
-                        data.get("train/effective_entropy", 0)
-                        for data in self.report_data_list
-                    ]
-                )
-                train_step = self.report_data_list[0]["train_step"]
-                self.report_data_list = []
-
-                policy_report_data = {
-                    "train/loss_avg": total_loss_avg,
-                    "train/loss_max": total_loss_max,
-                    "train/learning_rate": total_learning_rate,
-                    "train/iteration_time": total_iter_time_avg,
-                    "train/kl_loss_avg": total_kl_loss_avg,
-                    "train/kl_loss_max": total_kl_loss_max,
-                    "train/grad_norm": total_grad_norm,
-                    "train/entropy": total_entropy,
-                    "train/effective_entropy": total_effective_entropy,
-                }
-
-                if len(self.filter_records) > 0:
-                    total_samples_for_filtering = sum(
-                        v for v in self.filter_records.values()
-                    )
-                    for k, v in self.filter_records.items():
-                        policy_report_data.update(
-                            {f"rollout/{k}_ratio": v / total_samples_for_filtering}
-                        )
-                self.train_report_data.setdefault(train_step, {}).update(
-                    policy_report_data
-                )
-
-                if "wandb" in self.config.logging.logger and is_wandb_available():
-                    log_wandb(
-                        data=self.train_report_data[train_step],
-                        step=train_step,
-                    )
-                if "console" in self.config.logging.logger:
-                    logger.info(
-                        f"Step: {train_step}/{total_steps}, Reward Mean: {self.train_report_data[train_step]['train/reward_mean']:.4f}, Reward Std: {self.train_report_data[train_step]['train/reward_std']:.4f}, Reward Max: {self.train_report_data[train_step]['train/reward_max']:.4f}, Reward Min: {self.train_report_data[train_step]['train/reward_min']:.4f}, Completion Length Mean: {self.train_report_data[train_step]['rollout/completion_length_mean']:.2f}, Completion Length Max: {self.train_report_data[train_step]['rollout/completion_length_max']:.2f}, Average loss: {total_loss_avg:.5f}, Max loss: {total_loss_max:.5f}, Learning rate: {total_learning_rate:.5e}, Entropy: {total_entropy:.5f}, Effective Entropy: {total_effective_entropy:.5f}, Grad Norm: {total_grad_norm:.5f}, KL Loss Avg: {total_kl_loss_avg:.5f}, KL Loss Max: {total_kl_loss_max:.5f}, Iteration time: {total_iter_time_avg:.2f}s."
-                    )
-                    if len(self.filter_records) > 0:
-                        logger.info(
-                            f"Dynamic sampling rewards distribution so far: {self.filter_records}."
-                        )
-                self.filter_records = {}
-                for logger_fn in self.custom_logger_fns:
-                    try:
-                        logger_fn(self.train_report_data[train_step], train_step)
-                    except Exception as e:
-                        logger.warning(
-                            f"[Controller] Warning reporting customized training results: {e}"
-                        )
-            except Exception as e:
-                import traceback
-
-                logger.warning(
-                    f"[Controller] Warning reporting training results: {e}\n{traceback.format_exc()}"
-                )
         # P->R & R->R
         if need_sync_weight:
             PolicyToRolloutUnicastCommand.trigger(

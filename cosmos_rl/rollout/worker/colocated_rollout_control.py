@@ -26,6 +26,8 @@ from cosmos_rl.dispatcher.command import (
 )
 from cosmos_rl.utils import constant
 from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.colocated.utils import CommandDispatcher
+from typing import Type
 
 
 class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
@@ -40,11 +42,14 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         DisaggregatedRolloutControlWorker.rollout_command_handler_registry
     )
 
-    def init_redis(self):
+    def set_command_dispatcher(self, dispatcher: CommandDispatcher):
         """
-        No op for colocated rollout worker.
+        Set the command dispatcher for the policy worker.
+        Args:
+            dispatcher (CommandDispatcher): The command dispatcher.
         """
-        pass
+        self.redis_for_remote = self.redis_controller
+        self.redis_controller = dispatcher
 
     @torch.no_grad()
     def policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
@@ -60,7 +65,7 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         self.lazy_initialize_rollout_engine(load_format)
         if command.dst_replica_name == self.replica_name:
             return
-        self.rollout.set_underlying_model(self.api_client.get_policy_model())
+        # self.rollout.set_underlying_model(self.api_client.get_policy_model())
         self.state.set_weight_synced()
 
     def broadcast_to_all_rollout_replica(
@@ -124,8 +129,25 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         _, valid_results = self.one_step_generation()
         return no_more_prompts, len(valid_results)
 
+    def subscribe_remote_commands(self):
+        """
+        Subscribe and get commands from remote controller.
+        """
+        commands = []
+        try:
+            commands = self.redis_for_remote.subscribe_command(self.replica_name)
+        except Exception as e:
+            logger.debug(
+                f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+            )
+        commands = [Command.depack(x) for x in commands]
+        return commands
+
     def consume_command(
-        self, cmd_pred=None, timeout=constant.COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT
+        self,
+        command_type: Type[Command] = Command,
+        cmd_pred=None,
+        timeout=constant.COSMOS_ROLLOUT_CMD_WAIT_TIMEOUT,
     ):
         """
         Consume one command from controller.
@@ -141,9 +163,13 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
 
         for instruction in commands:
             command = Command.depack(instruction)
-            logger.info(f"[Rollout] Received command: {command}")
             self._command_queue.put(command)
-        return super().consume_one_command(cmd_pred)
+        executed_cmd = super().consume_one_command(cmd_pred)
+        logger.info(f"[Rollout] Executing command: {executed_cmd}")
+        assert executed_cmd is None or isinstance(
+            executed_cmd, command_type
+        ), f"Invalid command type: {type(executed_cmd)}"
+        return executed_cmd
 
 
 # Register command handlers

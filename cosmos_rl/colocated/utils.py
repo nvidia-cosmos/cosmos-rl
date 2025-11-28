@@ -16,6 +16,8 @@
 from typing import List
 from queue import Queue, Empty
 
+from cosmos_rl.dispatcher.command import Command
+
 
 class CommandDispatcher:
     """
@@ -65,3 +67,39 @@ class CommandDispatcher:
             except Empty:
                 pass
         return commands
+
+    def front_command(self, stream_name: str) -> Command:
+        """
+        Get the front command from the specified command queue without removing it.
+        Args:
+            stream_name (str): The name of the command queue.
+        Returns:
+            Command: The front command if exists, else None.
+        """
+        if stream_name not in self.command_queues:
+            return None
+        if not self.command_queues[stream_name].empty():
+            try:
+                command = self.command_queues[stream_name].queue[0]
+                return Command.depack(command)
+            except Empty:
+                pass
+        return None
+
+    def pop_command(self, stream_name: str) -> Command:
+        """
+        Pop the front command from the specified command queue.
+        Args:
+            stream_name (str): The name of the command queue.
+        Returns:
+            Command: The popped command if exists, else None.
+        """
+        if stream_name not in self.command_queues:
+            return None
+        if not self.command_queues[stream_name].empty():
+            try:
+                command = self.command_queues[stream_name].get_nowait()
+                return Command.depack(command)
+            except Empty:
+                pass
+        return None
