@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import unittest
 import os
 import subprocess
 import sys
-import util
-import toml
+from cosmos_rl.utils import util
 import tempfile
+import toml
 
 
 class TestGspo(unittest.TestCase):
