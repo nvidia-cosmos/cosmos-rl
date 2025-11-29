@@ -2094,13 +2094,13 @@ def run_reference_reset_test():
         self.data_packer.setup(self.config)
         self.shutdown_signal = threading.Event()
         self.shutdown_mp_signal = mp.Event()  # Must be a multiprocessing event
-        pass
 
     CommMixin.init_comm = dummy
     CommMixin.init_redis = lambda self: None
     RLPolicyWorker.prepare_shard_infos_for_weight_sync_insts = lambda self: None
 
     rl_worker = RLPolicyWorker(config=config, parallel_dims=parallel_dims)
+    rl_worker.trainer.model_load_from_hf()
     state_dict = rl_worker.trainer.model.state_dict()
     for key, value in state_dict.items():
         rl_worker.trainer.reference_state_dict[key] = value.detach().cpu()
