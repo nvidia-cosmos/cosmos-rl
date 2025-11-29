@@ -1442,11 +1442,11 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                     sft_worker.config.policy.model_max_length,
                     sft_worker.data_packer.sft_compute_max_len(raw_batch),
                 )
-                if sft_worker.seq_len_multiple > 1:
+                if sft_worker.trainer.seq_len_multiple > 1:
                     max_len = (
-                        (max_len + sft_worker.seq_len_multiple - 1)
-                        // sft_worker.seq_len_multiple
-                        * sft_worker.seq_len_multiple
+                        (max_len + sft_worker.trainer.seq_len_multiple - 1)
+                        // sft_worker.trainer.seq_len_multiple
+                        * sft_worker.trainer.seq_len_multiple
                     )
                 batch = sft_worker.data_packer.sft_collate_fn(
                     raw_batch,
@@ -1471,7 +1471,7 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                         pad_token_id=sft_worker.data_packer.pad_token_id,
                         label_ids=labels,
                         ignore_label_id=-100,
-                        seq_len_multiple=sft_worker.seq_len_multiple,
+                        seq_len_multiple=sft_worker.trainer.seq_len_multiple,
                     )
                     batch.update(packed_args)
                     labels = pack_sequences_for_labels(labels, batch["valid_input_len"])
@@ -1526,6 +1526,15 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
                     ),
                 )
                 sft_worker.trainer.optimizers.step()
+                if sft_worker.trainer.lr_schedulers is None:
+                    assert (
+                        sft_worker.train_step == 0
+                    ), "lr_schedulers should be None if training is from scratch"
+                    sft_worker.trainer.lr_schedulers = build_lr_schedulers(
+                        sft_worker.trainer.optimizers,
+                        sft_worker.config,
+                        training_steps=sft_worker.total_steps,
+                    )
                 sft_worker.trainer.lr_schedulers.step()
                 sft_worker.train_step += 1
                 if (
@@ -1581,12 +1590,15 @@ def run_sft_for_sequence_packing(fsdp, tp, cp):
     CommMixin.init_comm = dummy
     sft_worker = SFTPolicyWorker(config=config, parallel_dims=parallel_dims)
     non_packing_losses = train_test(sft_worker, False)
+    sft_worker = SFTPolicyWorker(config=config, parallel_dims=parallel_dims)
     packing_losses = train_test(sft_worker, True)
     if util.is_master_rank(sft_worker.parallel_dims, sft_worker.global_rank):
-        assert len(non_packing_losses) == 8
-        assert len(packing_losses) == 8
-        logger.info(f"[Test] non_packing_losses: {non_packing_losses}")
-        logger.info(f"[Test] packing_losses: {packing_losses}")
+        assert (
+            len(non_packing_losses) == 8
+        ), f"Expected non-packing losses to be 8, but got {len(non_packing_losses)}"
+        assert (
+            len(packing_losses) == 8
+        ), f"Expected packing losses to be 8, but got {len(packing_losses)}"
         double_actual = torch.tensor(non_packing_losses).double().view(-1)
         double_expected = torch.tensor(packing_losses).double().view(-1)
         cosine_similarity = torch.nn.functional.cosine_similarity(
