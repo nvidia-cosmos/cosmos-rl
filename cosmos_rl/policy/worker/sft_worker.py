@@ -549,9 +549,6 @@ class SFTPolicyWorker(WorkerBase, CommMixin):
                 val_global_batch, self.train_step, self.total_steps
             )
             val_total_loss += val_score
-        logger.info(
-            f"Validation loss: {val_total_loss}, dataset size: {len(self.val_data_loader.dataset)}"
-        )
         val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
         logger.info(f"Validation loss: {val_avg_loss}")
         return val_avg_loss
