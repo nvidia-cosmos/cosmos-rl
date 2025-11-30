@@ -554,7 +554,9 @@ class SFTPolicyWorker(WorkerBase, CommMixin):
         return val_avg_loss
 
     def main_loop(self):
+        self.profiler.start()
         pp_last_stage = False
+
         if self.parallel_dims.pp_enabled:
             pp_last_stage = (
                 self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
@@ -606,6 +608,8 @@ class SFTPolicyWorker(WorkerBase, CommMixin):
                     pp_last_stage=pp_last_stage,
                     val_score=val_avg_loss,
                 )
+
+                self.profiler.step()
 
         # Finally: validation and save checkpoint
         val_avg_loss = self.validate(is_last_step=True)

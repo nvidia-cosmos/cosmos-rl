@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import torch
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import init_distributed
 from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
-import torch
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.comm.base import WorkerBase
 
