@@ -100,7 +100,7 @@ class VLARollout(RolloutBase):
         # Success rate thresholds for GRPO filtering (default member variables)
         # NOTE: These are different from PPO epsilon_low/high which are clipping ratios!
         self.success_rate_threshold_low = 0.1
-        self.success_rate_threshold_high = 0.9
+        self.success_rate_threshold_high = 1
         
         logger.info(f"Initialized VLA rollout for task suite: {self.task_suite}")
         logger.info(f"GRPO filtering: success_rate ∈ [{self.success_rate_threshold_low:.2f}, {self.success_rate_threshold_high:.2f}]")
@@ -661,6 +661,9 @@ class VLARollout(RolloutBase):
                 "complete": init_data['complete'],
                 "finish_step": init_data['finish_step'],
                 "task_file_name": init_data['task_file_name'],
+                "task_id": task_ids[idx],
+                "trial_id": trial_ids[idx],
+                "gen_idx": gen_indices[idx],
             })
             
             # Collect initial video frames
@@ -885,13 +888,13 @@ class VLARollout(RolloutBase):
             # Check if success rate is in valid range
             if not (self.success_rate_threshold_low <= success_rate <= self.success_rate_threshold_high):
                 logger.info(
-                    f"[GRPO Filter] ❌ DISCARDED "
+                    f"[GRPO Filter] ❌ DISCARDED task {task_records[0]['task_id']}, trial {task_records[0]['trial_id']} "
                     f"(success={successes}/{group_size}, rate={success_rate:.2f})"
                 )
                 return None
             else:
                 logger.info(
-                    f"[GRPO Filter] ✅ ACCEPTED "
+                    f"[GRPO Filter] ✅ ACCEPTED task {task_records[0]['task_id']}, trial {task_records[0]['trial_id']} "
                     f"(success={successes}/{group_size}, rate={success_rate:.2f})"
                 )
         
@@ -922,7 +925,6 @@ class VLARollout(RolloutBase):
         for episode_idx in range(group_size):
             traj = trajectories[episode_idx]
             
-            
             # Stack into batch tensors
             input_ids_batch = torch.stack(traj['input_ids']).to(device)
             attention_mask_batch = torch.stack(traj['attention_mask']).to(device)
@@ -931,14 +933,27 @@ class VLARollout(RolloutBase):
             
             # Compute old_log_probs
             with torch.no_grad():
-                old_log_probs = self.model_inference.compute_old_log_probs(
+                outputs = self.vla_model.forward_with_trajectory_structure(
                     input_ids=input_ids_batch,
-                    attention_mask=attention_mask_batch,
                     pixel_values=pixel_values_batch,
-                    responses=responses_batch,
+                    attention_mask=attention_mask_batch,
+                    labels=responses_batch,
                     temperature=self.temperature,
                     proprio=None
                 )
+                logits, _, old_log_probs = outputs.logits, outputs.entropy, outputs.logprobs
+            # if episode_idx == 0:
+            #     logger.info(f"input_ids {input_ids_batch.shape}, logits {logits.shape}, log_probs {old_log_probs.shape}")
+            #     logger.info(f"logits chunk 0: {logits[0]}")
+            #     logger.info(f"old_log_probs chunk 0: {old_log_probs.reshape(-1, 56)[0]}")
+            #     logger.info(f"logits chunk 31: {logits[31]}")
+            #     logger.info(f"old_log_probs chunk 31: {old_log_probs.reshape(-1, 56)[31]}")
+            #     # logger.info(f"responses {responses_batch.shape}")
+            #     # logger.info(f"{responses_batch}")
+            #     logger.info(f"pixel_values {pixel_values_batch.shape}")
+            #     logger.info(f"pixel_values chunk 31: {pixel_values_batch[31]}")
+            #     logger.info(f"attention_mask {attention_mask_batch.shape}")
+            #     logger.info(f"{attention_mask_batch[31]}")
             
             # OPTIMIZATION: Store as STACKED tensor instead of list to reduce pickle overhead
             # (num_steps, 56) instead of list of (56,) tensors
@@ -972,6 +987,9 @@ class VLARollout(RolloutBase):
                     'task_suite': str(self.task_suite),  # Ensure Python str
                     'success': bool(success),  # Convert numpy.bool_ to Python bool
                     'num_actions': int(episode_length),  # Add num_actions field expected by worker
+                    'task_id': task_records[env_idx]['task_id'],
+                    'trial_id': task_records[env_idx]['trial_id'],
+                    'gen_idx': task_records[env_idx]['gen_idx'],
                 },
                 vla_trajectory=trajectory_data
             )

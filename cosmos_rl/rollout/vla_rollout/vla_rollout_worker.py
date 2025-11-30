@@ -1325,6 +1325,9 @@ class VLARolloutWorker(RolloutWorkerBase):
                     'temperature': float(self.temperature),
                     'n_generation': int(self.n_generation),
                     'episode_length': result.episode_length,
+                    'task_id': env_info.get('task_id', 0),
+                    'trial_id': env_info.get('trial_id', 0),
+                    'gen_idx': env_info.get('gen_idx', 0),
                 }
                 
                 # Add trajectory data if available (from dedicated vla_trajectory field)

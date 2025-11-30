@@ -1395,9 +1395,11 @@ class GRPOTrainer(Trainer):
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
-        
-        # Check if we should use saved batches
-        use_saved_batches = False #hasattr(self.config, 'vla') and hasattr(self.config.vla, 'use_saved_batches') and self.config.vla.use_saved_batches
+
+        # Recompute log_probs on policy side before training
+        # This recomputes old_log_probs using the current policy (before updates)
+        # to ensure consistency and avoid stale values from rollout phase
+        use_saved_batches = True #hasattr(self.config, 'vla') and hasattr(self.config.vla, 'use_saved_batches') and self.config.vla.use_saved_batches
         
         if use_saved_batches:
             # Use dispatch pattern: only rank 0 loads, then scatter to all workers
@@ -1424,6 +1426,44 @@ class GRPOTrainer(Trainer):
         
         logger.info(f"[VLA Train] Processing {len(policy_inputs)} full episodes")
         
+        # Compute old_log_probs for all episodes using current policy (before training updates)
+        # old_log_probs_per_episode = []
+        # self.model.eval()  # Use eval mode for computing old log probs
+        
+        # with torch.no_grad():
+        #     for episode_idx, policy_input in enumerate(policy_inputs):
+        #         # Collate episode data
+        #         episode_data = self.data_packer.policy_collate_fn([policy_input], max_steps=64)
+        #         
+        #         # Remove padding from prompt
+        #         prompt_mask = episode_data['input_ids'][0] != self.tokenizer.pad_token_id
+        #         prompt_len = prompt_mask.sum().item()
+        #         input_ids = episode_data['input_ids'][..., :prompt_len].to(self.device)
+        #         attention_mask = episode_data['attention_mask'][..., :prompt_len].to(self.device)
+        #         pixel_values = episode_data['pixel_values'].to(self.device)
+        #         responses = episode_data['responses'].to(self.device)
+        #         
+        #         # Compute old_log_probs for entire episode
+        #         outputs = self.model.forward_with_trajectory_structure(
+        #             input_ids=input_ids.squeeze(0),
+        #             pixel_values=pixel_values.squeeze(0),
+        #             attention_mask=attention_mask.squeeze(0),
+        #             labels=responses.squeeze(0),
+        #             temperature=self.config.train.train_policy.temperature,
+        #         )
+        #         
+        #         # Store flattened old_log_probs for this episode
+        #         old_log_probs = outputs.logprobs.reshape(1, -1)  # (1, num_steps * 56)
+        #         old_log_probs_per_episode.append(old_log_probs)
+        #         
+        #         # if episode_idx == 0:
+        #         #     logger.info(f"[VLA Train] Computed old_log_probs for episode 0: shape={old_log_probs.shape}")
+        #         #     logger.info(f"  old_log_probs chunk 0: {old_log_probs.reshape(-1, 56)[0]}")
+        #         #     if old_log_probs.shape[1] > 56 * 31:
+        #         #         logger.info(f"  old_log_probs chunk 31: {old_log_probs.reshape(-1, 56)[31]}")
+        
+        # logger.info(f"[VLA Train] Computed old_log_probs for {len(old_log_probs_per_episode)} episodes")
+        
         # 3. Training loop: process each episode with gradient accumulation
         # Following SimpleVLA-RL: 1 episode per step, chunk within episode for memory
         CHUNK_SIZE = 16  # Max steps per mini-step (matches SimpleVLA-RL)
@@ -1444,6 +1484,7 @@ class GRPOTrainer(Trainer):
         for episode_idx, (policy_input, advantage) in enumerate(zip(policy_inputs, advantages_list)):
             task_id = getattr(policy_input, 'task_id', -1)
             trial_id = getattr(policy_input, 'trial_id', -1)
+            gen_idx = getattr(policy_input, 'gen_idx', -1)
             num_steps = policy_input.num_steps
 
             episode_data = self.data_packer.policy_collate_fn([policy_input], max_steps=64)
@@ -1458,7 +1499,7 @@ class GRPOTrainer(Trainer):
             episode_mask_sum = episode_logprob_masks.sum()
             logger.info(
                 f"[VLA Train] Episode {episode_idx+1}/{len(policy_inputs)}: "
-                f"{num_steps} chunks, {episode_mask_sum / 7} episode steps, advantage={advantage}, temperature={self.config.train.train_policy.temperature}"
+                f"{num_steps} chunks, {episode_mask_sum // 7} episode steps, advantage={advantage}, temperature={self.config.train.train_policy.temperature}"
             )
             
             # Chunk episode - all workers process same chunks for FSDP sync
@@ -1477,27 +1518,23 @@ class GRPOTrainer(Trainer):
                 pixel_values = batch_dict['pixel_values'].squeeze(0) # (CHUNK_SIZE, 6, 224, 224)
                 attention_mask = batch_dict['attention_mask'].squeeze(0) # (CHUNK_SIZE, prompt_len)
                 responses = batch_dict['responses'].squeeze(0) # (CHUNK_SIZE, 56)
-                old_log_prob = batch_dict['old_log_prob'].reshape(1, -1) # (1, CHUNK_SIZE x 56)
                 response_mask = batch_dict['logprob_masks'].reshape(1, -1) # (1, CHUNK_SIZE x 56)
+
+
+                old_log_prob = batch_dict['old_log_prob'].reshape(1, -1) # (1, CHUNK_SIZE x 56)
+                # # Use precomputed old_log_probs from policy side (not from rollout batch_dict)
+                # episode_old_log_probs = old_log_probs_per_episode[episode_idx]
+                # chunk_start_token = start_idx * 56  # Each step has 56 tokens
+                # chunk_end_token = end_idx * 56
+                # old_log_prob = episode_old_log_probs[:, chunk_start_token:chunk_end_token]  # (1, CHUNK_SIZE x 56)
                 
                 # Forward pass (vocab slicing and temperature applied inside)
                 outputs = self.model.forward_with_trajectory_structure(
-                    input_ids, pixel_values, attention_mask,
+                    input_ids, pixel_values, attention_mask, responses,
                     temperature=self.config.train.train_policy.temperature
                 )
-                logits = outputs.logits  # (batch*steps, action_len, 256) - already sliced and temp-scaled
-                start_index = outputs.action_vocab_start_index
-                
-                # Remap responses from full vocab to action vocab [0, 256)
-                responses = batch_dict['responses'].reshape(logits.shape[0], -1)
-                responses_remapped = responses - start_index
+                logits, entropy, log_probs = outputs.logits, outputs.entropy, outputs.logprobs.reshape(1, -1)  # (batch*steps, action_len, 256) - already sliced and temp-scaled
 
-                
-                # Compute log probabilities (entropy computed in forward pass)
-                log_probs_full = torch.nn.functional.log_softmax(logits, dim=-1)  # (batch, seq_len, 256)
-                log_probs = torch.gather(log_probs_full, dim=-1, index=responses_remapped.unsqueeze(-1)).squeeze(-1)
-                log_probs = log_probs.reshape(1, -1)
-                entropy = outputs.entropy  # Already computed in forward pass
                 chunk_entropy = entropy.mean()
                 
                 # Compute PPO loss (following SimpleVLA-RL approach)
@@ -1505,7 +1542,22 @@ class GRPOTrainer(Trainer):
                 clip_ratio_high = self.config.train.train_policy.epsilon_high
                 
                 negative_approx_kl = log_probs - old_log_prob
+                # if torch.distributed.get_rank() == 0:
+                #     if chunk_idx == 0:
+                #         logger.info(f"log_probs {log_probs.shape}, logits {logits.shape}")
+                #         logger.info(f"logits chunk 0: {logits.reshape(-1, 56, 256)[0]}")
+                #         logger.info(f"log_probs chunk 0: {log_probs.reshape(-1, 56)[0]}")
+                #         logger.info(f"negative_approx_kl chunk 0: {negative_approx_kl.reshape(-1, 56)[0]}")
+                #     if chunk_idx == 1:
+                #         logger.info(f"log_probs {log_probs.shape}, logits {logits.shape}")
+                #         logger.info(f"logits chunk 31: {logits.reshape(-1, 56, 256)[15]}")
+                #         logger.info(f"old_log_prob chunk 31: {old_log_prob.reshape(-1, 56)[15]}")
+                #         logger.info(f"log_probs chunk 31: {log_probs.reshape(-1, 56)[15]}")
+                #         logger.info(f"negative_approx_kl chunk 31: {negative_approx_kl.reshape(-1, 56)[15]}")
                 ratio = torch.exp(negative_approx_kl)
+                # logger.info(f"ratio min: {ratio.reshape(-1, 56).min(dim=-1)}")
+                # logger.info(f"ratio max: {ratio.reshape(-1, 56).max(dim=-1)}")
+
                 
                 pg_losses = -advantage * ratio
                 pg_losses2 = -advantage * torch.clamp(ratio, 1.0 - clip_ratio_low, 1.0 + clip_ratio_high)
@@ -1536,7 +1588,7 @@ class GRPOTrainer(Trainer):
                 
                 # Logging
                 logger.info(
-                    f"[VLA Train] Task {task_id} Trial {trial_id} Chunk {chunk_idx+1}/{num_chunks}: "
+                    f"[VLA Train] Task {task_id}_{trial_id}_{gen_idx} Chunk {chunk_idx+1}/{num_chunks}: "
                     f"loss={loss.item()}, ratio [{ratio.min().item()},{ratio.max().item()}], "
                     f"clipfrac={pg_clipfrac.item()}, ppo_kl={ppo_kl.item()}, "
                     f"mask_sum={response_mask_sum.item()/7:.0f}"

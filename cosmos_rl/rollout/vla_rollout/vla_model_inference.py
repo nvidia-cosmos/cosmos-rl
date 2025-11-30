@@ -331,47 +331,33 @@ class VLAModelInference:
         do_sample = getattr(self.config, 'do_sample', True)
         temperature = getattr(self.config, 'temperature', 1.0)
         
-        # Handle FSDP model parameters
-        param_ctx = contextlib.nullcontext()
-        if isinstance(self.module, FSDP):
-            param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
-        
-        try:
-            with param_ctx:
-                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                    # Try to call the VLA model's generation method
-                    if hasattr(self.module, 'generate_action_verl'):
-                        actions, responses = self.module.generate_action_verl(
-                            input_ids=input_ids,
-                            pixel_values=pixel_values,
-                            proprio=proprio,
-                            attention_mask=attention_mask,
-                            padding_idx=getattr(self.processor.tokenizer, 'pad_token_id', 0),
-                            do_sample=do_sample,
-                            unnorm_key=getattr(self.config, 'unnorm_key', 'default'),
-                            temperature=temperature,
-                        )
-                        
-                        # Convert actions to numpy if needed (might already be numpy from _unnormalize_actions)
-                        if isinstance(actions, torch.Tensor):
-                            actions_np = actions.cpu().numpy()
-                        else:
-                            actions_np = actions
-                        
-                        return {
-                            "action": actions_np,
-                            "responses": responses,
-                            "input_ids": input_ids,
-                            "attention_mask": attention_mask,
-                            "pixel_values": pixel_values,
-                        }
-                    else:
-                        logger.warning("VLA model does not have generate_action_verl method")
-                        return self._generate_dummy_step(prompts)
-                        
-        except Exception as e:
-            logger.warning(f"VLA-OFT inference failed: {e}")
-            return self._generate_dummy_step(prompts)
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            # Try to call the VLA model's generation method
+            actions, responses = self.module.generate_action_verl(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                proprio=proprio,
+                attention_mask=attention_mask,
+                padding_idx=getattr(self.processor.tokenizer, 'pad_token_id', 0),
+                do_sample=do_sample,
+                unnorm_key=getattr(self.config, 'unnorm_key', 'default'),
+                temperature=temperature,
+            )
+            
+            # Convert actions to numpy if needed (might already be numpy from _unnormalize_actions)
+            if isinstance(actions, torch.Tensor):
+                actions_np = actions.cpu().numpy()
+            else:
+                actions_np = actions
+            
+            return {
+                "action": actions_np,
+                "responses": responses,
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "pixel_values": pixel_values,
+            }
+
     
     def _generate_one_step_openvla(self, prompts: Dict[str, torch.Tensor]) -> Dict[str, Any]:
         """Generate one step for OpenVLA (matching SimpleVLA-RL)"""
@@ -442,64 +428,58 @@ class VLAModelInference:
             # Get vla_type from config
             vla_type = getattr(self.config, 'vla_type', getattr(self.config, 'vla', None))
             
-            # Handle FSDP model parameters
-            param_ctx = contextlib.nullcontext()
-            if isinstance(self.module, FSDP):
-                param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
-            
-            with param_ctx:
-                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                    if vla_type == "openvla-oft":
-                        # Get model logits for OpenVLA-OFT
-                        logits = self.module(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            pixel_values=pixel_values,
-                            proprio=proprio,
-                        )
-                        
-                        # Extract action token logits (last 256 tokens, excluding padding)
-                        vocab_size = getattr(self.module, 'vocab_size', 32000)
-                        start_index = vocab_size - 256
-                        logits = logits[..., -256-64:-64]  # (batch, seq_len, 256)
-                        
-                        # Remap responses to action space [0, 255]
-                        responses_remapped = responses - start_index
-                        
-                        # Apply temperature
-                        logits = logits.div(temperature)
-                        
-                        # Compute log probabilities
-                        log_probs = logprobs_from_logits(logits, responses_remapped)
-                        
-                        return log_probs
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                if vla_type == "openvla-oft":
+                    # Get model logits for OpenVLA-OFT
+                    logits = self.module(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        pixel_values=pixel_values,
+                        proprio=proprio,
+                    )
                     
-                    elif vla_type == "openvla":
-                        # Get model output for OpenVLA
-                        output = self.module(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            pixel_values=pixel_values,
-                            use_cache=False
-                        )
-                        logits = output.logits
-                        
-                        # Extract action token logits
-                        response_length = responses.size(-1)
-                        logits = logits[:, -response_length - 1:-1]
-                        
-                        # Apply temperature
-                        logits = logits.div(temperature)
-                        
-                        # Compute log probabilities
-                        log_probs = logprobs_from_logits(logits, responses)
-                        
-                        return log_probs
+                    # Extract action token logits (last 256 tokens, excluding padding)
+                    vocab_size = getattr(self.module, 'vocab_size', 32000)
+                    start_index = vocab_size - 256
+                    logits = logits[..., -256-64:-64]  # (batch, seq_len, 256)
                     
-                    else:
-                        logger.warning(f"Unknown VLA type: {vla_type}, returning dummy log probs")
-                        # Return dummy log probs
-                        return torch.zeros_like(responses, dtype=torch.float32)
+                    # Remap responses to action space [0, 255]
+                    responses_remapped = responses - start_index
+                    
+                    # Apply temperature
+                    logits = logits.div(temperature)
+                    
+                    # Compute log probabilities
+                    log_probs = logprobs_from_logits(logits, responses_remapped)
+                    
+                    return log_probs, logits
+                
+                elif vla_type == "openvla":
+                    # Get model output for OpenVLA
+                    output = self.module(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        pixel_values=pixel_values,
+                        use_cache=False
+                    )
+                    logits = output.logits
+                    
+                    # Extract action token logits
+                    response_length = responses.size(-1)
+                    logits = logits[:, -response_length - 1:-1]
+                    
+                    # Apply temperature
+                    logits = logits.div(temperature)
+                    
+                    # Compute log probabilities
+                    log_probs = logprobs_from_logits(logits, responses)
+                    
+                    return log_probs
+                
+                else:
+                    logger.warning(f"Unknown VLA type: {vla_type}, returning dummy log probs")
+                    # Return dummy log probs
+                    return torch.zeros_like(responses, dtype=torch.float32)
         
         except Exception as e:
             logger.error(f"Failed to compute old_log_probs: {e}")

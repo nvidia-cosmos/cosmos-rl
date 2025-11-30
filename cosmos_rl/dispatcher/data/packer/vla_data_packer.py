@@ -138,115 +138,112 @@ class VLADataPacker(DataPacker):
                 # Fallback: old approach where trajectory was embedded in metadata
                 trajectory = sample.metadata.get('trajectory')
         
-        if trajectory and trajectory.get('input_ids') is not None and trajectory.get('responses') is not None:
-            input_ids_data = trajectory['input_ids']
-            responses_data = trajectory['responses']
-            pixel_values_data = trajectory.get('pixel_values', [])
-            old_log_prob_data = trajectory.get('old_log_prob', [])
-            
-            # Handle both stacked tensors and lists
-            if isinstance(input_ids_data, torch.Tensor) and input_ids_data.dim() >= 2:
-                # NEW FORMAT: Stacked tensors
-                num_steps = input_ids_data.shape[0]
-                input_ids_list = [input_ids_data[i] for i in range(num_steps)]
-                responses_list = [responses_data[i] for i in range(num_steps)]
-                pixel_values_list = [pixel_values_data[i] for i in range(num_steps)] if isinstance(pixel_values_data, torch.Tensor) else pixel_values_data
-                old_log_prob_list = [old_log_prob_data[i] for i in range(num_steps)] if isinstance(old_log_prob_data, torch.Tensor) and old_log_prob_data.numel() > 0 else []
-            else:
-                # OLD FORMAT: Lists
-                input_ids_list = input_ids_data if isinstance(input_ids_data, list) else [input_ids_data]
-                responses_list = responses_data if isinstance(responses_data, list) else [responses_data]
-                pixel_values_list = pixel_values_data if isinstance(pixel_values_data, list) else [pixel_values_data]
-                old_log_prob_list = old_log_prob_data if isinstance(old_log_prob_data, list) else [old_log_prob_data]
-            
-            # Build per-step data structure (matches SimpleVLA-RL)
-            per_step_data = []
-            
-            for step_idx, (step_ids, step_responses) in enumerate(zip(input_ids_list, responses_list)):
-                # Convert prompt tokens to tensor
-                if isinstance(step_ids, torch.Tensor):
-                    prompt_tokens = step_ids
-                elif isinstance(step_ids, list):
-                    prompt_tokens = torch.tensor(step_ids, dtype=torch.long)
-                else:
-                    continue
-                
-                # Convert response tokens to tensor
-                if isinstance(step_responses, torch.Tensor):
-                    # Flatten if multi-dimensional: (8 actions, 7 tokens) → [56 tokens]
-                    response_tokens = step_responses.flatten()
-                elif isinstance(step_responses, list):
-                    # Flatten nested lists
-                    flat_responses = []
-                    if step_responses and isinstance(step_responses[0], (list, torch.Tensor)):
-                        for r in step_responses:
-                            if isinstance(r, torch.Tensor):
-                                flat_responses.extend(r.flatten().tolist())
-                            elif isinstance(r, list):
-                                flat_responses.extend(r)
-                    else:
-                        flat_responses = step_responses
-                    response_tokens = torch.tensor(flat_responses, dtype=torch.long)
-                else:
-                    response_tokens = torch.tensor([], dtype=torch.long)
-                
-                # Extract old_log_prob for this step (if available)
-                old_log_prob = None
-                if old_log_prob_list and step_idx < len(old_log_prob_list):
-                    if isinstance(old_log_prob_list[step_idx], torch.Tensor):
-                        old_log_prob = old_log_prob_list[step_idx].flatten()
-                    elif isinstance(old_log_prob_list[step_idx], list):
-                        old_log_prob = torch.tensor(old_log_prob_list[step_idx], dtype=torch.float32).flatten()
-                
-                # If no old_log_prob available, create dummy zeros
-                if old_log_prob is None:
-                    old_log_prob = torch.zeros(len(response_tokens), dtype=torch.float32)
-                
-                # CRITICAL: Only pass prompt to model (NOT concatenated with actions)
-                # The openvla-oft model internally:
-                #   1. Adds 56 placeholder action tokens
-                #   2. Adds 1 stop token
-                #   3. Returns logits ONLY for the 56 action positions
-                # So input is just the prompt, model handles the rest
-                
-                # Create attention mask for prompt only
-                attention_mask = torch.ones_like(prompt_tokens)
-                
-                # Create logprob mask for action tokens only (56 values)
-                # This will be aligned with the model's output logits (56 tokens)
-                ACTION_CHUNK_SIZE = 8
-                ACTION_DIM_SIZE = 7
-                mini_step_start = step_idx * ACTION_CHUNK_SIZE
-                mini_step_mask = (mini_step_start + torch.arange(ACTION_CHUNK_SIZE)) < episode_length  # (8,)
-                logprob_mask = mini_step_mask.unsqueeze(-1).repeat(1, ACTION_DIM_SIZE).flatten()  # (56,) = repeat 7 times
-                
-                per_step_data.append({
-                    'input_ids': prompt_tokens,  # Prompt only (31 tokens)
-                    'attention_mask': attention_mask,  # Mask for prompt (31 values)
-                    'logprob_mask': logprob_mask,
-                    'responses': response_tokens,  # Action labels for loss computation (56 tokens)
-                    'old_log_prob': old_log_prob,  # Old log probs from rollout (56 values)
-                })
-                
-            # Return full episode without chunking
-            # Chunking will be handled in train_vla() for gradient accumulation
-            class RLPolicyInput:
-                """Per-step structured input for VLA training"""
-                def __init__(self, per_step_data, pixel_values):
-                    self.per_step_data = per_step_data  # List of dicts, one per step
-                    self.pixel_values = pixel_values  # List of tensors, one per step
-                    self.num_steps = len(per_step_data)
-            
-            return RLPolicyInput(per_step_data, pixel_values_list)
+        input_ids_data = trajectory['input_ids']
+        responses_data = trajectory['responses']
+        pixel_values_data = trajectory.get('pixel_values', [])
+        old_log_prob_data = trajectory.get('old_log_prob', [])
+        task_id = sample.metadata.get('task_id', 0)
+        trial_id = sample.metadata.get('trial_id', 0)
+        gen_idx = sample.metadata.get('gen_idx', 0)
+        
+        # Handle both stacked tensors and lists
+        if isinstance(input_ids_data, torch.Tensor) and input_ids_data.dim() >= 2:
+            # NEW FORMAT: Stacked tensors
+            num_steps = input_ids_data.shape[0]
+            input_ids_list = [input_ids_data[i] for i in range(num_steps)]
+            responses_list = [responses_data[i] for i in range(num_steps)]
+            pixel_values_list = [pixel_values_data[i] for i in range(num_steps)] if isinstance(pixel_values_data, torch.Tensor) else pixel_values_data
+            old_log_prob_list = [old_log_prob_data[i] for i in range(num_steps)] if isinstance(old_log_prob_data, torch.Tensor) and old_log_prob_data.numel() > 0 else []
         else:
-            # Trajectory missing or invalid - log for debugging
-            if not trajectory:
-                logger.warning("[VLA Policy Input] No trajectory data found in sample")
-            elif not trajectory.get('input_ids'):
-                logger.warning("[VLA Policy Input] Trajectory missing 'input_ids' field")
-            elif not trajectory.get('responses'):
-                logger.warning("[VLA Policy Input] Trajectory missing 'responses' field")
-            return None
+            # OLD FORMAT: Lists
+            input_ids_list = input_ids_data if isinstance(input_ids_data, list) else [input_ids_data]
+            responses_list = responses_data if isinstance(responses_data, list) else [responses_data]
+            pixel_values_list = pixel_values_data if isinstance(pixel_values_data, list) else [pixel_values_data]
+            old_log_prob_list = old_log_prob_data if isinstance(old_log_prob_data, list) else [old_log_prob_data]
+        
+        # Build per-step data structure (matches SimpleVLA-RL)
+        per_step_data = []
+        
+        for step_idx, (step_ids, step_responses) in enumerate(zip(input_ids_list, responses_list)):
+            # Convert prompt tokens to tensor
+            if isinstance(step_ids, torch.Tensor):
+                prompt_tokens = step_ids
+            elif isinstance(step_ids, list):
+                prompt_tokens = torch.tensor(step_ids, dtype=torch.long)
+            else:
+                continue
+            
+            # Convert response tokens to tensor
+            if isinstance(step_responses, torch.Tensor):
+                # Flatten if multi-dimensional: (8 actions, 7 tokens) → [56 tokens]
+                response_tokens = step_responses.flatten()
+            elif isinstance(step_responses, list):
+                # Flatten nested lists
+                flat_responses = []
+                if step_responses and isinstance(step_responses[0], (list, torch.Tensor)):
+                    for r in step_responses:
+                        if isinstance(r, torch.Tensor):
+                            flat_responses.extend(r.flatten().tolist())
+                        elif isinstance(r, list):
+                            flat_responses.extend(r)
+                else:
+                    flat_responses = step_responses
+                response_tokens = torch.tensor(flat_responses, dtype=torch.long)
+            else:
+                response_tokens = torch.tensor([], dtype=torch.long)
+            
+            # Extract old_log_prob for this step (if available)
+            old_log_prob = None
+            if old_log_prob_list and step_idx < len(old_log_prob_list):
+                if isinstance(old_log_prob_list[step_idx], torch.Tensor):
+                    old_log_prob = old_log_prob_list[step_idx].flatten()
+                elif isinstance(old_log_prob_list[step_idx], list):
+                    old_log_prob = torch.tensor(old_log_prob_list[step_idx], dtype=torch.float32).flatten()
+            
+            # If no old_log_prob available, create dummy zeros
+            if old_log_prob is None:
+                old_log_prob = torch.zeros(len(response_tokens), dtype=torch.float32)
+            
+            # CRITICAL: Only pass prompt to model (NOT concatenated with actions)
+            # The openvla-oft model internally:
+            #   1. Adds 56 placeholder action tokens
+            #   2. Adds 1 stop token
+            #   3. Returns logits ONLY for the 56 action positions
+            # So input is just the prompt, model handles the rest
+            
+            # Create attention mask for prompt only
+            attention_mask = torch.ones_like(prompt_tokens)
+            
+            # Create logprob mask for action tokens only (56 values)
+            # This will be aligned with the model's output logits (56 tokens)
+            ACTION_CHUNK_SIZE = 8
+            ACTION_DIM_SIZE = 7
+            mini_step_start = step_idx * ACTION_CHUNK_SIZE
+            mini_step_mask = (mini_step_start + torch.arange(ACTION_CHUNK_SIZE)) < episode_length  # (8,)
+            logprob_mask = mini_step_mask.unsqueeze(-1).repeat(1, ACTION_DIM_SIZE).flatten()  # (56,) = repeat 7 times
+            
+            per_step_data.append({
+                'input_ids': prompt_tokens,  # Prompt only (31 tokens)
+                'attention_mask': attention_mask,  # Mask for prompt (31 values)
+                'logprob_mask': logprob_mask,
+                'responses': response_tokens,  # Action labels for loss computation (56 tokens)
+                'old_log_prob': old_log_prob,  # Old log probs from rollout (56 values)
+            })
+            
+        # Return full episode without chunking
+        # Chunking will be handled in train_vla() for gradient accumulation
+        class RLPolicyInput:
+            """Per-step structured input for VLA training"""
+            def __init__(self, per_step_data, pixel_values, task_id, trial_id, gen_idx):
+                self.per_step_data = per_step_data  # List of dicts, one per step
+                self.pixel_values = pixel_values  # List of tensors, one per step
+                self.num_steps = len(per_step_data)
+                self.task_id = task_id
+                self.trial_id = trial_id
+                self.gen_idx = gen_idx
+        
+        return RLPolicyInput(per_step_data, pixel_values_list, task_id, trial_id, gen_idx)
+
     
     def policy_compute_max_len(self, processed_samples: List[Any]) -> int:
         """

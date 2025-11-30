@@ -23,6 +23,7 @@ from typing import Tuple, List, Optional, Any, Dict
 from dataclasses import dataclass, field
 from transformers import AutoConfig, AutoProcessor
 from safetensors import safe_open
+import torch.nn.functional as F
 
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.vla.weight_mapper import VLAWeightMapper
@@ -157,7 +158,7 @@ class VLAModel(BaseModel):
             # Wrap it in a simple namespace to provide .logits attribute
             if isinstance(outputs, torch.Tensor):
                 from types import SimpleNamespace
-                outputs = SimpleNamespace(logits=outputs)
+                outputs = SimpleNamespace(logits=outputs, logprobs=None, entropy=None)
             
             return outputs
         except Exception as e:
@@ -170,10 +171,8 @@ class VLAModel(BaseModel):
         input_ids: torch.Tensor,  # (batch, num_steps, seq_len)
         pixel_values: torch.Tensor,  # (batch, num_steps, C, H, W)
         attention_mask: torch.Tensor,  # (batch, num_steps, seq_len)
-        position_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         temperature: float = 1.0,
-        return_action_logits_only: bool = True,
         **kwargs
     ):
         """
@@ -205,29 +204,31 @@ class VLAModel(BaseModel):
                 **kwargs
             )
         
-            # Get raw logits: (batch*steps, output_len, vocab)
-            logits = outputs.logits
-            
-            if return_action_logits_only:
-                # Slice vocab to action tokens: [vocab_size-256-64 : vocab_size-64]
-                # This extracts the 256 action tokens from the full vocabulary
-                vocab_size = logits.shape[-1]
-                start_index = vocab_size - 256 - 64
-                logits = logits[..., start_index:start_index + 256]
-                # Store start_index for response remapping
-                outputs.action_vocab_start_index = start_index
-            
-            # Apply temperature scaling
-            logits = logits.div(temperature)
-            
-            # Compute entropy: -sum(p * log(p))
-            log_probs_full = torch.nn.functional.log_softmax(logits, dim=-1)
-            probs = torch.nn.functional.softmax(logits, dim=-1)
-            entropy = -(probs * log_probs_full).sum(dim=-1)  # (batch, seq_len)
-            
-            outputs.logits = logits
-            outputs.entropy = entropy
-            return outputs
+        # Get raw logits: (batch*steps, output_len, vocab)
+        logits = outputs.logits
+        
+        # Slice vocab to action tokens: [vocab_size-256-64 : vocab_size-64]
+        # This extracts the 256 action tokens from the full vocabulary
+        vocab_size = logits.shape[-1]
+        start_index = vocab_size - 256 - 64
+        logits = logits[..., start_index:start_index + 256]
+        labels_remapped = labels - start_index
+        
+        # Apply temperature scaling
+        logits = logits.div(temperature)
+
+        logp = F.log_softmax(logits, dim=-1)
+        logpy = torch.gather(logp, dim=-1, index=labels_remapped.unsqueeze(-1))
+        logpy = logpy.squeeze(-1)
+        
+        # Compute entropy: -sum(p * log(p))
+        probs = F.softmax(logits, dim=-1)
+        entropy = -(probs * logp).sum(dim=-1)  # (batch, seq_len)
+        
+        outputs.logits = logits
+        outputs.entropy = entropy
+        outputs.logprobs = logpy
+        return outputs
     
     def generate(
         self,
