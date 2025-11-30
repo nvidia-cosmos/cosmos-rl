@@ -13,15 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.policy.trainer.llm_trainer import LLMTrainer
-from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
-from cosmos_rl.policy.trainer.base import Trainer
+
+from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
+from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
+from cosmos_rl.policy.worker.llm_worker import LLMPolicyWorker
 
 __all__ = [
-    "LLMTrainer",
-    "GRPOTrainer",
-    "SFTTrainer",
-    "Trainer",
+    "SFTPolicyWorker",
+    "RLPolicyWorker",
+    "LLMPolicyWorker",
 ]
-

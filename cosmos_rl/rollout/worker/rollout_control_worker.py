@@ -508,7 +508,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     underlying_tensor_view
                 )
                 logger.debug(
-                    f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {underlying_tensor_view.shape} of {target_tensor.shape} with dtype {underlying_tensor_view.dtype}."
+                    f"[Rollout] Recving tensor {inst_dest_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {underlying_tensor_view.shape} of {target_tensor.shape} with dtype {recv_tensor.dtype}."
                 )
                 nccl_recv(recv_tensor, p_rank, communicator_index)
 

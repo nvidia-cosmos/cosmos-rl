@@ -13,72 +13,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.policy.trainer import Trainer
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.parallelism import (
-    ParallelDims,
-)
-import torch
-from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
-from torch.utils.data import Dataset
-from typing import Union, Callable, Optional
-import inspect
 import os
-from cosmos_rl.utils.logging import logger
-import cosmos_rl.utils.distributed as dist_util
-import time
-import torch.distributed as dist
+import torch
+import types
+from functools import partial
+import inspect
 import numpy as np
-import threading
-import asyncio
-from queue import Queue, Empty
-from cosmos_rl.policy.trainer.optm import build_lr_schedulers
-from cosmos_rl.dispatcher.command import (
-    Command,
-    BuildMeshCommand,
-    PolicyToPolicyBroadcastCommand,
-    PolicyToRolloutUnicastCommand,
-    WeightResumeCommand,
-    PolicyToPolicyUnicastCommand,
-    DataFetchCommand,
+import enum
+from functools import cached_property
+from typing import Optional, Dict, Any, Callable, List, Tuple
+
+from cosmos_rl.policy.config import Config as CosmosConfig
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.trainer.llm_trainer import LLMTrainer
+from cosmos_rl.policy.trainer.base import TrainerRegistry
+from cosmos_rl.policy.trainer.optm import (
+    build_lr_schedulers as common_build_lr_schedulers,
 )
-import atexit
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
+from cosmos_rl.utils.distributed import HighAvailabilitylNccl
+from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import (
     compute_mfu,
     setup_tokenizer,
 )
-from cosmos_rl.utils.parallelism_map import (
-    ParallelTopoMapperGroup,
-)
-from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
-from functools import cached_property
-from typing import List, Dict, Any, Tuple
-import types
-from functools import partial
-import msgpack
-from cosmos_rl.utils.ulysses import (
-    slice_inputs_for_ulysses,
-)
-from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
-from cosmos_rl.utils import constant
-from cosmos_rl.utils.distributed import HighAvailabilitylNccl
-from cosmos_rl.dispatcher.replica import Rollout
-from cosmos_rl.utils.pynccl import (
-    create_nccl_uid,
-    create_nccl_comm,
-    nccl_send,
-    nccl_group_start,
-    nccl_group_end,
-)
-from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
+from cosmos_rl.dispatcher.data.schema import Rollout
+from cosmos_rl.utils.balance_seqlen import rearrange_mini_batches
 from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_inputs,
     pack_sequences_for_logprobs,
     pack_sequences_info_collect,
     pack_sequences_for_masks,
 )
-from cosmos_rl.utils.balance_seqlen import rearrange_mini_batches
-import enum
+from cosmos_rl.utils.ulysses import (
+    slice_inputs_for_ulysses,
+)
+from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
+from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
+import cosmos_rl.utils.distributed as dist_util
 
 
 class TrainerPhase(enum.Enum):
@@ -285,12 +257,205 @@ def compute_loss(
     )
 
 
-class GRPOTrainer(Trainer):
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
-        super().__init__(config, parallel_dims)
+# TODO: (lms) May be it's better to register this func as a hook to the last stage model.
+# That way is more clean. I think it's feasible but need to be compatible with torch Pipelie schedule.
+def _swizzle_pp_grpo_forward(
+    trainer: "GRPOTrainer",
+    ori_forward: Callable,
+    config: CosmosConfig,
+    inter_policy_nccl: HighAvailabilitylNccl,
+    *args,
+    **kwargs,
+):
+    args = args[1:]  # Skip self
+    """
+    Swizzle the forward function (only to last stage) to return the loss directly.
+    """
+    # [mini_batch_size]: the mini-batch index of the sample with respect to the whole batch
+    # [micro_batch_size]: the micro-batch index of the sample with respect to the mini-batch
+    mini_batch_ids = kwargs.pop("mini_batch_ids")
+    micro_batch_ids = kwargs.pop("micro_batch_ids")
+    loss_scaling = kwargs.pop("loss_scaling")
+    is_computing_ref = kwargs.pop("is_computing_ref")
+    is_computing_old_ahead = kwargs.pop("is_computing_old_ahead")
+    advantages = kwargs.pop("advantages")
+    positive_flags = kwargs.pop("positive_flags", None)
+
+    micro_batch_id = micro_batch_ids[0].item()
+    mini_batch_id = mini_batch_ids[0].item()
+    loss_scaling = loss_scaling[0].item()
+    is_computing_ref = is_computing_ref[0].item()
+    is_computing_old_ahead = is_computing_old_ahead[0].item()
+
+    # User defined input
+    user_input = kwargs.copy()
+
+    assert torch.all(
+        micro_batch_ids == micro_batch_id
+    ), f"micro_batch_ids are not all the same: {micro_batch_ids}"
+    assert torch.all(
+        mini_batch_ids == mini_batch_id
+    ), f"mini_batch_ids are not all the same: {mini_batch_ids}"
+    del micro_batch_ids, mini_batch_ids
+
+    n_args = len(args)
+    if n_args > 0:
+        # remove the first `n_args` arguments from kwargs
+        signature = list(inspect.signature(ori_forward).parameters.keys())[:n_args]
+        for key in signature:
+            if key in kwargs:
+                kwargs.pop(key)
+
+    raw_logits = ori_forward(*args, **kwargs)
+
+    # recover the input ids and position ids
+    if "input_ids_before_cp" in kwargs:
+        user_input["input_ids"] = kwargs["input_ids_before_cp"]
+    if "position_ids_before_cp" in kwargs:
+        user_input["position_ids"] = kwargs["position_ids_before_cp"]
+
+    if config.train.train_policy.temperature > 1e-6:
+        raw_logits = raw_logits / config.train.train_policy.temperature
+    # [n_tokens, n_vocab]
+    current_per_token_logprobs, cu_seqlens, metrics = trainer.compute_logprobs(
+        minibatch={
+            **user_input,
+        },
+        logits=raw_logits,
+        is_full_logits=True if raw_logits.ndim == 3 else False,
+    )
+    logprob_masks = user_input["logprob_masks"]
+    current_advantages = logprob_masks * advantages
+
+    if positive_flags is not None:
+        pos_mask = positive_flags.bool().expand_as(logprob_masks)
+        pos_token_mask = pos_mask & logprob_masks
+    else:
+        pos_token_mask = None
+
+    if is_computing_ref:
+        if trainer.ref_per_token_logps[mini_batch_id] is not None:
+            assert isinstance(trainer.ref_per_token_logps[mini_batch_id], list)
+            trainer.ref_per_token_logps[mini_batch_id].append(
+                current_per_token_logprobs.detach()
+            )
+        else:
+            trainer.ref_per_token_logps[mini_batch_id] = [
+                current_per_token_logprobs.detach()
+            ]
+        # Skip the rest logic since we are computing ref
+        return None
+    if is_computing_old_ahead:
+        if trainer.old_per_token_logps[mini_batch_id] is not None:
+            assert isinstance(trainer.old_per_token_logps[mini_batch_id], list)
+            trainer.old_per_token_logps[mini_batch_id].append(
+                current_per_token_logprobs.detach()
+            )
+        else:
+            trainer.old_per_token_logps[mini_batch_id] = [
+                current_per_token_logprobs.detach()
+            ]
+        # Skip the rest logic since we are computing old ahead
+        return None
+
+    if (
+        trainer.old_per_token_logps[mini_batch_id] is not None
+        and len(trainer.old_per_token_logps[mini_batch_id]) > micro_batch_id
+    ):
+        old_per_token_logprobs = trainer.old_per_token_logps[mini_batch_id][
+            micro_batch_id
+        ]
+        assert isinstance(old_per_token_logprobs, torch.Tensor)
+        assert (
+            old_per_token_logprobs.ndim == 1
+        ), f"old_per_token_logprobs.ndim: {old_per_token_logprobs.ndim}, while it should be 1"
+        assert (
+            old_per_token_logprobs.shape == current_per_token_logprobs.shape
+        ), f"old_per_token_logprobs.shape: {old_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
+    else:
+        old_per_token_logprobs = current_per_token_logprobs.detach()
+        # Following should only happen in the first iteration
+        if micro_batch_id == 0:
+            # assert trainer.old_per_token_logps[mini_batch_id] is None, f"old_per_token_logps[mini_batch_id] should be None"
+            # Due to the PP warmup, the first micro-batch could get processed multiple times
+            trainer.old_per_token_logps[mini_batch_id] = [old_per_token_logprobs]
+        else:
+            assert isinstance(trainer.old_per_token_logps[mini_batch_id], list)
+            trainer.old_per_token_logps[mini_batch_id].append(old_per_token_logprobs)
+
+    ref_per_token_logprobs = None
+    if trainer.ref_per_token_logps[mini_batch_id] is not None:
+        ref_per_token_logprobs = trainer.ref_per_token_logps[mini_batch_id][
+            micro_batch_id
+        ]
+        assert (
+            ref_per_token_logprobs.ndim == 1
+        ), f"ref_per_token_logprobs.ndim: {ref_per_token_logprobs.ndim}, while it should be 1"
+        assert (
+            ref_per_token_logprobs.shape == current_per_token_logprobs.shape
+        ), f"ref_per_token_logprobs.shape: {ref_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
+
+    loss, _, _ = compute_loss(
+        current_per_token_logprobs,
+        old_per_token_logprobs,
+        ref_per_token_logprobs,
+        current_advantages,
+        cu_seqlens,
+        config,
+        logprob_masks,
+        dp_group=trainer.parallel_dims.mesh["dp"].get_group()
+        if trainer.parallel_dims.dp_enabled
+        else None,
+        ddp_comm=inter_policy_nccl,
+        rollout_per_token_logps=user_input.get("rollout_logprobs", None),
+    )
+    if config.train.train_policy.entropy_coeff > 0.0:
+        loss += (
+            -config.train.train_policy.entropy_coeff * (metrics["effective_entropy"])
+        )
+    for key in metrics:
+        trainer.metrics[key] += metrics[key]
+
+    # Add Positive NLL if enabled and mask available
+    pos_coef = config.train.train_policy.positive_nll_coef
+    if (
+        pos_coef is not None
+        and pos_coef > 0.0
+        and pos_token_mask is not None
+        and pos_token_mask.any()
+    ):
+        flat_mask = pos_token_mask[logprob_masks]
+        l_nll = -current_per_token_logprobs[flat_mask].mean()
+        loss = loss + pos_coef * l_nll
+
+    return loss.unsqueeze(0) * loss_scaling
+
+
+@TrainerRegistry.register(trainer_type="grpo")
+class GRPOTrainer(LLMTrainer):
+    def __init__(
+        self,
+        config: CosmosConfig,
+        parallel_dims: ParallelDims,
+        train_stream: torch.cuda.Stream,
+        data_packer: BaseDataPacker,
+        val_data_packer: BaseDataPacker,
+        **kwargs,
+    ):
+        super(GRPOTrainer, self).__init__(
+            config,
+            parallel_dims,
+            train_stream=train_stream,
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+            **kwargs,
+        )
+
+    def trainer_init(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
+        super(GRPOTrainer, self).trainer_init(config, parallel_dims, **kwargs)
         self.reference_state_dict = {}
 
-        self.lr_schedulers = build_lr_schedulers(self.optimizers, self.config, 1e6)
+        self.lr_schedulers = self.build_lr_schedulers()
         self.lr_schedulers_updated = False
         if parallel_dims.dp_replicate > 1:
             raise ValueError(
@@ -299,37 +464,6 @@ class GRPOTrainer(Trainer):
             )
 
         self.grpo_config = self.config.train.train_policy
-        # For model load
-        self.model_ready = False
-
-        # For mesh build
-        self.inter_policy_nccl = HighAvailabilitylNccl(
-            replica_name=self.replica_name,
-            global_rank=self.global_rank,
-            api_client=self.api_client,
-        )
-        self.rollouts_comm = {}
-        self.kv_store = dist_util.DistKVStore(
-            group=dist.distributed_c10d._get_default_group(),
-            master_rank=0,
-            shutdown_event=self.shutdown_signal,
-        )
-
-        # For command fetch
-        self.fetch_command_buffer = Queue()
-        self.command_buffer = Queue()
-
-        # For rollouts fetch
-        self.data_queue = Queue()
-
-        # Parallel parameters
-        self.dp_rank, self.dp_world_size = 0, 1
-        if parallel_dims.dp_enabled:
-            self.dp_rank = parallel_dims.mesh["dp"].get_local_rank()
-            self.dp_world_size = parallel_dims.mesh["dp"].size()
-
-        # Init redis controller
-        self.init_redis()
 
         # For iteration control
         self.mini_step = 0
@@ -337,806 +471,29 @@ class GRPOTrainer(Trainer):
         self.mini_batch = self.grpo_config.mini_batch
         self.batch_size_per_optimize = self.grpo_config.batch_size_per_optimize
 
-        # For Polocy to Rollout weight mapping
-        self.policy_to_rollout_insts = None
-
         # For GRPO
         self.max_length = config.policy.model_max_length
         self.mu_iterations = self.config.train.train_policy.mu_iterations
         self.optimizers.zero_grad()
-        self.fetch_command_thread = None
-        self.fetch_rollouts_thread = None
-        atexit.register(self.handle_shutdown)
-        self.p2r_nccl_uuids = {}
 
-        # Flag for determining if the current replica is the master replica,
-        # The master replica needs to:
-        # - Save the checkpoint/safetensors
-        self.is_master_replica = True
-        self.prepare_shard_infos_for_weight_sync_insts()
         if config.train.train_policy.variant == "gspo":
             logger.info("[Policy] Use GSPO loss in RL.")
 
-        self.setup(
-            dataset=kwargs.get("dataset", None),
-            data_packer=kwargs.get("data_packer", None),
-            val_dataset=kwargs.get("val_dataset", None),
-            val_data_packer=kwargs.get("val_data_packer", None),
-        )
-        self.tokenizer = setup_tokenizer(config.policy.model_name_or_path)
-
-    def setup(
-        self,
-        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        data_packer: Optional[BaseDataPacker] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
-    ):
-        # setup data packer first
-        self.init_data_packer(
-            data_packer=data_packer,
-            val_data_packer=val_data_packer,
-        )
-        # Set up data fetcher
-        self.data_fetcher = WorkerDataFetcher(
-            config=self.config,
-            dataset=dataset,
-            val_dataset=val_dataset,
-            data_packer=self.data_packer,
-            val_data_packer=self.val_data_packer,
-            is_rl=True,
-        )
-
-    @torch.no_grad()
-    def prepare_shard_infos_for_weight_sync_insts(self):
-        keys_n_ranks = []
-        trainable_params = self.model.trainable_params
-        for name, tensor_or_callable in self.model.weight_sync_transforms:
-            if isinstance(tensor_or_callable, torch.Tensor):
-                keys_n_ranks.append((name, tensor_or_callable.ndim))
-            else:
-                assert isinstance(tensor_or_callable, Callable)
-                tensor_or_callable = tensor_or_callable()
-                keys_n_ranks.append((name, tensor_or_callable.ndim))
-            if name not in trainable_params:
-                logger.debug(f"[Policy] Not trainable for param {name}")
-        local_shard_infos = ParallelTopoMapperGroup(
-            self.parallel_dims,
-            hf_config=self.hf_config,
-            is_policy=True,
-            underlying_model=self.model,
-            weight_mapper=self.model.weight_mapper,
-        ).prepare_local_shard_infos(keys_n_ranks, self.global_rank)
-        self.all_rank_local_shard_infos = dist_util.all_gather_object_cpu(
-            local_shard_infos
-        )
-        sorted_params_all_rank = dist_util.all_gather_object_cpu(
-            sorted([x[0] for x in keys_n_ranks])
-        )
-        sorted_params_all_rank = [
-            x
-            for r, x in enumerate(sorted_params_all_rank)
-            if self.parallel_dims.get_rank_in_dim("dp_cp_tp", r) == 0
-        ]
-        trainable_params_all_rank = dist_util.all_gather_object_cpu(trainable_params)
-        self.trainable_params = set()
-        for trainable_params_per_rank in trainable_params_all_rank:
-            self.trainable_params.update(trainable_params_per_rank)
-
-        if self.global_rank == 0:
-            logger.info(
-                f"[Policy] Parse {len(self.trainable_params)} trainable params to controller."
-            )
-            self.api_client.post_policy_shard_info(
-                shard_infos=self.all_rank_local_shard_infos,
-                param_groups=[],
-                sorted_params=sorted_params_all_rank,
-                trainable_params=list(self.trainable_params),
-            )
-
-    def handle_shutdown(self):
-        if not hasattr(self, "_handle_shutdown_called"):
-            self._handle_shutdown_called = True
-
-            self.shutdown_signal.set()
-            self.shutdown_mp_signal.set()
-            self.inter_policy_nccl.shutdown()
-            if self.fetch_rollouts_thread is not None:
-                self.fetch_rollouts_thread.join()
-                self.fetch_rollouts_thread = None
-
-            if self.fetch_command_thread is not None:
-                self.fetch_command_thread.join()
-                self.fetch_command_thread = None
-
-            if hasattr(self, "heartbeat_thread") and self.heartbeat_thread is not None:
-                self.heartbeat_thread.join()
-                self.heartbeat_thread = None
-
-            # Manually unregister from controller
-            self.unregister_from_controller()
-
-            if hasattr(self, "upload_thread") and self.upload_thread is not None:
-                logger.info("[Policy] Waiting for upload thread to finish...")
-                self.upload_thread.join()
-                logger.info("[Policy] Upload thread finished.")
-                self.upload_thread = None
-
-            # TODO(jiaxin)
-            # The background threads are daemon threads, so that they will exit when the main thread exits
-            # However, the previous `.join()` may not really wait for them to stop.
-            # So we need to wait for a while to ensure they have a chance to exit to prevent `exitcode:-6`
-
-            # Another notice is that make sure the background threads detect the shutdown event in less than 15 seconds
-            # Otherwise, the main thread may exit before the background threads detect the shutdown event
-            time.sleep(15)
-
-    def model_load_from_hf(self):
-        self.model.load_hf_weights(
-            self.config.policy.model_name_or_path,
-            self.parallel_dims,
-            self.device,
-            revision=self.config.policy.model_revision,
-        )
-        self.model.train()
-        self.model_ready = True
-
-    def model_resume_from_checkpoint(self):
-        self.ckpt_manager.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizers,
-            scheduler=self.lr_schedulers,
-            model_name_or_path=self.config.policy.model_name_or_path,
-            revision=self.config.policy.model_revision,
-        )
-        self.model.train()
-        self.model_ready = True
-
-    async def fetch_rollouts(self):
-        assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
-        while not self.shutdown_signal.is_set():
-            rollouts = []
-            try:
-                rollouts = [
-                    Rollout.model_validate(msgpack.unpackb(x))
-                    for x in self.redis_controller.subscribe_rollout(self.replica_name)
-                ]
-            except Exception as e:
-                logger.debug(f"Failed to get rollouts: {e}, wait for next round")
-            for rollout in rollouts:
-                self.data_queue.put_nowait(rollout)
-
-    def pre_P2R_collect_parameters(self):
-        needed_tensors = []
-        for insts_group in self.policy_to_rollout_insts:
-            for insts_for_per_param in insts_group.param_instructions:
-                dest_name = insts_for_per_param.param_name
-                needed_tensors.append(dest_name)
-        prepared_tensor_to_rollout = {}
-        for dest_name, local_view in self.map_w_from_policy_to_rollout.items():
-            if isinstance(
-                local_view, Callable
-            ) and self.model.weight_mapper.policy_pre_P2R_gather_required_for_sync(
-                dest_name
-            ):
-                view = local_view()
-                if dest_name in needed_tensors:
-                    prepared_tensor_to_rollout[dest_name] = view
-        return prepared_tensor_to_rollout
-
-    @Trainer.register_policy_command_handler(PolicyToPolicyBroadcastCommand)
-    def execute_policy_to_policy_broadcast(
-        self, command: PolicyToPolicyBroadcastCommand
-    ):
-        send = self.replica_name == command.src_replica_name
-        recv = self.replica_name in command.dst_replica_names and not send
-        if not send and not recv:
-            return True
-        st = time.time()
-        # TODO(zjx): there need failure tolerance for nccl send and recv, so get nccl param from command
-        send_recv_hook = partial(
-            self.inter_policy_nccl.broadcast, src_replica=command.src_replica_name
-        )
-        len_params = self.sync_all_states(
-            is_send=send,
-            send_hook=send_recv_hook,
-            recv_hook=send_recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
-        )
-        if recv:
-            self.model_ready = True
-        time_eclapsed = time.time() - st
-        logger.debug(
-            f"[Policy] Policy2Policy Broadcast {len_params} parameters from {command.src_replica_name} (rank {self.inter_policy_nccl.get_replica_rank(command.src_replica_name)}) to {len(command.dst_replica_names)} replicas took {time_eclapsed:.3f} seconds."
-        )
-        return False
-
-    @Trainer.register_policy_command_handler(PolicyToPolicyUnicastCommand)
-    def execute_policy_to_policy_unicast(self, command: PolicyToPolicyUnicastCommand):
-        send = self.replica_name == command.src_replica_name
-        recv = self.replica_name == command.dst_replica_name
-        if not send and not recv:
-            return False
-        st = time.time()
-        # TODO(zjx): there need failure tolerance for nccl send and recv, so get nccl param from command
-        send_hook = partial(
-            self.inter_policy_nccl.send, dst_replica=command.dst_replica_name
-        )
-        recv_hook = partial(
-            self.inter_policy_nccl.recv, src_replica=command.src_replica_name
-        )
-        len_params = self.sync_all_states(
-            is_send=send,
-            send_hook=send_hook,
-            recv_hook=recv_hook,
-            reference_model=self.config.train.train_policy.kl_beta != 0.0,
-        )
-        if recv:
-            self.model_ready = True
-        time_eclapsed = time.time() - st
-        logger.debug(
-            f"[Policy] Policy2Policy Unicast {len_params} parameters from {command.src_replica_name} (rank {self.inter_policy_nccl.get_replica_rank(command.src_replica_name)}) to {command.dst_replica_name} (rank {self.inter_policy_nccl.get_replica_rank(command.dst_replica_name)}) as sender {send} took {time_eclapsed:.3f} seconds."
-        )
-        return False
-
-    @cached_property
-    def map_w_from_policy_to_rollout(self):
-        """
-        Generate a mapping from local parameters into shape/layout that rollout requires.
-        The mapping is created by iterating through the named parameters of both models
-        and replacing certain substrings in the parameter names.
-        """
-        name_to_transform = {}
-        assert len(self.model.weight_sync_transforms) > 0, "No sorted parameters found."
-        for name, transform_block in self.model.weight_sync_transforms:
-            assert isinstance(transform_block, Callable) or isinstance(
-                transform_block, torch.Tensor
-            )
-            name_to_transform[name] = transform_block
-        return name_to_transform
-
-    @Trainer.register_policy_command_handler(PolicyToRolloutUnicastCommand)
-    def execute_policy_to_rollout_unicast(self, command: PolicyToRolloutUnicastCommand):
-        assert command.src_replica_size == self.world_size
-        if not command.src_replica_name == self.replica_name:
-            logger.error(
-                f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
-            )
-            return False
-
-        comm_id = {}
-        # Create nccl id for one policy replica to another rollout replica
-        mesh_key = command.src_replica_name + "_" + command.dst_replica_name
-        if mesh_key not in self.p2r_nccl_uuids:
-            nccl_uuid = None
-            if self.global_rank == 0:
-                # Only create nccl group id in rank 0.
-                nccl_uuid = create_nccl_uid()
-                logger.debug(f"[Policy] mesh_key: {mesh_key}")
-                self.api_client.post_nccl_comm_initiator(mesh_key, nccl_uuid)
-            # broadcast the nccl group id to all ranks
-            nccl_uuid = dist_util.broadcast_object_cpu(nccl_uuid)
-            self.p2r_nccl_uuids[mesh_key] = nccl_uuid
-
-        if mesh_key not in self.rollouts_comm:
-            assert mesh_key in self.p2r_nccl_uuids
-            nccl_uuid = self.p2r_nccl_uuids[mesh_key]
-            logger.debug(
-                f"[Policy] Creating nccl communicator for `P2R` with mesh_key: {mesh_key}"
-            )
-            comm_id = create_nccl_comm(
-                nccl_uuid,
-                self.global_rank,
-                self.world_size + command.dst_replica_size,
-            )
-            logger.debug(
-                f"[Policy] `P2R` nccl comm: {comm_id} for `P2R` with mesh_key: {mesh_key} is created."
-            )
-            self.rollouts_comm[mesh_key] = comm_id
-        else:
-            comm_id = self.rollouts_comm[mesh_key]
-        assert (
-            self.map_w_from_policy_to_rollout is not None
-        ), "No parameters to sync found."
-        st = time.time()
-
-        if self.policy_to_rollout_insts is None:
-            self.policy_to_rollout_insts = []
-            self.policy_to_rollout_insts = self.api_client.post_policy_shard_send_insts(
-                self.global_rank
-            )
-        # sort the param list by the dest_name, same as rollout
-        total_bytes_sent = 0
-        # There is a local-replica comm in training step
-        # Here we use another comm to send weight to rollout
-        # NCCL announces that multi-comm could lead to deadlocks if not synchronized
-        with torch.cuda.stream(self.train_stream):
-            with torch.no_grad():
-                if self.config.policy.lora is not None:
-                    from cosmos_rl.policy.lora.plugin import (
-                        merge_lora_weights_,
-                        unmerge_lora_weights_,
-                    )
-
-                    merge_lora_weights_(self.model)
-
-                pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
-                    self.pre_P2R_collect_parameters()
-                )
-
-                def grouped_send(grouped_send_ops):
-                    nccl_group_start(comm_id)
-                    for view, r_rank, dest_name in grouped_send_ops:
-                        logger.debug(
-                            f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
-                        )
-                        nccl_send(
-                            view,
-                            self.world_size + r_rank,
-                            comm_id,
-                        )
-                    nccl_group_end(comm_id)
-                    grouped_send_ops.clear()
-
-                grouped_send_ops = []
-                num_groups = 0
-
-                transferred_params_cnt = 0
-                skipped_params_cnt = 0
-                for insts_group in self.policy_to_rollout_insts:
-                    for insts_for_per_param in insts_group.param_instructions:
-                        dest_name = insts_for_per_param.param_name
-                        if (
-                            dest_name not in self.trainable_params
-                            and command.trainable_only
-                        ):
-                            logger.debug(
-                                f"[Policy] Skip {dest_name} in P2R send due to non trainable."
-                            )
-                            skipped_params_cnt += 1
-                            continue
-                        transferred_params_cnt += 1
-
-                        for inst in insts_for_per_param.instructions:
-                            p_rank = inst.policy_rank
-                            r_rank = inst.rollout_rank
-                            tensor_split_strategys = inst.slice_strategy
-                            if dest_name not in self.map_w_from_policy_to_rollout:
-                                raise RuntimeError(
-                                    f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
-                                )
-                            local_view = self.map_w_from_policy_to_rollout[dest_name]
-                            if dest_name in pre_P2R_collected_tensors:
-                                local_view = pre_P2R_collected_tensors[dest_name]
-                            elif isinstance(local_view, Callable):
-                                local_view = local_view()
-                            else:
-                                pass
-                            local_view = local_view.to(
-                                str2torch_dtype(self.config.train.transfer_dtype)
-                            )
-                            view = (
-                                local_view.cosmos_slice(tensor_split_strategys)
-                                .contiguous()
-                                .cuda()
-                            )
-                            assert self.global_rank == p_rank
-                            logger.debug(
-                                f"Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
-                            )
-                            grouped_send_ops.append((view, r_rank, dest_name))
-                            total_bytes_sent += view.numel() * view.element_size()
-                    num_groups += 1
-                    if num_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                        grouped_send(grouped_send_ops)
-                        num_groups = 0
-
-                grouped_send(grouped_send_ops)
-
-                if self.config.policy.lora is not None:
-                    # Always attempt to unmerge to restore training state
-                    unmerge_lora_weights_(self.model)
-
-                if command.trainable_only:
-                    if not hasattr(self, "synced_trainable_params"):
-                        self.synced_trainable_params = transferred_params_cnt
-                    else:
-                        assert (
-                            self.synced_trainable_params == transferred_params_cnt
-                        ), "Trainable synced params count must match at each weight sync."
-
-        # make sure all the send operations of all ranks are finished
-        time_eclapsed = time.time() - st
-        logger.debug(
-            f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent. While {skipped_params_cnt} non-trainable splitted params skipped and {transferred_params_cnt} splitted params transferred."
-        )
-        return False
-
-    @Trainer.register_policy_command_handler(WeightResumeCommand)
-    def execute_weight_resume(self, command: WeightResumeCommand = None):
-        # If KL-divergence is enabled, hf model should always be loaded from checkpoint
-        model_loaded = False
-        if self.config.train.train_policy.kl_beta != 0.0:
-            self.model_load_from_hf()
-            model_loaded = True
-            # Clone the state dict of hf model so that it can be used for KL-divergence calculation
-            self.reference_state_dict = {}
-            state_dict = self.model.state_dict()
-            for key, value in state_dict.items():
-                self.reference_state_dict[key] = value.detach().cpu()
-
-        if self.config.train.resume:
-            try:
-                # Need to reload again from checkpoint to make sure the model is in the correct state
-                self.model_resume_from_checkpoint()
-                model_loaded = True
-            except Exception as e:
-                if isinstance(e, FileNotFoundError):
-                    logger.info(
-                        f"Fail to resume from {self.config.train.resume} because the checkpoint file does not exist, trying to load from HuggingFace..."
-                    )
-                else:
-                    logger.error(
-                        f"Cannot resume from {self.config.train.resume} {e}. Trying to load from HuggingFace..."
-                    )
-                if not model_loaded:
-                    self.model_load_from_hf()
-                    model_loaded = True
-        elif not model_loaded:
-            logger.info("Resume not set. Trying to load from HuggingFace...")
-            self.model_load_from_hf()
-            model_loaded = True
-
-        assert model_loaded, "Model weight must be populated before training starts."
-        logger.info("[Policy] Model loaded from checkpoint.")
-        assert (
-            self.map_w_from_policy_to_rollout is not None
-        ), "No parameters to sync found."
-        return False
-
-    @Trainer.register_policy_command_handler(DataFetchCommand)
-    def execute_data_fetch(self, command: DataFetchCommand):
-        if command.do_profile:
-            self.profiler.start_dynamic(
-                active_steps=command.active_steps,
-                rank_filter=command.rank_filter,
-                record_shape=command.record_shape,
-                profile_memory=command.profile_memory,
-                with_stack=command.with_stack,
-                with_modules=command.with_modules,
-            )
-
-        assert self.replica_name == command.replica_name
-        self.replica_batch_for_this_step = command.items_count
-
-        is_fake_step = self.replica_batch_for_this_step == 0
-        if not is_fake_step:
-            if not self.lr_schedulers_updated:
-                assert (
-                    command.total_steps is not None and command.total_steps > 0
-                ), "Total steps must be set for lr scheduler"
-                logger.info(
-                    f"[Policy] Building lr schedulers for total steps {command.total_steps}"
-                )
-
-                # TODO(jiaxinc): This is a tricky part:
-                # Rebuild lr schedulers for the very first step because
-                # only until the first step, we can know the exact total steps from the controller
-                new_lr_schedulers = build_lr_schedulers(
-                    self.optimizers, self.config, command.total_steps
-                )
-                with torch.no_grad():
-                    # Note: we need to load the state dict of the old lr schedulers
-                    # in case it is resumed from a checkpoint,
-                    # otherwise, the lr scheduler will be reset to the initial value
-                    new_lr_schedulers.load_state_dict(self.lr_schedulers.state_dict())
-                self.lr_schedulers = new_lr_schedulers
-                self.lr_schedulers_updated = True
-            report_data = self.train(
-                current_step=command.global_step,
-                total_steps=command.total_steps,
-                remain_samples_num=command.remain_samples_num,
-                do_save_checkpoint=command.do_save,
-            )
-        else:
-            report_data = {}
-            logger.info(
-                f"[Policy] No data to fetch for global step {command.global_step}, skip this step."
-            )
-
-        # Train ACK
-        if is_master_rank(self.parallel_dims, self.global_rank):
-            self.api_client.post_policy_train_ack(
-                self.replica_name,
-                command.global_step,
-                command.total_steps,
-                self.profiler.check_finished(),
-                report_data,
-            )
-
-        logger.debug(f"[Policy] Train ack sent for global step {command.global_step}.")
-        return command.replica_should_stop()
-
-    def execute_all_reduce(self) -> float:
-        """
-        # Add nccl allreduce operations for all parameters and necessary states.
-        """
-        with torch.cuda.stream(self.train_stream):
-            for model_part in self.model_parts:
-                # Model part may use same physical mesh for different logical mesh,
-                # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
-                # So we need to do allreduce for each model part
-                if model_part is not None:
-                    dist_util.gradient_reduce_across_dp_replicas_(
-                        [p for p in model_part.parameters()], self.inter_policy_nccl
-                    )
-
-            """
-            Compute the global grad norm on all parameters and then apply
-            gradient clipping using the global grad norm.
-            """
-            # Must pass empty list even if model_part is None,
-            # GradNorm across pp stages will fail if some rank does not join the barrier
-            all_params = [
-                p
-                for m in [model for model in self.model_parts if model is not None]
-                for p in m.parameters()
-            ]
-            grad_norm = dist_util.gradient_norm_clipping(
-                all_params,
-                self.config.train.optm_grad_norm_clip,
-                foreach=True,
-                pp_mesh=self.parallel_dims.mesh["pp"]
-                if self.parallel_dims.pp_enabled
-                else None,
-                return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
-            )
-            self.optimizers.step()
-            self.optimizers.zero_grad()
-        return grad_norm
-
-    async def fetch_command(self):
-        # assert self.global_rank == 0, "Only rank 0 can fetch command"
-        while not self.shutdown_signal.is_set():
-            # TODO(zjx): will remove separate BuildMeshCommand, and here only fetch other commands
-            if self.global_rank == 0:
-                # rank 0 will get command from redis
-                # and broadcast the buildmesh command to all ranks
-                commands = []
-                try:
-                    commands = self.redis_controller.subscribe_command(
-                        self.replica_name
-                    )
-                except Exception as e:
-                    logger.debug(
-                        f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
-                    )
-                for x in commands:
-                    command = Command.depack(x)
-                    if isinstance(command, BuildMeshCommand):
-                        """ directly push the buildmesh command to the nccl comm, will not block main thread """
-                        # broadcast the buildmesh command to all ranks
-                        cmd = self.kv_store.broadcast_command(command, src=0)
-                        self.is_master_replica = (
-                            cmd.replica_name_to_rank[self.replica_name] == 0
-                        )
-                        self.inter_policy_nccl.push_cmd(cmd)
-                        continue
-                    self.fetch_command_buffer.put_nowait(command)
-
-            else:
-                try:
-                    bmcmd = self.kv_store.broadcast_command(None, src=0)
-                    if bmcmd:
-                        assert isinstance(
-                            bmcmd, BuildMeshCommand
-                        ), "Only buildmesh command is supported"
-                        self.is_master_replica = (
-                            bmcmd.replica_name_to_rank[self.replica_name] == 0
-                        )
-                        self.inter_policy_nccl.push_cmd(bmcmd)
-                except Exception as e:
-                    raise RuntimeError(f"Failed to broadcast on slave workers: {e}")
-
-    def execute_command(self, command: Command):
-        logger.debug(f"[Policy] Process command {command._serialize()}")
-
-        handler = self.get_policy_command_handler(type(command))
-        if handler is None:
-            raise Exception(f"No such command supoorted in policy {command}")
-        should_abort = handler(self, command)
-        logger.debug(
-            f"[Policy] Command {command._serialize()} executed with abort: {should_abort}"
-        )
-        return should_abort
-
-    def broadcast_command(self):
-        command = []
-        if self.global_rank == 0:
-            while len(self.fetch_command_buffer.queue) > 0:
-                command.append(self.fetch_command_buffer.get_nowait())
-        command = dist_util.broadcast_object_cpu(
-            command, src=0, device=torch.device("cpu")
-        )
-        if len(command) > 0:
-            for c in command:
-                self.command_buffer.put_nowait(c)
-
-    def main_loop(self):
-        def fetch_command_helper(trainer: GRPOTrainer):
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            new_loop.run_until_complete(trainer.fetch_command())
-            new_loop.stop()
-            new_loop.close()
-            return
-
-        def fetch_rollouts_helper(trainer: GRPOTrainer):
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            new_loop.run_until_complete(trainer.fetch_rollouts())
-            new_loop.stop()
-            new_loop.close()
-            return
-
-        # Start the thread with daemon=True, so it will exit when the main program exits.
-        # we need all ranks have fetch_command_thread, so that buildmesh command can be broadcasted to all ranks
-        # TODO(zjx): we will only let rank 0 fetch and broadcast command
-        self.fetch_command_thread = threading.Thread(
-            target=fetch_command_helper,
-            args=(self,),
-            daemon=True,
-            name="fetch_command_thread",
-        ).start()
-
-        if self.global_rank == 0:
-            self.fetch_rollouts_thread = threading.Thread(
-                target=fetch_rollouts_helper,
-                args=(self,),
-                daemon=True,
-                name="fetch_rollouts_thread",
-            ).start()
-
-        abort = False
-        while True:
-            abort_at_this_round = abort
-            if abort_at_this_round:
-                # Wait 30s to make sure the final potential P->R is received to finalize the Rollouts
-                time.sleep(30)
-
-            self.broadcast_command()
-            while len(self.command_buffer.queue) > 0:
-                cmd = self.command_buffer.get_nowait()
-                abort = self.execute_command(cmd) or abort
-
-            if abort_at_this_round:
-                break
-        logger.info("[Policy] Main loop finished. Shutdown background task event set.")
-        self.train_stream.synchronize()
-        self.handle_shutdown()
-
-    def dispatch_rollouts(self):
-        rollouts = [[]]
-        scattered_rollouts = [[] for _ in range(self.world_size)]
-        if self.global_rank == 0:
-            batch_for_this_step = (
-                self.replica_batch_for_this_step
-                // self.dp_world_size
-                * self.dp_world_size
-            )
-            assert batch_for_this_step % self.dp_world_size == 0
-
-            dp_id = 0
-            for _ in range(batch_for_this_step):
-                try:
-                    rollout = self.data_queue.get(block=True, timeout=None)
-                except Empty:
-                    raise Empty(
-                        "[Policy] Rollouts queue is empty, please check the dispatcher."
-                    )
-                for i in range(self.world_size):
-                    if self.parallel_dims.get_rank_in_dim("dp", i) == dp_id:
-                        scattered_rollouts[i].append(rollout)
-                        # logger.info(f"[Policy] Rollout {dp_id} dispatched to rank {i}, dp world_size {self.dp_world_size}")
-                dp_id += 1
-                if dp_id >= self.dp_world_size:
-                    dp_id = 0
-        if self.world_size == 1:
-            return scattered_rollouts[0]
-        dist.scatter_object_list(
-            rollouts,
-            scattered_rollouts,
-            src=0,
-        )
-        return rollouts[0]
-
-    def compute_logprobs(
-        self,
-        minibatch: Dict[str, Any],
-        logits: torch.Tensor,
-        is_full_logits: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        """
-        Compute the per-token log probabilities and advantages
-
-        Args:
-            minibatch: a dictionary containing the input_ids and logprob_masks
-            logits: the logits of the model
-            is_full_logits: whether the logits are full logits or have been index-selected for memory efficiency
-
-        Returns:
-            logps: the per-token log probabilities
-            logprob_masks: the logprob_masks
-            metrics: a dict of collected metrics, e.g. entropy
-        """
-        assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
-        assert (
-            "logprob_masks" in minibatch
-        ), "logprob_masks is required for computing logprobs"
-        return logprobs_computing(
-            minibatch["input_ids"],
-            minibatch["logprob_masks"],
-            logits,
-            is_full_logits=is_full_logits,
-            label_packing_mask=minibatch.get("label_packing_mask", None),
-            input_packing_mask=minibatch.get("input_packing_mask", None),
-        )
-
-    @torch.no_grad()
-    def _swap_model_state_dict(self):
-        kl_beta = self.config.train.train_policy.kl_beta
-        if kl_beta != 0.0:
-            with torch.cuda.stream(self.train_stream):
-                model_state_dict = self.model.state_dict()
-                reference_state_dict = self.reference_state_dict
-                for key, value in model_state_dict.items():
-                    # clone the reference state dict to avoid inplace operation
-                    ref_clone = reference_state_dict[key].clone()
-                    # copy the current model state dict to the reference state dict
-                    reference_state_dict[key].copy_(value)
-                    # copy the reference state dict to the current model state dict
-                    value.copy_(ref_clone)
-            return True, kl_beta
-        else:
-            return False, 0.0
-
-    def reference_reset(self, current_step: int):
-        if (
-            self.config.train.train_policy.kl_beta != 0.0
-            and self.config.train.train_policy.reference_reset_interval is not None
-            and self.config.train.train_policy.reference_reset_interval > 0
-        ):
-            if (
-                current_step % self.config.train.train_policy.reference_reset_interval
-                == 0
-            ):
-                logger.info(
-                    f"[Policy] Resetting reference model at step {current_step} with interval {self.config.train.train_policy.reference_reset_interval}"
-                )
-                # Update the state dict of hf model so that it can be used for KL-divergence calculation
-                state_dict = self.model.state_dict()
-                for key, value in state_dict.items():
-                    assert (
-                        key in self.reference_state_dict
-                    ), f"Key {key} not found in reference state dict"
-                    self.reference_state_dict[key] = value.detach().cpu()
-                if self.config.train.train_policy.reset_optimizer_with_reference:
-                    logger.info("[Policy] Resetting optimizer.")
-                    self.build_optimizers()
-                    for lr in self.lr_schedulers.schedulers:
-                        lr.optimizer = self.optimizers
+        self.tokenizer = setup_tokenizer(self.config.policy.model_name_or_path)
 
     def train(
         self,
+        rollouts: List[Rollout],
         current_step: int,
         total_steps: int,
         remain_samples_num: int,
+        inter_policy_nccl: HighAvailabilitylNccl,
+        is_master_replica: bool,
         do_save_checkpoint: bool = False,
     ) -> Dict[str, Any]:
         pp_last_stage = (
             self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
         )
-
         # Do it once
         if (
             pp_last_stage
@@ -1151,6 +508,7 @@ class GRPOTrainer(Trainer):
                     self,
                     orig_forward,
                     self.config,
+                    inter_policy_nccl,
                 ),
                 self.model,
             )
@@ -1159,28 +517,15 @@ class GRPOTrainer(Trainer):
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
-        logger.debug("[Policy] Prepare training data.")
-        rollouts: List[Rollout] = self.dispatch_rollouts()
-        assert all(
-            rollout.prompt_idx >= 0 for rollout in rollouts
-        ), "All rollouts from controller should have a valid prompt index"
-
-        # preprocess rollouts
-        if self.config.train.local_dataset:
-            for i in range(len(rollouts)):
-                rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
-                    rollouts[i].prompt_idx
-                )
-                rollouts[i].conversation = self.data_fetcher.get_payload_by_index(
-                    rollouts[i].prompt_idx,
-                    attr="conversation",
-                )
 
         # For single-turn rollout, we use the prompt, for multi-turn rollout, we use the completed conversation
         if self.config.rollout.multi_turn_config.enable:
             samples = [rollout.completed_conversation for rollout in rollouts]
         else:
             samples = [rollout.prompt for rollout in rollouts]
+        assert all(
+            rollout.prompt is not None for rollout in rollouts
+        ), "All rollouts should have a valid prompt"
 
         completions_list = [
             rollout.completion_token_ids
@@ -1203,6 +548,9 @@ class GRPOTrainer(Trainer):
         n_ignore_prefix_tokens_list = [
             rollout.n_ignore_prefix_tokens for rollout in rollouts
         ]
+        assert all(
+            samples[i] is not None for i in range(len(samples))
+        ), "All samples should be not None"
         processed_samples: List[Any] = [
             self.data_packer.get_policy_input(
                 samples[i],
@@ -1325,7 +673,7 @@ class GRPOTrainer(Trainer):
                                             batch=processed_samples_for_optimize,
                                             seq_len_effective=minibatch_seq_len,
                                             max_token_len=max_token_len,
-                                            ddp_comm=self.inter_policy_nccl,
+                                            ddp_comm=inter_policy_nccl,
                                         )
                                     )
                                 else:
@@ -1746,7 +1094,7 @@ class GRPOTrainer(Trainer):
                                             ].get_group()
                                             if self.parallel_dims.dp_enabled
                                             else None,
-                                            ddp_comm=self.inter_policy_nccl,
+                                            ddp_comm=inter_policy_nccl,
                                             rollout_per_token_logps=user_mini_batch.get(
                                                 "rollout_logprobs", None
                                             ),
@@ -1808,7 +1156,9 @@ class GRPOTrainer(Trainer):
                                     == 0
                                 ) and local_mini_step > 1:
                                     all_reduced = True
-                                    grad_norm_sum += self.execute_all_reduce()
+                                    grad_norm_sum += self.all_reduce_states(
+                                        inter_policy_nccl
+                                    )
                                     grad_norm_count += 1
                                 else:
                                     all_reduced = False
@@ -1818,7 +1168,9 @@ class GRPOTrainer(Trainer):
                                 and not is_computing_old_ahead
                                 and not all_reduced
                             ):
-                                grad_norm_sum += self.execute_all_reduce()
+                                grad_norm_sum += self.all_reduce_states(
+                                    inter_policy_nccl
+                                )
                                 grad_norm_count += 1
                             local_optimize_step += 1
         self.old_per_token_logps = []
@@ -1888,7 +1240,7 @@ class GRPOTrainer(Trainer):
         self.lr_schedulers.step()
 
         # checkpointing
-        if self.is_master_replica and (do_save_checkpoint):
+        if is_master_replica and (do_save_checkpoint):
             if self.config.train.ckpt.export_safetensors:
                 logger.info(
                     f"[Policy] Saving huggingface checkpoint at step {current_step} to {self.config.train.output_dir}..."
@@ -1917,12 +1269,226 @@ class GRPOTrainer(Trainer):
             )
             self.ckpt_manager.save_check(step=current_step)
 
-        # For profiling
-        self.profiler.step()
-
         self.reference_reset(current_step)
 
         return report_data
+
+    def reference_reset(self, current_step: int):
+        if (
+            self.config.train.train_policy.kl_beta != 0.0
+            and self.config.train.train_policy.reference_reset_interval is not None
+            and self.config.train.train_policy.reference_reset_interval > 0
+        ):
+            if (
+                current_step % self.config.train.train_policy.reference_reset_interval
+                == 0
+            ):
+                logger.info(
+                    f"[Policy] Resetting reference model at step {current_step} with interval {self.config.train.train_policy.reference_reset_interval}"
+                )
+                # Update the state dict of hf model so that it can be used for KL-divergence calculation
+                state_dict = self.model.state_dict()
+                for key, value in state_dict.items():
+                    assert (
+                        key in self.reference_state_dict
+                    ), f"Key {key} not found in reference state dict"
+                    self.reference_state_dict[key] = value.detach().cpu()
+                if self.config.train.train_policy.reset_optimizer_with_reference:
+                    logger.info("[Policy] Resetting optimizer.")
+                    self.build_optimizers()
+                    for lr in self.lr_schedulers.schedulers:
+                        lr.optimizer = self.optimizers
+
+    @torch.no_grad()
+    def _swap_model_state_dict(self):
+        kl_beta = self.config.train.train_policy.kl_beta
+        if kl_beta != 0.0:
+            with torch.cuda.stream(self.train_stream):
+                model_state_dict = self.model.state_dict()
+                reference_state_dict = self.reference_state_dict
+                for key, value in model_state_dict.items():
+                    # clone the reference state dict to avoid inplace operation
+                    ref_clone = reference_state_dict[key].clone()
+                    # copy the current model state dict to the reference state dict
+                    reference_state_dict[key].copy_(value)
+                    # copy the reference state dict to the current model state dict
+                    value.copy_(ref_clone)
+            return True, kl_beta
+        else:
+            return False, 0.0
+
+    def compute_logprobs(
+        self,
+        minibatch: Dict[str, Any],
+        logits: torch.Tensor,
+        is_full_logits: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Compute the per-token log probabilities and advantages
+
+        Args:
+            minibatch: a dictionary containing the input_ids and logprob_masks
+            logits: the logits of the model
+            is_full_logits: whether the logits are full logits or have been index-selected for memory efficiency
+
+        Returns:
+            logps: the per-token log probabilities
+            logprob_masks: the logprob_masks
+            metrics: a dict of collected metrics, e.g. entropy
+        """
+        assert "input_ids" in minibatch, "input_ids is required for computing logprobs"
+        assert (
+            "logprob_masks" in minibatch
+        ), "logprob_masks is required for computing logprobs"
+        return logprobs_computing(
+            minibatch["input_ids"],
+            minibatch["logprob_masks"],
+            logits,
+            is_full_logits=is_full_logits,
+            label_packing_mask=minibatch.get("label_packing_mask", None),
+            input_packing_mask=minibatch.get("input_packing_mask", None),
+        )
+
+    def model_load_from_hf(self):
+        self.model.load_hf_weights(
+            self.config.policy.model_name_or_path,
+            self.parallel_dims,
+            self.device,
+            revision=self.config.policy.model_revision,
+        )
+        self.model.train()
+        return True
+
+    def model_resume_from_checkpoint(self):
+        self.ckpt_manager.load_checkpoint(
+            model=self.model,
+            optimizer=self.optimizers,
+            scheduler=self.lr_schedulers,
+        )
+        self.model.train()
+        return True
+
+    @cached_property
+    def map_w_from_policy_to_rollout(self):
+        """
+        Generate a mapping from local parameters into shape/layout that rollout requires.
+        The mapping is created by iterating through the named parameters of both models
+        and replacing certain substrings in the parameter names.
+        """
+        name_to_transform = {}
+        assert len(self.model.weight_sync_transforms) > 0, "No sorted parameters found."
+        for name, transform_block in self.model.weight_sync_transforms:
+            assert isinstance(transform_block, Callable) or isinstance(
+                transform_block, torch.Tensor
+            )
+            name_to_transform[name] = transform_block
+        return name_to_transform
+
+    @cached_property
+    def weight_mapper(self):
+        return self.model.weight_mapper
+
+    def weight_resume(self):
+        # If KL-divergence is enabled, hf model should always be loaded from checkpoint
+        model_loaded = False
+        if self.config.train.train_policy.kl_beta != 0.0:
+            self.model_load_from_hf()
+            model_loaded = True
+            # Clone the state dict of hf model so that it can be used for KL-divergence calculation
+            self.reference_state_dict = {}
+            state_dict = self.model.state_dict()
+            for key, value in state_dict.items():
+                self.reference_state_dict[key] = value.detach().cpu()
+
+        if self.config.train.resume:
+            try:
+                # Need to reload again from checkpoint to make sure the model is in the correct state
+                self.model_resume_from_checkpoint()
+                model_loaded = True
+            except Exception as e:
+                if isinstance(e, FileNotFoundError):
+                    logger.info(
+                        f"Fail to resume from {self.config.train.resume} because the checkpoint file does not exist, trying to load from HuggingFace..."
+                    )
+                else:
+                    logger.error(
+                        f"Cannot resume from {self.config.train.resume} {e}. Trying to load from HuggingFace..."
+                    )
+                if not model_loaded:
+                    self.model_load_from_hf()
+                    model_loaded = True
+        elif not model_loaded:
+            logger.info("Resume not set. Trying to load from HuggingFace...")
+            self.model_load_from_hf()
+            model_loaded = True
+
+        assert model_loaded, "Model weight must be populated before training starts."
+        logger.info("[Policy] Model loaded from checkpoint.")
+        assert (
+            self.map_w_from_policy_to_rollout is not None
+        ), "No parameters to sync found."
+        return False
+
+    def build_lr_schedulers(self):
+        return common_build_lr_schedulers(self.optimizers, self.config, 1e6)
+
+    def update_lr_schedulers(self, total_steps: Optional[int] = None):
+        if not self.lr_schedulers_updated:
+            assert (
+                total_steps is not None and total_steps > 0
+            ), "Total steps must be set for lr scheduler"
+            logger.info(
+                f"[Policy] Building lr schedulers for total steps {total_steps}"
+            )
+
+            # TODO(jiaxinc): This is a tricky part:
+            # Rebuild lr schedulers for the very first step because
+            # only until the first step, we can know the exact total steps from the controller
+            new_lr_schedulers = self.build_lr_schedulers()
+            with torch.no_grad():
+                # Note: we need to load the state dict of the old lr schedulers
+                # in case it is resumed from a checkpoint,
+                # otherwise, the lr scheduler will be reset to the initial value
+                new_lr_schedulers.load_state_dict(self.lr_schedulers.state_dict())
+            self.lr_schedulers = new_lr_schedulers
+            self.lr_schedulers_updated = True
+
+    def all_reduce_states(self, inter_policy_nccl: HighAvailabilitylNccl) -> float:
+        """
+        # Add nccl allreduce operations for all parameters and necessary states.
+        """
+        with torch.cuda.stream(self.train_stream):
+            for model_part in self.model_parts:
+                # Model part may use same physical mesh for different logical mesh,
+                # which is not supported by DTensor operands like `torch.nn.utils.get_total_norm`
+                # So we need to do allreduce for each model part
+                if model_part is not None:
+                    dist_util.gradient_reduce_across_dp_replicas_(
+                        [p for p in model_part.parameters()], inter_policy_nccl
+                    )
+            """
+            Compute the global grad norm on all parameters and then apply
+            gradient clipping using the global grad norm.
+            """
+            # Must pass empty list even if model_part is None,
+            # GradNorm across pp stages will fail if some rank does not join the barrier
+            all_params = [
+                p
+                for m in [model for model in self.model_parts if model is not None]
+                for p in m.parameters()
+            ]
+            grad_norm = dist_util.gradient_norm_clipping(
+                all_params,
+                self.config.train.optm_grad_norm_clip,
+                foreach=True,
+                pp_mesh=self.parallel_dims.mesh["pp"]
+                if self.parallel_dims.pp_enabled
+                else None,
+                return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+            )
+            self.optimizers.step()
+            self.optimizers.zero_grad()
+        return grad_norm
 
     @property
     def pp_loss_fn(self):
@@ -1936,172 +1502,3 @@ class GRPOTrainer(Trainer):
             return loss.mean()
 
         return fake_compute_loss
-
-
-# TODO: (lms) May be it's better to register this func as a hook to the last stage model.
-# That way is more clean. I think it's feasible but need to be compatible with torch Pipelie schedule.
-def _swizzle_pp_grpo_forward(
-    trainer: GRPOTrainer, ori_forward: Callable, config: CosmosConfig, *args, **kwargs
-):
-    args = args[1:]  # Skip self
-    """
-    Swizzle the forward function (only to last stage) to return the loss directly.
-    """
-    # [mini_batch_size]: the mini-batch index of the sample with respect to the whole batch
-    # [micro_batch_size]: the micro-batch index of the sample with respect to the mini-batch
-    mini_batch_ids = kwargs.pop("mini_batch_ids")
-    micro_batch_ids = kwargs.pop("micro_batch_ids")
-    loss_scaling = kwargs.pop("loss_scaling")
-    is_computing_ref = kwargs.pop("is_computing_ref")
-    is_computing_old_ahead = kwargs.pop("is_computing_old_ahead")
-    advantages = kwargs.pop("advantages")
-    positive_flags = kwargs.pop("positive_flags", None)
-
-    micro_batch_id = micro_batch_ids[0].item()
-    mini_batch_id = mini_batch_ids[0].item()
-    loss_scaling = loss_scaling[0].item()
-    is_computing_ref = is_computing_ref[0].item()
-    is_computing_old_ahead = is_computing_old_ahead[0].item()
-
-    # User defined input
-    user_input = kwargs.copy()
-
-    assert torch.all(
-        micro_batch_ids == micro_batch_id
-    ), f"micro_batch_ids are not all the same: {micro_batch_ids}"
-    assert torch.all(
-        mini_batch_ids == mini_batch_id
-    ), f"mini_batch_ids are not all the same: {mini_batch_ids}"
-    del micro_batch_ids, mini_batch_ids
-
-    n_args = len(args)
-    if n_args > 0:
-        # remove the first `n_args` arguments from kwargs
-        signature = list(inspect.signature(ori_forward).parameters.keys())[:n_args]
-        for key in signature:
-            if key in kwargs:
-                kwargs.pop(key)
-
-    raw_logits = ori_forward(*args, **kwargs)
-
-    # recover the input ids and position ids
-    if "input_ids_before_cp" in kwargs:
-        user_input["input_ids"] = kwargs["input_ids_before_cp"]
-    if "position_ids_before_cp" in kwargs:
-        user_input["position_ids"] = kwargs["position_ids_before_cp"]
-
-    if config.train.train_policy.temperature > 1e-6:
-        raw_logits = raw_logits / config.train.train_policy.temperature
-    # [n_tokens, n_vocab]
-    current_per_token_logprobs, cu_seqlens, metrics = trainer.compute_logprobs(
-        minibatch={
-            **user_input,
-        },
-        logits=raw_logits,
-        is_full_logits=True if raw_logits.ndim == 3 else False,
-    )
-    logprob_masks = user_input["logprob_masks"]
-    current_advantages = logprob_masks * advantages
-
-    if positive_flags is not None:
-        pos_mask = positive_flags.bool().expand_as(logprob_masks)
-        pos_token_mask = pos_mask & logprob_masks
-    else:
-        pos_token_mask = None
-
-    if is_computing_ref:
-        if trainer.ref_per_token_logps[mini_batch_id] is not None:
-            assert isinstance(trainer.ref_per_token_logps[mini_batch_id], list)
-            trainer.ref_per_token_logps[mini_batch_id].append(
-                current_per_token_logprobs.detach()
-            )
-        else:
-            trainer.ref_per_token_logps[mini_batch_id] = [
-                current_per_token_logprobs.detach()
-            ]
-        # Skip the rest logic since we are computing ref
-        return None
-    if is_computing_old_ahead:
-        if trainer.old_per_token_logps[mini_batch_id] is not None:
-            assert isinstance(trainer.old_per_token_logps[mini_batch_id], list)
-            trainer.old_per_token_logps[mini_batch_id].append(
-                current_per_token_logprobs.detach()
-            )
-        else:
-            trainer.old_per_token_logps[mini_batch_id] = [
-                current_per_token_logprobs.detach()
-            ]
-        # Skip the rest logic since we are computing old ahead
-        return None
-
-    if (
-        trainer.old_per_token_logps[mini_batch_id] is not None
-        and len(trainer.old_per_token_logps[mini_batch_id]) > micro_batch_id
-    ):
-        old_per_token_logprobs = trainer.old_per_token_logps[mini_batch_id][
-            micro_batch_id
-        ]
-        assert isinstance(old_per_token_logprobs, torch.Tensor)
-        assert (
-            old_per_token_logprobs.ndim == 1
-        ), f"old_per_token_logprobs.ndim: {old_per_token_logprobs.ndim}, while it should be 1"
-        assert (
-            old_per_token_logprobs.shape == current_per_token_logprobs.shape
-        ), f"old_per_token_logprobs.shape: {old_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
-    else:
-        old_per_token_logprobs = current_per_token_logprobs.detach()
-        # Following should only happen in the first iteration
-        if micro_batch_id == 0:
-            # assert trainer.old_per_token_logps[mini_batch_id] is None, f"old_per_token_logps[mini_batch_id] should be None"
-            # Due to the PP warmup, the first micro-batch could get processed multiple times
-            trainer.old_per_token_logps[mini_batch_id] = [old_per_token_logprobs]
-        else:
-            assert isinstance(trainer.old_per_token_logps[mini_batch_id], list)
-            trainer.old_per_token_logps[mini_batch_id].append(old_per_token_logprobs)
-
-    ref_per_token_logprobs = None
-    if trainer.ref_per_token_logps[mini_batch_id] is not None:
-        ref_per_token_logprobs = trainer.ref_per_token_logps[mini_batch_id][
-            micro_batch_id
-        ]
-        assert (
-            ref_per_token_logprobs.ndim == 1
-        ), f"ref_per_token_logprobs.ndim: {ref_per_token_logprobs.ndim}, while it should be 1"
-        assert (
-            ref_per_token_logprobs.shape == current_per_token_logprobs.shape
-        ), f"ref_per_token_logprobs.shape: {ref_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
-
-    loss, _, _ = compute_loss(
-        current_per_token_logprobs,
-        old_per_token_logprobs,
-        ref_per_token_logprobs,
-        current_advantages,
-        cu_seqlens,
-        config,
-        logprob_masks,
-        dp_group=trainer.parallel_dims.mesh["dp"].get_group()
-        if trainer.parallel_dims.dp_enabled
-        else None,
-        ddp_comm=trainer.inter_policy_nccl,
-        rollout_per_token_logps=user_input.get("rollout_logprobs", None),
-    )
-    if config.train.train_policy.entropy_coeff > 0.0:
-        loss += (
-            -config.train.train_policy.entropy_coeff * (metrics["effective_entropy"])
-        )
-    for key in metrics:
-        trainer.metrics[key] += metrics[key]
-
-    # Add Positive NLL if enabled and mask available
-    pos_coef = config.train.train_policy.positive_nll_coef
-    if (
-        pos_coef is not None
-        and pos_coef > 0.0
-        and pos_token_mask is not None
-        and pos_token_mask.any()
-    ):
-        flat_mask = pos_token_mask[logprob_masks]
-        l_nll = -current_per_token_logprobs[flat_mask].mean()
-        loss = loss + pos_coef * l_nll
-
-    return loss.unsqueeze(0) * loss_scaling
