@@ -355,15 +355,13 @@ class GroupedExpertsDeepEP(nn.Module):
                 tokens_per_expert,
                 trans_b=True,
             )
-            gate, up = torch.chunk(output1, 2, -1)
-            output1_ = F.silu(gate) * up
+            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             output2 = ops.gmm(
                 output1_, self.down_projs.to_local(), tokens_per_expert, trans_b=True
             )
         else:
             output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
-            gate, up = torch.chunk(output1, 2, -1)
-            output1_ = F.silu(gate) * up
+            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
 
         y = self.token_dispatcher.token_unpermutation(output2)
