@@ -41,7 +41,7 @@ from cosmos_rl.policy.config import (
 )
 from cosmos_rl.policy.trainer.sampler import SkippingSampler
 import cosmos_rl.utils.cache as cache
-from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
+from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.worker.base import PolicyWorkerBase
 
 

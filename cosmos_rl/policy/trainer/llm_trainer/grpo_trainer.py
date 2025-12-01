@@ -25,7 +25,7 @@ from typing import Optional, Dict, Any, Callable, List, Tuple
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.trainer.llm_trainer import LLMTrainer
+from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.policy.trainer.optm import (
     build_lr_schedulers as common_build_lr_schedulers,

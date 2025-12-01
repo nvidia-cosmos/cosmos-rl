@@ -16,8 +16,8 @@
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
-from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.policy.worker.llm_worker import RLPolicyWorker
+from cosmos_rl.policy.trainer import GRPOTrainer
+from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
 from cosmos_rl.dispatcher.api.client import APIClient

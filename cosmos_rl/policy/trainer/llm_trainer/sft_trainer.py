@@ -52,7 +52,7 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_masks,
     pack_sequences_for_labels,
 )
-from cosmos_rl.policy.trainer.llm_trainer import LLMTrainer
+from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 
 

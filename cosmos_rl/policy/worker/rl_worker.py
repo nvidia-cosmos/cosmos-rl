@@ -34,7 +34,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.dispatcher.data.schema import Rollout
-from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
+from cosmos_rl.policy.trainer.llm_trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.utils import util
 from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl, destroy_distributed
