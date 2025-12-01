@@ -21,7 +21,10 @@ from cosmos_rl.dispatcher.data.packer.base import worker_entry_parser
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.rollout.worker.llm_worker import LLMRolloutWorker
 
+from cosmos_rl.utils.decorators import monitor_status
 
+
+@monitor_status(name="Cosmos-RL Rollout", mode="rollout")
 def run_rollout(args: Optional[argparse.Namespace] = None, **kwargs):
     # This means that args are not parsed in dataset entry script
     # So we need to parse the args manually

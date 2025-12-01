@@ -20,6 +20,7 @@ from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.packer import DataPacker, HFVLMDataPacker
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.decorators import monitor_status
 from cosmos_rl.policy.config import Config as CosmosConfig
 import argparse
 import toml
@@ -229,7 +230,8 @@ class DemoDataPacker(DataPacker):
         )
 
 
-if __name__ == "__main__":
+@monitor_status(name="Cosmos-RL HF VLM GRPO Dataset", mode="dataset")
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_known_args()[0]
@@ -251,3 +253,7 @@ if __name__ == "__main__":
         val_dataset=get_val_dataset,
         val_data_packer=DemoDataPacker(),
     )
+
+
+if __name__ == "__main__":
+    main()

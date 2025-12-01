@@ -29,6 +29,7 @@ from cosmos_rl.utils.wandb_logger import (
     is_wandb_available,
     log_wandb,
 )
+from cosmos_rl.utils.tao_status_logger import log_tao_status
 import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, Sampler
@@ -149,10 +150,13 @@ def construct_dataset(
     if cosmos_config.validation.enable:
         if user_provided_val_dataset is not None:
             test_dataset = user_provided_val_dataset
-            logger.info(
-                "Using user-provided validation dataset, which will skip split processing."
-            )
+            logger.info("Using custom validation dataset")
+            logger.info(f"Custom validation dataset size: {len(test_dataset)}")
+            _using_custom_val_dataset = True
         elif cosmos_config.validation.dataset.name:
+            logger.info(
+                f"Using HuggingFace validation dataset: Loading {cosmos_config.validation.dataset.name}"
+            )
             dataset = util.load_data_from_disk_or_hf(
                 cosmos_config.validation.dataset.name,
                 cosmos_config.validation.dataset.subset,
@@ -165,17 +169,20 @@ def construct_dataset(
                 )
                 dataset_list.append(dataset[split_name])
             test_dataset = concatenate_datasets(dataset_list)
+            logger.info(f"Total HuggingFace validation dataset size: {len(test_dataset)}")
+            _using_custom_val_dataset = True
         else:
             logger.warning(
-                "No validation dataset provided, using split of training dataset for validation."
+                "Fallback to training dataset split: No validation dataset provided!"
             )
             if isinstance(train_dataset, torch.utils.data.Dataset):
                 # Define the split ratio (e.g., 80% train, 20% test)
                 if config.dataset.test_size is None:
                     logger.warning(
-                        "No test size specified, using 10% of the training dataset for testing."
+                        "No test size specified, using 10% of the training dataset for validation."
                     )
                     config.dataset.test_size = 0.1
+                _using_custom_val_dataset = False
                 if isinstance(config.dataset.test_size, float):
                     n_test_samples = int(len(train_dataset) * config.dataset.test_size)
                 else:
@@ -222,7 +229,7 @@ def construct_dataset(
         is_user_dataset=user_provided_dataset is not None,
     )
 
-    return train_sft_dataset, test_sft_dataset
+    return train_sft_dataset, test_sft_dataset, _using_custom_val_dataset
 
 
 class SFTDataset(Dataset):
@@ -292,10 +299,18 @@ class SFTTrainer(Trainer):
         val_data_packer: Optional[BaseDataPacker] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
+        using_custom_val_dataset: bool = False,
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
     ):
         super(SFTTrainer, self).__init__(config, parallel_dims)
+
+        # Track whether we're using a custom validation dataset
+        # This will be set later when datasets are constructed
+        self._using_custom_val_dataset = using_custom_val_dataset
+
+        # Track the last step where validation was performed to avoid duplicates
+        self._last_validation_step = -1
 
         # Enlarge the compile cache size for validation
         if config.train.compile and config.validation.enable:
@@ -361,14 +376,26 @@ class SFTTrainer(Trainer):
         if not self.val_data_packer:
             self.val_data_packer = self.data_packer
 
+        if isinstance(val_dataset, Callable):
+            val_dataset = val_dataset(self.config)
+            val_dataset.setup(self.config, self.tokenizer)
+        if val_data_packer:
+            val_data_packer.setup(self.config, self.tokenizer)
+            self.val_data_packer = val_data_packer
+        else:
+            self.val_data_packer = self.data_packer
+
         # Prepare dataset
-        train_dataset, val_dataset = construct_dataset(
+        train_dataset, val_dataset, using_custom_val = construct_dataset(
             self.config,
             data_packer=self.data_packer,
             user_provided_dataset=dataset,
             val_data_packer=self.val_data_packer,
             user_provided_val_dataset=val_dataset,
         )
+
+        # Update the flag with the actual value from dataset construction
+        self._using_custom_val_dataset = using_custom_val
         if sampler is not None:
             logger.info("Using user-provided sampler for training dataset.")
             if isinstance(sampler, Callable):
@@ -481,15 +508,17 @@ class SFTTrainer(Trainer):
         self.epoch = self.config.train.epoch
 
         self.train_data_loader = get_train_data_loader(train_sampler, batch_sampler)
+        effective_val_batch_size = self.config.validation.batch_size or self.config.train.train_batch_per_replica
+        logger.info(f"Validation batch size: {effective_val_batch_size}")
         if val_batch_sampler is not None:
             logger.info(
                 "Using custom batch Sampler that yields list of indices for validation dataset."
             )
+
             if isinstance(val_batch_sampler, Callable):
                 val_batch_sampler = val_batch_sampler(
                     val_sampler,
-                    batch_size=self.config.validation.batch_size
-                    or self.config.train.train_batch_per_replica,
+                    batch_size=effective_val_batch_size,
                     drop_last=False,
                 )
             self.val_data_loader = DataLoader(
@@ -502,10 +531,9 @@ class SFTTrainer(Trainer):
         else:
             self.val_data_loader = DataLoader(
                 val_dataset,
-                batch_size=self.config.validation.batch_size
-                or self.config.train.train_batch_per_replica,
-                num_workers=self.config.train.train_policy.dataloader_num_workers,
-                prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
+                batch_size=effective_val_batch_size,
+                num_workers=self.config.validation.dataloader_num_workers,
+                prefetch_factor=self.config.validation.dataloader_prefetch_factor,
                 sampler=val_sampler,
                 collate_fn=collate_fn,
                 drop_last=False,
@@ -550,26 +578,84 @@ class SFTTrainer(Trainer):
         # Calculate the step interval to save the checkpoint
         if self.config.train.ckpt.save_freq_in_epoch > 0:
             # Use save_freq_in_epoch to calculate the save frequency in priority
+            # For epoch-based saving, don't divide by dp_world_size as we want to save at epoch boundaries
             self._save_freq = (
                 self.config.train.ckpt.save_freq_in_epoch * len(self.train_data_loader)
-            ) // self.dp_world_size
+            )
             logger.info(
-                f"Checkpoint will be saved every {self._save_freq} steps, which is approximately every `train.ckpt.save_freq_in_epoch` {self.config.train.ckpt.save_freq_in_epoch} epochs. `train.ckpt.save_freq` will be ignored."
+                f"Checkpoint will be saved every {self._save_freq} steps, which is every `train.ckpt.save_freq_in_epoch` {self.config.train.ckpt.save_freq_in_epoch} epochs. `train.ckpt.save_freq` will be ignored."
             )
         else:
             self._save_freq = self.config.train.ckpt.save_freq
 
-    def validate(self):
+    def _send_validation_status_callback(self, data: dict, current_epoch: int = None):
+        """Send validation status via TAO status logger to prevent timeout.
+        
+        Args:
+            data: Status data dictionary to log
+            current_epoch: Current epoch number (optional)
+        """
+        if self.config.logging.logger and "tao" in self.config.logging.logger:
+            if util.is_master_rank(self.parallel_dims, self.global_rank):
+                try:
+                    if current_epoch is not None:
+                        log_tao_status(
+                            data=data,
+                            current_epoch=current_epoch,
+                            max_epochs=self.epoch,
+                            component_name=f"{self.config.logging.experiment_name} Validation"
+                        )
+                    else:
+                        log_tao_status(
+                            data=data,
+                            step=int(self.train_step),
+                            max_steps=int(self.total_steps),
+                            component_name=f"{self.config.logging.experiment_name} Validation"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to send validation status: {e}")
+
+    def validate(self, current_epoch: int = None):
         if not self.config.validation.enable:
             return
         if self.parallel_dims.dp_replicate_coord[0] != 0:
             return
 
-        logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
+        logger.info(f"Starting validation at step {self.train_step}/{self.total_steps}...")
+        self._send_validation_status_callback(
+            data={
+                "validation_phase": "starting",
+                "dataset_size": len(self.val_data_loader.dataset),
+            },
+            current_epoch=current_epoch
+        )
+        logger.info(f"Validation dataset size: {len(self.val_data_loader.dataset)}")
+
+        # Get actual batch size from dataloader
+        actual_batch_size = self.val_data_loader.batch_size if hasattr(self.val_data_loader, 'batch_size') else self.config.validation.batch_size
+        logger.info(f"Validation batch size: {actual_batch_size}")
+
+        # Check if this is a custom validation dataset or training split
+        if self._using_custom_val_dataset:
+            logger.info("Computing validation loss on CUSTOM validation dataset")
+        else:
+            logger.info("Computing validation loss on TRAINING dataset split")
         self.model.eval()
         with torch.no_grad():
             val_total_loss = 0.0
+            total_batches = len(self.val_data_loader)
+            batch_count = 0
+            
+            self._send_validation_status_callback(
+                data={
+                    "validation_phase": "processing",
+                    "total_batches": total_batches,
+                },
+                current_epoch=current_epoch
+            )
+
             for val_global_batch in tqdm(self.val_data_loader, desc="Validation"):
+                batch_count += 1
                 fixed_length = (
                     self.config.policy.model_max_length
                     if self.parallel_dims.pp_enabled
@@ -654,8 +740,67 @@ class SFTTrainer(Trainer):
 
                     val_loss = self.loss_fn(val_logits, val_labels)
                 val_total_loss += val_loss.item() * val_inputs.size(0)
-            val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
-            logger.info(f"Validation loss: {val_avg_loss}")
+                
+                # Send status callback after each batch to prevent timeout
+                progress_pct = (batch_count / total_batches) * 100
+                self._send_validation_status_callback(
+                    data={
+                        "validation_phase": "in_progress",
+                        "batches_processed": batch_count,
+                        "total_batches": total_batches,
+                        "progress_percent": float(progress_pct),
+                    },
+                    current_epoch=current_epoch
+                )
+
+            # Aggregate validation loss across all ranks if using distributed training
+            if self.parallel_dims.dp_enabled or self.parallel_dims.cp_enabled:
+                # Convert to tensor for distributed reduction
+                val_total_loss_tensor = torch.tensor([val_total_loss], device=self.device)
+                val_total_samples_tensor = torch.tensor([len(self.val_data_loader.dataset)], device=self.device)
+
+                # Sum across all ranks
+                val_total_loss_tensor = dist_util.dist_sum(val_total_loss_tensor, self.parallel_dims.mesh["dp_cp"])
+                val_total_samples_tensor = dist_util.dist_sum(val_total_samples_tensor, self.parallel_dims.mesh["dp_cp"])
+
+                val_avg_loss = val_total_loss_tensor.item() / val_total_samples_tensor.item()
+            else:
+                val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
+
+            self._send_validation_status_callback(
+                data={
+                    "validation_phase": "completed",
+                    "batches_processed": batch_count,
+                    "total_batches": total_batches,
+                    "val/loss": float(val_avg_loss),
+                },
+                current_epoch=current_epoch
+            )
+            logger.info(f"Validation complete: loss = {val_avg_loss:.4f}")
+
+            # TAO status logging for validation (only from master rank)
+            if self.config.logging.logger and "tao" in self.config.logging.logger:
+                if util.is_master_rank(self.parallel_dims, self.global_rank):
+                    validation_data = {
+                        "val/loss": float(val_avg_loss),
+                        "val/step": int(self.train_step),
+                        "steps_per_epoch": len(self.train_data_loader),
+                    }
+                    if current_epoch is not None:
+                        log_tao_status(
+                            data=validation_data,
+                            current_epoch=current_epoch,
+                            max_epochs=self.epoch,
+                            component_name=f"{self.config.logging.experiment_name} SFT Validation"
+                        )
+                    else:
+                        # Fall back to step-based logging if epoch is not available
+                        log_tao_status(
+                            data=validation_data,
+                            step=int(self.train_step),
+                            component_name=f"{self.config.logging.experiment_name} SFT Validation",
+                            max_steps=int(self.total_steps)
+                        )
         return val_avg_loss
 
     def train(self):
@@ -938,12 +1083,11 @@ class SFTTrainer(Trainer):
 
                         report_data = {
                             "train/iteration_time": iter_time,
-                            "train/loss_avg": global_avg_loss,
-                            "train/loss_max": global_max_loss,
+                            "train/loss_avg": global_avg_loss.item() if isinstance(global_avg_loss, torch.Tensor) else global_avg_loss,
+                            "train/loss_max": global_max_loss.item() if isinstance(global_max_loss, torch.Tensor) else global_max_loss,
                             "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
-                            "train/grad_norm": grad_norm
-                            if grad_norm is not None
-                            else -1,
+                            "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else (grad_norm if grad_norm is not None else -1),
+                            "steps_per_epoch": len(self.train_data_loader),
                         }
 
                         # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
@@ -957,7 +1101,7 @@ class SFTTrainer(Trainer):
                                 dtype=self.config.train.param_dtype,
                             )
                             for k, v in mfu.items():
-                                report_data[f"train/{k}"] = v
+                                report_data[f"train/{k}"] = v.item() if isinstance(v, torch.Tensor) else v
                         if (
                             "wandb" in self.config.logging.logger
                             and is_wandb_available()
@@ -965,6 +1109,15 @@ class SFTTrainer(Trainer):
                             log_wandb(
                                 data=report_data,
                                 step=self.train_step,
+                            )
+                        if "tao" in self.config.logging.logger:
+                            # Calculate current epoch (1-based) from current training step
+                            current_training_epoch = cur_epoch + 1
+                            log_tao_status(
+                                data=report_data,
+                                current_epoch=current_training_epoch,
+                                max_epochs=self.epoch,
+                                component_name=f"{self.config.logging.experiment_name} SFT"
                             )
                         if "console" in self.config.logging.logger:
                             logger.info(
@@ -975,9 +1128,30 @@ class SFTTrainer(Trainer):
                 self.profiler.step()
 
                 val_score = None
-                # validation
-                if self.train_step % self.config.validation.freq == 0:
-                    val_score = self.validate()
+                # validation - support both step-based and epoch-based frequency
+                should_validate = False
+
+                if self.config.validation.enable:
+                    if self.config.validation.freq_in_epoch > 0:
+                        # Epoch-based validation (takes priority)
+                        steps_per_epoch = len(self.train_data_loader)
+                        # Calculate validation steps: end of each freq_in_epoch epochs
+                        validation_steps = []
+                        for epoch_num in range(1, self.config.train.epoch + 1):
+                            if epoch_num % self.config.validation.freq_in_epoch == 0:
+                                validation_steps.append(epoch_num * steps_per_epoch)
+
+                        if self.train_step in validation_steps:
+                            should_validate = True
+                            current_epoch = self.train_step // steps_per_epoch
+                            logger.info(f"[SFT Trainer] Triggering epoch-based validation at step {self.train_step} (end of epoch {current_epoch})")
+                    elif self.config.validation.freq > 0 and self.train_step % self.config.validation.freq == 0:
+                        # Step-based validation (fallback when epoch-based disabled)
+                        should_validate = True
+
+                if should_validate:
+                    val_score = self.validate(current_epoch=cur_epoch + 1)
+                    self._last_validation_step = self.train_step  # Track when we last validated
 
                 # save checkpoint
                 if (
@@ -991,11 +1165,18 @@ class SFTTrainer(Trainer):
                         logger.info(
                             f"Saving huggingface checkpoint at step {self.train_step} to {self.config.train.output_dir}..."
                         )
+                        # Use epoch-based naming for safetensors when save_freq_in_epoch is configured
+                        if self.config.train.ckpt.save_freq_in_epoch > 0:
+                            completed_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
+                            safetensors_identifier = f"epoch_{completed_epoch}"
+                        else:
+                            safetensors_identifier = f"step_{self.train_step}"
+
                         self.export_safetensors(
                             output_dir=self.config.train.output_dir,
                             rel_path=os.path.join(
                                 "safetensors",
-                                f"step_{self.train_step}",
+                                safetensors_identifier,
                             ),
                             trainable_only=False,
                             dtype=util.str2torch_dtype(self.config.train.param_dtype),
@@ -1003,15 +1184,19 @@ class SFTTrainer(Trainer):
                     logger.info(
                         f"Saving cosmos checkpoint at step {self.train_step}..."
                     )
+                    # Calculate the actual epoch being completed based on current step
+                    completed_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
                     self.ckpt_manager.save_checkpoint(
                         model=self.model,
                         optimizer=self.optimizers,
                         scheduler=self.lr_schedulers,
                         step=self.train_step,
                         total_steps=self.total_steps,
+                        epoch=completed_epoch,
                     )
                     self.ckpt_manager.save_check(
                         step=self.train_step,
+                        epoch=completed_epoch,
                         val_score=val_score,
                         pp_enabled=self.parallel_dims.pp_enabled,
                         pp_last_stage=pp_last_stage,
@@ -1025,38 +1210,70 @@ class SFTTrainer(Trainer):
                 break  # break outer epoch loop
 
         # process the final step
-        val_score = self.validate()
+        # Calculate final epoch for validation logging
+        final_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
+
+        # Only run final validation if we haven't just validated at the last step
+        if self._last_validation_step != self.train_step:
+            val_score = self.validate(current_epoch=final_epoch)
+        else:
+            logger.info(f"Skipping final validation - already validated at step {self.train_step}")
+            val_score = None  # Use the score from the previous validation
+
+        # Check if we already saved at this step during regular checkpointing
+        already_saved_at_final_step = (
+            self.config.train.ckpt.enable_checkpoint
+            and self.train_step % self._save_freq == 0
+            and self.train_step > 0
+        )
+
         if (
             self.config.train.ckpt.export_safetensors
             and self.parallel_dims.dp_replicate_coord[0] == 0
+            and not already_saved_at_final_step  # Skip if we already exported safetensors
         ):
             logger.info(
                 f"Saving final huggingface checkpoint to {self.config.train.output_dir}..."
             )
+            # Use epoch-based naming for final safetensors when save_freq_in_epoch is configured
+            if self.config.train.ckpt.save_freq_in_epoch > 0:
+                final_safetensors_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
+                safetensors_identifier = f"epoch_{final_safetensors_epoch}"
+            else:
+                safetensors_identifier = f"step_{self.train_step}"
+
             self.export_safetensors(
                 output_dir=self.config.train.output_dir,
                 rel_path=os.path.join(
                     "safetensors",
-                    f"step_{self.train_step}",
+                    safetensors_identifier,
                 ),
                 trainable_only=False,
                 is_final=True,
                 dtype=util.str2torch_dtype(self.config.train.param_dtype),
             )
-        if self.config.train.ckpt.enable_checkpoint:
+        if self.config.train.ckpt.enable_checkpoint and not already_saved_at_final_step:
             logger.info(
                 f"Training finished at step {self.train_step}/{self.total_steps}, saving final cosmos checkpoint..."
             )
+            # For final checkpoint, calculate current epoch from steps
+            final_completed_epoch = None
+            if self.config.train.ckpt.save_freq_in_epoch > 0:
+                # Calculate current epoch based on steps and dataloader length
+                final_completed_epoch = (self.train_step - 1) // len(self.train_data_loader) + 1
+
             self.ckpt_manager.save_checkpoint(
                 model=self.model,
                 optimizer=self.optimizers,
                 scheduler=self.lr_schedulers,
                 step=self.train_step,
                 total_steps=self.total_steps,
+                epoch=final_completed_epoch,
                 is_final=True,
             )
             self.ckpt_manager.save_check(
                 step=self.train_step,
+                epoch=final_completed_epoch,
                 val_score=val_score if self.config.validation.enable else -1,
                 pp_enabled=self.parallel_dims.pp_enabled,
                 pp_last_stage=pp_last_stage,
