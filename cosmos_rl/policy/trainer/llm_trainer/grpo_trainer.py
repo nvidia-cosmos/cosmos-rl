@@ -1362,6 +1362,8 @@ class GRPOTrainer(LLMTrainer):
             model=self.model,
             optimizer=self.optimizers,
             scheduler=self.lr_schedulers,
+            model_name_or_path=self.config.policy.model_name_or_path,
+            revision=self.config.policy.model_revision,
         )
         self.model.train()
         return True

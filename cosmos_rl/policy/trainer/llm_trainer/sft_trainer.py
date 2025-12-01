@@ -660,6 +660,8 @@ class SFTTrainer(LLMTrainer):
             model=self.model,
             optimizer=self.optimizers,
             scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
+            model_name_or_path=self.config.policy.model_name_or_path,
+            revision=self.config.policy.model_revision,
         )
         return ckpt_extra_vars
 
