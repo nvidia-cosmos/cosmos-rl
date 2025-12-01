@@ -455,6 +455,7 @@ class Block(nn.Module):
                 score_func=args.score_func,
                 route_scale=args.route_scale,
                 dim=args.dim,
+                enable_router_bias=True,
                 moe_inter_dim=args.moe_inter_dim,
                 fake_balanced_gate=args.fake_balanced_gate,
             )

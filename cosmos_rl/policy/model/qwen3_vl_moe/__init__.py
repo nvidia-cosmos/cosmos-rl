@@ -146,6 +146,7 @@ class Qwen3MoE(nn.Module):
             n_expert_groups=getattr(model_args.hf_config, "n_group", 0),
             n_limited_groups=getattr(model_args.hf_config, "topk_group", 0),
             train_gate=model_args.train_gate,
+            enable_router_bias=False,
             gate_bias_update_factor=model_args.gate_bias_update_factor,
             aux_loss_coeff=model_args.aux_loss_coeff,
             score_func=getattr(model_args.hf_config, "scoring_func", "softmax"),

@@ -86,6 +86,7 @@ class Qwen3MoE(nn.Module):
             train_gate=model_args.train_gate,
             gate_bias_update_factor=model_args.gate_bias_update_factor,
             aux_loss_coeff=model_args.aux_loss_coeff,
+            enable_router_bias=False,
             score_func=getattr(model_args.hf_config, "scoring_func", "softmax"),
             route_scale=getattr(model_args.hf_config, "routed_scaling_factor", 1.0),
             dim=model_args.dim,
