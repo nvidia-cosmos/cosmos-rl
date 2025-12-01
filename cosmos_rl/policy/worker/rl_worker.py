@@ -13,18 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import torch
 import atexit
 import time
 import msgpack
+import asyncio
+import threading
 from functools import partial
 from typing import List, Optional, Union, Callable, Dict
 from torch.utils.data import Dataset
 from queue import Queue
 import torch.distributed as dist
 from queue import Empty
-from transformers import AutoConfig
 
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
@@ -33,9 +33,6 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.policy.trainer.base import TrainerRegistry
-from cosmos_rl.comm.base import WorkerBase
-from cosmos_rl.dispatcher.protocol import Role
-from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.utils import util
@@ -62,13 +59,14 @@ from cosmos_rl.dispatcher.command import (
 )
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.utils import constant
-import asyncio
-import threading
+from cosmos_rl.policy.worker.base import PolicyWorkerBase
 
 
-class RLPolicyWorker(WorkerBase, CommMixin):
+class RLPolicyWorker(PolicyWorkerBase):
     """
-    Policy worker is the worker that handles the policy training.
+    RL Policy Worker. This worker is responsible for the training of the RL.
+    It interacts with the controller to fetch rollouts and commands, dispatch
+    rollouts to RL trainer for step training.
     """
 
     config: CosmosConfig
@@ -77,54 +75,25 @@ class RLPolicyWorker(WorkerBase, CommMixin):
         assert isinstance(
             config, CosmosConfig
         ), "config must be a CosmosConfig object for this trainer"
-        super().__init__(config, parallel_dims=parallel_dims, **kwargs)
-
-    def worker_init(self, **kwargs):
-        parallel_dims = kwargs.get("parallel_dims", None)
-        if parallel_dims is None:
-            raise ValueError("parallel_dims is required")
-        self.parallel_dims = parallel_dims
-
-        self.hf_config = util.retry(AutoConfig.from_pretrained)(
-            self.config.policy.model_name_or_path,
-            trust_remote_code=True,
-        )
-
-        if self.config.policy.parallelism.dp_shard_size == -1:
-            self.config.policy.parallelism.dp_shard_size = parallel_dims.dp_shard
-
-        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        self.global_rank = int(os.environ.get("RANK", 0))
-        self.role = Role.POLICY
-        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
-        self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
-        self.check_config()
-
-        self.train_stream = torch.cuda.current_stream()
-        self.init_comm()
-
-        policy_type = self.config.train.train_policy.type
-        if policy_type != "sft":
-            # if not sft, we have to init redis
-            self.init_redis()
+        super().__init__(config, parallel_dims=parallel_dims)
 
         self.report_data = {}
         self.upload_thread = None
-
-        # profiler is initialized after the init_comm()
-        self.profiler = CosmosProfiler(
-            self.config,
-            parallel_dims,
-            replica_name=self.replica_name,
-            api_client=self.api_client,
-        )
 
         # Model Status related
         self.model_ready = False
 
         # Initialize the trainer
-        self.build_runner(**kwargs)
+        dataset = kwargs.get("dataset", None)
+        data_packer = kwargs.get("data_packer", None)
+        val_dataset = kwargs.get("val_dataset", None)
+        val_data_packer = kwargs.get("val_data_packer", None)
+        self.build_runner(
+            dataset=dataset,
+            data_packer=data_packer,
+            val_dataset=val_dataset,
+            val_data_packer=val_data_packer,
+        )
 
         # Dist related
 
@@ -148,12 +117,6 @@ class RLPolicyWorker(WorkerBase, CommMixin):
         # For rollouts fetch
         self.data_queue = Queue()
         self.replica_batch_for_this_step = 0
-
-        # Parallel parameters
-        self.dp_rank, self.dp_world_size = 0, 1
-        if self.parallel_dims.dp_enabled:
-            self.dp_rank = self.parallel_dims.mesh["dp"].get_local_rank()
-            self.dp_world_size = self.parallel_dims.mesh["dp"].size()
 
         # For Polocy to Rollout weight mapping
         self.policy_to_rollout_insts = None
@@ -755,29 +718,6 @@ class RLPolicyWorker(WorkerBase, CommMixin):
         self.train_stream.synchronize()
         self.handle_shutdown()
 
-    def check_config(self):
-        mini_batch = 1
-        policy_type = self.config.train.train_policy.type
-        train_batch_per_replica = self.config.train.train_batch_per_replica
-        dp_shard_size = self.config.policy.parallelism.dp_shard_size
-        error_msg = f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by dp_shard_size({dp_shard_size})"
-        mini_batch = self.config.train.train_policy.mini_batch
-        if policy_type == "grpo":
-            error_msg += f" * mini_batch({mini_batch})"
-            assert dp_shard_size == self.parallel_dims.dp_shard
-            assert dp_shard_size > 0, "dp_shard_size must be greater than 0"
-            assert (
-                train_batch_per_replica % (dp_shard_size * mini_batch) == 0
-            ), error_msg
-        else:
-            # TODO(jiaxinc): Optimize this:
-            #  for SFT,`train_batch_per_replica` stands for the batch_size for a DP worker,
-            #  not really for a training replica
-            assert (
-                train_batch_per_replica % mini_batch == 0
-            ), f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by mini_batch({mini_batch})"
-        logger.info("Config checked successfully")
-
     def sync_all_states(
         self,
         is_send: bool,
@@ -789,13 +729,19 @@ class RLPolicyWorker(WorkerBase, CommMixin):
             is_send, send_hook, recv_hook, reference_model
         )
 
-    def build_runner(self, **kwargs):
+    def build_runner(
+        self,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
+    ):
         # Initialize data packer and setup data fetcher first.
         self.setup(
-            dataset=kwargs.get("dataset", None),
-            data_packer=kwargs.get("data_packer", None),
-            val_dataset=kwargs.get("val_dataset", None),
-            val_data_packer=kwargs.get("val_data_packer", None),
+            dataset=dataset,
+            data_packer=data_packer,
+            val_dataset=val_dataset,
+            val_data_packer=val_data_packer,
         )
 
         self.trainer = TrainerRegistry.get_trainer_cls(

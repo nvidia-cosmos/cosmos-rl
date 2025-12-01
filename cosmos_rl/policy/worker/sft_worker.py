@@ -16,43 +16,33 @@
 
 import os
 import torch
-from typing import Optional, Union, Callable, Dict
+from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
 from tqdm import tqdm
+from itertools import islice
+from torch.utils.data import DataLoader, DistributedSampler, Sampler
+from datasets import concatenate_datasets
 
 
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.policy.trainer.base import TrainerRegistry
-from cosmos_rl.comm.base import WorkerBase
-from cosmos_rl.dispatcher.protocol import Role
-from cosmos_rl.utils.profiler import CosmosProfiler
 from cosmos_rl.utils import util
 from cosmos_rl.utils.distributed import destroy_distributed
 from cosmos_rl.utils.wandb_logger import (
     init_wandb,
     is_wandb_available,
 )
-
-
-from itertools import islice
-
-from torch.utils.data import DataLoader, DistributedSampler, Sampler
-from datasets import concatenate_datasets
-from typing import Any
-
-
 from cosmos_rl.policy.config import (
     SFTDataConfig,
     config_hash,
 )
 from cosmos_rl.policy.trainer.sampler import SkippingSampler
 import cosmos_rl.utils.cache as cache
-
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
+from cosmos_rl.policy.worker.base import PolicyWorkerBase
 
 
 class SFTDataset(Dataset):
@@ -223,7 +213,7 @@ def collate_fn(
     return batch
 
 
-class SFTPolicyWorker(WorkerBase, CommMixin):
+class SFTPolicyWorker(PolicyWorkerBase):
     trainer: SFTTrainer
 
     def __init__(
@@ -239,38 +229,11 @@ class SFTPolicyWorker(WorkerBase, CommMixin):
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
     ):
-        super(SFTPolicyWorker, self).__init__(
-            config,
-            parallel_dims=parallel_dims,
-            dataset=dataset,
-            data_packer=data_packer,
-            val_dataset=val_dataset,
-            val_data_packer=val_data_packer,
-            sampler=sampler,
-            batch_sampler=batch_sampler,
-            val_sampler=val_sampler,
-            val_batch_sampler=val_batch_sampler,
-        )
+        super(SFTPolicyWorker, self).__init__(config, parallel_dims)
 
-    def worker_init(self, **kwargs):
         # Enlarge the compile cache size for validation
         if self.config.train.compile and self.config.validation.enable:
             torch._dynamo.config.cache_size_limit = 64
-
-        parallel_dims: ParallelDims = kwargs.get("parallel_dims", None)
-        if parallel_dims is None:
-            raise ValueError("parallel_dims is required")
-        self.parallel_dims = parallel_dims
-        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        self.global_rank = int(os.environ.get("RANK", 0))
-        self.role = Role.POLICY
-        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
-        self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
-        self.dp_rank, self.dp_world_size = 0, 1
-        if self.parallel_dims.dp_enabled:
-            self.dp_rank = self.parallel_dims.mesh["dp"].get_local_rank()
-            self.dp_world_size = self.parallel_dims.mesh["dp"].size()
 
         # Prepare wandb
         if "wandb" in self.config.logging.logger and is_wandb_available():
@@ -284,16 +247,16 @@ class SFTPolicyWorker(WorkerBase, CommMixin):
 
         self.train_step = 0
         self.start_epoch = 0
-        self.train_stream = torch.cuda.current_stream()
 
-        self.init_comm()
-        self.build_runner(**kwargs)
-
-        self.profiler = CosmosProfiler(
-            self.config,
-            self.parallel_dims,
-            replica_name=self.replica_name,
-            api_client=self.api_client,
+        self.build_runner(
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
+            val_sampler=val_sampler,
+            val_batch_sampler=val_batch_sampler,
+            dataset=dataset,
+            val_dataset=val_dataset,
         )
 
     def setup(
@@ -307,10 +270,20 @@ class SFTPolicyWorker(WorkerBase, CommMixin):
             val_data_packer=val_data_packer,
         )
 
-    def build_runner(self, **kwargs):
+    def build_runner(
+        self,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
+        sampler: Optional[Callable] = None,
+        batch_sampler: Optional[Callable] = None,
+        val_sampler: Optional[Callable] = None,
+        val_batch_sampler: Optional[Callable] = None,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+    ):
         self.setup(
-            data_packer=kwargs.get("data_packer", None),
-            val_data_packer=kwargs.get("val_data_packer", None),
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
         )
 
         self.trainer = TrainerRegistry.get_trainer_cls("sft")(
@@ -321,13 +294,6 @@ class SFTPolicyWorker(WorkerBase, CommMixin):
             val_data_packer=self.val_data_packer,
         )
         self.ckpt_total_steps, self.train_step = self.trainer.load_model()
-
-        sampler = kwargs.get("sampler", None)
-        batch_sampler = kwargs.get("batch_sampler", None)
-        val_sampler = kwargs.get("val_sampler", None)
-        val_batch_sampler = kwargs.get("val_batch_sampler", None)
-        dataset = kwargs.get("dataset", None)
-        val_dataset = kwargs.get("val_dataset", None)
 
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
