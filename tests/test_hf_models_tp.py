@@ -28,7 +28,7 @@ from qwen_vl_utils import process_vision_info
 
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.trainer.sft_trainer import async_safe_ce
+from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import async_safe_ce
 from transformers import (
     AutoConfig,
     AutoProcessor,
