@@ -230,7 +230,7 @@ def test_cp_forward_and_backward(CP_SIZE, TP_SIZE, DP_SIZE):
 
     # 1. CP part.
     # Only DP and CP to simpify test. So each rank will load all the model weights.
-    with init_on_device(device='meta', include_buffers=False):
+    with init_on_device(device="meta", include_buffers=False):
         with util.cosmos_default_dtype(torch.bfloat16):
             model = GPT.from_pretrained(
                 hf_config,
