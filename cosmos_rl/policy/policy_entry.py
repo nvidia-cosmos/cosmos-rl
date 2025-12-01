@@ -49,12 +49,12 @@ def policy_entry(**kwargs):
     policy_type = cosmos_config.train.train_policy.type
     if cosmos_config.mode == "colocated":
         logger.info("Starting colocated RL worker...")
-        control_worker = ColocatedRLControlWorker(
+        policy_worker = ColocatedRLControlWorker(
             config=cosmos_config,
             parallel_dims=parallel_dims,
             **kwargs,
         )
-        control_worker.setup(
+        policy_worker.setup(
             config=cosmos_config,
             dataset=kwargs.get("dataset", None),
             val_dataset=kwargs.get("val_dataset", None),
@@ -63,7 +63,6 @@ def policy_entry(**kwargs):
             val_sampler=kwargs.get("val_sampler", None),
             val_batch_sampler=kwargs.get("val_batch_sampler", None),
         )
-        control_worker.main_loop()
     elif policy_type == "grpo":
         policy_worker = RLPolicyWorker(
             config=cosmos_config,

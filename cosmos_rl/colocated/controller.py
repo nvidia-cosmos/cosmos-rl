@@ -364,9 +364,10 @@ class ColocatedController(Controller):
                 f"[Controller] DataFetchCommand details: {data_fetch_cmd} at step {self.current_step}"
             )
             if not self.config.train.resume:
-                assert (
-                    data_fetch_cmd.do_save == do_save
-                ), f"Expected do_save {do_save} but got {data_fetch_cmd.do_save}"
+                assert data_fetch_cmd.do_save == (
+                    do_save and self.config.train.ckpt.enable_checkpoint
+                ), f"Expected do_save { (do_save
+                    and self.config.train.ckpt.enable_checkpoint)} but got {data_fetch_cmd.do_save}"
                 assert (
                     self.current_step == data_fetch_cmd.global_step
                 ), f"Expected global_step {self.current_step} but got {data_fetch_cmd.global_step}"
@@ -391,7 +392,7 @@ class ColocatedController(Controller):
                 completion_length = (
                     len(rollout.completion_token_ids)
                     if self.config.train.train_policy.rollout_as_token_ids
-                    else len(self.policy.tokenizer.encode(rollout.completion))
+                    else len(self.policy.trainer.tokenizer.encode(rollout.completion))
                 )
                 advantages.extend([rollout.advantage] * completion_length)
                 filter_rewards.append(rollout.filter_reward)
@@ -474,7 +475,6 @@ class ColocatedController(Controller):
         Returns:
             torch.nn.Module: The current policy model instance.
         """
-        if isinstance(self.policy.model, HFModel):
-            logger.info("Returning underlying HF model from policy.model")
-            return self.policy.model.model
-        return self.policy.model
+        if isinstance(self.policy.trainer.model, HFModel):
+            return self.policy.trainer.model.model
+        return self.policy.trainer.model

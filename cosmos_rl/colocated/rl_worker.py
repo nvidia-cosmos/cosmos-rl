@@ -179,3 +179,18 @@ class ColocatedRLControlWorker:
 
                 # Process the RolloutToRolloutBroadcast command
                 self.rollout.consume_command(RolloutToRolloutBroadcastCommand)
+
+    def execute(self):
+        """
+        Execute the Colocated GRPO Control Worker's main loop.
+        """
+        try:
+            self.main_loop()
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            raise e
+        finally:
+            self.policy.destroy_worker()
+            # No need to destroy rollout worker separately in colocated mode
