@@ -74,5 +74,4 @@ def policy_entry(**kwargs):
     else:
         raise ValueError(f"Unknown policy type: {policy_type}")
 
-    logger.info("[Policy] LMS start")
     policy_worker.execute()
