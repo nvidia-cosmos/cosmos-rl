@@ -20,20 +20,19 @@ from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
-from transformers import AutoTokenizer
 from torch.utils.data import ConcatDataset
 from cosmos_rl.utils.decorators import monitor_status
+import cosmos_rl.utils.util as util
 
 
 class MathDapoDataset(Dataset):
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
-        `tokenizer`: tokenizer;
         """
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
 
         # This demo is only for DAPO-Math-17k dataset
         assert "DAPO-Math-17k" in config.train.train_policy.dataset.name

@@ -14,20 +14,21 @@
 # limitations under the License.
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.decorators import monitor_status
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
 from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
-from cosmos_rl.utils import util
 from cosmos_rl.dispatcher.api.client import APIClient
+
+from cosmos_rl.utils.decorators import monitor_status
 
 
 @monitor_status(name="Cosmos-RL Policy", mode="train")
 def main(*args, **kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+
     api_client = APIClient(role="POLICY")
     metadata = api_client.get_controller_metadata()
 
@@ -49,46 +50,41 @@ def main(*args, **kwargs):
     policy_type = cosmos_config.train.train_policy.type
 
     try:
-        with torch.autocast(
-            device_type="cuda",
-            dtype=util.str2torch_dtype(cosmos_config.train.param_dtype),
-        ):
-            if policy_type == "grpo":
-                logger.info("Starting GRPO training...")
-                trainer = GRPOTrainer(config=cosmos_config, parallel_dims=parallel_dims)
-                trainer.main_loop()
-            elif policy_type == "sft":
-                custom_sft_dataset = kwargs.get("dataset")
-                custom_sft_data_packer = kwargs.get("data_packer")
-                logger.info("Starting SFT training...")
-                # Check if we have a custom validation dataset
-                val_dataset = kwargs.get("val_dataset", None)
-                using_custom_val = val_dataset is not None
-
-                trainer = SFTTrainer(
-                    config=cosmos_config,
-                    parallel_dims=parallel_dims,
-                    dataset=custom_sft_dataset,
-                    data_packer=custom_sft_data_packer,
-                    val_dataset=val_dataset,
-                    val_data_packer=kwargs.get("val_data_packer", None),
-                    sampler=kwargs.get("sampler", None),
-                    batch_sampler=kwargs.get("batch_sampler", None),
-                    using_custom_val_dataset=using_custom_val,
-                    val_sampler=kwargs.get("val_sampler", None),
-                    val_batch_sampler=kwargs.get("val_batch_sampler", None),
-                )
-                trainer.train()
-            else:
-                raise ValueError(f"Unknown policy type: {policy_type}")
-    except (KeyboardInterrupt, SystemError) as e:
-        logger.warning(f"[Policy] Training was interrupted: {str(e)}")
-        raise
+        if policy_type == "grpo":
+            logger.info("Starting GRPO training...")
+            trainer = GRPOTrainer(
+                config=cosmos_config,
+                parallel_dims=parallel_dims,
+                dataset=kwargs.get("dataset", None),
+                data_packer=kwargs.get("data_packer", None),
+                val_dataset=kwargs.get("val_dataset", None),
+                val_data_packer=kwargs.get("val_data_packer", None),
+            )
+            trainer.main_loop()
+        elif policy_type == "sft":
+            custom_sft_dataset = kwargs.get("dataset")
+            custom_sft_data_packer = kwargs.get("data_packer")
+            logger.info("Starting SFT training...")
+            trainer = SFTTrainer(
+                config=cosmos_config,
+                parallel_dims=parallel_dims,
+                dataset=custom_sft_dataset,
+                data_packer=custom_sft_data_packer,
+                val_dataset=kwargs.get("val_dataset", None),
+                val_data_packer=kwargs.get("val_data_packer", None),
+                sampler=kwargs.get("sampler", None),
+                batch_sampler=kwargs.get("batch_sampler", None),
+                val_sampler=kwargs.get("val_sampler", None),
+                val_batch_sampler=kwargs.get("val_batch_sampler", None),
+            )
+            trainer.train()
+        else:
+            raise ValueError(f"Unknown policy type: {policy_type}")
     except Exception as e:
         import traceback
+
         traceback.print_exc()
-        logger.error(f"[Policy] Training failed: {str(e)}")
-        raise
+        raise e
     finally:
         destroy_distributed()
         logger.info("Process group destroyed.")

@@ -119,6 +119,7 @@ RUN pip install ninja && MAX_JOBS=8 pip install --no-cache-dir flash-attn --no-b
 
 RUN pip install --no-cache-dir \
     torchao==0.13.0 \
+    flash_attn==${FLASH_ATTN_VERSION} \
     flashinfer-python \
     transformer_engine[pytorch] --no-build-isolation
 
@@ -141,23 +142,18 @@ RUN if [ "$TARGETARCH" != "amd64" ]; then \
         rm -rf /tmp/vllm ; \
     else \
         pip install --no-cache-dir vllm==0.11.0 --no-build-isolation ; \
+        fi    
+        
+# Install nvshmem grouped_gemm and DeepEP for MoE (x86 only)
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        pip install nvidia-nvshmem-cu12 && \
+        TORCH_CUDA_ARCH_LIST="8.0 9.0+PTX" pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4 --no-build-isolation && \
+        apt-get update && apt-get install -y libibverbs-dev && \
+        git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep && \
+        cd /tmp/deepep && \
+        python setup.py build && \
+        python setup.py install ; \
     fi
-
-# Copy source code last - this layer will rebuild when code changes
-# but pip installs above will be cached
-COPY . .
-
-RUN if [ "$TARGETARCH" != "amd64" ]; then \
-        pip install --no-cache-dir -c constraints.txt -r requirements.txt ; \
-        pip install --no-cache-dir llmcompressor==0.6.0 ; \
-    else \
-        pip install --no-cache-dir -r requirements.txt ; \
-        pip install --no-cache-dir llmcompressor==0.7.0 ; \
-        pip install --no-cache-dir decord ; \
-    fi
-
-###################################################
-
 
 # Phase for building any lib that we want to builf from source
 FROM no-efa-base AS source-build
@@ -247,15 +243,18 @@ RUN apt-get autoremove -y && \
 
 WORKDIR /workspace/cosmos_rl
 
-# Copy source code last - this layer will rebuild when code changes
+# Copy source code last - this layer will rebuild when code changes    
 # but pip installs above will be cached
 COPY . .
 
 RUN if [ "$TARGETARCH" != "amd64" ]; then \
         pip install --no-cache-dir -c constraints.txt -r requirements.txt ; \
-    else \
+        pip install --no-cache-dir llmcompressor==0.6.0 ; \
+    else \    
         pip install --no-cache-dir -r requirements.txt ; \
-    fi
+        pip install --no-cache-dir llmcompressor==0.7.0 ; \
+        pip install --no-cache-dir decord ; \
+    fi    
 
 # Install additional dependencies that depend on the source code
 # Use SETUPTOOLS_SCM_PRETEND_VERSION since .git is excluded from Docker context

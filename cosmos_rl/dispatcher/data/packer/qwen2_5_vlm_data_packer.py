@@ -1,10 +1,10 @@
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
-from typing import List, Any, Dict, Optional, Tuple
+from typing import List, Any, Dict, Optional, Tuple, Union
 import torch
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
-from transformers import AutoTokenizer, AutoProcessor, AutoConfig
+from transformers import AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info
 import logging
 import copy
@@ -27,8 +27,8 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
             self.input_ids = input_ids
             self.logprob_masks = logprob_masks
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        super().setup(config, tokenizer, *args, **kwargs)
+    def setup(self, config: Config, *args, **kwargs):
+        super().setup(config, *args, **kwargs)
         self.hf_processor = retry(AutoProcessor.from_pretrained)(
             config.policy.model_name_or_path
         )
@@ -566,7 +566,7 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
     def get_policy_input(
         self,
         sample: "Qwen2_5_VLM_DataPacker.Payload",
-        rollout_output: Optional[str] = None,
+        rollout_output: Optional[Union[str, List[int]]] = None,
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
@@ -602,7 +602,13 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         input_ids = x["input_ids"]
         completion_ids = []
         if rollout_output:
-            completion_ids = self.tokenizer(rollout_output).input_ids
+            rollout_as_token_ids = isinstance(rollout_output, list) and all(
+                isinstance(i, int) for i in rollout_output
+            )
+            if rollout_as_token_ids:
+                completion_ids = rollout_output
+            else:
+                completion_ids = self.tokenizer(rollout_output).input_ids
             # recompute position_ids
             # position_ids: (3, 1, seq_len)
             position_ids, _ = self._get_rope_index(
@@ -662,7 +668,6 @@ class Qwen2_5_VLM_DataPacker(DataPacker):
         self,
         processed_samples: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         # Reuse the RL collate minibatch function

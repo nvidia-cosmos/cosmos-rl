@@ -19,6 +19,9 @@ from cosmos_rl.utils.parallelism import (
     ParallelDims,
 )
 import torch
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
+from torch.utils.data import Dataset
+from typing import Union, Callable, Optional
 import inspect
 import os
 from cosmos_rl.utils.logging import logger
@@ -42,12 +45,14 @@ from cosmos_rl.dispatcher.command import (
 import atexit
 from cosmos_rl.utils.util import (
     compute_mfu,
+    setup_tokenizer,
 )
 from cosmos_rl.utils.parallelism_map import (
     ParallelTopoMapperGroup,
 )
+from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 from functools import cached_property
-from typing import List, Callable, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 import types
 from functools import partial
 import msgpack
@@ -94,6 +99,9 @@ def compute_loss(
     logprob_masks: torch.Tensor,  # of shape `[batch_size, max_len]`
     dp_group: Optional[torch.distributed.ProcessGroup] = None,
     ddp_comm: HighAvailabilitylNccl = None,
+    rollout_per_token_logps: Optional[
+        List[List[float]]
+    ] = None,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
     current_advantages = torch.masked_select(current_advantages, logprob_masks)
@@ -110,11 +118,23 @@ def compute_loss(
         ), "ref_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
             ref_per_token_logps.shape, current_token_logps.shape
         )
+    if rollout_per_token_logps is not None:
+        rollout_per_token_logps = torch.tensor(
+            np.concatenate(rollout_per_token_logps, axis=0),
+            device=current_token_logps.device,
+            dtype=current_token_logps.dtype,
+        ).detach()
+        assert (
+            rollout_per_token_logps.shape == current_token_logps.shape
+        ), "rollout_per_token_logps and current_token_logps should have the same shape, but got {} and {}".format(
+            rollout_per_token_logps.shape, current_token_logps.shape
+        )
 
     shifted_length = cu_seqlens[1:] - cu_seqlens[:-1]
     bsz = shifted_length.shape[0]
     negative_approx_kl = current_token_logps - old_per_token_logps
 
+    # Compute importance ratio
     if config.train.train_policy.variant == "gspo":
         # For GSPO, we compute sequence-level importance ratios
         # but we need to maintain gradient flow through the token-level logprobs
@@ -179,6 +199,18 @@ def compute_loss(
             per_token_loss = torch.where(
                 current_advantages < 0, clip_losses2, clip_losses1
             )
+
+    if rollout_per_token_logps is not None:
+        # Compute behavior KL divergence and importance weight
+        behav_kl = old_per_token_logps - rollout_per_token_logps
+        behav_imp_weight = torch.exp(behav_kl)
+        behav_mask = (
+            (behav_imp_weight <= config.train.train_policy.behav_imp_weight_cap)
+            if config.train.train_policy.behav_imp_weight_cap is not None
+            else torch.ones_like(behav_imp_weight, dtype=torch.bool)
+        )
+        behav_imp_weight = torch.where(behav_mask, behav_imp_weight, 0.0)
+        per_token_loss = per_token_loss * behav_imp_weight
 
     # Compute the KL divergence between the model and the reference model
     if config.train.train_policy.kl_beta != 0.0:
@@ -254,7 +286,7 @@ def compute_loss(
 
 
 class GRPOTrainer(Trainer):
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
+    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
         super().__init__(config, parallel_dims)
         self.reference_state_dict = {}
 
@@ -324,6 +356,36 @@ class GRPOTrainer(Trainer):
         self.prepare_shard_infos_for_weight_sync_insts()
         if config.train.train_policy.variant == "gspo":
             logger.info("[Policy] Use GSPO loss in RL.")
+
+        self.setup(
+            dataset=kwargs.get("dataset", None),
+            data_packer=kwargs.get("data_packer", None),
+            val_dataset=kwargs.get("val_dataset", None),
+            val_data_packer=kwargs.get("val_data_packer", None),
+        )
+        self.tokenizer = setup_tokenizer(config.policy.model_name_or_path)
+
+    def setup(
+        self,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
+    ):
+        # setup data packer first
+        self.init_data_packer(
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+        )
+        # Set up data fetcher
+        self.data_fetcher = WorkerDataFetcher(
+            config=self.config,
+            dataset=dataset,
+            val_dataset=val_dataset,
+            data_packer=self.data_packer,
+            val_data_packer=self.val_data_packer,
+            is_rl=True,
+        )
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
@@ -424,6 +486,8 @@ class GRPOTrainer(Trainer):
             model=self.model,
             optimizer=self.optimizers,
             scheduler=self.lr_schedulers,
+            model_name_or_path=self.config.policy.model_name_or_path,
+            revision=self.config.policy.model_revision,
         )
         self.model.train()
         self.model_ready = True
@@ -588,93 +652,90 @@ class GRPOTrainer(Trainer):
         # NCCL announces that multi-comm could lead to deadlocks if not synchronized
         with torch.cuda.stream(self.train_stream):
             with torch.no_grad():
-                try:
-                    if self.config.policy.lora is not None:
-                        from cosmos_rl.policy.lora.plugin import (
-                            merge_lora_weights_,
-                            unmerge_lora_weights_,
-                        )
-
-                        merge_lora_weights_(self.model)
-
-                    pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
-                        self.pre_P2R_collect_parameters()
+                if self.config.policy.lora is not None:
+                    from cosmos_rl.policy.lora.plugin import (
+                        merge_lora_weights_,
+                        unmerge_lora_weights_,
                     )
 
-                    def grouped_send(grouped_send_ops):
-                        nccl_group_start(comm_id)
-                        for view, r_rank, dest_name in grouped_send_ops:
+                    merge_lora_weights_(self.model)
+
+                pre_P2R_collected_tensors: Dict[str, torch.Tensor] = (
+                    self.pre_P2R_collect_parameters()
+                )
+
+                def grouped_send(grouped_send_ops):
+                    nccl_group_start(comm_id)
+                    for view, r_rank, dest_name in grouped_send_ops:
+                        logger.debug(
+                            f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
+                        )
+                        nccl_send(
+                            view,
+                            self.world_size + r_rank,
+                            comm_id,
+                        )
+                    nccl_group_end(comm_id)
+                    grouped_send_ops.clear()
+
+                grouped_send_ops = []
+                num_groups = 0
+
+                transferred_params_cnt = 0
+                skipped_params_cnt = 0
+                for insts_group in self.policy_to_rollout_insts:
+                    for insts_for_per_param in insts_group.param_instructions:
+                        dest_name = insts_for_per_param.param_name
+                        if (
+                            dest_name not in self.trainable_params
+                            and command.trainable_only
+                        ):
                             logger.debug(
-                                f"[Policy] Sending tensor {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, shape {view.shape} with dtype: {view.dtype}."
+                                f"[Policy] Skip {dest_name} in P2R send due to non trainable."
                             )
-                            nccl_send(
-                                view,
-                                self.world_size + r_rank,
-                                comm_id,
+                            skipped_params_cnt += 1
+                            continue
+                        transferred_params_cnt += 1
+
+                        for inst in insts_for_per_param.instructions:
+                            p_rank = inst.policy_rank
+                            r_rank = inst.rollout_rank
+                            tensor_split_strategys = inst.slice_strategy
+                            if dest_name not in self.map_w_from_policy_to_rollout:
+                                raise RuntimeError(
+                                    f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
+                                )
+                            local_view = self.map_w_from_policy_to_rollout[dest_name]
+                            if dest_name in pre_P2R_collected_tensors:
+                                local_view = pre_P2R_collected_tensors[dest_name]
+                            elif isinstance(local_view, Callable):
+                                local_view = local_view()
+                            else:
+                                pass
+                            local_view = local_view.to(
+                                str2torch_dtype(self.config.train.transfer_dtype)
                             )
-                        nccl_group_end(comm_id)
-                        grouped_send_ops.clear()
+                            view = (
+                                local_view.cosmos_slice(tensor_split_strategys)
+                                .contiguous()
+                                .cuda()
+                            )
+                            assert self.global_rank == p_rank
+                            logger.debug(
+                                f"Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
+                            )
+                            grouped_send_ops.append((view, r_rank, dest_name))
+                            total_bytes_sent += view.numel() * view.element_size()
+                    num_groups += 1
+                    if num_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
+                        grouped_send(grouped_send_ops)
+                        num_groups = 0
 
-                    grouped_send_ops = []
-                    num_groups = 0
+                grouped_send(grouped_send_ops)
 
-                    transferred_params_cnt = 0
-                    skipped_params_cnt = 0
-                    for insts_group in self.policy_to_rollout_insts:
-                        for insts_for_per_param in insts_group.param_instructions:
-                            dest_name = insts_for_per_param.param_name
-                            if (
-                                dest_name not in self.trainable_params
-                                and command.trainable_only
-                            ):
-                                logger.debug(
-                                    f"[Policy] Skip {dest_name} in P2R send due to non trainable."
-                                )
-                                skipped_params_cnt += 1
-                                continue
-                            transferred_params_cnt += 1
-
-                            for inst in insts_for_per_param.instructions:
-                                p_rank = inst.policy_rank
-                                r_rank = inst.rollout_rank
-                                tensor_split_strategys = inst.slice_strategy
-                                if dest_name not in self.map_w_from_policy_to_rollout:
-                                    raise RuntimeError(
-                                        f"dest_name {dest_name} not in map_w_from_policy_to_rollout"
-                                    )
-                                local_view = self.map_w_from_policy_to_rollout[
-                                    dest_name
-                                ]
-                                if dest_name in pre_P2R_collected_tensors:
-                                    local_view = pre_P2R_collected_tensors[dest_name]
-                                elif isinstance(local_view, Callable):
-                                    local_view = local_view()
-                                else:
-                                    pass
-                                local_view = local_view.to(
-                                    str2torch_dtype(self.config.train.transfer_dtype)
-                                )
-                                view = (
-                                    local_view.cosmos_slice(tensor_split_strategys)
-                                    .contiguous()
-                                    .cuda()
-                                )
-                                assert self.global_rank == p_rank
-                                logger.debug(
-                                    f"Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
-                                )
-                                grouped_send_ops.append((view, r_rank, dest_name))
-                                total_bytes_sent += view.numel() * view.element_size()
-                        num_groups += 1
-                        if num_groups == constant.COSMOS_P2R_NCCL_GROUP_SIZE:
-                            grouped_send(grouped_send_ops)
-                            num_groups = 0
-
-                    grouped_send(grouped_send_ops)
-                finally:
-                    if self.config.policy.lora is not None:
-                        # Always attempt to unmerge to restore training state
-                        unmerge_lora_weights_(self.model)
+                if self.config.policy.lora is not None:
+                    # Always attempt to unmerge to restore training state
+                    unmerge_lora_weights_(self.model)
 
                 if command.trainable_only:
                     if not hasattr(self, "synced_trainable_params"):
@@ -1100,6 +1161,20 @@ class GRPOTrainer(Trainer):
         start_event.record()
         logger.debug("[Policy] Prepare training data.")
         rollouts: List[Rollout] = self.dispatch_rollouts()
+        assert all(
+            rollout.prompt_idx >= 0 for rollout in rollouts
+        ), "All rollouts from controller should have a valid prompt index"
+
+        # preprocess rollouts
+        if self.config.train.local_dataset:
+            for i in range(len(rollouts)):
+                rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
+                    rollouts[i].prompt_idx
+                )
+                rollouts[i].conversation = self.data_fetcher.get_payload_by_index(
+                    rollouts[i].prompt_idx,
+                    attr="conversation",
+                )
 
         # For single-turn rollout, we use the prompt, for multi-turn rollout, we use the completed conversation
         if self.config.rollout.multi_turn_config.enable:
@@ -1107,7 +1182,12 @@ class GRPOTrainer(Trainer):
         else:
             samples = [rollout.prompt for rollout in rollouts]
 
-        completions_list = [rollout.completion for rollout in rollouts]
+        completions_list = [
+            rollout.completion_token_ids
+            if self.config.train.train_policy.rollout_as_token_ids
+            else rollout.completion
+            for rollout in rollouts
+        ]
         advantages_list = [rollout.advantage for rollout in rollouts]
         # Optional Positive-NLL support: only compute flags when coefficient > 0
         pos_coef_global = self.config.train.train_policy.positive_nll_coef
@@ -1313,12 +1393,43 @@ class GRPOTrainer(Trainer):
                                         computed_max_len=computed_max_len,
                                     )
                                 )
+                                if self.config.train.train_policy.use_decoupled_loss:
+                                    rollout_logbprobs = []
+                                    assert len(mini_batch_indices) == len(
+                                        user_mini_batch["logprob_masks"]
+                                    )
+                                    for i in mini_batch_indices:
+                                        assert (
+                                            len(rollouts[i].completion_logprobs)
+                                            == len(completions_list[i])
+                                        ), f"Unexpected completion_logprobs length {len(rollouts[i].completion_logprobs)} vs completion length {len(completions_list[i])}"
+                                        # Skip the last token logprob which is for <eos> if needed
+                                        # Skip the n_ignore_prefix_tokens as they are not included in the loss calculation
+                                        rollout_logbprobs.append(
+                                            rollouts[i].completion_logprobs[
+                                                n_ignore_prefix_tokens_list[i] :
+                                            ]
+                                        )
+                                    user_mini_batch["rollout_logprobs"] = (
+                                        rollout_logbprobs
+                                    )
                                 packing_seq = self.config.train.sequence_packing
                                 if packing_seq:
                                     if self.parallel_dims.pp_enabled:
                                         packing_seq = False
                                         logger.debug(
                                             "[Policy] Packing sequence is disabled due to incompatible dimensions."
+                                        )
+                                    elif (
+                                        hasattr(
+                                            self.model,
+                                            "check_sequence_packing_compatible",
+                                        )
+                                        and not self.model.check_sequence_packing_compatible()
+                                    ):
+                                        packing_seq = False
+                                        logger.debug(
+                                            "[Policy] Packing sequence is disabled due to unsupported model."
                                         )
 
                                 # TP/CP will shard the sequence dimension into n-ranks.
@@ -1636,6 +1747,9 @@ class GRPOTrainer(Trainer):
                                             if self.parallel_dims.dp_enabled
                                             else None,
                                             ddp_comm=self.inter_policy_nccl,
+                                            rollout_per_token_logps=user_mini_batch.get(
+                                                "rollout_logprobs", None
+                                            ),
                                         )
                                         if (
                                             self.config.train.train_policy.entropy_coeff
@@ -1969,6 +2083,7 @@ def _swizzle_pp_grpo_forward(
         if trainer.parallel_dims.dp_enabled
         else None,
         ddp_comm=trainer.inter_policy_nccl,
+        rollout_per_token_logps=user_input.get("rollout_logprobs", None),
     )
     if config.train.train_policy.entropy_coeff > 0.0:
         loss += (

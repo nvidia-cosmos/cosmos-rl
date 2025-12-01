@@ -29,6 +29,7 @@ except ImportError:
 try:
     from grouped_gemm import ops
 except ImportError:
+    ops = None
     print(
         "grouped_gemm is not available. Please run:"
         "pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
@@ -45,6 +46,20 @@ from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
 _shared_experts_stream: Optional[torch.cuda.Stream] = None
 
 
+def is_deepep_supported():
+    supported = False
+    # GroupedExpertsDeepEP requires both 'grouped_gemm' and 'deep_ep' packages to be installed.
+    if ops is not None:
+        try:
+            from deep_ep import Buffer  # noqa: F401
+            from deep_ep.utils import EventHandle, EventOverlap  # noqa: F401
+
+            supported = True
+        except ImportError as e:
+            print(f"Failed to import deep_ep: {e}")
+    return supported
+
+
 @dataclass
 class MoEArgs:
     n_routed_experts: int
@@ -59,7 +74,7 @@ class MoEArgs:
     route_scale: float
     dim: int
     moe_inter_dim: int
-    enable_deepep: bool = False
+    norm_topk_prob: bool = False
     fake_balanced_gate: bool = False
 
 
@@ -123,11 +138,9 @@ class GroupedExperts(nn.Module):
         """
         super().__init__()
         self.n_routed_experts = args.n_routed_experts
-        self.gate_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
-        )
-        self.up_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
+        self.moe_inter_dim = args.moe_inter_dim
+        self.gate_and_up_projs = nn.Parameter(
+            torch.empty(args.n_routed_experts, args.moe_inter_dim * 2, args.dim)
         )
         self.down_projs = nn.Parameter(
             torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim)
@@ -158,8 +171,8 @@ class GroupedExperts(nn.Module):
         """
         assert not isinstance(x, DTensor)
 
-        if isinstance(self.gate_projs, DTensor):
-            ep_mesh = self.gate_projs.device_mesh
+        if isinstance(self.gate_and_up_projs, DTensor):
+            ep_mesh = self.gate_and_up_projs.device_mesh
             assert ep_mesh is not None
             assert ep_mesh.ndim == 1, "We only support 1D mesh for MoE"
             ep_size = ep_mesh.size()
@@ -208,9 +221,10 @@ class GroupedExperts(nn.Module):
                 continue
             active_local_experts += 1
 
-            gate_proj = get_local_proj(self.gate_projs, i)
+            gate_and_up_proj = get_local_proj(self.gate_and_up_projs, i)
+            gate_proj = gate_and_up_proj[: self.moe_inter_dim, :]
+            up_proj = gate_and_up_proj[self.moe_inter_dim :, :]
             down_proj = get_local_proj(self.down_projs, i)
-            up_proj = get_local_proj(self.up_projs, i)
 
             idx_b = idx[:, None].expand(-1, x.size(1))
             x_idx = x.gather(dim=0, index=idx_b)
@@ -223,9 +237,10 @@ class GroupedExperts(nn.Module):
 
         if active_local_experts == 0:
             # We need to handle the case where no token selects the experts on this device.
-            gate_proj = get_local_proj(self.gate_projs, experts_start_idx)
+            gate_and_up_proj = get_local_proj(self.gate_and_up_projs, experts_start_idx)
+            gate_proj = gate_and_up_proj[: self.moe_inter_dim, :]
+            up_proj = gate_and_up_proj[self.moe_inter_dim :, :]
             down_proj = get_local_proj(self.down_projs, experts_start_idx)
-            up_proj = get_local_proj(self.up_projs, experts_start_idx)
             expert_out = (
                 swiglu(torch.zeros_like(x[0]), gate_proj, down_proj, up_proj)
                 * weights[0, 0, None]
@@ -262,12 +277,11 @@ class GroupedExpertsDeepEP(nn.Module):
                 model and intermediate dimension parameters.
         """
         super().__init__()
-
         self.gate_and_up_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim * 2)
+            torch.empty(args.n_routed_experts, args.moe_inter_dim * 2, args.dim)
         )
         self.down_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
+            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim)
         )
         self.args = args
 
@@ -323,10 +337,6 @@ class GroupedExpertsDeepEP(nn.Module):
         """
         assert not isinstance(x, DTensor)
 
-        assert (
-            self.n_routed_experts % self.ep_size == 0
-        ), f"Number of experts must be divisible by ep_size (ep_size={self.ep_size})"
-
         indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
 
         (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
@@ -338,22 +348,21 @@ class GroupedExpertsDeepEP(nn.Module):
             )
         )
         permuted_probs = permuted_probs.unsqueeze(-1)
-
         if torch.count_nonzero(tokens_per_expert) > 0:
             output1 = ops.gmm(
                 permuted_local_hidden_states,
                 self.gate_and_up_projs.to_local(),
                 tokens_per_expert,
-                trans_b=False,
+                trans_b=True,
             )
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             output2 = ops.gmm(
-                output1_, self.down_projs.to_local(), tokens_per_expert, trans_b=False
+                output1_, self.down_projs.to_local(), tokens_per_expert, trans_b=True
             )
         else:
-            output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0])
+            output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
-            output2 = torch.matmul(output1_, self.down_projs.to_local()[0])
+            output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
 
         y = self.token_dispatcher.token_unpermutation(output2)
 
@@ -437,6 +446,7 @@ class Gate(nn.Module):
         self.n_groups = args.n_expert_groups
         self.topk_groups = args.n_limited_groups
         self.score_func = args.score_func
+        self.norm_topk_prob = args.norm_topk_prob
         self.route_scale = args.route_scale
         self.train_gate = args.train_gate
         self.bias_update_factor = args.gate_bias_update_factor
@@ -505,8 +515,9 @@ class Gate(nn.Module):
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
 
-        if self.score_func == "sigmoid":
+        if self.score_func == "sigmoid" or self.norm_topk_prob:
             weights /= weights.sum(dim=-1, keepdim=True)
+        if self.score_func == "sigmoid":
             original_scores /= original_scores.sum(dim=-1, keepdim=True)
         weights *= self.route_scale
 
@@ -712,11 +723,18 @@ class MoE(nn.Module):
             self.gate = FakeBalancedGate(args)
         else:
             self.gate = Gate(args)
-        if args.enable_deepep:
+
+        if is_deepep_supported():
             self.experts = GroupedExpertsDeepEP(args)
         else:
+            # Use allgather dispatcher
+            # TODO(huik): support all2all dispatcher for common use cases
             self.experts = GroupedExperts(args)
-        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
+        if args.n_shared_experts > 0:
+            self.shared_experts = MLP(
+                args.dim, args.n_shared_experts * args.moe_inter_dim
+            )
+        self.args = args
 
     def forward(
         self,
@@ -745,24 +763,25 @@ class MoE(nn.Module):
 
         weights, indices, aux_loss = self.gate(x, token_mask, cp_mesh)
 
+        y = self.experts(x, token_mask, weights, indices)
         # Execute shared experts in a separate stream to overlap compute with the
         # communication for grouped experts.
-        global _shared_experts_stream
-        if _shared_experts_stream is None:
-            _shared_experts_stream = torch.cuda.Stream()
+        if self.args.n_shared_experts > 0:
+            global _shared_experts_stream
+            if _shared_experts_stream is None:
+                _shared_experts_stream = torch.cuda.Stream()
 
-        _shared_experts_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(_shared_experts_stream):
-            z = self.shared_experts(x)
-
-        y = self.experts(x, token_mask, weights, indices)
-
-        # Wait for the shared experts stream to complete all operations before
-        # adding together the outputs of grouped experts and shared experts.
-        torch.cuda.current_stream().wait_stream(_shared_experts_stream)
+            _shared_experts_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(_shared_experts_stream):
+                z = self.shared_experts(x)
+            # Wait for the shared experts stream to complete all operations before
+            # adding together the outputs of grouped experts and shared experts.
+            torch.cuda.current_stream().wait_stream(_shared_experts_stream)
 
         # Reshape the outputs back to 3-D.
-        return (y + z).view(shape), aux_loss
+        return (y + z).view(shape) if self.args.n_shared_experts > 0 else y.view(
+            shape
+        ), aux_loss
 
     def init_weights(self) -> None:
         self.apply(_init_weights)
@@ -780,11 +799,7 @@ def _init_weights(module):
     if isinstance(module, Gate):
         to_local(module.weight).normal_(mean=0.0, std=std)
         to_local(module.e_score_correction_bias).zero_()
-    elif isinstance(module, GroupedExperts):
-        to_local(module.gate_projs).normal_(mean=0.0, std=std)
-        to_local(module.up_projs).normal_(mean=0.0, std=std)
-        to_local(module.down_projs).normal_(mean=0.0, std=std)
-    elif isinstance(module, GroupedExpertsDeepEP):
+    elif isinstance(module, GroupedExperts) or isinstance(module, GroupedExpertsDeepEP):
         to_local(module.gate_and_up_projs).normal_(mean=0.0, std=std)
         to_local(module.down_projs).normal_(mean=0.0, std=std)
     elif isinstance(module, MLP):

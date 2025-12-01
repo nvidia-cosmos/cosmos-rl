@@ -13,6 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .vllm_rollout_worker import vLLMRolloutWorker
+from .vllm_rollout import vLLMRollout
 
-__all__ = ["vLLMRolloutWorker"]
+__all__ = ["vLLMRollout"]

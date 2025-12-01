@@ -19,7 +19,6 @@ from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config
 from cosmos_rl.policy.config import Config as CosmosConfig
-from transformers import AutoTokenizer
 import argparse
 import toml
 from cosmos_rl.utils.decorators import monitor_status
@@ -29,12 +28,11 @@ class HFVLMSFTDataset(Dataset):
     def __init__(self, dataset: Dataset):
         self.dataset = dataset
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: Config, *args, **kwargs):
         """
         Called by launcher after being mounted
         """
         self.config = config
-        self.tokenizer = tokenizer
 
         if config.train.train_policy.dataset.split:
             if isinstance(config.train.train_policy.dataset.split, list):

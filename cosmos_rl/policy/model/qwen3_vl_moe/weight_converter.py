@@ -50,7 +50,8 @@ def qwen3_moe_lm_weight_from_hf(
     tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
     assert n_experts % tp_ep_size == 0, "n_experts must be divisible by tp_ep_size"
 
-    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+    load_weight_test = not hasattr(parallel_dims, "mesh")
+    if not load_weight_test:
         dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
         dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
     else:
@@ -186,7 +187,8 @@ def convert_weight_from_hf(
 def map_weight_parallel_dims(
     n_dim: int, dest_name: str, parallel_dims: ParallelDims, model_config: Any
 ) -> Tuple[Dict[str, int], Dict[int, list], int]:
-    if dest_name.startswith("visual."):
+    # dest_name is HF style name
+    if dest_name.startswith("model.visual."):
         return None, None, None
 
     tp_ep_size = parallel_dims.tp
@@ -199,7 +201,9 @@ def map_weight_parallel_dims(
     pp_size = parallel_dims.pp
     n_layers = model_config.text_config.num_hidden_layers
 
-    assert dest_name.startswith("model.") or dest_name.startswith("lm_head.")
+    assert dest_name.startswith("model.language_model.") or dest_name.startswith(
+        "lm_head."
+    )
     if tp_ep_size > 1:
         if "lm_head.weight" == dest_name:
             dims_map[dim] = 0
@@ -207,10 +211,13 @@ def map_weight_parallel_dims(
         elif "lm_head.bias" == dest_name:
             pp_rank = pp_size - 1
             pass
-        elif "model.embed_tokens.weight" == dest_name:
+        elif "model.language_model.embed_tokens.weight" == dest_name:
             dims_map[dim] = 0
             pp_rank = 0
-        elif dest_name in ["model.norm.weight", "model.norm.bias"]:
+        elif dest_name in [
+            "model.language_model.norm.weight",
+            "model.language_model.norm.bias",
+        ]:
             pp_rank = pp_size - 1
             pass
         else:
@@ -242,15 +249,8 @@ def map_weight_parallel_dims(
                 dims_map[dim] = n_dim - 1
             elif (
                 match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.(up_proj|gate_proj)\.(weight|bias)", dest_name
-                )
-            ) is not None:
-                dims_map[dim] = (
-                    0  # For MoE Expert Parallelism, split in expert_num dimension
-                )
-            elif (
-                match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)", dest_name
+                    r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)",
+                    dest_name,
                 )
             ) is not None:
                 dims_map[dim] = (

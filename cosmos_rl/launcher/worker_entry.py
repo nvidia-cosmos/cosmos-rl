@@ -1,6 +1,6 @@
 import os
 from typing import Optional, List, Callable, Union
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 from torch.utils.data import Dataset
@@ -12,12 +12,12 @@ from cosmos_rl.utils.decorators import monitor_status
 @monitor_status(name="Cosmos-RL Worker Entry", mode="worker")
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-    data_packer: Optional[DataPacker] = None,
+    data_packer: Optional[BaseDataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
     filter_reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
-    val_data_packer: Optional[DataPacker] = None,
+    val_data_packer: Optional[BaseDataPacker] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
     sampler: Optional[Callable] = None,
     batch_sampler: Optional[Callable] = None,
@@ -72,6 +72,8 @@ def main(
             filter_reward_fns=filter_reward_fns,
             val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
         )
         return
 

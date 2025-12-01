@@ -65,7 +65,9 @@ def monitor_status(name: str = 'Cosmos-RL',
                     # Use TAO job environment if available
                     job_id = os.getenv('TAO_API_JOB_ID')
                     if job_id:
-                        default_results_dir = f'/results/{job_id}'
+                        # Use TAO_API_RESULTS_DIR for SLURM compatibility, fallback to /results
+                        results_base = os.getenv('TAO_API_RESULTS_DIR', '/results')
+                        default_results_dir = os.path.join(results_base, job_id)
                         logger.info(f"Using TAO job results dir: {default_results_dir}")
                     else:
                         default_results_dir = './results'
@@ -263,7 +265,9 @@ def monitor_training(name: str = 'Cosmos-RL Training',
                     # Use TAO job environment if available
                     job_id = os.getenv('TAO_API_JOB_ID')
                     if job_id:
-                        default_results_dir = f'/results/{job_id}'
+                        # Use TAO_API_RESULTS_DIR for SLURM compatibility, fallback to /results
+                        results_base = os.getenv('TAO_API_RESULTS_DIR', '/results')
+                        default_results_dir = os.path.join(results_base, job_id)
                         logger.info(f"Using TAO job results dir for training: {default_results_dir}")
                     else:
                         default_results_dir = './training_results'

@@ -51,7 +51,7 @@ min_filter_prefix_tokens = 1
 dataloader_shuffle = false
 
 [train.ckpt]
-enable_checkpoint = true
+enable_checkpoint = false
 save_freq = 20
 save_mode = "async"
 

@@ -67,7 +67,7 @@ with importlib_metadata_version_context():
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.kernel.moe.moe import GroupedExpertsDeepEP, MoE
-from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
 from cosmos_rl.utils.ulysses import swizzle_cp_forward, ulysses_attn_func
 
 
@@ -212,7 +212,7 @@ def _apply_fsdp(
                 fully_shard(
                     block.mlp.experts,
                     mesh=meshes["moe"]["dp_shard_with_ep"],
-                    shard_placement_fn=lambda _: Shard(1),
+                    shard_placement_fn=lambda _: Shard(0),
                     reshard_after_forward=not pp_enabled,
                 )
 
@@ -267,6 +267,7 @@ def _init_meshes(
     return meshes
 
 
+@pre_parallelize_sanity_check
 def parallelize_model(
     model: nn.Module,
     parallel_dims: ParallelDims,

@@ -481,7 +481,7 @@ class APIClient(object):
 
     def get_next_prompt(
         self, batch_size: int, validation_step: Optional[int] = None
-    ) -> Tuple[List[Tuple[int, str]], bool]:
+    ) -> Tuple[List[Dict[str, Any]], bool]:
         try:
             r = make_request_with_retry(
                 partial(
@@ -492,9 +492,9 @@ class APIClient(object):
                 max_retries=self.max_retries,
             )
             r = r.json()
-            payload = r["prompt_id_and_payload_list"]
+            payloads = r["payloads_list"]
             is_end = r["is_end"]
-            return payload, is_end
+            return payloads, is_end
         except Exception as e:
             logger.error(
                 f"[Rollout] Failed in fetching next prompt from controller after retries {e}."

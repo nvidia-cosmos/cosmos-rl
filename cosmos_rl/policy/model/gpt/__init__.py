@@ -105,13 +105,13 @@ class RotaryEmbedding(nn.Module):
             if isinstance(device_type, str) and device_type != "mps"
             else "cpu"
         )
-        with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (
-                inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()
-            ).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
+
+        freqs = (
+            inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()
+        ).transpose(1, 2)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos()
+        sin = emb.sin()
 
         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
         cos = cos * self.attention_scaling
@@ -212,6 +212,10 @@ class Attention(nn.Module):
 
         """
 
+        def _lastdim_contig(t: torch.Tensor) -> torch.Tensor:
+            # FlashAttention requires stride(-1) == 1
+            return t if t.stride(-1) == 1 else t.contiguous()
+
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         if self.q_norm is not None:
@@ -229,12 +233,15 @@ class Attention(nn.Module):
         cos, sin = position_embeddings
         xq, xk = self.rope_func(xq, xk, cos, sin, unsqueeze_dim=2)
 
+        xq = _lastdim_contig(xq)
+        xk = _lastdim_contig(xk)
+        xv = _lastdim_contig(xv)
+
         input_dtype = xq.dtype
+        # flash_attn only support bfloat16/float16
+        # Cast qkv to torch.bfloat16 if dtype for forward is torch.float32
         if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                target_dtype = torch.get_autocast_gpu_dtype()
-            else:
-                raise ValueError("Flash attention only supports float32 input")
+            target_dtype = torch.bfloat16
             xq = xq.to(target_dtype)
             xk = xk.to(target_dtype)
             xv = xv.to(target_dtype)
@@ -246,6 +253,11 @@ class Attention(nn.Module):
             xq = xq.view(seqlen, -1, self.head_dim)
             xk = xk.view(seqlen, -1, self.head_dim)
             xv = xv.view(seqlen, -1, self.head_dim)
+
+            xq = _lastdim_contig(xq)
+            xk = _lastdim_contig(xk)
+            xv = _lastdim_contig(xv)
+
             output = self.attn_func_varlen(
                 xq,
                 xk,
@@ -258,7 +270,7 @@ class Attention(nn.Module):
             )
         else:
             output = self.attn_func(xq, xk, xv, causal=True)
-        output = output.view(bs, seqlen, -1)
+        output = output.view(bs, seqlen, -1).to(input_dtype)
         return self.o_proj(output)
 
 
@@ -504,7 +516,11 @@ class GPT(BaseModel):
                 )
                 is_a_dist_tensor = isinstance(h, torch.distributed.tensor.DTensor)
                 h = h.full_tensor() if is_a_dist_tensor else h
-                output = h @ embed_tokens_weight.t()
+                # Since call dtensor.full_tensor here,
+                # full_tensor's dtype will equal to shard's dtype which will not be controlled by mp_policy
+                # for run torch.mm on input's dtype
+                with torch.autocast(device_type="cuda", dtype=h.dtype):
+                    output = h @ embed_tokens_weight.t()
             return output
         else:
             return h
@@ -760,11 +776,21 @@ class GPT(BaseModel):
         return model
 
     @classmethod
-    def fqn_filter_for_fp8(cls) -> List[str]:
+    def fqn_filter_for_quantization(cls) -> List[str]:
         return ["lm_head"]
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         if not (self.model_args.n_heads % (cp_size * tp_size) == 0):
             raise ValueError(
                 f"Model is not compatible with cp parallelism, model's head number={self.model_args.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+            )
+
+    def check_tp_compatible(self, tp_size: int):
+        non_divisible_by_tp_size = (
+            self.model_args.n_heads % tp_size != 0
+            or self.model_args.n_kv_heads % tp_size != 0
+        )
+        if non_divisible_by_tp_size:
+            raise ValueError(
+                f"Model is not compatible with tp parallelism, model's head number={self.model_args.n_heads} or kv head number={self.model_args.n_kv_heads} is not satisified by tp size({tp_size})"
             )

@@ -49,6 +49,7 @@ Example:
 
 import argparse
 from pathlib import Path
+import shutil
 import qwen_vl_utils
 import transformers
 
@@ -173,6 +174,7 @@ def main():
 
         # Handle LoRA merging if enabled
         model_path = args.model_path
+        adapter_backup_path = None
         if args.enable_lora:
             if not args.base_model_path:
                 raise ValueError("--base_model_path is required when --enable_lora is specified")
@@ -181,6 +183,16 @@ def main():
                 status_level=Status.SUCCESS,
                 message=f"LoRA merging enabled. Using merged model: {model_path}"
             )
+        else:
+            # If LoRA is disabled but adapter files exist, temporarily hide them during loading
+            adapter_config_path = Path(model_path) / "adapter_config.json"
+            if adapter_config_path.exists():
+                adapter_backup_path = Path(model_path) / "adapter_config.json.bak"
+                shutil.move(str(adapter_config_path), str(adapter_backup_path))
+                s_logger.write(
+                    status_level=Status.SUCCESS,
+                    message="Temporarily hiding adapter files to load base model only"
+                )
 
         # Prepare model loading arguments
         model_kwargs = {
@@ -215,17 +227,27 @@ def main():
             )
 
         # Load model
-        model = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_path, **model_kwargs
-        )
-        processor: transformers.Qwen2_5_VLProcessor = (
-            transformers.AutoProcessor.from_pretrained(model_path)
-        )
+        try:
+            model = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_path, **model_kwargs
+            )
+            processor: transformers.Qwen2_5_VLProcessor = (
+                transformers.AutoProcessor.from_pretrained(model_path)
+            )
 
-        s_logger.write(
-            status_level=Status.SUCCESS,
-            message="Model and processor loaded successfully"
-        )
+            s_logger.write(
+                status_level=Status.SUCCESS,
+                message="Model and processor loaded successfully"
+            )
+        finally:
+            # Restore adapter config if it was temporarily hidden
+            if not args.enable_lora and adapter_backup_path and adapter_backup_path.exists():
+                adapter_config_path = Path(model_path) / "adapter_config.json"
+                shutil.move(str(adapter_backup_path), str(adapter_config_path))
+                s_logger.write(
+                    status_level=Status.SUCCESS,
+                    message="Restored adapter configuration files"
+                )
 
         try:
             s_logger.write(

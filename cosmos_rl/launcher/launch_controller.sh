@@ -30,6 +30,10 @@ while [[ $# -gt 0 ]]; do
       LOG_FILE="$2"
       shift 2
       ;;
+    --script)
+      SCRIPT="$2"
+      shift 2
+      ;;
     --help)
       show_help
       exit 0
@@ -41,6 +45,8 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+echo "[Controller] Using script: $SCRIPT"
 
 if [[ "$SCRIPT" != *.py ]]; then
   CMD="python -m $SCRIPT"

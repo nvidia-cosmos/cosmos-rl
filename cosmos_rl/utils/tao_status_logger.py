@@ -29,13 +29,15 @@ def get_tao_status_file_path() -> str:
     """Get the TAO status file path based on TAO_API_JOB_ID environment variable.
 
     Returns:
-        Path to status.json file: /results/{TAO_API_JOB_ID}/status.json
+        Path to status.json file: {TAO_API_RESULTS_DIR}/{TAO_API_JOB_ID}/status.json
     """
     job_id = os.getenv('TAO_API_JOB_ID')
     if not job_id:
         raise ValueError("TAO_API_JOB_ID environment variable is required for TAO status logging")
 
-    results_dir = f"/results/{job_id}"
+    # Use TAO_API_RESULTS_DIR for SLURM compatibility, fallback to /results
+    results_base = os.getenv('TAO_API_RESULTS_DIR', '/results')
+    results_dir = os.path.join(results_base, job_id)
     os.makedirs(results_dir, exist_ok=True)
     return os.path.join(results_dir, "status.json")
 

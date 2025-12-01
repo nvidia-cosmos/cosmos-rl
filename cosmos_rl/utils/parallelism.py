@@ -14,15 +14,19 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.policy.config import ParallelismConfig
 import contextlib
-from typing import Generator, Optional, List
 import torch
 import math
 import numpy
 import os
+import functools
+import inspect
+
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from typing import Generator, Optional, List
+
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.policy.config import ParallelismConfig
 
 
 def train_context(enable_compiled_autograd: bool):
@@ -190,7 +194,8 @@ class ParallelDims:
         valid_dims = []
         valid_names = []
         for dim, name in zip(dims, names):
-            if dim > 1:
+            # always have dp_shard mesh in mesh
+            if dim > 1 or name == "dp_shard":
                 valid_dims.append(dim)
                 valid_names.append(name)
 
@@ -308,7 +313,9 @@ class ParallelDims:
 
     @property
     def dp_shard_enabled(self) -> bool:
-        return self.dp_shard > 1
+        # alway warp model with fsdp
+        # to ensure consistent mix precision trainning strategy controled by mp_policy
+        return self.dp_shard >= 1
 
     @property
     def cp_enabled(self) -> bool:
@@ -428,3 +435,26 @@ class ParallelDims:
 
         self.global_rank = int(os.environ.get("RANK", 0))
         # logger.info(f"Full rank info: {self.full_rank_info}")
+
+
+def pre_parallelize_sanity_check(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        sig = inspect.signature(func)
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        # retrieve config and parallel_dims
+        parallel_dims: ParallelDims = bound.arguments["parallel_dims"]
+        model = bound.arguments["model"]
+
+        if parallel_dims.tp_enabled:
+            # TP Check
+            tp_size = parallel_dims.tp_coord[1]
+            model.check_tp_compatible(tp_size)
+        if parallel_dims.cp_enabled:
+            # check if cp is compatible with model
+            cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
+            model.check_cp_compatible(cp_size, tp_size)
+        return func(*args, **kwargs)
+
+    return wrapper

@@ -14,13 +14,12 @@
 # limitations under the License.
 
 import re
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Union
 from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.algo.reward import gsm8k_reward_fn
-from transformers import AutoTokenizer
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.utils.modelscope import modelscope_load_dataset
 from cosmos_rl.utils.logging import logger
@@ -37,21 +36,21 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
     add_assistant_message,
 )
 from cosmos_rl.dispatcher.data import RLPayload
-from cosmos_rl.utils.decorators import monitor_status
 from contextlib import contextmanager
+import cosmos_rl.utils.util as util
+from cosmos_rl.utils.decorators import monitor_status
 
 
 class GSM8kDataset(Dataset):
     """TODO(zjx): we should refactor it with RLDataset."""
 
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, *args, **kwargs):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
-        `tokenizer`: tokenizer;
         """
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
         self.apply_chat_template = not config.rollout.multi_turn_config.enable
         modelscope_dataset_if_enabled = modelscope_load_dataset(
             config.train.train_policy.dataset.name, subset_name="main", split="train"
@@ -116,7 +115,7 @@ class GSM8kValDataset(GSM8kDataset):
     It should be used in the launcher to evaluate the model during training.
     """
 
-    def setup(self, config: CosmosConfig, tokenizer: AutoTokenizer, *args, **kwargs):
+    def setup(self, config: CosmosConfig, *args, **kwargs):
         if not config.validation.enable:
             logger.warning(
                 "Validation is not enabled in the config. Skipping setup for GSM8kValDataset."
@@ -124,7 +123,7 @@ class GSM8kValDataset(GSM8kDataset):
             return
         self.apply_chat_template = not config.rollout.multi_turn_config.enable
         self.config = config
-        self.tokenizer = tokenizer
+        self.tokenizer = util.setup_tokenizer(config.policy.model_name_or_path)
 
         self.dataset = load_dataset(
             config.validation.dataset.name, config.validation.dataset.subset
@@ -276,7 +275,6 @@ class GSM8kDataPacker(DataPacker):
     def setup(
         self,
         config: CosmosConfig,
-        tokenizer: AutoTokenizer,
         *args,
         tool_agent: Optional[ToolAgent] = None,
         **kwargs,
@@ -284,11 +282,10 @@ class GSM8kDataPacker(DataPacker):
         """
         This method is optional and get called by launcher after being mounted
         `config`: config;
-        `tokenizer`: tokenizer;
         """
-        super().setup(config, tokenizer, *args, tool_agent=tool_agent, **kwargs)
+        super().setup(config, *args, tool_agent=tool_agent, **kwargs)
         self.underlying_data_packer.setup(
-            config, tokenizer, *args, tool_agent=tool_agent, **kwargs
+            config, *args, tool_agent=tool_agent, **kwargs
         )
 
     def get_rollout_input(self, item: Any) -> Any:
@@ -304,7 +301,10 @@ class GSM8kDataPacker(DataPacker):
         return self.underlying_data_packer.rollout_collate_fn(items)
 
     def get_policy_input(
-        self, item: Any, rollout_output: str, n_ignore_prefix_tokens: int = 0
+        self,
+        item: Any,
+        rollout_output: Union[str, List[int]],
+        n_ignore_prefix_tokens: int = 0,
     ) -> Any:
         """
         Process samples & rollout output before collating them into a mini-batch
@@ -361,29 +361,9 @@ class GSM8kDataPacker(DataPacker):
         return conversation
 
 
-        real_response = ""
-        for response in responses:
-            if response:
-                real_response = response
-                break
-
-        if real_response == "":
-            return conversation
-
-        # 1. add real_response as assistant
-        conversation = add_assistant_message(conversation, real_response)
-
-        # 2. check if the response contains tool call instruction
-        tool_responses = self.tool_agent.call_tools(real_response, ground_truth)
-        if tool_responses:
-            for tr in tool_responses:
-                conversation = add_tool_response_messages(conversation, tr.text)
-
-        return conversation
-
-
 @monitor_status(name="Cosmos-RL GSM8k GRPO Dataset", mode="dataset")
-def main():
+def main()
+
     def get_dataset(config: CosmosConfig) -> Dataset:
         return GSM8kDataset()
 

@@ -67,12 +67,14 @@ jobs:
           ${DOCKER_RUN} python tests/test_math_verify.py
           ${DOCKER_RUN} python tests/test_policy_overfit.py
           ${DOCKER_RUN} python tests/test_data_packer.py
+          ${DOCKER_RUN} python tests/test_dataset_signature.py
           ${DOCKER_RUN} python tests/test_sequence_packing.py
           ${LONG_DOCKER_RUN} python tests/test_integration.py --stream
           ${LONG_DOCKER_RUN} python tests/test_hf_models.py
           ${LONG_DOCKER_RUN} /bin/bash -c "torchrun --nproc_per_node=2 tests/test_hf_models_tp.py"
           ${DOCKER_RUN} python tests/test_activation_offload.py
           ${DOCKER_RUN} python tests/test_policy_variant.py
+          ${DOCKER_RUN} python tests/test_deepep.py
 
       - name: Cleanup
         if: always()
