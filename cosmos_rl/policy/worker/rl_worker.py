@@ -35,7 +35,6 @@ from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.policy.trainer.llm_trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.utils import util
 from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl, destroy_distributed
 from cosmos_rl.utils.parallelism_map import (
@@ -754,25 +753,6 @@ class RLPolicyWorker(PolicyWorkerBase):
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
         )
-
-    def execute(self):
-        """
-        Execute the training.
-        """
-        assert self.trainer is not None, "[Policy] Trainer has not been built."
-        try:
-            with torch.autocast(
-                device_type="cuda",
-                dtype=util.str2torch_dtype(self.config.train.param_dtype),
-            ):
-                self.main_loop()
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            raise e
-        finally:
-            self.destroy_worker()
 
     def destroy_worker(self):
         destroy_distributed()

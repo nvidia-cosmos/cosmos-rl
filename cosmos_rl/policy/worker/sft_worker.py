@@ -482,25 +482,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
         else:
             self._save_freq = self.config.train.ckpt.save_freq
 
-    def execute(self):
-        """
-        Execute the training.
-        """
-        assert self.trainer is not None, "[Policy] Trainer has not been built."
-        try:
-            with torch.autocast(
-                device_type="cuda",
-                dtype=util.str2torch_dtype(self.config.train.param_dtype),
-            ):
-                self.main_loop()
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            raise e
-        finally:
-            self.destroy_worker()
-
     def validate(self, is_last_step: bool = False):
         if not self.config.validation.enable:
             return None
@@ -529,6 +510,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             pp_last_stage = (
                 self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
             )
+
         for cur_epoch in range(self.start_epoch, self.epoch):
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:
@@ -556,7 +538,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     total_steps=self.total_steps,
                     train_step=self.train_step,
                     save_freq=self._save_freq,
-                    pp_last_stage=pp_last_stage,
                 )
 
                 self.train_step += 1
@@ -586,8 +567,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     total_steps=self.total_steps,
                     train_step=self.train_step,
                     save_freq=self._save_freq,
+                    pp_last_stage=False,
                     is_last_step=False,
-                    pp_last_stage=pp_last_stage,
                     val_score=val_avg_loss,
                 )
 

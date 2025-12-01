@@ -15,6 +15,8 @@
 
 import torch
 import os
+import random
+import numpy as np
 import json
 import threading
 from typing import Optional, Dict
@@ -59,6 +61,18 @@ class LLMTrainer(Trainer):
             val_data_packer=val_data_packer,
             **kwargs,
         )
+
+        if config.train.seed:
+            torch.manual_seed(config.train.seed)
+            torch.cuda.manual_seed(config.train.seed)
+            torch.cuda.manual_seed_all(config.train.seed)
+            random.seed(config.train.seed)
+            np.random.seed(config.train.seed)
+
+        if config.train.deterministic:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            torch.use_deterministic_algorithms(mode=True, warn_only=True)
 
         init_flash_attn_meta(
             config.train.deterministic, config.train.compile, config.train.fa_version

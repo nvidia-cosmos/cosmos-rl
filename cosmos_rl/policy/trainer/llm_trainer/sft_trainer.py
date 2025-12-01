@@ -21,8 +21,7 @@ import torch.distributed as dist
 
 from functools import partial
 
-from torch.utils.data import Dataset
-from typing import Optional, Dict, Any
+from typing import Optional
 
 
 from cosmos_rl.utils.parallelism import (
@@ -30,15 +29,12 @@ from cosmos_rl.utils.parallelism import (
 )
 from cosmos_rl.policy.config import (
     Config as CosmosConfig,
-    SFTDataConfig,
-    config_hash,
 )
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.logging import logger
 
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
-import cosmos_rl.utils.cache as cache
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 
 from cosmos_rl.utils.ulysses import (
@@ -51,62 +47,6 @@ from cosmos_rl.utils.sequence_packing import (
 )
 from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
-
-
-class SFTDataset(Dataset):
-    def __init__(
-        self,
-        config: SFTDataConfig,
-        dataset: Dataset,
-        data_packer: BaseDataPacker,
-        is_user_dataset: bool = False,
-    ):
-        self.config = config
-        self.column_name = config.conversation_column_name
-        self.dataset = dataset
-        self.data_packer = data_packer
-        self.is_user_dataset = is_user_dataset
-        self.cache = None
-        if self.config.enable_dataset_cache:
-            # TODO(zjx): can we reuse the cache between different training jobs?
-            # It's not stable yet, we only checked if the config is the same
-            # If there are any problems, it is recommended that the user clears the cache folder
-            cache_folder = os.path.join(
-                os.environ.get(
-                    "COSMOS_CACHE",
-                    os.path.join(os.path.expanduser("~"), ".cache/cosmos/"),
-                ),
-                "datasets_cache",
-                f"{self.config.dataset.name}-{config_hash(config)}",
-            )
-            logger.info(f"SFTDataset Cache folder: {cache_folder}")
-            self.cache = cache.DiskCache(cache_folder)
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        # we only cache on_the_fly result
-        if self.cache is not None:
-            cache_obj = self.cache.get(idx)
-            if cache_obj is not None:
-                return cache_obj
-
-        raw_item = (
-            self.dataset[idx][self.column_name]
-            if not self.is_user_dataset and self.column_name
-            else self.dataset[idx]
-        )
-
-        if isinstance(idx, list):  # a batch of items
-            item = [self.data_packer.sft_process_sample(x) for x in raw_item]
-        else:
-            item: Dict[str, Any] = self.data_packer.sft_process_sample(raw_item)
-
-        if self.cache is not None:
-            # try cache obj
-            self.cache.set(idx, item)
-        return item
 
 
 def async_safe_ce(
@@ -212,8 +152,8 @@ class SFTTrainer(LLMTrainer):
         total_steps: int,
         train_step: int,
         save_freq: int,
-        pp_last_stage: bool = False,
     ):
+        pp_last_stage = False
         if self.lr_schedulers is None:
             assert (
                 train_step == 0

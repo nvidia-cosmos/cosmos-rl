@@ -89,3 +89,18 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
                 train_batch_per_replica % mini_batch == 0
             ), f"train_batch_per_replica({train_batch_per_replica}) of {policy_type} must be divisible by mini_batch({mini_batch})"
         logger.info("Config checked successfully")
+
+    def execute(self):
+        """
+        Execute the training.
+        """
+        assert self.trainer is not None, "[Policy] Trainer has not been built."
+        try:
+            self.main_loop()
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            raise e
+        finally:
+            self.destroy_worker()
