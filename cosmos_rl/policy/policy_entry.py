@@ -24,7 +24,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
 
 
-def llm_entry(**kwargs):
+def policy_entry(**kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 
     api_client = APIClient(role="POLICY")
@@ -74,13 +74,5 @@ def llm_entry(**kwargs):
     else:
         raise ValueError(f"Unknown policy type: {policy_type}")
 
-    try:
-        policy_worker.execute()
-    except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        raise e
-    finally:
-        policy_worker.destroy_worker()
-        policy_worker = None
+    logger.info("[Policy] LMS start")
+    policy_worker.execute()

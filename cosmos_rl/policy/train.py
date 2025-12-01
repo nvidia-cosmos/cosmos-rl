@@ -18,7 +18,7 @@ from typing import Optional
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.packer.base import worker_entry_parser
-from cosmos_rl.policy.llm_entry import llm_entry
+from cosmos_rl.policy.policy_entry import policy_entry
 
 
 def main(args: Optional[argparse.Namespace] = None, **kwargs):
@@ -34,7 +34,7 @@ def main(args: Optional[argparse.Namespace] = None, **kwargs):
             )
             raise e
 
-    llm_entry(**kwargs)
+    policy_entry(**kwargs)
 
 
 if __name__ == "__main__":

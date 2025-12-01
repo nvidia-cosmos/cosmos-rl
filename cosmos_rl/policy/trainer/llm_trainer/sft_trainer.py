@@ -35,10 +35,7 @@ from cosmos_rl.policy.config import (
 )
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.wandb_logger import (
-    is_wandb_available,
-    log_wandb,
-)
+
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.cache as cache
@@ -190,9 +187,6 @@ class SFTTrainer(LLMTrainer):
             val_data_packer=val_data_packer,
             **kwargs,
         )
-
-    def trainer_init(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
-        super(SFTTrainer, self).trainer_init(config, parallel_dims, **kwargs)
 
         if self.parallel_dims.dp_shard_enabled:
             dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
@@ -447,6 +441,7 @@ class SFTTrainer(LLMTrainer):
         else:
             global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
 
+        report_data = {}
         if self.config.logging.logger:
             if util.is_master_rank(self.parallel_dims, self.global_rank):
                 # Calculate last iteration time
@@ -474,15 +469,9 @@ class SFTTrainer(LLMTrainer):
                     for k, v in mfu.items():
                         report_data[f"train/{k}"] = v
 
-                if "wandb" in self.config.logging.logger and is_wandb_available():
-                    log_wandb(
-                        data=report_data,
-                        step=train_step,
-                    )
-                if "console" in self.config.logging.logger:
-                    logger.info(
-                        f"Step: {train_step}/{total_steps}, Loss: {global_avg_loss:.5f}, Grad norm: {grad_norm:.5f}, Learning rate: {self.lr_schedulers.get_last_lr()[0]:.5e}, Iteration time: {iter_time:.2f}s."
-                    )
+                report_data["train/learning_rate"] = self.lr_schedulers.get_last_lr()[0]
+
+        return report_data
 
     def validate(self, val_global_batch, train_step: int, total_steps: int):
         if not self.config.validation.enable:

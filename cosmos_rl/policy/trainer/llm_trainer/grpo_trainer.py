@@ -451,8 +451,6 @@ class GRPOTrainer(LLMTrainer):
             **kwargs,
         )
 
-    def trainer_init(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
-        super(GRPOTrainer, self).trainer_init(config, parallel_dims, **kwargs)
         self.reference_state_dict = {}
 
         self.lr_schedulers = self.build_lr_schedulers()

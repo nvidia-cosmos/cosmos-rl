@@ -60,7 +60,6 @@ class LLMTrainer(Trainer):
             **kwargs,
         )
 
-    def trainer_init(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
         init_flash_attn_meta(
             config.train.deterministic, config.train.compile, config.train.fa_version
         )
@@ -69,8 +68,6 @@ class LLMTrainer(Trainer):
             config.policy.model_name_or_path,
             trust_remote_code=True,
         )
-
-        self.train_stream = torch.cuda.current_stream()
 
         model = ModelRegistry.build_model(config)
 

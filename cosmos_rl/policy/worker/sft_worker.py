@@ -34,11 +34,13 @@ from cosmos_rl.utils.distributed import destroy_distributed
 from cosmos_rl.utils.wandb_logger import (
     init_wandb,
     is_wandb_available,
+    log_wandb,
 )
 from cosmos_rl.policy.config import (
     SFTDataConfig,
     config_hash,
 )
+
 from cosmos_rl.policy.trainer.sampler import SkippingSampler
 import cosmos_rl.utils.cache as cache
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import SFTTrainer
@@ -549,7 +551,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                     ):
                         torch.cuda.cudart().cudaProfilerStop()
 
-                self.trainer.step_training(
+                report_data = self.trainer.step_training(
                     global_batch=global_batch,
                     total_steps=self.total_steps,
                     train_step=self.train_step,
@@ -558,6 +560,20 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 )
 
                 self.train_step += 1
+
+                if report_data and util.is_master_rank(
+                    self.parallel_dims, self.global_rank
+                ):
+                    if "wandb" in self.config.logging.logger and is_wandb_available():
+                        log_wandb(
+                            data=report_data,
+                            step=self.train_step,
+                        )
+                    if "console" in self.config.logging.logger:
+                        logger.info(
+                            f"Step: {self.train_step}/{self.total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
+                        )
+
                 if (
                     self.config.train.max_num_steps is not None
                     and self.train_step >= self.total_steps

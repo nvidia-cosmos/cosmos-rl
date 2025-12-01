@@ -255,11 +255,7 @@ class TestPolicyTrainer:
         self.config = config
         self.parallel_dims = parallel_dims
         self.train_stream = train_stream
-        self.trainer_init(config, parallel_dims, **kwargs)
-
-    def trainer_init(
-        self, config, parallel_dims, freeze_params: bool = False, **kwargs
-    ):
+        freeze_params = kwargs.get("freeze_params", False)
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.global_rank = int(os.environ.get("RANK", 0))
@@ -340,7 +336,7 @@ class TestPolicyWorker:
                 device_type="cuda",
                 dtype=util.str2torch_dtype(self.config.train.param_dtype),
             ):
-                self.trainer.step_training()
+                self.main_loop()
         except Exception as e:
             import traceback
 
@@ -348,6 +344,9 @@ class TestPolicyWorker:
             raise e
         finally:
             self.destroy_worker()
+
+    def main_loop(self):
+        pass
 
     def destroy_worker(self):
         destroy_distributed()
@@ -986,7 +985,7 @@ def run_overfitting_policy(args: argparse.Namespace):
 
         self.unregister_from_controller()
 
-    SFTTrainer.train = train
+    SFTTrainer.step_training = train
     SFTPolicyWorker.main_loop = main_loop
 
     assert args is not None

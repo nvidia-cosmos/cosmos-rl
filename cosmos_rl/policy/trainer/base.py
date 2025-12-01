@@ -126,12 +126,6 @@ class Trainer(ABC):
             if self.val_data_packer is None:
                 self.val_data_packer = self.data_packer
 
-        self.trainer_init(self.config, parallel_dims, **kwargs)
-
-    @abstractmethod
-    def trainer_init(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
-        raise NotImplementedError("trainer_init method must be implemented")
-
     @abstractmethod
     def build_optimizers(self):
         """
