@@ -30,7 +30,6 @@ from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import (
 )
 from transformers import (
     AutoProcessor,
-    AutoTokenizer,
     Qwen3VLMoeForConditionalGeneration,
 )
 
@@ -267,9 +266,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
         # create data packer
         # ================================
         data_packer = Qwen3_VL_DataPacker()
-        data_packer.setup(
-            config=config, tokenizer=AutoTokenizer.from_pretrained(model_name)
-        )
+        data_packer.setup(config=config)
 
         if int(os.environ.get("WORLD_SIZE", 1)) > 1:
             if not torch.distributed.is_initialized():

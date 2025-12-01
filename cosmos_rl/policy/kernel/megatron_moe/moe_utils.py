@@ -18,16 +18,40 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-try:
-    from transformer_engine.pytorch import (
-        moe_permute,
-        moe_permute_with_probs,
-        moe_unpermute,
-    )
+# TODO: (lms) remove the context manager after this PR is released: https://github.com/NVIDIA/TransformerEngine/pull/1913
+from contextlib import contextmanager
+from importlib.metadata import version as get_pkg_version, PackageNotFoundError
 
-    HAVE_TE = True
-except ImportError:
-    HAVE_TE = False
+
+@contextmanager
+def importlib_metadata_version_context():
+    original_version = get_pkg_version
+
+    def mocked_version(name):
+        if name == "flash-attn-3":
+            raise PackageNotFoundError
+        return original_version(name)
+
+    import importlib.metadata
+
+    importlib.metadata.version = mocked_version
+    try:
+        yield
+    finally:
+        importlib.metadata.version = original_version
+
+
+with importlib_metadata_version_context():
+    try:
+        from transformer_engine.pytorch import (
+            moe_permute,
+            moe_permute_with_probs,
+            moe_unpermute,
+        )
+
+        HAVE_TE = True
+    except ImportError:
+        HAVE_TE = False
 
 
 def permute(

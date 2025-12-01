@@ -371,7 +371,7 @@ class GrpoConfig(BaseModel):
     allowed_outdated_steps: int = Field(
         default=4,
         description="Allowed outdated-async steps for rollout engine. "
-        "If the number of left pending rollouts is larger than the `allowed_outdated_steps * n_policy_replicas * train_batch_per_replica`, "
+        "If the number of left uncompleted rollout samples is larger than the `(allowed_outdated_steps + 1) * n_policy_replicas * train_batch_per_replica`, "
         "then rollout engine traffic will be throttled. ",
     )
 
@@ -380,9 +380,9 @@ class GrpoConfig(BaseModel):
         description="Enable fully synchronized (on-policy) rollout. If set to True, the rollout engine will wait until the expected weight version is updated before next generation starts.",
     )
 
-    no_outdated_rollout: bool = Field(
-        default=False,
-        description="Disable outdated rollout. If set to True, the rollout engine will stop generating rollouts if the weight outdated.",
+    outdated_rollout_fetch_batch_size: int = Field(
+        default=1,
+        description="Number of outdated rollouts to fetch. If set to 0, the rollout engine will stop generating rollouts if the weight is outdated.",
     )
 
     min_filter_prefix_tokens: Optional[int] = Field(
@@ -411,6 +411,23 @@ class GrpoConfig(BaseModel):
         description="Whether to balance the number of tokens in each data parallel replica when calculating the loss.",
     )
 
+    # Refer to the decoupled objective concept from the AREAL paper: https://arxiv.org/abs/2505.24298.
+    use_decoupled_loss: bool = Field(
+        default=False,
+        description="Whether to use decoupled loss. A decoupled loss separates the optimization of the behavior policy and the target policy, which can help to reduce the variance of the gradient estimate.",
+    )
+
+    # Related to the above decoupled loss to cap the behavior importance weights.
+    behav_imp_weight_cap: Optional[float] = Field(
+        default=None,
+        description="Clipping cap for behavior importance weights. Useful when decoupled loss is used to avoid large variance.",
+    )
+
+    rollout_as_token_ids: bool = Field(
+        default=False,
+        description="Whether to use token ids for rollouts instead of text. This can save tokenization time during rollout generation.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
@@ -435,6 +452,12 @@ class GrpoConfig(BaseModel):
                 "dataloader_batch_size is not positive so disable it as None."
             )
             self.dataloader_batch_size = None
+        if self.use_decoupled_loss:
+            self.rollout_as_token_ids = True
+            logger.warning(
+                "Decoupled loss is enabled, so rollout_as_token_ids is set to True."
+            )
+
         return self
 
 
@@ -469,6 +492,20 @@ class ProfilerConfig(BaseModel):
 class FP8Config(BaseModel):
     enable_fp8: bool = Field(default=False, description="Whether to enable fp8.")
     fp8_recipe: str = Field(
+        default="dynamic_scaling",
+        description="Recipe for weight scale calculation.",
+        choices=["dynamic_scaling", "delayed_scaling"],
+    )
+    quant_recipe: str = Field(
+        default="rowwise",
+        description="Quantization strategy for weight.",
+        choices=["rowwise", "tensorwise"],
+    )
+
+
+class FP4Config(BaseModel):
+    enable_fp4: bool = Field(default=False, description="Whether to enable fp4.")
+    fp4_recipe: str = Field(
         default="dynamic_scaling",
         description="Recipe for weight scale calculation.",
         choices=["dynamic_scaling", "delayed_scaling"],
@@ -533,9 +570,9 @@ class TrainingConfig(BaseModel):
 
     # --------- FSDP ---------
 
-    master_dtype: Optional[str] = Field(
+    master_dtype: str = Field(
         default="float32",
-        description="The master weight data type for optimizers, is orthognal to `param_dtype`.",
+        description="The master weight data type for optimizers, is orthognal to `param_dtype`. Should be high precision for convergence consideration",
         choices=["bfloat16", "float16", "float32"],
     )
     param_dtype: str = Field(
@@ -573,6 +610,7 @@ class TrainingConfig(BaseModel):
     # --------- Engineering ---------
 
     fp8: FP8Config = Field(default_factory=FP8Config)
+    fp4: FP4Config = Field(default_factory=FP4Config)
     ckpt: CheckpointConfig = Field(default_factory=CheckpointConfig)
     resume: Union[bool, str] = Field(
         default=False,
@@ -610,6 +648,11 @@ class TrainingConfig(BaseModel):
     seed: Optional[int] = Field(
         default=None,
         description="Random seed for training. If deterministic is set to True, will by default be set to 42.",
+    )
+
+    local_dataset: Optional[bool] = Field(
+        default=True,
+        description="Whether to use local dataset to query sample. If set to True, will use the local dataset.",
     )
 
     # --------- smoke-test helpers ---------
@@ -668,7 +711,7 @@ class ParallelismConfig(BaseModel):
     cp_size: int = Field(default=1, description="Context parallelism size")
     ep_size: int = Field(default=1, description="Expert parallelism size")
     dp_shard_size: int = Field(
-        default=-1, description="Data Parallelism size in sharded mode"
+        default=1, description="Data Parallelism size in sharded mode"
     )
     pp_size: int = Field(default=1, description="Pipeline parallelism size")
     pp_dynamic_shape: bool = Field(
@@ -983,11 +1026,6 @@ class RolloutConfig(BaseModel):
     multi_turn_config: MultiTurnRolloutConfig = Field(
         default_factory=MultiTurnRolloutConfig,
         description="Configuration for multi-turn rollout.",
-    )
-
-    reference_answer_in_local: bool = Field(
-        default=False,
-        description="Whether to store the dataset in local rollout worker for fetching reference answer.",
     )
 
     @model_validator(mode="after")

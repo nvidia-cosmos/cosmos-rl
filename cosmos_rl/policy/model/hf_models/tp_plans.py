@@ -15,6 +15,7 @@
 
 from typing import cast
 
+from cosmos_rl.utils.logging import logger
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     RowwiseParallel,
@@ -36,11 +37,16 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VLForConditionalGeneration,
 )
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
-from transformers.models.qwen3_vl.modeling_qwen3_vl import (
-    Qwen3VLForConditionalGeneration,
-)
 
-from cosmos_rl.utils.logging import logger
+try:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+        Qwen3VLForConditionalGeneration,
+    )
+except ImportError:
+    logger.warning(
+        "Qwen3VLForConditionalGeneration is not available. Please install transformers >= 4.57.0 to import Qwen3VLForConditionalGeneration, "
+    )
+    Qwen3VLForConditionalGeneration = None
 
 
 # For VLMs, we only support TP for the language model, and ignore the vision encoder.

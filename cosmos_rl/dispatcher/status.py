@@ -18,7 +18,6 @@ import math
 from queue import Queue
 from strenum import StrEnum
 from typing import Dict, List, Iterator, Any, Optional, Callable
-from torch.utils.data import DataLoader
 from cosmos_rl.utils.constant import COSMOS_HEARTBEAT_TIMEOUT
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import RollingDict
@@ -32,10 +31,9 @@ from cosmos_rl.utils.wandb_logger import (
     log_wandb,
 )
 from cosmos_rl.utils.tao_status_logger import log_tao_status
+from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from transformers import AutoTokenizer
 import numpy as np
-from tqdm import tqdm
-import itertools
 
 
 class ReplicaScalingEnum(StrEnum):
@@ -115,6 +113,7 @@ class PolicyStatusManager:
         self.rollout_buffer = Queue()
         self.remain_samples_num = 0
         self.consumed_samples_num = 0
+        self.samples_on_the_fly = 0
 
         self.status = {}
 
@@ -122,9 +121,7 @@ class PolicyStatusManager:
 
         self.replica_scaling_log = []
 
-        # Validation
-        self.val_iters: Dict[int, Iterator] = {}
-        self.activated_val_iter: Optional[Iterator] = None
+        # Validation related
         self.val_report_data: Dict[int, List[Any]] = {}
 
         # Indicate whether on-policy rollout collection has completed for the current policy step
@@ -137,11 +134,11 @@ class PolicyStatusManager:
         self,
         config: Config,
         redis_handler: RedisStreamHandler,
+        data_fetcher: ControllerDataFetcher,
         remain_samples_num: int,
         samples_per_epoch: int,
-        tokenizer: AutoTokenizer,
+        tokenizer: Optional[AutoTokenizer] = None,
         current_step: int = 0,
-        val_dataloader: Optional[DataLoader] = None,
         max_num_steps: Optional[int] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
         val_datasize: Optional[int] = None,
@@ -151,14 +148,14 @@ class PolicyStatusManager:
         self.remain_samples_num = remain_samples_num
         self.samples_per_epoch = samples_per_epoch
         self.tokenizer = tokenizer
-        self.val_dataloader = val_dataloader
         self.current_step = current_step
         self.max_num_steps = max_num_steps
-        self.recompute_total_steps()
         self.custom_logger_fns = (
             custom_logger_fns if custom_logger_fns is not None else []
         )
-        self.val_datasize = val_datasize
+        self.data_fetcher = data_fetcher
+
+        self.recompute_total_steps()
 
     def n_atoms_per_replica(self) -> int:
         """
@@ -546,29 +543,6 @@ class PolicyStatusManager:
             )
             self.set_status(target_replica.name, PolicyStatus.READY)
 
-    ############################################################
-    # utility functions
-    ############################################################
-    def validation_activate_dataloader(self, validation_step: int):
-        if validation_step not in self.val_iters:
-            logger.info(
-                f"[Controller] Activating validation dataloader for step {validation_step}, with length {(self.val_datasize or len(self.val_dataloader))}"
-            )
-            self.val_iters[validation_step] = iter(self.val_dataloader)
-            self.activated_val_iter = self.val_iters[validation_step]
-            self.activated_val_tqdm = tqdm(
-                desc="validation",
-                total=(self.val_datasize or len(self.val_dataloader)),
-            )
-
-    def validation_get_dataloader(
-        self, validation_step: Optional[int] = None
-    ) -> Iterator:
-        if validation_step is None:
-            return self.activated_val_iter
-        else:
-            return self.val_iters[validation_step]
-
     def validation_report_validation_results(
         self,
         validation_step: int,
@@ -584,20 +558,17 @@ class PolicyStatusManager:
         )
 
         validation_finished = n_items_of_this_step == (
-            self.val_datasize or len(self.val_dataloader)
+            self.data_fetcher.val_datasize or len(self.data_fetcher.val_dataloader)
         )
 
-        if self.activated_val_tqdm:
-            self.activated_val_tqdm.update(n_items_of_this_step)
+        if self.data_fetcher.activated_val_tqdm:
+            self.data_fetcher.activated_val_tqdm.update(n_items_of_this_step)
         else:
             logger.error("[Controller] Validation tqdm is not activated")
-
         # Check if all rollout replicas have reported validation results
-        if validation_finished and self.activated_val_iter is not None:
+        if validation_finished and self.data_fetcher.activated_val_iter is not None:
             # Validation is finished, trigger next step training
-            self.activated_val_iter = None
-            self.activated_val_tqdm.clear()
-            self.activated_val_tqdm = None
+            self.data_fetcher.clear_validation_status()
 
             try:
                 all_rollouts_lists: List[List[Rollout]] = self.val_report_data[
@@ -677,15 +648,12 @@ class PolicyStatusManager:
         self.rollout_buffer.put(rollout)
         self.try_trigger_data_fetch_and_training()
 
-    def put_rollouts(
-        self, valid_rollouts: List[Rollout], invalid_rollouts: List[Rollout]
-    ):
+    def put_rollouts(self, rollouts: List[Rollout]):
         """
         Put the rollouts to the rollout buffer.
         """
         completion_tokens_count = 0
         n_samples = 0
-        rollouts_to_put = None
         if (
             self.config.train.train_policy.on_policy
             and self.on_policy_rollout_completed
@@ -693,26 +661,13 @@ class PolicyStatusManager:
             # On-policy training has already completed the required samples for this policy step
             return completion_tokens_count, n_samples
 
-        if self.config.train.train_policy.variant == "dapo":
-            rollouts_to_put = valid_rollouts
-            # In single-thread: invalid rollouts should also be decreased from the total number of samples
-            self.remain_samples_num -= len(invalid_rollouts)
-            for rollout in invalid_rollouts:
-                filter_reward = rollout.filter_reward
-                key = "filtered_positive" if filter_reward > 0 else "filtered_negative"
-                if key not in self.filter_records:
-                    self.filter_records[key] = 0
-                self.filter_records[key] += 1
-            for rollout in valid_rollouts:
-                key = "sampled"
-                if key not in self.filter_records:
-                    self.filter_records[key] = 0
-                self.filter_records[key] += 1
-        else:
-            rollouts_to_put = list(itertools.chain(valid_rollouts, invalid_rollouts))
-
-        for rollout in rollouts_to_put:
-            completion_tokens_count += len(self.tokenizer.encode(rollout.completion))
+        for rollout in rollouts:
+            if self.config.train.train_policy.rollout_as_token_ids:
+                completion_tokens_count += len(rollout.completion_token_ids)
+            else:
+                completion_tokens_count += len(
+                    self.tokenizer.encode(rollout.completion)
+                )
             n_samples += 1
             self.put_rollout(rollout)
             if self.config.train.train_policy.on_policy:
@@ -722,6 +677,19 @@ class PolicyStatusManager:
                     break
 
         return completion_tokens_count, n_samples
+
+    def update_dynamic_sampling_statistics(self, filter_records: Dict[str, int]):
+        """
+        Update the dynamic sampling statistics.
+        """
+        for k in ["sampled", "filtered_positive", "filtered_negative"]:
+            self.filter_records[k] = self.filter_records.get(k, 0) + filter_records.get(
+                k, 0
+            )
+
+        # Update the remaining samples number to reflect the filtering results
+        self.remain_samples_num -= filter_records.get("filtered_positive", 0)
+        self.remain_samples_num -= filter_records.get("filtered_negative", 0)
 
     def train_ack(
         self,
@@ -741,6 +709,12 @@ class PolicyStatusManager:
             self.report_data_list = []
         self.report_data_list.append(report_data)
         if self.all_reduced():
+            self.samples_on_the_fly -= self.config.train.train_batch_per_replica * len(
+                self.get_all_atoms_arrived_replicas()
+            )
+            assert (
+                self.samples_on_the_fly >= 0
+            ), "samples_on_the_fly should not be negative"
             # All replicas have been reduced, trigger allreduce
             need_sync_weight = step % self.config.train.sync_weight_interval == 0
             # If the current step is the last step, we need to sync weight always to act as ending signal
@@ -758,7 +732,9 @@ class PolicyStatusManager:
                 self[replica_name].sub_profiler_config.do_profile = False
 
             # Sum and report data
-            if self.config.logging.logger:
+            if self.config.logging.logger and not all(
+                [not data for data in self.report_data_list]
+            ):
                 try:
                     total_loss_avg = np.mean(
                         [data["train/loss_avg"] for data in self.report_data_list]
@@ -931,7 +907,7 @@ class PolicyStatusManager:
 
     def try_trigger_data_fetch_and_training(self, is_fake_last_cmd=False):
         # If the validation dataloader is activated, do not trigger data fetch and training
-        if self.activated_val_iter is not None:
+        if self.data_fetcher.activated_val_iter is not None:
             return
 
         arrived_replicas = self.get_all_atoms_arrived_replicas()
@@ -992,7 +968,7 @@ class PolicyStatusManager:
                     )
 
             if should_activate_validation:
-                self.validation_activate_dataloader(self.current_step)
+                self.data_fetcher.validation_activate_dataloader(self.current_step)
 
             # FIXME: (lms) will this dipatch style cause non-alignment with VeRL?
             # This dispatch style will cause rollouts from same prompt may be dispatched to different replicas.
@@ -1075,13 +1051,14 @@ class PolicyStatusManager:
                 filter_rewards = []
                 for rollout in rollouts_of_this_step:
                     rewards.append(rollout.reward)
-                    advantages.extend(
-                        [rollout.advantage] * rollout.completion_token_length
+                    completion_length = (
+                        len(rollout.completion_token_ids)
+                        if self.config.train.train_policy.rollout_as_token_ids
+                        else len(self.tokenizer.encode(rollout.completion))
                     )
+                    advantages.extend([rollout.advantage] * completion_length)
                     filter_rewards.append(rollout.filter_reward)
-                    completion_lengths.append(
-                        len(self.tokenizer.encode(rollout.completion))
-                    )
+                    completion_lengths.append(completion_length)
                 report_data = {
                     "train/reward_mean": np.mean(rewards),
                     "train/reward_std": np.std(rewards),
@@ -1121,11 +1098,9 @@ class RolloutStatusManager:
         self,
         config: Config,
         redis_handler: RedisStreamHandler,
-        tokenizer: AutoTokenizer,
     ):
         self.redis_handler = redis_handler
         self.config = config
-        self.tokenizer = tokenizer
         """
         Maintain the life status of the policy and rollout replicas.
         """

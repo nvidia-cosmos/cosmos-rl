@@ -15,13 +15,31 @@
 
 import os
 import torch
+from typing import Union
 
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
+
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.dispatcher.protocol import Role
-import cosmos_rl.utils.util as util
-from transformers import AutoTokenizer
+from cosmos_rl.utils.logging import logger
+
+# For rollout workers import for registration
+try:
+    import cosmos_rl.rollout.vllm_rollout.vllm_rollout as vllm_rollout_dummy  # noqa: F401
+except ImportError as e:
+    logger.debug(
+        f"Failed to import VLLM Rollout. Please make sure vllm is installed. Error: {e}"
+    )
+    pass
+
+try:
+    import cosmos_rl.rollout.example_custom_rollout.example_custom_rollout as example_custom_rollout_dummy  # noqa: F401
+except ImportError as e:
+    logger.debug(
+        f"Failed to import example HF Rollout. Please make sure transformers is installed. Error: {e}"
+    )
+    pass
 
 
 class State:
@@ -58,20 +76,23 @@ class State:
 
 
 class RolloutWorkerBase(CommMixin):
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims) -> None:
+    def __init__(
+        self,
+        config: Union[CosmosConfig],
+        parallel_dims: ParallelDims,
+    ) -> None:
         super().__init__()
         self.config = config
-        self.role = Role.ROLLOUT
         self.parallel_dims = parallel_dims
+        self.runner_init()
+
+    def runner_init(self):
+        self.role = Role.ROLLOUT
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))  # rank in the node
         self.global_rank = int(os.environ.get("RANK", 0))  # rank in replica
         self.world_size = int(os.environ.get("WORLD_SIZE", 1))
         self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
-
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            self.config.policy.model_name_or_path
-        )
 
         self.backend = "vllm"
 
@@ -89,7 +110,10 @@ class TRTLLMRolloutWorkerBase(CommMixin):
         super().__init__(*args, **kwargs)
 
     def post_init(
-        self, cosmos_config: CosmosConfig, parallel_dims: ParallelDims, init_comm=True
+        self,
+        cosmos_config: CosmosConfig,
+        parallel_dims: ParallelDims,
+        init_comm=True,
     ):
         self.config = cosmos_config
         self.role = Role.ROLLOUT
@@ -100,9 +124,6 @@ class TRTLLMRolloutWorkerBase(CommMixin):
         self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
 
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            self.config.policy.model_name_or_path
-        )
         self.backend = "trtllm"
 
         if init_comm:

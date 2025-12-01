@@ -94,15 +94,13 @@ def remap_model_state_for_deepep(
                 f"Remapping {key} to {prefix}model.layers.{layer_num}.mlp.experts.xxx_projs"
             )
 
-            v_1, v_2 = torch.chunk(v, 2, -1)
+            v_1, v_2 = torch.chunk(v, 2, 1)
             new_state_dict[
                 f"{prefix}model.layers.{layer_num}.mlp.experts.gate_projs"
-            ] = v_1.transpose(1, 2)
+            ] = v_1
             new_state_dict[f"{prefix}model.layers.{layer_num}.mlp.experts.up_projs"] = (
-                v_2.transpose(1, 2)
+                v_2
             )
             del new_state_dict[key]
-        elif "mlp.experts.down_projs" in key:
-            new_state_dict[key] = v.transpose(1, 2)
 
     return new_state_dict

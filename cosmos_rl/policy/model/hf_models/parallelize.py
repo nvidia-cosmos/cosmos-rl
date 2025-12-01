@@ -24,11 +24,12 @@ from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecision
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
-from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.hf_models.tp_plans import get_tp_plans
 
 
+@pre_parallelize_sanity_check
 def parallelize(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -52,7 +53,6 @@ def parallelize(
     assert not config.train.compile, "Compile is not supported for HFModel"
 
     if parallel_dims.tp_enabled:
-        model.check_tp_compatible(world_mesh["tp"].size())
         apply_tp(
             model,
             world_mesh["tp"],

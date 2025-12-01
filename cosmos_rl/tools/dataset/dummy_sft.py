@@ -19,10 +19,9 @@ import toml
 from torch.utils.data import Dataset
 from datasets import concatenate_datasets
 import cosmos_rl.utils.util as util
-from transformers import AutoTokenizer
+from cosmos_rl.utils.decorators import monitor_status
 from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
 from cosmos_rl.policy.config import Config
-from cosmos_rl.utils.decorators import monitor_status
 
 
 # This dataset is used for SFT with raw text input, which is used for models like Mistral
@@ -36,10 +35,8 @@ class SFTRawTextDataset(Dataset):
     def setup(
         self,
         config: Config,
-        tokenizer: AutoTokenizer,
     ):
         self.config = config.train.train_policy
-        self.tokenizer = tokenizer
 
     def __len__(self):
         return len(self.dataset)

@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 
 from strenum import StrEnum
-from abc import abstractmethod, ABC
 from typing import Union, List
 from functools import partial
 from torchao.float8 import convert_to_float8_training
@@ -28,6 +27,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import is_cuda_compatible, torch_version_at_least
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.model_converter import ModelConverter
 
 MIN_TORCH_VERSION_FOR_FP8 = "2.7.0"
 IS_TORCH_COMPATIBLE_WITH_FP8 = torch_version_at_least(MIN_TORCH_VERSION_FOR_FP8)
@@ -38,21 +38,6 @@ if not IS_TORCH_COMPATIBLE_WITH_FP8:
     )
 
 # Mainly refer to: https://github.com/pytorch/torchtitan/blob/main/docs/float8.md
-
-
-class ModelConverter(ABC):
-    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
-        self.config = config
-        self.parallel_dims = parallel_dims
-
-    @abstractmethod
-    def convert_model(self, model: torch.nn.Module) -> torch.nn.Module: ...
-
-    def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
-        """
-        Post-optimizer hook (e.g. compute weights statistics).
-        """
-        ...
 
 
 class FP8Recipe(StrEnum):
@@ -162,7 +147,7 @@ class FP8ModelConverter(ModelConverter):
             model,
             config=self.ao_float8_config,
             module_filter_fn=partial(
-                module_filter_fn, filter_fqns=model.fqn_filter_for_fp8()
+                module_filter_fn, filter_fqns=model.fqn_filter_for_quantization()
             ),
         )
 

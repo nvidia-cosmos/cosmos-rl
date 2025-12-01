@@ -21,8 +21,6 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from torch.utils.data import Dataset
 import asyncio
-import base64
-import cloudpickle
 import threading
 
 
@@ -76,8 +74,8 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
-from cosmos_rl.dispatcher.data.packer.base import DataPacker, worker_entry_parser
 from cosmos_rl.utils.decorators import monitor_status
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker, worker_entry_parser
 from cosmos_rl.utils.payload import extract_rollouts
 from fastapi.responses import Response
 from fastapi import Request
@@ -161,14 +159,6 @@ async def meta():
     meta = {
         "config": controller.config,
     }
-    if controller.user_data_packer is not None:
-        meta["user_data_packer"] = base64.b64encode(
-            cloudpickle.dumps(controller.user_data_packer)
-        ).decode("utf-8")
-    if controller.user_val_data_packer is not None:
-        meta["user_val_data_packer"] = base64.b64encode(
-            cloudpickle.dumps(controller.user_val_data_packer)
-        ).decode("utf-8")
     return meta
 
 
@@ -393,21 +383,16 @@ Rollout API
 
 @app.get(COSMOS_API_NEXT_PROMPT_SUFFIX)
 async def get_batched_prompt(n: int, validation_step: Optional[int] = None):
-    prompt_id_and_payload_list, is_end = await controller.get_batched_prompt(
-        n, validation_step
-    )
+    payloads_list, is_end = await controller.get_batched_prompt(n, validation_step)
     return {
-        "prompt_id_and_payload_list": prompt_id_and_payload_list,
+        "payloads_list": payloads_list,
         "is_end": is_end,
     }
 
 
 @app.post(COSMOS_API_VALIDATION_REPORT_SUFFIX)
 async def validation_report(request: ValidationReportRequest):
-    rollouts_list, invalid_rollouts_list = extract_rollouts(
-        request.payloads, True, request.prompt_idxs
-    )
-    assert len(invalid_rollouts_list) == 0, "Validation rollouts should all be valid"
+    rollouts_list = extract_rollouts(request.payloads, True)
     controller.policy_status_manager.validation_report_validation_results(
         request.validation_step, rollouts_list, controller.rollout_status_manager
     )
@@ -418,9 +403,6 @@ async def validation_report(request: ValidationReportRequest):
 async def put_rollout_group(rollout: RolloutRequest):
     try:
         if rollout.is_end:
-            assert (
-                len(rollout.prompt_idxs) == 0
-            ), "Prompt idxs should be empty if is_end is True"
             logger.info(
                 f"[Controller] Received rollout end signal from {rollout.src_replica_name}"
             )
@@ -470,29 +452,25 @@ async def put_rollout_group(rollout: RolloutRequest):
 
             return {"message": "Rollout end signal received"}
 
-        # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
-        valid_rollouts_list, invalid_rollouts_list = extract_rollouts(
-            rollout.payloads, rollout.is_end, rollout.prompt_idxs
-        )
+        rollouts_list = extract_rollouts(rollout.payloads, rollout.is_end)
+        # Update the statistics for dynamic sampling used for metrics collection
+        if controller.config.train.train_policy.variant == "dapo":
+            controller.policy_status_manager.update_dynamic_sampling_statistics(
+                rollout.metrics
+            )
         # Flatten the rollouts into a single list
-        valid_rollouts = [
+        rollouts = [
             rollout
-            for rollouts_group in valid_rollouts_list
+            for rollouts_group in rollouts_list
             for rollout in rollouts_group  # rollouts_group: all rollouts of the same prompt.
         ]
-        invalid_rollouts = [
-            rollout
-            for rollouts_group in invalid_rollouts_list
-            for rollout in rollouts_group
-        ]
-
-        if len(valid_rollouts) > 0:
+        if len(rollouts) > 0:
             logger.debug(
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
-                f"example: rollouts[0]\n{valid_rollouts[0]}"
+                f"example: rollouts[0]\n{rollouts[0]}"
             )
 
-        await controller.put_rollouts(valid_rollouts, invalid_rollouts)
+        await controller.put_rollouts(rollouts)
         return {"message": "Rollout put"}
     except Exception as e:
         import traceback
@@ -534,12 +512,12 @@ def _serialize_replicas(replicas: Dict[str, Replica]) -> List[Dict]:
 @monitor_status(name="Cosmos-RL Web Panel", mode="web_panel")
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-    data_packer: Optional[DataPacker] = None,
+    data_packer: Optional[BaseDataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
     filter_reward_fns: Optional[List[Callable]] = None,
     val_dataset: Optional[Dataset] = None,
     val_reward_fns: Optional[List[Callable]] = None,
-    val_data_packer: Optional[DataPacker] = None,
+    val_data_packer: Optional[BaseDataPacker] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
     sampler: Optional[Callable] = None,
     batch_sampler: Optional[Callable] = None,
@@ -585,6 +563,8 @@ def main(
                 filter_reward_fns=filter_reward_fns,
                 val_dataset=val_dataset,
                 val_reward_fns=val_reward_fns,
+                data_packer=data_packer,
+                val_data_packer=val_data_packer,
             )
         return
 
@@ -599,6 +579,9 @@ def main(
                 "Error when parsing args. Did you use custom arguments in your script? If so, please check your custom script and pass `args` to this main function."
             )
             raise e
+        assert (
+            args.config is not None
+        ), "Config file path is required. Please provide --config argument."
 
     # Load config from file if provided
     loaded_config = None
@@ -627,16 +610,14 @@ def main(
 
         if data_packer is not None:
             assert isinstance(
-                data_packer, DataPacker
-            ), "data_packer should be a DataPacker instance"
+                data_packer, BaseDataPacker
+            ), "data_packer should be a BaseDataPacker instance"
         controller.setup(
             loaded_config,
             redis_port=args.redis_port,
             redis_logfile_path=args.redis_logfile_path,
             dataset=dataset,
-            data_packer=data_packer,
             val_dataset=val_dataset,
-            val_data_packer=val_data_packer,
             custom_logger_fns=custom_logger_fns,
             sampler=sampler,
             batch_sampler=batch_sampler,

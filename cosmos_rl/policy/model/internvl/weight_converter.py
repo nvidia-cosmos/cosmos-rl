@@ -75,7 +75,8 @@ def qwen3_moe_lm_weight_from_hf(
     tp_ep_rank, tp_ep_size = parallel_dims.tp_coord
     assert n_experts % tp_ep_size == 0, "n_experts must be divisible by tp_ep_size"
 
-    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+    load_weight_test = not hasattr(parallel_dims, "mesh")
+    if not load_weight_test:
         dp_shard_rank = parallel_dims.mesh[tuple(("dp_shard_cp",))].get_local_rank()
         dp_shard_size = parallel_dims.mesh[tuple(("dp_shard_cp",))].size()
     else:
@@ -126,7 +127,7 @@ def qwen3_moe_lm_weight_from_hf(
             shard = tensor.tensor_split(tp_ep_size, dim=-1)[tp_ep_rank]
     elif (
         match := re.search(  # noqa: F841
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj)\.(weight|bias)",
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
             dest_name,
         )
     ) is not None:
@@ -141,27 +142,6 @@ def qwen3_moe_lm_weight_from_hf(
         belongs_to_current_ep = (
             tp_ep_rank * n_expert_per_ep
             <= int(match.group(2))  # Expert index
-            < (tp_ep_rank + 1) * n_expert_per_ep
-        )
-        belongs_to_current_dp_shard = (
-            int(match.group(2)) - tp_ep_rank * n_expert_per_ep
-        ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
-        if belongs_to_current_ep and belongs_to_current_dp_shard:
-            should_do_fsdp_sharding = False
-            shard = tensor
-        else:
-            # If the expert does not belong to the current process, return None to skip this weight
-            return None, None
-    elif (
-        match := re.search(
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)", dest_name
-        )  # noqa: F841
-    ) is not None:
-        # The same logic as the up_proj/gate_proj
-        n_expert_per_ep = n_experts // tp_ep_size
-        belongs_to_current_ep = (
-            tp_ep_rank * n_expert_per_ep
-            <= int(match.group(2))
             < (tp_ep_rank + 1) * n_expert_per_ep
         )
         belongs_to_current_dp_shard = (

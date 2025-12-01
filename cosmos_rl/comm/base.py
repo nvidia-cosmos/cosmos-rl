@@ -20,6 +20,7 @@ import copy
 import time
 import atexit
 import threading
+from abc import ABC, abstractmethod
 from cosmos_rl.utils.redis_stream import RedisStreamHandler
 from cosmos_rl.utils.network_util import get_local_ip
 from cosmos_rl.dispatcher.command import (
@@ -27,7 +28,7 @@ from cosmos_rl.dispatcher.command import (
     RolloutCommandRegistry,
     Command,
 )
-from cosmos_rl.dispatcher.data.packer import DataPacker, DecoderOnlyLLMDataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker, DecoderOnlyLLMDataPacker
 from cosmos_rl.dispatcher.data.packer import (
     HFVLMDataPacker,
 )
@@ -37,8 +38,6 @@ import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
 import cosmos_rl.utils.util as util
-import base64
-import cloudpickle
 from transformers import AutoConfig
 import multiprocessing as mp
 from cosmos_rl.dispatcher.api.client import APIClient
@@ -87,31 +86,28 @@ class CommMixin:
         )
 
         self.api_client = APIClient(self.role)
-        self.init_meta()
-
         self.register_to_controller()
 
-    def init_meta(self):
-        # Fetch metadata from the controller
-        metadata = self.api_client.get_controller_metadata()
-        self.init_data_packer(metadata)
-
-    def init_data_packer(self, metadata: Dict[str, Any]):
+    def init_data_packer(
+        self,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
+    ):
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
         )
         is_vlm = getattr(hf_config, "vision_config", None) is not None
         model_type = hf_config.model_type
 
-        user_data_packer = metadata.get("user_data_packer", None)
-        if user_data_packer:
-            user_data_packer = base64.b64decode(user_data_packer)
-            user_data_packer = cloudpickle.loads(user_data_packer)
-            self.data_packer = user_data_packer
+        if data_packer:
+            assert isinstance(
+                data_packer, BaseDataPacker
+            ), "data_packer must be a BaseDataPacker instance"
+            self.data_packer = data_packer
             logger.info(f"Using user-provided data packer: {self.data_packer}")
         else:
             try:
-                self.data_packer = DataPacker.get_default_data_packer(model_type)
+                self.data_packer = BaseDataPacker.get_default_data_packer(model_type)
                 logger.info(f"Using default data packer: {self.data_packer}")
             except ValueError:
                 self.data_packer = (
@@ -121,19 +117,21 @@ class CommMixin:
                     f"No default data packer found for {model_type}, using {type(self.data_packer).__name__} as default"
                 )
 
-        self.data_packer.setup(self.config, self.tokenizer)
+        util.call_setup(self.data_packer, self.config)
 
-        user_val_data_packer = metadata.get("user_val_data_packer", None)
-        if user_val_data_packer:
-            user_val_data_packer = base64.b64decode(user_val_data_packer)
-            user_val_data_packer = cloudpickle.loads(user_val_data_packer)
-            self.val_data_packer = user_val_data_packer
+        if val_data_packer:
+            assert isinstance(
+                val_data_packer, BaseDataPacker
+            ), "val_data_packer must be a BaseDataPacker instance"
+            self.val_data_packer = val_data_packer
             logger.info(
                 f"Using user-provided validation data packer: {self.val_data_packer}"
             )
         else:
             try:
-                self.val_data_packer = DataPacker.get_default_data_packer(model_type)
+                self.val_data_packer = BaseDataPacker.get_default_data_packer(
+                    model_type
+                )
                 logger.info(
                     f"Using default validation data packer: {self.val_data_packer}"
                 )
@@ -145,7 +143,7 @@ class CommMixin:
                     f"No default validation data packer found for {model_type}, using {type(self.val_data_packer).__name__} as default"
                 )
 
-        self.val_data_packer.setup(self.config, self.tokenizer)
+        util.call_setup(self.val_data_packer, self.config)
 
     def register_to_controller(self):
         if hasattr(self, "_is_registered"):
@@ -261,3 +259,26 @@ class CommMixin:
                 time.sleep(constant.COSMOS_HEARTBEAT_SEND_INTERVAL)
                 if shutdown_signal.is_set():
                     break
+
+
+class WorkerBase(ABC):
+    def __init__(self, config: Any, **kwargs):
+        self.config = config
+        # Forward the args and kwargs to the worker_init method.
+        self.worker_init(**kwargs)
+
+    @abstractmethod
+    def worker_init(self, **kwargs):
+        raise RuntimeError("worker_init method must be implemented")
+
+    @abstractmethod
+    def execute(self):
+        raise RuntimeError("execute method must be implemented")
+
+    @abstractmethod
+    def build_runner(self, **kwargs):
+        raise RuntimeError("build_runner method must be implemented")
+
+    @abstractmethod
+    def destroy_worker(self):
+        raise RuntimeError("destroy method must be implemented")

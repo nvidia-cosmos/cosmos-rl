@@ -2,17 +2,13 @@ import io
 import base64
 import torch
 from PIL import Image
-from typing import List, Any, Dict, Optional, Tuple
-from transformers import AutoTokenizer, AutoProcessor, AutoConfig
+from typing import List, Any, Dict, Optional, Tuple, Union
+from transformers import AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info as qwen_vl_process_vision_info
 
 from cosmos_rl.utils.util import retry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.dispatcher.data.schema import ChatMessage
-from transformers import AutoTokenizer, AutoProcessor, AutoConfig
-from PIL import Image
-import base64
-import io
 from cosmos_rl.dispatcher.data.packer.base import DataPacker
 
 IGNORE_LABEL_ID = -100
@@ -54,8 +50,8 @@ class HFVLMDataPacker(DataPacker):
             self.input_ids = input_ids
             self.logprob_masks = logprob_masks
 
-    def setup(self, config: Config, tokenizer: AutoTokenizer, *args, **kwargs):
-        super().setup(config, tokenizer, *args, **kwargs)
+    def setup(self, config: Config, *args, **kwargs):
+        super().setup(config, *args, **kwargs)
         self.hf_processor = retry(AutoProcessor.from_pretrained)(
             config.policy.model_name_or_path, trust_remote_code=True
         )
@@ -64,8 +60,10 @@ class HFVLMDataPacker(DataPacker):
             config.policy.model_name_or_path, trust_remote_code=True
         )
 
-        image_token_id = getattr(hf_config, "image_token_id", None) or getattr(
-            hf_config.vision_config, "image_token_id", None
+        image_token_id = (
+            getattr(hf_config, "image_token_id", None)
+            or getattr(hf_config.vision_config, "image_token_id", None)
+            or getattr(hf_config, "img_context_token_id", None)
         )
         if image_token_id is None:
             image_token_id = getattr(hf_config, "image_token_index", None) or getattr(
@@ -73,7 +71,9 @@ class HFVLMDataPacker(DataPacker):
             )
         assert image_token_id is not None, f"Cannot find image token id in {hf_config=}"
         self.image_token_id = image_token_id
-        self.image_token = getattr(self.hf_processor, "image_token", None)
+        self.image_token = getattr(self.hf_processor, "image_token", None) or getattr(
+            hf_config, "img_context_token", None
+        )
 
         video_token_id = getattr(hf_config, "video_token_id", None) or getattr(
             hf_config.vision_config, "video_token_id", None
@@ -624,7 +624,7 @@ class HFVLMDataPacker(DataPacker):
     def get_policy_input(
         self,
         sample: "HFVLMDataPacker.Payload",
-        rollout_output: Optional[str] = None,
+        rollout_output: Optional[Union[str, List[int]]] = None,
         n_ignore_prefix_tokens: int = 0,
         add_generation_prompt: bool = True,
     ) -> Any:
@@ -707,7 +707,15 @@ class HFVLMDataPacker(DataPacker):
         input_ids = x["input_ids"]
         completion_ids = []
         if rollout_output:
-            completion_ids = self.tokenizer(rollout_output).input_ids  # Don't pad yet
+            rollout_as_token_ids = isinstance(rollout_output, list) and all(
+                isinstance(i, int) for i in rollout_output
+            )
+            if rollout_as_token_ids:
+                completion_ids = rollout_output
+            else:
+                completion_ids = self.tokenizer(
+                    rollout_output
+                ).input_ids  # Don't pad yet
         return_dict["input_ids"] = input_ids + completion_ids
 
         return_dict["logprob_masks"] = (
@@ -746,7 +754,6 @@ class HFVLMDataPacker(DataPacker):
         self,
         processed_samples: List[Dict[str, Any]],
         computed_max_len: int,
-        pad_token_id: int,
         ignore_label_id: int,
     ) -> Dict[str, Any]:
         # Reuse the RL collate minibatch function

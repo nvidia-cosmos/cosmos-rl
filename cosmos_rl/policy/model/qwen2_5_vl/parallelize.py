@@ -29,7 +29,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -43,6 +43,7 @@ import os
 from typing import Callable, Optional
 
 
+@pre_parallelize_sanity_check
 def parallelize(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -95,7 +96,7 @@ def parallelize(
         mp_policy = MixedPrecisionPolicy(
             param_dtype=str2torch_dtype(config.train.param_dtype),
             reduce_dtype=str2torch_dtype(config.train.fsdp_reduce_dtype),
-            cast_forward_inputs=False,
+            cast_forward_inputs=True,
         )
         fsdp_config = {"mesh": world_mesh["dp_cp_tp"], "mp_policy": mp_policy}
         if config.train.fsdp_offload:
@@ -269,10 +270,6 @@ def parallelize(
 
 def apply_cp(model: nn.Module, parallel_dims: ParallelDims):
     """Apply Context Parallel to the model."""
-    # check if cp is compatible with model
-    cp_size, tp_size = parallel_dims.cp_coord[1], parallel_dims.tp_coord[1]
-    model.check_cp_compatible(cp_size, tp_size)
-
     cp_mesh = parallel_dims.mesh["cp"]
     # For language
     for _, transformer_block in model.model.layers.items():
@@ -451,7 +448,7 @@ def apply_fsdp(
 
     """
     mp_policy = MixedPrecisionPolicy(
-        param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=False
+        param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from typing import List, Any, Dict, Optional, Tuple, Union
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
@@ -53,6 +53,10 @@ class RLPayload(BaseModel):
 
     prompt: Optional[Union[ConversationType, str]] = Field(
         default=None, description="The input prompt for the rollout."
+    )
+
+    prompt_idx: int = Field(
+        default=-1, description="The index of the prompt for the rollout."
     )
 
     conversation: Optional[ConversationType] = Field(
@@ -101,14 +105,13 @@ class RLPayload(BaseModel):
         default=None, description="The filter reward for each completion."
     )
 
-    completions_token_length: Optional[List[int]] = Field(
-        default=None, description="The token lengths of each completion."
+    completion_token_ids: Optional[List[List[int]]] = Field(
+        default=None, description="The token ids of each completion."
     )
 
-    @model_validator(mode="after")
-    def check_params_value(self):
-        assert self.prompt or self.conversation, "Must set prompt or conversation"
-        return self
+    completion_logprobs: Optional[List[List[float]]] = Field(
+        default=None, description="The logprobs of each completion."
+    )
 
     @staticmethod
     def collate_fn(
@@ -133,6 +136,10 @@ class Rollout(BaseModel):
         default=None, description="The input prompt for the rollout."
     )
 
+    prompt_idx: int = Field(
+        default=-1, description="The index of the prompt for the rollout."
+    )
+
     conversation: Optional[ConversationType] = Field(
         default=None, description="The input conversation for the rollout."
     )
@@ -153,16 +160,16 @@ class Rollout(BaseModel):
 
     advantage: float = Field(default=0.0, description="The advantage for the rollout.")
 
-    prompt_idx: int = Field(
-        default=0, description="The index of the prompt for the rollout."
-    )
-
     n_ignore_prefix_tokens: int = 0
 
     filter_reward: float = Field(
         default=0.0, description="The filter reward for the rollout."
     )
 
-    completion_token_length: int = Field(
-        default=0, description="The token length of the completion."
+    completion_token_ids: Optional[List[int]] = Field(
+        default=None, description="The token ids of each completion."
+    )
+
+    completion_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of each completion."
     )

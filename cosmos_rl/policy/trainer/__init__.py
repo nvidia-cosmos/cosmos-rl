@@ -24,7 +24,7 @@ from cosmos_rl.utils.checkpoint import (
     upload_folder_to_s3,
     CheckpointMananger,
 )
-from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationConfig
+from transformers import AutoConfig, GenerationConfig
 from cosmos_rl.policy.trainer.optm import build_optimizers
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -78,45 +78,26 @@ class Trainer(CommMixin):
         self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
         self.check_config()
-        self.tokenizer = util.retry(AutoTokenizer.from_pretrained)(
-            config.policy.model_name_or_path,
-            trust_remote_code=True,
-        )
-        # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
-        if getattr(self.tokenizer, "pad_token_id", None) is None:
-            try:
-                logger.warning(
-                    f"Tokenizer for {config.policy.model_name_or_path} has no pad_token_id, try to use eos_token_id({self.tokenizer.eos_token_id}) as pad_token_id"
-                )
-                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-            except Exception as e:
-                logger.warning(
-                    f"Failed to set pad_token_id with eos_token_id, error = {e}, ignore if not needed"
-                )
 
         self.hf_config = util.retry(AutoConfig.from_pretrained)(
             config.policy.model_name_or_path,
             trust_remote_code=True,
         )
-        try:
-            self.hf_processor = util.retry(AutoProcessor.from_pretrained)(
-                config.policy.model_name_or_path,
-                trust_remote_code=True,
-            )
-        except Exception as e:
-            self.hf_processor = None
-            logger.info(
-                f"Failed to load processor for {config.policy.model_name_or_path}, using tokenizer as processor, ignore if not needed, error = {e}"
-            )
 
         self.train_stream = torch.cuda.current_stream()
         self.init_comm()
+
         model = ModelRegistry.build_model(config)
 
         # FP8 settings
         with torch.device("meta"):
             if config.train.fp8.enable_fp8:
                 self.model_converter = FP8ModelConverter(config, parallel_dims)
+                self.model_converter.convert_model(model)
+            elif config.train.fp4.enable_fp4:
+                from cosmos_rl.utils.fp4.fp4_util import FP4ModelConverter
+
+                self.model_converter = FP4ModelConverter(config, parallel_dims)
                 self.model_converter.convert_model(model)
 
         if config.train.fsdp_offload:
@@ -174,13 +155,13 @@ class Trainer(CommMixin):
 
         self.seq_len_multiple = parallel_dims.cp * parallel_dims.tp
         self.lr_schedulers = None
-        if self.config.train.fp8.enable_fp8:
-            # Constraint of FP8 kernel(torch._scaled_mm): it requires K in MNK is mutiple of 16. In backward of Linear, to
+        if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
+            # Constraint of FP8/FP4 kernel(torch._scaled_mm): it requires K in MNK is mutiple of 16. In backward of Linear, to
             # calculate the gradient of weight, we have to round the seq_len_multiple to mutiple of 16.
             # See: https://github.com/pytorch/pytorch/blob/851a6fa82df251fbc368f0284d941ce78f68e7b1/aten/src/ATen/native/cuda/Blas.cpp#L1252
             self.seq_len_multiple = (self.seq_len_multiple + 16 - 1) // 16 * 16
             logger.info(
-                "FP8 Training enabled, round seq_len_multiple to mutiple of 16."
+                "FP8/FP4 Training enabled, round seq_len_multiple to mutiple of 16."
             )
         logger.info(
             f"Trainer initialized at local rank {self.local_rank}, with seq_len_multiple: {self.seq_len_multiple}"
@@ -217,7 +198,7 @@ class Trainer(CommMixin):
     def build_optimizers(self):
         # TODO(cjx): add `CompiledAutograd` support
         self.optimizers = build_optimizers(self.model_parts, self.config)
-        if self.config.train.fp8.enable_fp8:
+        if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
             self.optimizers.register_step_post_hook(
                 lambda *args, **kwargs: self.model_converter.post_optimizer_hook(
                     self.model_parts
@@ -240,8 +221,6 @@ class Trainer(CommMixin):
 
         save_hf_config = self.config.policy.lora is None
         save_lora_config = self.config.policy.lora is not None
-        save_tokenizer = True
-        save_processor = True
         save_generation_config = True
         export_weight_index_json = self.config.policy.lora is None
 
@@ -442,7 +421,7 @@ class Trainer(CommMixin):
                         indent=4,
                     )
 
-            # save hf_config and tokenizer_config
+            # save hf_config
             if save_hf_config:
                 self.hf_config.save_pretrained(path)
             if save_lora_config:
@@ -454,10 +433,8 @@ class Trainer(CommMixin):
                 lora_config["peft_type"] = "LORA"
                 with open(os.path.join(path, "adapter_config.json"), "w") as f:
                     json.dump(lora_config, f, indent=4)
-            if save_tokenizer:
-                self.tokenizer.save_pretrained(path)
-            if save_processor and self.hf_processor is not None:
-                self.hf_processor.save_pretrained(path)
+
+            self.data_packer.save_state(path)
 
             # save the generation config to get the generation aligned with HF.
             try:

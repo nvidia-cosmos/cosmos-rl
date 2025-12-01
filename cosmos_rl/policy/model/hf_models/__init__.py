@@ -23,7 +23,7 @@ from transformers.utils import quantization_config as transformers_quantization_
 from functools import partial, cached_property
 from typing import Tuple, List, Optional, Callable
 
-from transformers import AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 from cosmos_rl.utils.util import (
     clear_weight_name,
     safe_deep_getattr,
@@ -41,6 +41,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model.hf_models.patch import (
     pre_hf_models_patch,
     post_hf_models_patch,
+    sequence_packing_forward_patch,
 )
 
 
@@ -62,17 +63,41 @@ class HFModel(BaseModel):
     def supported_model_types():
         return [COSMOS_HF_MODEL_TYPES]
 
+    @staticmethod
+    def check_dependency(model_type):
+        dependencies = {
+            "NemotronH_Nano_VL_V2": ["causal_conv1d", "mamba_ssm", "timm"],
+            "nemotron_h": ["causal_conv1d", "mamba_ssm"],
+        }
+        if model_type in dependencies:
+            missing = []
+            for dep in dependencies[model_type]:
+                try:
+                    __import__(dep)
+                except ImportError:
+                    missing.append(dep)
+            if missing:
+                raise ImportError(
+                    f"Missing dependencies: {', '.join(missing)}. "
+                    f"Please install them with `pip install {' '.join(missing)}`."
+                )
+
     def __init__(
         self, hf_config, model, model_class, is_vlm=False, need_dequantization=False
     ):
         super().__init__(hf_config)
         self.hf_config = hf_config
         self.model = model
-        self.model = self.model.to(dtype=hf_config.torch_dtype)
+        # The whole init function in run inside context:
+        # with util.cosmos_default_dtype(cosmos_default_dtype)
+        # cosmos_default_dtype is config.train.master_dtype
+        # Change model to torch.get_default_dtype() will change it precision to config.train.master_dtype
+        self.model = self.model.to(dtype=torch.get_default_dtype())
         self.model_class = model_class
         self.is_vlm = is_vlm
         self.need_dequantization = need_dequantization
         self.tp_slice_dim_map = None
+        self.sequence_packing_forward_patched = None
         if getattr(model, "_checkpoint_conversion_mapping", None):
             if hf_config.model_type in ["R"]:
                 logger.warning(
@@ -88,9 +113,26 @@ class HFModel(BaseModel):
                     f"reverse_hf_conversion_mapping={self.weight_mapper.reverse_hf_conversion_mapping}"
                 )
 
+    def set_gradient_checkpointing_enabled(self, enabled: bool):
+        """
+        Set the gradient checkpointing enabled flag.
+        This is used to enable or disable the gradient checkpointing for the model.
+        """
+        super().set_gradient_checkpointing_enabled(enabled)
+        # Configure gradient checkpointing if enabled
+        if self._gradient_checkpointing_enabled:
+            self.model.gradient_checkpointing_enable()
+            assert (
+                self.model.is_gradient_checkpointing
+            ), "Gradient checkpointing is not enabled"
+            logger.info("Enabled gradient checkpointing for HFModel")
+
     @cached_property
     def model_forward_valid_kwargs(self):
-        sig = inspect.signature(self.model.forward)
+        if self.hf_config.model_type == "NemotronH_Nano_VL_V2":
+            sig = inspect.signature(self.model.generate)
+        else:
+            sig = inspect.signature(self.model.forward)
         return sig.parameters.keys()
 
     def forward(
@@ -103,6 +145,9 @@ class HFModel(BaseModel):
         kwargs_filtered = {
             k: v for k, v in kwargs.items() if k in self.model_forward_valid_kwargs
         }
+
+        if "valid_input_len" in kwargs:
+            kwargs_filtered["valid_input_len"] = kwargs["valid_input_len"]
 
         out = self.model(
             input_ids=input_ids,
@@ -146,14 +191,17 @@ class HFModel(BaseModel):
     @property
     def lm_layers(self):
         lm_layers = None
-        sub_lm_model = getattr(self.language_model, "model", None)
-        if sub_lm_model is None:
-            lm_layers = self.language_model.layers
-        else:
-            lm_layers = sub_lm_model.layers
+        for path in [
+            "layers",
+            "model.layers",
+            "backbone.layers",  # NemotronH_Nano_VL_V2
+        ]:
+            lm_layers = safe_deep_getattr(self.language_model, path, None)
+            if lm_layers is not None:
+                break
         assert (
             lm_layers is not None
-        ), f"Can not get lm layers from {self.language_model}"
+        ), f"Can not get lm layers from {self.language_model}."
         return lm_layers
 
     @property
@@ -167,6 +215,7 @@ class HFModel(BaseModel):
                 "model.layers",  # Llama4VisionModel
                 "encoder.layer",  # InternVLVisionModel(qwen)
                 "encoder.layers",  # InternVLVisionModel(gpt-oss)
+                "model.blocks",  # NemotronH_Nano_VL_V2
             ]:
                 vision_layers = safe_deep_getattr(self.vision_model, path, None)
                 if vision_layers is not None:
@@ -227,18 +276,22 @@ class HFModel(BaseModel):
             elif hasattr(self.model, "model"):
                 language_model = self.model.model
             else:
-                logger.warning(f"Can not get language model from {self.model}.")
+                raise ValueError(f"Can not get language model from {self.model}.")
         else:
             language_model = self.model
         return language_model
 
     @property
     def embed_tokens(self):
-        embed_tokens = getattr(self.language_model, "embed_tokens", None)
-        if embed_tokens is None:
-            embed_tokens = safe_deep_getattr(
-                self.language_model, "model.embed_tokens", None
-            )
+        embed_tokens = None
+        for path in [
+            "embed_tokens",
+            "model.embed_tokens",
+            "backbone.embeddings",  # NemotronH_Nano_VL_V2
+        ]:
+            embed_tokens = safe_deep_getattr(self.language_model, path, None)
+            if embed_tokens is not None:
+                break
         if embed_tokens is None:
             raise ValueError(f"Can not get embed tokens from {self.language_model}")
         return embed_tokens
@@ -269,6 +322,17 @@ class HFModel(BaseModel):
                 multi_modal_projector = self.model.mlp1
 
         return multi_modal_projector
+
+    @property
+    def tensor_names_to_skip(self):
+        filter_list = []
+        if self.hf_config.model_type == "NemotronH_Nano_VL_V2":
+            filter_list = [
+                "vision_model.radio_model.summary_idxs",
+                "vision_model.radio_model.input_conditioner.norm_mean",
+                "vision_model.radio_model.input_conditioner.norm_std",
+            ]
+        return filter_list
 
     @property
     def delay_cp_slice_inputs(self):
@@ -342,8 +406,8 @@ class HFModel(BaseModel):
                     raise ValueError(f"Can not get num of llm layers from {config}")
             # Attempt to load partial model to extract all named buffers
             try:
-                if isinstance(self.model_class, AutoModel):
-                    hf_model = AutoModel.from_config(config)
+                if self.model_class in [AutoModelForCausalLM, AutoModel]:
+                    hf_model = self.model_class.from_config(config)
                 else:
                     hf_model = self.model_class._from_config(config)
                 hf_named_buffers = [name for name, _ in hf_model.named_buffers()]
@@ -445,7 +509,7 @@ class HFModel(BaseModel):
         embed_tokens_weight_key = None
         # Find the lm_head and embed_tokens weight keys in the state dict
         for k in self_state_dict.keys():
-            if "embed_tokens" in k:
+            if "embed_tokens" in k or "embeddings" in k:
                 embed_tokens_weight_key = k
                 if lm_head_weight_key is not None:
                     break
@@ -483,6 +547,9 @@ class HFModel(BaseModel):
                     reserved[name] = ckpt_tensor
 
             for name in weights_of_ckpt.keys():
+                if name in self.tensor_names_to_skip:
+                    logger.info(f"Skipping {name} because it is in the skip list")
+                    continue
                 tensor = weights_of_ckpt[name]
                 tp_slice_dim = None
                 if self.tp_slice_dim_map is not None:
@@ -490,7 +557,6 @@ class HFModel(BaseModel):
                 dest_name, shared_weight = convert_weight_from_hf(
                     tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
                 )
-
                 target_tensor = self_state_dict[dest_name]
                 is_dist_tensor = isinstance(
                     target_tensor, torch.distributed.tensor.DTensor
@@ -532,6 +598,22 @@ class HFModel(BaseModel):
                 with torch.no_grad():
                     local_view.data.copy_(shared_weight.to(device))
 
+    def reset_named_buffers_from_pretrained(
+        self, model_name_or_path: str, revision: Optional[str] = None
+    ):
+        dtype = self.hf_config.torch_dtype
+        kwargs = {
+            "config": self.hf_config,
+            "revision": revision,
+            "trust_remote_code": True,
+        }
+        hf_model = self.model_class.from_pretrained(
+            model_name_or_path,
+            **kwargs,
+        ).to(device="cpu", dtype=dtype)
+
+        self.reset_named_buffers(hf_model=hf_model)
+
     def load_hf_weights(
         self,
         model_name_or_path: str,
@@ -560,14 +642,6 @@ class HFModel(BaseModel):
                 modules_to_not_convert=quantization_config["modules_to_not_convert"],
             )
             kwargs["quantization_config"] = mxfp4_quantization_config
-
-        # Configure gradient checkpointing if enabled
-        if self._gradient_checkpointing_enabled:
-            self.model.gradient_checkpointing_enable()
-            assert (
-                self.model.is_gradient_checkpointing
-            ), "Gradient checkpointing is not enabled"
-            logger.info("Enabled gradient checkpointing for HFModel")
 
         # Use from_pretrained loading in two scenarios:
         # 1. Model requires dequantization (e.g., gpt-oss)
@@ -602,6 +676,10 @@ class HFModel(BaseModel):
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
 
         for name, tensor in hf_state_dict.items():
+            if name in self.tensor_names_to_skip:
+                logger.info(f"Skipping {name} because it is in the skip list")
+                continue
+            tp_slice_dim = None
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
             dest_name, shared_weight = convert_weight_from_hf(
@@ -749,11 +827,11 @@ class HFModel(BaseModel):
             model_class = load_model_class_by_config(hf_config)
             model = model_class(hf_config)
         except Exception as e:
+            model_class = AutoModelForCausalLM if not is_vlm else AutoModel
             logger.warning(
-                f"Got error({e}) when loading {hf_config.model_type}, Using AutoModel instead."
+                f"Got error({e}) when loading {hf_config.model_type}, Using {model_class} instead."
             )
-            model_class = AutoModel
-            model = AutoModel.from_config(hf_config, trust_remote_code=True)
+            model = model_class.from_config(hf_config, trust_remote_code=True)
 
         post_hf_models_patch(hf_config, model)
 
@@ -785,6 +863,8 @@ class HFModel(BaseModel):
 
         """
 
+        cls.check_dependency(hf_config.model_type)
+
         if max_position_embeddings is not None:
             hf_config.max_position_embeddings = max_position_embeddings
             if hasattr(hf_config, "text_config") and hasattr(
@@ -802,14 +882,14 @@ class HFModel(BaseModel):
         return self.model.named_parameters(*args, **kwargs)
 
     @classmethod
-    def fqn_filter_for_fp8(cls) -> List[str]:
+    def fqn_filter_for_quantization(cls) -> List[str]:
         llm = [
             "lm_head",
         ]
         visual = [
             "visual",
             "vision_tower",
-        ]  # Filter Linear in visual out, they will corrupt the FP8 Linear.
+        ]  # Filter Linear in visual out, they will corrupt the FP8/FP4 Linear.
         return llm + visual
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
@@ -824,6 +904,13 @@ class HFModel(BaseModel):
         assert (
             num_key_value_heads % tp_size == 0
         ), f"{num_key_value_heads=} must be divisible by TP size ({tp_size})"
+
+    def check_sequence_packing_compatible(self):
+        if self.sequence_packing_forward_patched is None:
+            # called only once if patch is successful
+            patch_success = sequence_packing_forward_patch(self.hf_config, self)
+            self.sequence_packing_forward_patched = patch_success
+        return self.sequence_packing_forward_patched
 
     def post_transform_of_local_view(self, local_view: torch.Tensor, name: str):
         if "gpt_oss" in self.hf_config.model_type:

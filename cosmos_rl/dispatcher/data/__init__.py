@@ -18,8 +18,8 @@ from datasets import concatenate_datasets
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.util import load_data_from_disk_or_hf
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.util import call_setup
 from typing import Optional, Any
-from transformers import AutoTokenizer
 
 from .schema import RLPayload, IdxAndRLPayload
 
@@ -28,10 +28,9 @@ from .schema import RLPayload, IdxAndRLPayload
 
 
 class RLDataset(Dataset):
-    def __init__(self, dataset: Any, tokenizer: AutoTokenizer, config: CosmosConfig):
+    def __init__(self, dataset: Any, config: CosmosConfig):
         self.dataset = dataset
-        if hasattr(self.dataset, "setup"):
-            self.dataset.setup(tokenizer=tokenizer, config=config)
+        call_setup(self.dataset, config)
 
     def __len__(self):
         return len(self.dataset)
@@ -39,8 +38,9 @@ class RLDataset(Dataset):
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
         prompt = self.dataset[idx]
         if isinstance(prompt, RLPayload):
+            prompt.prompt_idx = idx
             return idx, prompt
-        return idx, RLPayload(prompt=prompt)
+        return idx, RLPayload(prompt=prompt, prompt_idx=idx)
 
     def get_reference_answer(self, idx: int) -> Any:
         assert hasattr(
@@ -65,7 +65,7 @@ class RLInternalDataset(Dataset):
 
     def __getitem__(self, idx: int) -> IdxAndRLPayload:
         prompt: str = self.dataset[idx][self.prompt_column]
-        return idx, RLPayload(prompt=prompt)
+        return idx, RLPayload(prompt=prompt, prompt_idx=idx)
 
     def get_reference_answer(self, idx: int) -> Any:
         ref = self.dataset[idx][self.response_column]
@@ -77,11 +77,10 @@ class CosmosDataset:
         self,
         config: CosmosConfig,
         train_set: Optional[Dataset] = None,
-        tokenizer: AutoTokenizer = None,
     ):
         self.config = config
         if train_set is not None:
-            self.train_set = RLDataset(train_set, tokenizer, config)
+            self.train_set = RLDataset(train_set, config)
         else:
             """
             Deprecated: for most cases, users should provide a train_set for better generalization
@@ -116,11 +115,10 @@ class CosmosValidationDataset:
         self,
         config: CosmosConfig,
         val_set: Optional[Dataset] = None,
-        tokenizer: AutoTokenizer = None,
     ):
         self.config = config
         if val_set is not None:
-            self.val_set = RLDataset(val_set, tokenizer, config)
+            self.val_set = RLDataset(val_set, config)
         else:
             """
             Deprecated: for most cases, users should provide a train_set for better generalization

@@ -37,9 +37,8 @@ from cosmos_rl.policy.trainer.sampler import SkippingSampler
 import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 import cosmos_rl.utils.cache as cache
-from transformers import AutoTokenizer
 from datasets import concatenate_datasets
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import os
 from typing import Optional, Dict, Any, Callable, Union
 from tqdm import tqdm
@@ -123,10 +122,9 @@ def collate_fn(
 
 def construct_dataset(
     cosmos_config: CosmosConfig,
-    tokenizer: AutoTokenizer,
-    data_packer: DataPacker,
+    data_packer: BaseDataPacker,
     user_provided_dataset: Optional[Dataset] = None,
-    val_data_packer: Optional[DataPacker] = None,
+    val_data_packer: Optional[BaseDataPacker] = None,
     user_provided_val_dataset: Optional[Dataset] = None,
 ):
     config = cosmos_config.train.train_policy
@@ -220,14 +218,12 @@ def construct_dataset(
 
     train_sft_dataset = SFTDataset(
         config,
-        tokenizer=tokenizer,
         dataset=train_dataset,
         data_packer=data_packer,
         is_user_dataset=user_provided_dataset is not None,
     )
     test_sft_dataset = SFTDataset(
         config,
-        tokenizer=tokenizer,
         dataset=test_dataset,
         data_packer=val_data_packer,
         is_user_dataset=user_provided_dataset is not None,
@@ -240,13 +236,11 @@ class SFTDataset(Dataset):
     def __init__(
         self,
         config: SFTDataConfig,
-        tokenizer: AutoTokenizer,
         dataset: Dataset,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         is_user_dataset: bool = False,
     ):
         self.config = config
-        self.tokenizer = tokenizer
         self.column_name = config.conversation_column_name
         self.dataset = dataset
         self.data_packer = data_packer
@@ -299,10 +293,10 @@ class SFTTrainer(Trainer):
         self,
         config: CosmosConfig,
         parallel_dims: ParallelDims,
-        dataset: Optional[Dataset] = None,
-        data_packer: Optional[DataPacker] = None,
-        val_dataset: Optional[Dataset] = None,
-        val_data_packer: Optional[DataPacker] = None,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         using_custom_val_dataset: bool = False,
@@ -336,20 +330,51 @@ class SFTTrainer(Trainer):
             )
 
         self.train_step = 0
-
-        self.lr_schedulers = None
         self.start_epoch = 0
+        self.lr_schedulers = None
 
-        ckpt_total_steps = self.load_model()
+        self.ckpt_total_steps = self.load_model()
         self.model.train()
+
+        self.setup(
+            dataset=dataset,
+            val_dataset=val_dataset,
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
+            val_sampler=val_sampler,
+            val_batch_sampler=val_batch_sampler,
+        )
+
+    def setup(
+        self,
+        dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
+        sampler: Optional[Callable] = None,
+        batch_sampler: Optional[Callable] = None,
+        val_sampler: Optional[Callable] = None,
+        val_batch_sampler: Optional[Callable] = None,
+    ):
+        # setup data packer first
+        self.init_data_packer(
+            data_packer=data_packer,
+            val_data_packer=val_data_packer,
+        )
 
         if isinstance(dataset, Callable):
             # Incase it is a factory function, we need to call it to get the dataset
             dataset = dataset(self.config)
-            dataset.setup(self.config, self.tokenizer)
-        if data_packer:
-            data_packer.setup(self.config, self.tokenizer)
-            self.data_packer = data_packer
+            util.call_setup(dataset, self.config)
+
+        if isinstance(val_dataset, Callable):
+            val_dataset = val_dataset(self.config)
+            util.call_setup(val_dataset, self.config)
+
+        if not self.val_data_packer:
+            self.val_data_packer = self.data_packer
 
         if isinstance(val_dataset, Callable):
             val_dataset = val_dataset(self.config)
@@ -362,8 +387,7 @@ class SFTTrainer(Trainer):
 
         # Prepare dataset
         train_dataset, val_dataset, using_custom_val = construct_dataset(
-            config,
-            tokenizer=self.tokenizer,
+            self.config,
             data_packer=self.data_packer,
             user_provided_dataset=dataset,
             val_data_packer=self.val_data_packer,
@@ -379,7 +403,7 @@ class SFTTrainer(Trainer):
                     train_dataset,
                     num_replicas=self.dp_world_size,
                     rank=self.dp_rank,
-                    shuffle=config.train.train_policy.dataloader_shuffle,
+                    shuffle=self.config.train.train_policy.dataloader_shuffle,
                     drop_last=False,
                 )
             else:
@@ -389,14 +413,14 @@ class SFTTrainer(Trainer):
                 train_dataset,
                 num_replicas=self.dp_world_size,
                 rank=self.dp_rank,
-                shuffle=config.train.train_policy.dataloader_shuffle,
+                shuffle=self.config.train.train_policy.dataloader_shuffle,
                 drop_last=False,
             )
 
         if batch_sampler is not None and isinstance(batch_sampler, Callable):
             batch_sampler = batch_sampler(
                 train_sampler,
-                batch_size=config.train.train_batch_per_replica,
+                batch_size=self.config.train.train_batch_per_replica,
                 drop_last=False,
             )
 
@@ -410,25 +434,25 @@ class SFTTrainer(Trainer):
                 )
                 data_loader = DataLoader(
                     train_dataset,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    num_workers=self.config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     batch_sampler=sampler_in_batch,
                     collate_fn=collate_fn,
                 )
             else:
                 data_loader = DataLoader(
                     train_dataset,
-                    batch_size=config.train.train_batch_per_replica,
+                    batch_size=self.config.train.train_batch_per_replica,
                     shuffle=False,
-                    num_workers=config.train.train_policy.dataloader_num_workers,
-                    prefetch_factor=config.train.train_policy.dataloader_prefetch_factor,
+                    num_workers=self.config.train.train_policy.dataloader_num_workers,
+                    prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                     sampler=sampler,
                     collate_fn=collate_fn,
                     drop_last=False,
                 )
             return data_loader
 
-        if config.train.resume and self.train_step > 0:
+        if self.config.train.resume and self.train_step > 0:
             """
             Note: Here we assume there is no data shuffling across epochs.
             Otherwise, we need to call `set_epoch` on the sampler after each epoch.
@@ -438,9 +462,9 @@ class SFTTrainer(Trainer):
                 get_train_data_loader(train_sampler, batch_sampler)
             )
             data_loader_bias = self.train_step % total_steps_per_epoch
-            data_loader_bias *= config.train.train_batch_per_replica
+            data_loader_bias *= self.config.train.train_batch_per_replica
             logger.info(
-                f"Resuming training from step {self.train_step}/{ckpt_total_steps}"
+                f"Resuming training from step {self.train_step}/{self.ckpt_total_steps}"
             )
             train_sampler = SkippingSampler(
                 train_sampler,
@@ -481,16 +505,11 @@ class SFTTrainer(Trainer):
                 shuffle=False,
                 drop_last=False,
             )
-        self.epoch = config.train.epoch
+        self.epoch = self.config.train.epoch
 
-        assert (
-            self.tokenizer.pad_token_id is not None
-        ), "Tokenizer must have a pad token id"
         self.train_data_loader = get_train_data_loader(train_sampler, batch_sampler)
-
-        effective_val_batch_size = config.validation.batch_size or config.train.train_batch_per_replica
+        effective_val_batch_size = self.config.validation.batch_size or self.config.train.train_batch_per_replica
         logger.info(f"Validation batch size: {effective_val_batch_size}")
-
         if val_batch_sampler is not None:
             logger.info(
                 "Using custom batch Sampler that yields list of indices for validation dataset."
@@ -504,8 +523,8 @@ class SFTTrainer(Trainer):
                 )
             self.val_data_loader = DataLoader(
                 val_dataset,
-                num_workers=config.validation.dataloader_num_workers,
-                prefetch_factor=config.validation.dataloader_prefetch_factor,
+                num_workers=self.config.train.train_policy.dataloader_num_workers,
+                prefetch_factor=self.config.train.train_policy.dataloader_prefetch_factor,
                 batch_sampler=val_batch_sampler,
                 collate_fn=collate_fn,
             )
@@ -513,20 +532,20 @@ class SFTTrainer(Trainer):
             self.val_data_loader = DataLoader(
                 val_dataset,
                 batch_size=effective_val_batch_size,
-                num_workers=config.validation.dataloader_num_workers,
-                prefetch_factor=config.validation.dataloader_prefetch_factor,
+                num_workers=self.config.validation.dataloader_num_workers,
+                prefetch_factor=self.config.validation.dataloader_prefetch_factor,
                 sampler=val_sampler,
                 collate_fn=collate_fn,
                 drop_last=False,
             )
 
         steps_by_dataset = (
-            ckpt_total_steps
-            if ckpt_total_steps > 0
+            self.ckpt_total_steps
+            if self.ckpt_total_steps > 0
             else len(self.train_data_loader) * self.epoch
         )
-        if config.train.max_num_steps is not None:
-            self.total_steps = min(steps_by_dataset, config.train.max_num_steps)
+        if self.config.train.max_num_steps is not None:
+            self.total_steps = min(steps_by_dataset, self.config.train.max_num_steps)
         else:
             self.total_steps = steps_by_dataset
 
@@ -660,7 +679,6 @@ class SFTTrainer(Trainer):
                 val_batch = self.val_data_packer.sft_collate_fn(
                     val_global_batch,
                     computed_max_len=max_len,
-                    pad_token_id=self.tokenizer.pad_token_id,
                     ignore_label_id=-100,
                 )
                 for k, v in val_batch.items():
@@ -840,11 +858,18 @@ class SFTTrainer(Trainer):
                             logger.debug(
                                 "[Policy] Packing sequence is disabled due to incompatible dimensions."
                             )
+                        elif (
+                            hasattr(self.model, "check_sequence_packing_compatible")
+                            and not self.model.check_sequence_packing_compatible()
+                        ):
+                            packing_seq = False
+                            logger.debug(
+                                "[Policy] Packing sequence is disabled due to unsupported model."
+                            )
 
                     batch = self.data_packer.sft_collate_fn(
                         raw_batch,
                         computed_max_len=max_len,
-                        pad_token_id=self.tokenizer.pad_token_id,
                         ignore_label_id=-100,
                     )
 
@@ -886,7 +911,7 @@ class SFTTrainer(Trainer):
                         # Prepare for the sequence packing information.
                         packed_args = pack_sequences_info_collect(
                             batch["input_ids"],
-                            pad_token_id=self.tokenizer.pad_token_id,
+                            pad_token_id=self.data_packer.pad_token_id,
                             label_ids=labels,
                             ignore_label_id=-100,
                             seq_len_multiple=self.seq_len_multiple,
@@ -979,7 +1004,7 @@ class SFTTrainer(Trainer):
                         #         text = ''
                         #         new_last_token_ids = torch.cat(last_token_ids, dim=-1).squeeze(0)
                         #         logger.info(f'{new_last_token_ids=}')
-                        #         text = self.tokenizer.decode(new_last_token_ids)
+                        #         text = self.data_packer.tokenizer.decode(new_last_token_ids)
                         #         logger.info(
                         #             f"generated tokens at sample : {text}"
                         #         )
@@ -1274,6 +1299,8 @@ class SFTTrainer(Trainer):
                             scheduler=partial(
                                 build_lr_schedulers, self.optimizers, self.config
                             ),
+                            model_name_or_path=self.config.policy.model_name_or_path,
+                            revision=self.config.policy.model_revision,
                         )
                     )
                     ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)

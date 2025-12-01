@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import tempfile
 import unittest
 import os
 import subprocess
@@ -93,7 +94,14 @@ class TestCustomRolloutOutput(unittest.TestCase):
                 rollout_output = self.kv_store.pop(id, None)
                 return rollout_output
 
-            def get_rollout_output(self, items):
+            def get_rollout_output(
+                self,
+                items,
+                completed_conversations=None,
+                logprobs=None,
+                token_ids=None,
+                **kwargs,
+            ):
                 uuids = []
                 if not items:
                     return items
@@ -103,7 +111,7 @@ class TestCustomRolloutOutput(unittest.TestCase):
                     id = uuid.uuid4()
                     self.kv_store[str(id)] = item
                     uuids.append(str(id))
-                return uuids
+                return uuids, completed_conversations, logprobs, token_ids, kwargs
 
         data_packer = TestDataPacker()
 
@@ -122,6 +130,7 @@ class TestCustomRolloutOutput(unittest.TestCase):
             payloads.append(
                 RLPayload(
                     prompt=dataset[i]["prompt"],
+                    prompt_idx=0,  # Mock the prompt index
                     completions=[dataset[i]["result"] for _ in range(16)],
                     completed_conversations=[[]] * 16,
                     rewards=[0.5] * 16,
@@ -133,18 +142,21 @@ class TestCustomRolloutOutput(unittest.TestCase):
             )
         if payloads is not None:
             for i in range(len(payloads)):
-                payloads[i].completions = data_packer.get_rollout_output(
-                    payloads[i].completions
-                )
-                payloads[i].completed_conversations = data_packer.get_rollout_output(
-                    payloads[i].completed_conversations
+                (
+                    payloads[i].completions,
+                    payloads[i].completed_conversations,
+                    _,
+                    _,
+                    _,
+                ) = data_packer.get_rollout_output(
+                    payloads[i].completions,
+                    payloads[i].completed_conversations,
                 )
 
-        valid_rollouts_list, invalid_rollouts_list = extract_rollouts(payloads, False)
+        valid_rollouts_list = extract_rollouts(payloads, False)
 
         assert len(valid_rollouts_list) == 1
         assert len(valid_rollouts_list[0]) == 16
-        assert len(invalid_rollouts_list) == 0
 
         rollouts = [r for rs in valid_rollouts_list for r in rs]
 
@@ -166,6 +178,110 @@ class TestCustomRolloutOutput(unittest.TestCase):
         for sample in processed_samples:
             assert sample is not None
             assert sample == dataset[0]["result"]
+
+
+class TestCustomRollout(unittest.TestCase):
+    def test_custom_rollout(self):
+        """Test the custom rollout engine."""
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+        world_size = 4
+        rollout_world_size = 1
+        port = util.find_available_port(8123)
+        config_path = os.path.join(
+            cur_dir,
+            "configs",
+            "test_simple_grpo.toml",
+        )
+        with open(config_path, "r") as f:
+            config = toml.load(f)
+
+        config["train"]["epoch"] = 1
+        config["train"]["train_batch_per_replica"] = 8
+        config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
+            cur_dir, "data_fixtures", "test_dataset"
+        )
+        config["rollout"]["n_generation"] = 2
+        config["rollout"]["batch_size"] = 1
+        config["rollout"]["backend"] = "example_hf"
+        config["rollout"]["max_response_length"] = 128
+
+        config["rollout"]["parallelism"]["tp_size"] = 1
+        config["rollout"]["parallelism"]["n_init_replicas"] = 4
+
+        config["policy"]["parallelism"]["tp_size"] = 1
+        config["policy"]["parallelism"]["dp_shard_size"] = 4
+
+        with tempfile.NamedTemporaryFile(
+            mode="w+", suffix=".toml", delete=False
+        ) as tmpfile:
+            toml.dump(config, tmpfile)
+            tmpfile_toml = tmpfile.name
+        controller_cmd = f"{sys.executable} -m cosmos_rl.dispatcher.run_web_panel --config {tmpfile_toml}"
+        controller_cmd += f" --port {port}"
+        env_dict = os.environ.copy()
+        env_dict["COSMOS_ROLE"] = "Controller"
+        controller_process = subprocess.Popen(
+            controller_cmd,
+            shell=True,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            env=env_dict,
+        )
+        os.environ["COSMOS_CONTROLLER_HOST"] = f"localhost:{port}"
+        # Create the Python command for torchrun
+        policy_cmd = [
+            "torchrun",
+            f"--nproc_per_node={world_size}",  # Use 2 GPUs
+            "--role=rank",
+            "--tee=3",
+            "--rdzv_backend=c10d",
+            "--rdzv_endpoint=localhost:0",
+            os.path.join(cur_dir, "utils", "mock_policy_entrance.py"),
+            "--test",
+            "custom_rollout",
+        ]
+        rollout_cmd = [
+            "torchrun",
+            f"--nproc_per_node={rollout_world_size}",  # Use 2 GPUs
+            "--role=rank",
+            "--tee=3",
+            "--rdzv_backend=c10d",
+            "--rdzv_endpoint=localhost:0",
+            os.path.join(cur_dir, "utils", "mock_rollout_entrance.py"),
+            "--test",
+            "custom_rollout",
+        ]
+        policy_env = dict(os.environ)
+        policy_env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+        # Start the process
+        policy_process = subprocess.Popen(
+            policy_cmd,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            env=policy_env,
+        )
+        rollout_processes = []
+        for dev in ["4", "5", "6", "7"]:
+            rollout_env = dict(os.environ)
+            rollout_env["CUDA_VISIBLE_DEVICES"] = dev
+            rollout_processes.append(
+                subprocess.Popen(
+                    rollout_cmd,
+                    stdout=sys.stderr,
+                    stderr=sys.stderr,
+                    env=rollout_env,
+                )
+            )
+
+        processes = [controller_process, policy_process] + rollout_processes
+
+        # Wait for process to complete
+        for process in processes:
+            stdout, stderr = process.communicate()
+            # Check if process completed successfully
+            assert (
+                process.returncode == 0
+            ), f"Process failed with code: {process.returncode}"
 
 
 if __name__ == "__main__":

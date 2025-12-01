@@ -11,6 +11,7 @@ import cv2
 import argparse
 import ast
 import logging
+import shutil
 
 # Import the base class from tao-core
 from cosmos_rl.utils.lora_utils import merge_lora_model
@@ -67,21 +68,37 @@ class CosmosInferenceMicroservice(BaseInferenceMicroserviceServer):
             print(f"Loading Cosmos model: {model_name}")
 
             # Handle LoRA merging if enabled
+            adapter_backup_path = None  # Initialize for later cleanup
             if enable_lora:
                 model_name = merge_lora_model(model_name, base_model_path)
                 print(f"LoRA merging enabled. Using merged model: {model_name}")
+            else:
+                # If LoRA is disabled but adapter files exist, temporarily hide them during loading
+                adapter_config_path = Path(model_name) / "adapter_config.json"
+                if adapter_config_path.exists():
+                    adapter_backup_path = Path(model_name) / "adapter_config.json.bak"
+                    shutil.move(str(adapter_config_path), str(adapter_backup_path))
+                    print("Temporarily hiding adapter files to load base model only")
 
             # Load Cosmos-Reason1 model
-            self.model = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                device_map=device_map
-            )
+            try:
+                self.model = transformers.Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    model_name,
+                    torch_dtype=torch_dtype,
+                    device_map=device_map
+                )
 
-            # Load processor
-            self.processor = transformers.AutoProcessor.from_pretrained(model_name)
+                # Load processor
+                self.processor = transformers.AutoProcessor.from_pretrained(model_name)
 
-            print(f"Successfully loaded Cosmos model: {model_name}")
+                print(f"Successfully loaded Cosmos model: {model_name}")
+            finally:
+                # Restore adapter config if it was temporarily hidden
+                if not enable_lora and adapter_backup_path and adapter_backup_path.exists():
+                    adapter_config_path = Path(model_name) / "adapter_config.json"
+                    shutil.move(str(adapter_backup_path), str(adapter_config_path))
+                    print("Restored adapter configuration files")
+
             return True
 
         except Exception as e:

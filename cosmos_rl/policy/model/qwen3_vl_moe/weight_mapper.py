@@ -39,17 +39,32 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
         )
 
     def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
-        rollout_weight_name = self.policy_map_local_key_to_hf_key(rollout_weight_name)
-        if not rollout_weight_name == "lm_head.weight":
-            if "experts.w13_weight" in rollout_weight_name:
-                return rollout_weight_name.replace(
-                    "experts.w13_weight", "gate_up_proj.weight"
-                )
-            elif "experts.w2_weight" in rollout_weight_name:
-                return rollout_weight_name.replace(
-                    "experts.w2_weight", "down_proj.weight"
-                )
-        return rollout_weight_name
+        converted_name = None
+
+        if rollout_weight_name.startswith("language_model.model."):
+            converted_name = rollout_weight_name.replace(
+                "language_model.model.", "model.language_model."
+            )
+
+        if rollout_weight_name.startswith("visual."):
+            converted_name = rollout_weight_name.replace("visual.", "model.visual.")
+
+        if rollout_weight_name == "language_model.lm_head.weight":
+            converted_name = "lm_head.weight"
+
+        if "experts.w13_weight" in converted_name:
+            converted_name = converted_name.replace(
+                "experts.w13_weight", "experts.gate_up_proj"
+            )
+        elif "experts.w2_weight" in converted_name:
+            converted_name = converted_name.replace(
+                "experts.w2_weight", "experts.down_proj"
+            )
+
+        assert (
+            converted_name is not None
+        ), f"{rollout_weight_name} is not mapped successfully."
+        return converted_name
 
     def __rollout_split_qkv_weight(self, name, weight: torch.Tensor):
         # visual
@@ -113,20 +128,20 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 group_keys.append((k_proj_weight_key, k_weight.ndim))
                 vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
                 group_keys.append((v_proj_weight_key, v_weight.ndim))
-            elif "gate_up_proj" in compatible_key:
-                # split gate and up proj
-                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
-                    compatible_key, param
-                )
-                gate_proj_weight_key = compatible_key.replace(
-                    "gate_up_proj", "gate_proj"
-                )
-                vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
+            # elif "gate_up_proj" in compatible_key:
+            #     # split gate and up proj
+            #     gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
+            #         compatible_key, param
+            #     )
+            #     gate_proj_weight_key = compatible_key.replace(
+            #         "gate_up_proj", "gate_proj"
+            #     )
+            #     vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
+            #     group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
 
-                up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
-                vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
+            #     up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
+            #     vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
+            #     group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
             elif "qkv" in compatible_key and "visual" in compatible_key:
                 q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
                     compatible_key, param
@@ -148,18 +163,33 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
-        if name.startswith("language_model."):
-            name = name.replace("language_model.", "")
-        if name == "model.lm_head.weight":
+        if name.startswith("model.") and "visual" not in name:
+            name = name.replace("model.", "model.language_model.")
+        if name.startswith("visual."):
+            name = name.replace("visual.", "model.visual.")
+
+        if "lm_head.weight" in name:
             name = "lm_head.weight"
+
+        if re.search(
+            r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.gate_and_up_projs",
+            name,
+        ):
+            name = name.replace("gate_and_up_projs", "gate_up_proj")
+        elif re.search(
+            r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.down_projs",
+            name,
+        ):
+            name = name.replace("down_projs", "down_proj")
+
         return name
 
     def name_to_model_part_index(self, dest_name: str) -> int:
         if dest_name in ["lm_head.weight", "lm_head.bias"]:
             return 0
-        elif dest_name.startswith("visual."):
+        elif dest_name.startswith("model.visual."):
             return 1
-        elif dest_name.startswith("model."):
+        elif dest_name.startswith("model.language_model."):
             return 0
         else:
             raise ValueError(f"Unsupported weight: {dest_name}")
@@ -226,7 +256,7 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
                 return weight_key.replace(key, "qkv_proj")
         for key in ["gate_proj", "up_proj"]:
             if key in weight_key:
-                return weight_key.replace(key, "gate_up_proj")
+                return weight_key.replace(key, "gate_and_up_proj")
         for key in ["q", "k", "v"]:
             if "visual" in weight_key and key in weight_key:
                 return weight_key.replace(key, "qkv")

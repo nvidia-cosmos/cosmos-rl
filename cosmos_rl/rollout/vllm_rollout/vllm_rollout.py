@@ -14,22 +14,23 @@
 # limitations under the License.
 import os
 
+from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
 
 import vllm
 import torch
 import copy
 from typing import List, Optional, Dict
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoConfig
 from transformers import GenerationConfig
 from vllm.entrypoints.llm import LLM
 from vllm import SamplingParams
-from cosmos_rl.rollout.rollout_base import RolloutBase
+from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.policy.config import RolloutConfig
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.utils.tools_use import ToolParser
 from cosmos_rl.dispatcher.data.packer.multi_turn import (
@@ -40,6 +41,18 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 from cosmos_rl.utils.tools_use import OpenAIFunctionToolSchema
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
+from cosmos_rl.dispatcher.command import (
+    PolicyToRolloutUnicastCommand,
+    RolloutToRolloutBroadcastCommand,
+    Command,
+)
+import threading
+import types
+from functools import partial
+from cosmos_rl.utils.constant import (
+    COSMOS_ROLLOUT_STEP_INTERVAL,
+    COSMOS_ROLLOUT_REPORT_INTERVAL,
+)
 
 
 def vllm_version_check(rollout_config: RolloutConfig):
@@ -49,6 +62,49 @@ def vllm_version_check(rollout_config: RolloutConfig):
             "Pipeline parallelism is not supported for vLLM < 0.9.0, current version is %s"
             % vllm_version
         )
+
+
+def _patch_vllm_rollout_locked_step(
+    rollout, consume_command, reward_fetch, enable_validation
+):
+    llm_engine = rollout.get_engine().llm_engine
+    orig_step = llm_engine.step
+
+    def cmd_pred(cmd: Command, enable_validation: threading.Event):
+        # Make sure no weight update happens during validation.
+        # So filter out R2R and P2R commands when validation is enabled.
+        if enable_validation.is_set() and (
+            isinstance(cmd, RolloutToRolloutBroadcastCommand)
+            or isinstance(cmd, PolicyToRolloutUnicastCommand)
+        ):
+            return False
+        return True
+
+    def step(self, *args, **kwargs):
+        if not hasattr(self, "_cosmos_step_counter"):
+            self._cosmos_step_counter = 0
+        self._cosmos_step_counter += 1
+
+        if (
+            COSMOS_ROLLOUT_REPORT_INTERVAL > 0
+            and self._cosmos_step_counter % COSMOS_ROLLOUT_REPORT_INTERVAL == 0
+        ):
+            _, is_validation, _, _ = reward_fetch()
+            assert not is_validation, "Validation report should be handled in the broadcast command rather than step function."
+
+        if (
+            COSMOS_ROLLOUT_STEP_INTERVAL > 0
+            and self._cosmos_step_counter % COSMOS_ROLLOUT_STEP_INTERVAL == 0
+        ):
+            # IMPORTANT:
+            # If validation is enabled, R2R is not expected to be called in this step function
+            # to avoid recursive inference execution.
+            consume_command(
+                cmd_pred=partial(cmd_pred, enable_validation=enable_validation)
+            )
+        return orig_step(*args, **kwargs)
+
+    llm_engine.step = types.MethodType(step, llm_engine)
 
 
 def update_conversation_wth_rollout_result(
@@ -73,20 +129,32 @@ def update_conversation_wth_rollout_result(
     return conversation
 
 
+@RolloutRegistry.register(rollout_type="vllm")
 class vLLMRollout(RolloutBase):
-    def __init__(self, config: Config, tokenizer: AutoTokenizer, **kwargs):
+    def __init__(
+        self,
+        config: Config,
+        parallel_dims: ParallelDims,
+        device: torch.device,
+        **kwargs,
+    ):
         """Rollout with vLLM as the backend.
 
         Args:
             config: Cosmos Config.
-            tokenizer: Tokenizer of the model.
+            parallel_dims: Parallel dimensions for the rollout engine.
+            device: The device on which the rollout engine will run.
             hf_config_path: huggingface config file path.
             model_hf_config: the huggingface config to initiallize the generating model in vllm
         """
-        super().__init__(config, tokenizer)
-        policy_config = self.config.policy
+        super().__init__(config, parallel_dims, device, **kwargs)
+
+    def post_init_hook(self, **kwargs):
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
+        self._model_param_map = None  # key: compatible name, value: param
+
+        policy_config = self.config.policy
 
         vllm_version_check(self.rollout_config)
 
@@ -109,13 +177,47 @@ class vLLMRollout(RolloutBase):
             # self.eos_token_ids = [tokenizer.eos_token_id]
             # TODO(lms): remove this
             self.eos_token_ids = [151645, 151643]
-        self._engine_initialized = False
-        self.rollout_engine = None
 
-        self._model_param_map = None  # key: compatible name, value: param
+        self.rollout_engine = None
         self.is_vlm = getattr(self.model_config, "vision_config", None) is not None
 
         self.preset_vllm_env()
+
+        # Set sampling params for rollout and validation.
+        self.val_sampling_params = SamplingParams(
+            n=self.config.validation.n_generation,
+            logprobs=0,
+            top_p=self.config.validation.top_p
+            if self.config.validation.top_p is not None
+            else self.config.rollout.sampling_config.top_p,
+            top_k=self.config.validation.top_k
+            if self.config.validation.top_k is not None
+            else self.config.rollout.sampling_config.top_k,
+            temperature=self.config.validation.temperature
+            if self.config.validation.temperature is not None
+            else self.config.rollout.sampling_config.temperature,
+            repetition_penalty=self.config.validation.repetition_penalty
+            if self.config.validation.repetition_penalty is not None
+            else self.config.rollout.sampling_config.repetition_penalty,
+            max_tokens=self.config.validation.max_response_length
+            if self.config.validation.max_response_length is not None
+            else self.config.rollout.max_response_length,
+            stop_token_ids=self.eos_token_ids,
+            include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
+            detokenize=True,
+        )
+        self.sampling_params = SamplingParams(
+            n=self.config.rollout.n_generation,
+            logprobs=0,
+            top_p=self.config.rollout.sampling_config.top_p,
+            top_k=self.config.rollout.sampling_config.top_k,
+            temperature=self.config.rollout.sampling_config.temperature,
+            repetition_penalty=self.config.rollout.sampling_config.repetition_penalty,
+            max_tokens=self.config.rollout.max_response_length,
+            stop_token_ids=self.eos_token_ids,
+            include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
+            detokenize=True,
+        )
 
     def init_engine(
         self,
@@ -200,22 +302,123 @@ class vLLMRollout(RolloutBase):
                 with set_current_vllm_config(vllm_config):
                     apply_fp8_linear_patch(self.get_underlying_model())
 
+    def post_init_engine_hook(
+        self, consume_command_hook, report_rollouts_hook, validation_flag, **kwargs
+    ):
+        """
+        Post initialization hook for the engine, which will be called after the engine is initialized.
+        """
+        _patch_vllm_rollout_locked_step(
+            self,
+            consume_command_hook,
+            report_rollouts_hook,
+            validation_flag,
+        )
+
+    def pre_get_params_for_sync_hook(
+        self, quantization_type, weight_mapper, parallel_dims, **kwargs
+    ):
+        """
+        Pre get sync param hook for the engine, which will be called before getting the sync params.
+        """
+        if quantization_type == "fp8":
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+                cache_weight_of_quantized_module,
+                replace_weight_of_quantized_module,
+            )
+        elif quantization_type == "mxfp4":
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import (
+                cache_weight_of_quantized_module,
+                replace_weight_of_quantized_module,
+            )
+
+        vllm_hp_weight_map, vllm_quantized_weight_map = None, None
+        if quantization_type is not None:
+            promotion_dtype = util.str2torch_dtype(self.config.train.param_dtype)
+            vllm_hp_weight_map, vllm_quantized_weight_map = (
+                cache_weight_of_quantized_module(
+                    self.get_underlying_model(),
+                    promotion_dtype,
+                    weight_mapper,
+                    parallel_dims,
+                )
+            )
+            # replace the weight of quantized module with the high precision weight.
+            # let weight in vllm_weight_inplace_view_map always in high precision for recv
+            # high precision weight from policy.
+            replace_weight_of_quantized_module(
+                self.get_underlying_model(),
+                vllm_hp_weight_map,
+                weight_mapper,
+            )
+        return vllm_hp_weight_map, vllm_quantized_weight_map
+
+    def post_get_params_for_sync_hook(
+        self,
+        quantization_type,
+        weight_mapper,
+        weight_view_map,
+        quantized_weight_map,
+        **kwargs,
+    ):
+        """
+        Post get sync param hook for the engine, which will be called after getting the sync params.
+        """
+        if quantization_type == "fp8":
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+                replace_weight_of_quantized_module,
+            )
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+                post_process_view_map_for_fp8 as post_process_view_map_for_lowp,
+            )
+        elif quantization_type == "mxfp4":
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import (
+                replace_weight_of_quantized_module,
+            )
+
+            from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_mxfp4 import (
+                post_process_view_map_for_mxfp4 as post_process_view_map_for_lowp,
+            )
+
+        if quantization_type is not None:
+            weight_view_map = post_process_view_map_for_lowp(weight_view_map)
+            # Get vllm weight back into quantized.
+            replace_weight_of_quantized_module(
+                self.get_underlying_model(),
+                quantized_weight_map,
+                weight_mapper,
+            )
+        return weight_view_map
+
+    @staticmethod
+    def parse_logprobs(logprobs: List[dict]) -> List[float]:
+        if logprobs is None:
+            return []
+        ret_logprobs = []
+        ret_token_ids = []
+        for logp in logprobs:
+            assert len(logp) == 1, "[Rollout] logprobs length should be 1."
+            ret_logprobs.append(list(logp.values())[0].logprob)
+            ret_token_ids.append(list(logp.keys())[0])
+        return ret_logprobs, ret_token_ids
+
     @torch.no_grad()
     def rollout_generation_single_turn(
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
-        n_to_batch: bool = False,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
-        n_repeats = sampling_params.n if n_to_batch else 1
+        n_repeats = (
+            sampling_params.n if self.config.rollout.n_generation_to_batch else 1
+        )
         payloads = [p for p in payloads for _ in range(n_repeats)]
-        if n_to_batch:
+        if self.config.rollout.n_generation_to_batch:
             local_sampling_params = copy.deepcopy(sampling_params)
             local_sampling_params.n = 1
         else:
@@ -224,9 +427,13 @@ class vLLMRollout(RolloutBase):
         # Pack the payloads into prompts for vllm.
         prompts = []
         for pl in payloads:
-            assert (
-                pl.prompt is not None
-            ), "Prompt should not be None for single turn rollout generation."
+            if not self.config.train.local_dataset:
+                assert (
+                    pl.prompt is not None
+                ), "Prompt should not be None for single turn rollout generation."
+            else:
+                # Quert prompt from local dataset
+                pass
             prompts.append(data_packer.get_rollout_input(pl.prompt))
         prompts = data_packer.rollout_collate_fn(prompts)
         if self.is_vlm:
@@ -250,6 +457,22 @@ class vLLMRollout(RolloutBase):
             )
             for i in range(0, len(results), n_repeats):
                 outputs = results[i : i + n_repeats]
+                logprobs = []
+                token_ids = []
+                # collect logprobs
+                for output in outputs:
+                    for j in range(len(output.outputs)):
+                        if self.config.train.train_policy.rollout_as_token_ids:
+                            logprob, token_id = self.parse_logprobs(
+                                output.outputs[j].logprobs
+                            )
+                            if not self.config.train.train_policy.use_decoupled_loss:
+                                logprob = []
+                        else:
+                            logprob = []
+                            token_id = []
+                        logprobs.append(logprob)
+                        token_ids.append(token_id)
                 response.append(
                     RolloutResult(
                         prompt=payloads[i].prompt,
@@ -258,6 +481,8 @@ class vLLMRollout(RolloutBase):
                             for output in outputs
                             for j in range(len(output.outputs))
                         ],
+                        completion_logprobs=logprobs,
+                        completion_token_ids=token_ids,
                     )
                 )
         except Exception as e:
@@ -273,7 +498,7 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
+        data_packer: BaseDataPacker,
         sampling_params: SamplingParams,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
@@ -307,6 +532,20 @@ class vLLMRollout(RolloutBase):
                 # TODO(zjx): support multi-path conversations search for multi-turn rollout generation
                 # extend the conversation with the rollout result
                 responses = [output.text for output in results[0].outputs]
+                # Get token IDs (list of ints)
+
+                # Manually decode to string
+                logprobs = []
+                token_ids = []
+                if self.config.train.train_policy.rollout_as_token_ids:
+                    assert (
+                        len(results[0].outputs) == 1
+                    ), "Expected single output for token ID extraction"
+                    for output in results[0].outputs:
+                        logprob, token_ids = self.parse_logprobs(output.logprobs)
+                        if self.config.train.train_policy.use_decoupled_loss:
+                            logprobs = logprob
+
                 current_conversation = data_packer.extend_conversation(
                     current_conversation,
                     responses,
@@ -328,7 +567,7 @@ class vLLMRollout(RolloutBase):
 
             # return the last assistant message as the completion to compute the reward in controller
             completion = current_conversation[-1].content
-            return current_conversation, completion
+            return current_conversation, completion, logprobs, token_ids
 
         n_generation = sampling_params.n
         sampling_params = copy.deepcopy(sampling_params)
@@ -337,18 +576,25 @@ class vLLMRollout(RolloutBase):
         for payload in payloads:
             conversations = []
             completions = []
+            logprobs_list = []
+            token_ids_list = []
             for _ in range(n_generation):
-                new_conversation, completion = generation_multi_turn_for_one_payload(
-                    copy.deepcopy(payload.conversation)
+                new_conversation, completion, logprobs, token_ids = (
+                    generation_multi_turn_for_one_payload(
+                        copy.deepcopy(payload.conversation)
+                    )
                 )
                 conversations.append(new_conversation)
                 completions.append(completion)
-
+                logprobs_list.append(logprobs)
+                token_ids_list.append(token_ids)
             response.append(
                 RolloutResult(
                     conversation=payload.conversation,
                     completions=completions,
                     completed_conversations=conversations,
+                    completion_logprobs=logprobs_list,
+                    completion_token_ids=token_ids_list,
                 )
             )
 
@@ -358,24 +604,27 @@ class vLLMRollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
-        data_packer: DataPacker,
-        sampling_params: SamplingParams,
-        n_to_batch: bool = False,
+        data_packer: BaseDataPacker,
+        is_validation: bool = False,
+        **kwargs,
     ) -> List[RolloutResult]:
         if self.rollout_config.multi_turn_config.enable:
             return self.rollout_generation_multi_turn(
                 payloads,
                 stream,
                 data_packer,
-                sampling_params,
+                sampling_params=self.val_sampling_params
+                if is_validation
+                else self.sampling_params,
             )
         else:
             return self.rollout_generation_single_turn(
                 payloads,
                 stream,
                 data_packer,
-                sampling_params,
-                n_to_batch=n_to_batch,
+                sampling_params=self.val_sampling_params
+                if is_validation
+                else self.sampling_params,
             )
 
     def get_underlying_model(self):
@@ -394,9 +643,6 @@ class vLLMRollout(RolloutBase):
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
         return self.rollout_engine
-
-    def is_engine_initialized(self):
-        return self._engine_initialized
 
     def fp8_quantization(self, weight: torch.Tensor):
         # convert to fp8
@@ -459,31 +705,6 @@ class vLLMRollout(RolloutBase):
             swizzled_weight_mxfp4.storage.data,
             swizzled_weight_scale_mxfp4.storage.data,
         )
-
-    def model_param_map(self, weight_mapper: WeightMapper) -> Dict[str, torch.Tensor]:
-        """
-        All the parameters of the rollout model:
-            - All the parameters of the model.
-            - All the scales of quantized weights.
-        """
-        if not self._engine_initialized:
-            raise RuntimeError(
-                "[Rollout] Engine is not initialized, please call init_engine first."
-            )
-
-        if self._model_param_map:
-            return self._model_param_map
-        model = self.get_underlying_model()
-        param_map = {}
-        for name, param in model.state_dict().items():
-            compatible_name = weight_mapper._rollout_vllm_name_to_hf(name)
-            param_map[compatible_name] = param
-
-        quantized_tensors = self.get_quantized_tensors(weight_mapper)
-        param_map.update(quantized_tensors)
-
-        self._model_param_map = param_map
-        return self._model_param_map
 
     def preset_vllm_env(self):
         def log_env(env_name: str, env_value: str):

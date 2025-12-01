@@ -37,3 +37,7 @@ class ValidationInstruction(InternalInstruction):
     ):
         self.validation_step = validation_step
         self.total_steps = total_steps
+
+
+class RolloutWrapperInstruction(InternalInstruction):
+    pass

@@ -219,6 +219,7 @@ class DeepseekV3MoEModel(BaseModel):
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
+        save_dcp: bool=False,
         revision: Optional[str] = None,
     ):
         dcp_checkpoint_path = os.path.join(
@@ -318,6 +319,14 @@ class DeepseekV3MoEModel(BaseModel):
                         )
                         continue
 
+                    slice_range = None
+                    if ".experts.gate_proj" in dest_name:
+                        dest_name = dest_name.replace("gate_projs", "gate_and_up_projs")
+                        slice_range = slice(0, self.config.moe_inter_dim)
+                    elif ".experts.up_proj" in dest_name:
+                        dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
+                        slice_range = slice(self.config.moe_inter_dim, None)
+
                     target_tensor = self_state_dict[dest_name]
                     if isinstance(target_tensor, torch.distributed.tensor.DTensor):
                         target_tensor = target_tensor.to_local()
@@ -332,6 +341,12 @@ class DeepseekV3MoEModel(BaseModel):
 
                         expert_id = expert_id % n_local_experts
                         target_tensor = target_tensor[expert_id]
+
+                    if slice_range is not None:
+                        assert (
+                            target_tensor.shape[0] == 2 * self.config.moe_inter_dim
+                        ), f"Shape mismatch: {target_tensor.shape} != {2 * self.config.moe_inter_dim} for {dest_name}"
+                        target_tensor = target_tensor[slice_range]
 
                     assert (
                         target_tensor.shape == shared_weight.shape
@@ -369,16 +384,16 @@ class DeepseekV3MoEModel(BaseModel):
                     ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
                     with torch.no_grad():
                         local_view.data.copy_(shared_weight)
-
-            logger.info(f"Dumping the tensors to DCP folder {dcp_checkpoint_path}")
-            os.makedirs(dcp_checkpoint_path, exist_ok=True)
-            fs_storage_writer = torch.distributed.checkpoint.FileSystemWriter(
-                dcp_checkpoint_path
-            )
-            torch.distributed.checkpoint.save(
-                state_dict=self_state_dict,
-                storage_writer=fs_storage_writer,
-            )
+            if save_dcp:
+                logger.info(f"Dumping the tensors to DCP folder {dcp_checkpoint_path}")
+                os.makedirs(dcp_checkpoint_path, exist_ok=True)
+                fs_storage_writer = torch.distributed.checkpoint.FileSystemWriter(
+                    dcp_checkpoint_path
+                )
+                torch.distributed.checkpoint.save(
+                    state_dict=self_state_dict,
+                    storage_writer=fs_storage_writer,
+                )
         else:
             logger.info("Loading from distributed checkpoints...")
             model_name_or_path = model_name_or_path.rstrip("/")
@@ -450,6 +465,23 @@ class DeepseekV3MoEModel(BaseModel):
             transforms[hf_name] = transform_or_view
 
         return sorted(transforms.items())
+
+    @classmethod
+    def fqn_filter_for_quantization(cls) -> List[str]:
+        return ["lm_head"]
+
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        if not (self.config.n_heads % (cp_size * tp_size) == 0):
+            raise ValueError(
+                f"Model is not compatible with cp parallelism, model's head number={self.config.n_heads} is not divisible by cp size({cp_size}) * tp_size({tp_size}) = {cp_size * tp_size}"
+            )
+
+    def check_tp_compatible(self, tp_size: int):
+        non_divisible_by_tp_size = self.config.n_heads % tp_size != 0
+        if non_divisible_by_tp_size:
+            raise ValueError(
+                f"Model is not compatible with tp parallelism, model's head number={self.config.n_heads} is not satisified by tp size({tp_size})"
+            )
 
 
 def _init_weights(module):
