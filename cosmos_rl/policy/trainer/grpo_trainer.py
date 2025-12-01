@@ -481,7 +481,7 @@ class GRPOTrainer(LLMTrainer):
 
         self.tokenizer = setup_tokenizer(self.config.policy.model_name_or_path)
 
-    def train(
+    def step_training(
         self,
         rollouts: List[Rollout],
         current_step: int,

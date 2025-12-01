@@ -551,7 +551,7 @@ class RLPolicyWorker(WorkerBase, CommMixin):
         is_fake_step = self.replica_batch_for_this_step == 0
         if not is_fake_step:
             self.trainer.update_lr_schedulers(command.total_steps)
-            report_data = self.trainer.train(
+            report_data = self.trainer.step_training(
                 rollouts=self.dispatch_rollouts(),
                 current_step=command.global_step,
                 total_steps=command.total_steps,

@@ -340,7 +340,7 @@ class TestPolicyWorker:
                 device_type="cuda",
                 dtype=util.str2torch_dtype(self.config.train.param_dtype),
             ):
-                self.trainer.train()
+                self.trainer.step_training()
         except Exception as e:
             import traceback
 
@@ -978,7 +978,7 @@ def run_overfitting_policy(args: argparse.Namespace):
         for step in range(N_STEPS):
             _log_in_master(self, f"Training step {step + 1}/{N_STEPS}")
 
-            global_avg_loss, grad_norm = self.trainer.train(
+            global_avg_loss, grad_norm = self.trainer.step_training(
                 raw_batch, N_STEPS, step, 0, False
             )
 
@@ -1021,7 +1021,7 @@ def run_dummy_policy(args: argparse.Namespace):
     def dummy_execute_policy_to_rollout_unicast(self, command):
         return False
 
-    GRPOTrainer.train = dummy_train_grpo
+    GRPOTrainer.step_training = dummy_train_grpo
     GRPOTrainer.model_load_from_hf = dummy_model_load_from_hf
 
     def get_policy_command_handler(cls, command_type):
@@ -1031,7 +1031,7 @@ def run_dummy_policy(args: argparse.Namespace):
 
     RLPolicyWorker.prepare_shard_infos_for_weight_sync_insts = dummy
     RLPolicyWorker.get_policy_command_handler = get_policy_command_handler
-    SFTTrainer.train = dummy
+    SFTTrainer.step_training = dummy
     SFTPolicyWorker.main_loop = dummy
     assert args is not None
     policy_main(args=args)
@@ -2062,7 +2062,7 @@ def run_gspo_test():
 
     for i in range(total_steps):
         rollouts = rl_worker.dispatch_rollouts()
-        report = rl_worker.trainer.train(
+        report = rl_worker.trainer.step_training(
             rollouts=rollouts,
             current_step=i,
             total_steps=total_steps,
@@ -2134,7 +2134,7 @@ def run_reference_reset_test():
 
     for i in range(total_steps):
         rollouts = rl_worker.dispatch_rollouts()
-        report = rl_worker.trainer.train(
+        report = rl_worker.trainer.step_training(
             rollouts=rollouts,
             current_step=i + 1,
             total_steps=total_steps,
@@ -2227,7 +2227,7 @@ def run_dynamic_batchsize_test(
     rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
     rl_worker.trainer.test_hooked_all_reduce_cnt = 0
     for i in range(total_steps // 4):
-        rl_worker.trainer.train(
+        rl_worker.trainer.step_training(
             rollouts=rl_worker.dispatch_rollouts(),
             current_step=i + 1,
             total_steps=total_steps,
@@ -2244,7 +2244,7 @@ def run_dynamic_batchsize_test(
     rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
     rl_worker.trainer.test_hooked_all_reduce_cnt = 0
     for i in range(total_steps // 4, total_steps // 2):
-        rl_worker.trainer.train(
+        rl_worker.trainer.step_training(
             rollouts=rl_worker.dispatch_rollouts(),
             current_step=i + 1,
             total_steps=total_steps,
@@ -2259,7 +2259,7 @@ def run_dynamic_batchsize_test(
     rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
     rl_worker.trainer.test_hooked_all_reduce_cnt = 0
     for i in range(total_steps // 2, total_steps * 3 // 4):
-        rl_worker.trainer.train(
+        rl_worker.trainer.step_training(
             rollouts=rl_worker.dispatch_rollouts(),
             current_step=i + 1,
             total_steps=total_steps,
@@ -2275,7 +2275,7 @@ def run_dynamic_batchsize_test(
     rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
     rl_worker.trainer.test_hooked_all_reduce_cnt = 0
     for i in range(total_steps * 3 // 4, total_steps * 7 // 8):
-        rl_worker.trainer.train(
+        rl_worker.trainer.step_training(
             rollouts=rl_worker.dispatch_rollouts(),
             current_step=i + 1,
             total_steps=total_steps,
@@ -2291,7 +2291,7 @@ def run_dynamic_batchsize_test(
     rl_worker.trainer.test_hooked_compute_logprobs_cnt = 0
     rl_worker.trainer.test_hooked_all_reduce_cnt = 0
     for i in range(total_steps * 7 // 8, total_steps):
-        rl_worker.trainer.train(
+        rl_worker.trainer.step_training(
             rollouts=rl_worker.dispatch_rollouts(),
             current_step=i + 1,
             total_steps=total_steps,

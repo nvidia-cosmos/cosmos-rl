@@ -212,7 +212,7 @@ class SFTTrainer(LLMTrainer):
             cp_group=cp_group,
         )
 
-    def train(
+    def step_training(
         self,
         global_batch,
         total_steps: int,

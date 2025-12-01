@@ -583,7 +583,7 @@ class SFTPolicyWorker(WorkerBase, CommMixin):
                     ):
                         torch.cuda.cudart().cudaProfilerStop()
 
-                self.trainer.train(
+                self.trainer.step_training(
                     global_batch=global_batch,
                     total_steps=self.total_steps,
                     train_step=self.train_step,

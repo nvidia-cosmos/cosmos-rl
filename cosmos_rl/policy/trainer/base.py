@@ -147,18 +147,11 @@ class Trainer(ABC):
         raise NotImplementedError("build_lr_schedulers method must be implemented")
 
     @abstractmethod
-    def train(self):
+    def step_training(self):
         """
-        Main loop of the trainer.
+        One step of training.
         """
-        raise NotImplementedError("train method must be implemented")
-
-    # @abstractmethod
-    # def train_step(self):
-    #     """
-    #     Train the model for one step.
-    #     """
-    #     raise NotImplementedError("train_step method must be implemented")
+        raise NotImplementedError("train_step method must be implemented")
 
     @abstractmethod
     def export_safetensors(
