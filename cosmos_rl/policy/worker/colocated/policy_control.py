@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from cosmos_rl.colocated.utils import CommandDispatcher
-from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
+from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.utils.logging import logger
 import copy
 from cosmos_rl.dispatcher.command import (
@@ -25,16 +25,16 @@ from cosmos_rl.dispatcher.command import (
 from typing import Type
 
 
-class ColocatedPolicyControlWorker(GRPOTrainer):
+class ColocatedPolicyControlWorker(RLPolicyWorker):
     """
     Colocated Policy Worker class.
-    Inherits from GRPOTrainer.
+    Inherits from RLPolicyWorker.
     Control the policy training control flow in colocated mode.
     """
 
     colocated = True
     policy_command_handler_registry = copy.deepcopy(
-        GRPOTrainer.policy_command_handler_registry
+        RLPolicyWorker.policy_command_handler_registry
     )
 
     def set_command_dispatcher(self, dispatcher: CommandDispatcher):

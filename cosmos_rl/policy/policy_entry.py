@@ -22,14 +22,7 @@ from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
-from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
-from cosmos_rl.policy.trainer.sft_trainer import SFTTrainer
-from cosmos_rl.policy.trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.policy.config import Config as CosmosConfig
-import torch
-from cosmos_rl.dispatcher.api.client import APIClient
-from cosmos_rl.policy.worker.colocated_rl_worker import ColocatedRLControlWorker
+from cosmos_rl.colocated.rl_worker import ColocatedRLControlWorker
 
 
 def policy_entry(**kwargs):

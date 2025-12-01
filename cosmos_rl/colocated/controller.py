@@ -29,10 +29,10 @@ from torch.utils.data import Dataset
 from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.parallelism_map import ParallelizedShardMapper
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
-from cosmos_rl.policy.worker.colocated_policy_control import (
+from cosmos_rl.policy.worker.colocated.policy_control import (
     ColocatedPolicyControlWorker,
 )
-from cosmos_rl.rollout.worker.colocated_rollout_control import (
+from cosmos_rl.rollout.worker.colocated.rollout_control import (
     ColocatedRolloutControlWorker,
 )
 from cosmos_rl.colocated.utils import CommandDispatcher
