@@ -59,7 +59,6 @@ def is_deepep_supported():
             print(f"Failed to import deep_ep: {e}")
     return supported
 
-
 @dataclass
 class MoEArgs:
     n_routed_experts: int
@@ -76,6 +75,7 @@ class MoEArgs:
     moe_inter_dim: int
     norm_topk_prob: bool = False
     fake_balanced_gate: bool = False
+    enable_router_bias: bool = False
 
 
 class MLP(nn.Module):
@@ -355,13 +355,15 @@ class GroupedExpertsDeepEP(nn.Module):
                 tokens_per_expert,
                 trans_b=True,
             )
-            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+            gate, up = torch.chunk(output1, 2, -1)
+            output1_ = F.silu(gate) * up
             output2 = ops.gmm(
                 output1_, self.down_projs.to_local(), tokens_per_expert, trans_b=True
             )
         else:
             output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
-            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+            gate, up = torch.chunk(output1, 2, -1)
+            output1_ = F.silu(gate) * up
             output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
 
         y = self.token_dispatcher.token_unpermutation(output2)
@@ -464,6 +466,13 @@ class Gate(nn.Module):
             torch.empty(args.n_routed_experts), requires_grad=False
         )
         self.e_score_correction_bias_master = None
+        self.enable_router_bias = args.enable_router_bias
+        if self.enable_router_bias:
+            self.e_score_correction_bias = nn.Parameter(
+                torch.empty(args.n_routed_experts), requires_grad=False
+            )
+        else:
+            self.e_score_correction_bias = None
 
         # Cumulative expert load is a tensor representing the number of tokens
         # routed to each expert on the current rank, accumulated across gradient

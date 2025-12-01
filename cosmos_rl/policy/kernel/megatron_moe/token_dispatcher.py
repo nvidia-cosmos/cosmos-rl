@@ -323,6 +323,7 @@ class _DeepepManager(_DispatchManager):
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.dispatched_routing_map,
             fused=self.permute_fusion,
+            probs=self.dispatched_probs
         )
         return hidden_states
 
