@@ -1347,27 +1347,6 @@ class GRPOTrainer(LLMTrainer):
             input_packing_mask=minibatch.get("input_packing_mask", None),
         )
 
-    def model_load_from_hf(self):
-        self.model.load_hf_weights(
-            self.config.policy.model_name_or_path,
-            self.parallel_dims,
-            self.device,
-            revision=self.config.policy.model_revision,
-        )
-        self.model.train()
-        return True
-
-    def model_resume_from_checkpoint(self):
-        self.ckpt_manager.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizers,
-            scheduler=self.lr_schedulers,
-            model_name_or_path=self.config.policy.model_name_or_path,
-            revision=self.config.policy.model_revision,
-        )
-        self.model.train()
-        return True
-
     @cached_property
     def map_w_from_policy_to_rollout(self):
         """
@@ -1427,6 +1406,9 @@ class GRPOTrainer(LLMTrainer):
         assert (
             self.map_w_from_policy_to_rollout is not None
         ), "No parameters to sync found."
+
+        self.model.train()
+
         return False
 
     def build_lr_schedulers(self):

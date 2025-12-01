@@ -40,6 +40,8 @@ from cosmos_rl.policy.trainer.base import Trainer
 from cosmos_rl.policy.trainer.base import extract_from_cuda_tensor, wrap_to_cuda_tensor
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
+from cosmos_rl.policy.trainer.optm import build_lr_schedulers
+from functools import partial
 
 
 class LLMTrainer(Trainer):
@@ -549,3 +551,21 @@ class LLMTrainer(Trainer):
                     daemon=True,
                 )
                 self.upload_thread.start()
+
+    def model_load_from_hf(self):
+        self.model.load_hf_weights(
+            self.config.policy.model_name_or_path,
+            self.parallel_dims,
+            self.device,
+            revision=self.config.policy.model_revision,
+        )
+
+    def model_resume_from_checkpoint(self):
+        ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
+            model=self.model,
+            optimizer=self.optimizers,
+            scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
+            model_name_or_path=self.config.policy.model_name_or_path,
+            revision=self.config.policy.model_revision,
+        )
+        return ckpt_extra_vars

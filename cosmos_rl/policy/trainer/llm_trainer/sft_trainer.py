@@ -647,14 +647,6 @@ class SFTTrainer(LLMTrainer):
             )
         )
 
-    def model_load_from_hf(self):
-        self.model.load_hf_weights(
-            self.config.policy.model_name_or_path,
-            self.parallel_dims,
-            self.device,
-            revision=self.config.policy.model_revision,
-        )
-
     def model_resume_from_checkpoint(self):
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
             model=self.model,
