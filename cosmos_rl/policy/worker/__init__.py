@@ -16,10 +16,8 @@
 
 from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
 from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
-from cosmos_rl.policy.worker.llm_worker import LLMPolicyWorker
 
 __all__ = [
     "SFTPolicyWorker",
     "RLPolicyWorker",
-    "LLMPolicyWorker",
 ]

@@ -17,8 +17,8 @@ import argparse
 from typing import Optional
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.policy.worker.llm_worker import LLMPolicyWorker
 from cosmos_rl.dispatcher.data.packer.base import worker_entry_parser
+from cosmos_rl.policy.llm_entry import llm_entry
 
 
 def main(args: Optional[argparse.Namespace] = None, **kwargs):
@@ -34,9 +34,7 @@ def main(args: Optional[argparse.Namespace] = None, **kwargs):
             )
             raise e
 
-    training_worker = LLMPolicyWorker(**kwargs)
-
-    training_worker.execute()
+    llm_entry(**kwargs)
 
 
 if __name__ == "__main__":
