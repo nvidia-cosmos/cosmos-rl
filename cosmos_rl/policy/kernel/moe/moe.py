@@ -460,9 +460,6 @@ class Gate(nn.Module):
         self.weight = nn.Parameter(
             torch.empty(args.n_routed_experts, args.dim), requires_grad=self.train_gate
         )
-        self.e_score_correction_bias = nn.Parameter(
-            torch.empty(args.n_routed_experts), requires_grad=False
-        )
         self.e_score_correction_bias_master = None
         self.enable_router_bias = args.enable_router_bias
         if self.enable_router_bias:
