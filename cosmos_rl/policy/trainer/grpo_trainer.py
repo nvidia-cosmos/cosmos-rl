@@ -719,6 +719,7 @@ class GRPOTrainer(Trainer):
         logger.info(f"[Policy] Received P2R command: {command.src_replica_name} -> {command.dst_replica_name}")
         logger.info(f"[Policy] My replica: {self.replica_name}, Global rank: {self.global_rank}, World size: {self.world_size}")
         logger.info(f"[Policy] Command src_size: {command.src_replica_size}, dst_size: {command.dst_replica_size}")
+        #return False
         
         assert command.src_replica_size == self.world_size
         if not command.src_replica_name == self.replica_name:
@@ -1167,21 +1168,27 @@ class GRPOTrainer(Trainer):
             )
             assert batch_for_this_step % self.dp_world_size == 0
 
-            dp_id = 0
-            for _ in range(batch_for_this_step):
-                try:
+            # dp_id = 0
+            # for _ in range(batch_for_this_step):
+            #     try:
+            #         rollout = self.data_queue.get(block=True, timeout=None)
+            #     except Empty:
+            #         raise Empty(
+            #             "[Policy] Rollouts queue is empty, please check the dispatcher."
+            #         )
+            #     for i in range(self.world_size):
+            #         if self.parallel_dims.get_rank_in_dim("dp", i) == dp_id:
+            #             scattered_rollouts[i].append(rollout)
+            #             # logger.info(f"[Policy] Rollout {dp_id} dispatched to rank {i}, dp world_size {self.dp_world_size}")
+            #     dp_id += 1
+            #     if dp_id >= self.dp_world_size:
+            #         dp_id = 0
+
+            rollout_per_rank = batch_for_this_step // self.dp_world_size
+            for i in range(self.dp_world_size):
+                for j in range(rollout_per_rank):
                     rollout = self.data_queue.get(block=True, timeout=None)
-                except Empty:
-                    raise Empty(
-                        "[Policy] Rollouts queue is empty, please check the dispatcher."
-                    )
-                for i in range(self.world_size):
-                    if self.parallel_dims.get_rank_in_dim("dp", i) == dp_id:
-                        scattered_rollouts[i].append(rollout)
-                        # logger.info(f"[Policy] Rollout {dp_id} dispatched to rank {i}, dp world_size {self.dp_world_size}")
-                dp_id += 1
-                if dp_id >= self.dp_world_size:
-                    dp_id = 0
+                    scattered_rollouts[i].append(rollout)
         if self.world_size == 1:
             return scattered_rollouts[0]
         dist.scatter_object_list(
@@ -1401,7 +1408,7 @@ class GRPOTrainer(Trainer):
         # Recompute log_probs on policy side before training
         # This recomputes old_log_probs using the current policy (before updates)
         # to ensure consistency and avoid stale values from rollout phase
-        use_saved_batches = True #hasattr(self.config, 'vla') and hasattr(self.config.vla, 'use_saved_batches') and self.config.vla.use_saved_batches
+        use_saved_batches = False #hasattr(self.config, 'vla') and hasattr(self.config.vla, 'use_saved_batches') and self.config.vla.use_saved_batches
         
         if use_saved_batches:
             # Use dispatch pattern: only rank 0 loads, then scatter to all workers
@@ -1549,14 +1556,15 @@ class GRPOTrainer(Trainer):
                 #     if chunk_idx == 0:
                 #         logger.info(f"log_probs {log_probs.shape}, logits {logits.shape}")
                 #         logger.info(f"logits chunk 0: {logits.reshape(-1, 56, 256)[0]}")
+                #         logger.info(f"old_log_prob chunk 0: {old_log_prob.reshape(-1, 56)[0]}")
                 #         logger.info(f"log_probs chunk 0: {log_probs.reshape(-1, 56)[0]}")
                 #         logger.info(f"negative_approx_kl chunk 0: {negative_approx_kl.reshape(-1, 56)[0]}")
-                #     if chunk_idx == 1:
+                #     #if chunk_idx == 1:
                 #         logger.info(f"log_probs {log_probs.shape}, logits {logits.shape}")
-                #         logger.info(f"logits chunk 31: {logits.reshape(-1, 56, 256)[15]}")
-                #         logger.info(f"old_log_prob chunk 31: {old_log_prob.reshape(-1, 56)[15]}")
-                #         logger.info(f"log_probs chunk 31: {log_probs.reshape(-1, 56)[15]}")
-                #         logger.info(f"negative_approx_kl chunk 31: {negative_approx_kl.reshape(-1, 56)[15]}")
+                #         logger.info(f"logits chunk 31: {logits.reshape(-1, 56, 256)[31]}")
+                #         logger.info(f"old_log_prob chunk 31: {old_log_prob.reshape(-1, 56)[31]}")
+                #         logger.info(f"log_probs chunk 31: {log_probs.reshape(-1, 56)[31]}")
+                #         logger.info(f"negative_approx_kl chunk 31: {negative_approx_kl.reshape(-1, 56)[31]}")
                 ratio = torch.exp(negative_approx_kl)
                 # logger.info(f"ratio min: {ratio.reshape(-1, 56).min(dim=-1)}")
                 # logger.info(f"ratio max: {ratio.reshape(-1, 56).max(dim=-1)}")

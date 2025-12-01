@@ -46,23 +46,23 @@ class VLAArgs:
 class VLAModel(BaseModel):
     """
     VLA (Vision-Language-Action) Model for Embodied AI
-    
+
     Supports loading SimpleVLA-RL models:
     - OpenVLA: Original OpenVLA models
     - OpenVLA-OFT: Models with Online Fine-Tuning support
-    
+
     Following cosmos-rl Qwen VL pattern - direct nn.Module instantiation,
     no AutoModel complexity.
     """
-    
+
     @staticmethod
     def supported_model_types():
         return ["openvla", "openvla-oft"]
-    
+
     def __init__(self, vla_args: VLAArgs, init_device: str = "cuda"):
         """
         Initialize VLA model following cosmos-rl pattern
-        
+
         Args:
             vla_args: VLA configuration arguments
             init_device: Device to initialize model on ("cuda", "cpu", or "meta")
@@ -72,7 +72,7 @@ class VLAModel(BaseModel):
         super().__init__(vla_args.hf_config)
         self.config = vla_args
         self.hf_config = vla_args.hf_config
-        
+
         # Create the actual VLA model instance directly (no AutoModel)
         if vla_args.vla_type == "openvla-oft":
             from cosmos_rl.policy.model.vla.openvla_oft.modeling_prismatic import OpenVLAForActionPrediction
@@ -80,14 +80,11 @@ class VLAModel(BaseModel):
         else:  # openvla (default)
             from cosmos_rl.policy.model.vla.openvla.modeling_prismatic import OpenVLAForActionPrediction  
             logger.info("Using OpenVLA direct implementation")
-        
+
         # Create model with specified device (use "meta" for fast initialization)
         logger.info(f"Creating VLA model structure on device: {init_device}")
         with torch.device(init_device):
             self.model = OpenVLAForActionPrediction(self.hf_config)
-
-        # self.model.to(dtype=torch.bfloat16)
-        # self._replace_rope_modules_float32()
 
         # Initialize additional attributes
         self.processor = None

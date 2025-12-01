@@ -525,7 +525,7 @@ class ParallelTopoMapper:
         if self.is_policy:
             self.parallelism_info_for_dtensor_params()
         else:
-            self.parallelism_info_for_vllm_params()
+            self.parallelism_info_for_dtensor_params()
 
         for dest_name, shape in params:
             split_dim_map, dim_to_parallel, pp_rank, dims_rank_info = (
@@ -643,9 +643,9 @@ class ParallelTopoMapper:
         The method checks if the model parameters are distributed tensors (DTensor) and extracts their detailed shard information from DTensor specifications.
         This method updates a dictionary with parameter names as keys and their parallel dimensions with shard information as values.
         """
-        assert (
-            self.is_policy
-        ), "parallelism_info_for_dtensor_params should only be called for policy model."
+        # assert (
+        #     self.is_policy
+        # ), "parallelism_info_for_dtensor_params should only be called for policy model."
         if hasattr(self, "parallelism_info_for_params"):
             return self.parallelism_info_for_params
         self.parallelism_info_for_params = {}
@@ -1520,14 +1520,15 @@ class ParallelizedShardMapper:
                 logger.warning(
                     f"[Rollout] No recv instructions generated for parameter {dest_name} in sorted_params, rollout rank {r_rank}."
                 )
+                continue
             if insts_for_group:
                 rollout_from_policy_insts.append(
                     WeightSyncInstructionsGroup(insts_for_group).__dict__
                 )
-            else:
-                raise ValueError(
-                    f"[Rollout] No recv insts_for_group generated for parameter {dest_name} in sorted_params, rollout rank {r_rank}."
-                )
+            # else:
+            #     raise ValueError(
+            #         f"[Rollout] No recv insts_for_group generated for parameter {dest_name} in sorted_params, rollout rank {r_rank}."
+            #     )
         for group in self.param_groups:
             insts_for_group = []
             for dest_name in group:

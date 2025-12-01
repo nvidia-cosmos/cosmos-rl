@@ -196,6 +196,13 @@ def apply_vla_fsdp(
     
     # VLAModel wraps the actual model in self.model
     actual_model = model.model if hasattr(model, 'model') else model
+
+    if reshard_after_forward_policy == "always":
+        reshard_after_forward = True
+    elif reshard_after_forward_policy == "never":
+        reshard_after_forward = False
+    else: # default
+        reshard_after_forward = True
     
     # Count layers for logging
     if hasattr(actual_model, 'language_model') and actual_model.language_model is not None:
@@ -204,17 +211,16 @@ def apply_vla_fsdp(
             n_layers = len(llm.model.layers)
             logger.info(f"Language model has {n_layers} transformer layers (will be sharded by top-level FSDP)")
             for i in range(n_layers):
-                fully_shard(llm.model.layers[i], **fsdp_config, reshard_after_forward=True)
-            fully_shard(llm.model.embed_tokens, **fsdp_config, reshard_after_forward=True)
-            fully_shard(llm.model.norm, **fsdp_config, reshard_after_forward=True)
-        fully_shard(llm.lm_head, **fsdp_config, reshard_after_forward=True)
+                fully_shard(llm.model.layers[i], **fsdp_config, reshard_after_forward=reshard_after_forward)
+            fully_shard(llm.model.embed_tokens, **fsdp_config, reshard_after_forward=reshard_after_forward)
+            fully_shard(llm.model.norm, **fsdp_config, reshard_after_forward=reshard_after_forward)
+        fully_shard(llm.lm_head, **fsdp_config, reshard_after_forward=reshard_after_forward)
     
-    fully_shard(actual_model.vision_backbone, **fsdp_config, reshard_after_forward=True)
-    fully_shard(actual_model.projector, **fsdp_config, reshard_after_forward=True)
+    fully_shard(actual_model.vision_backbone, **fsdp_config, reshard_after_forward=reshard_after_forward)
+    fully_shard(actual_model.projector, **fsdp_config, reshard_after_forward=reshard_after_forward)
     # Apply FSDP to each named module within actual_model
     # This includes vision_backbone, projector, action_head, and language_model
     # All parameters will be in parallelism_info_for_params for P2R sync
-
     logger.info(f"VLA FSDP applied: All components (vision backbone, projector, language model, action head) sharded by FSDP")
 
 

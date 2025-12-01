@@ -25,6 +25,8 @@ from multiprocessing import Process, Queue
 from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
 from cosmos_rl.rollout.schema import RolloutResult
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.model.base import ModelRegistry
 from cosmos_rl.dispatcher.data.schema import RLPayload
@@ -147,7 +149,7 @@ class VLARollout(RolloutBase):
         
         return max_steps_map.get(task_suite, self.vla_config.max_episode_length)
     
-    def init_engine(self, quantization: str, seed: int, load_format: str):
+    def init_engine(self, quantization: str, seed: int, load_format: str, parallel_dims: ParallelDims):
         """
         Initialize the VLA processing engine with actual model loading
         
@@ -160,9 +162,6 @@ class VLARollout(RolloutBase):
             logger.info(f"Initializing VLA engine with load_format={load_format}")
             
             model_path = self.config.policy.model_name_or_path
-
-            # Initialize the processor for VLA models using PrismaticProcessor
-            # IMPORTANT: Must use PrismaticProcessor, not generic AutoProcessor!
             
             if self.vla_type == "openvla-oft":
                 from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import PrismaticProcessor
@@ -173,7 +172,7 @@ class VLARollout(RolloutBase):
                 model_path, 
                 trust_remote_code=True
             )
-            self._init_dummy_vla_model(model_path)
+            self._init_dummy_vla_model(model_path, parallel_dims)
             
             # Initialize VLA model inference
             self.model_inference = VLAModelInference(self.module, self.processor, self)
@@ -185,7 +184,7 @@ class VLARollout(RolloutBase):
             traceback.print_exc()
             raise
     
-    def _init_dummy_vla_model(self, model_path: str):
+    def _init_dummy_vla_model(self, model_path: str, parallel_dims: ParallelDims):
         """
         Initialize VLA model structure without loading weights (dummy mode)
         Weights will be synchronized from policy worker via NCCL
@@ -212,6 +211,11 @@ class VLARollout(RolloutBase):
         
         # Save both the wrapper and inner module
         self.vla_model = vla_model  # Keep wrapper for weight_sync_transforms
+        # Apply parallelism to the model
+        parallelize_fn, _ = vla_model.parallelize_fn
+        self.config.train.fsdp_offload = True
+        self.config.train.fsdp_reshard_after_forward = "never"
+        parallelize_fn(vla_model, parallel_dims, self.config, pp_loss_fn=None)
         self.module = vla_model.model  # Inner OpenVLAForActionPrediction for inference
         self.module.eval()
         
@@ -681,7 +685,7 @@ class VLARollout(RolloutBase):
         # Episode execution loop
         step = 0
         vla_history = []
-        
+
         while step < self.max_steps:
             # Find active environments
             active_indices = [i for i, r in enumerate(task_records) if r['active']]
@@ -787,6 +791,9 @@ class VLARollout(RolloutBase):
             successes = sum(1 for r in task_records if r['complete'])
             success_rate = successes / group_size
             
+            # if torch.distributed.get_rank() > 0:
+            #     logger.info("ignore non-rank 0 results")
+            #     return None
             # Check if success rate is in valid range
             if not (self.success_rate_threshold_low <= success_rate <= self.success_rate_threshold_high):
                 logger.info(
@@ -844,7 +851,7 @@ class VLARollout(RolloutBase):
                     proprio=None
                 )
                 logits, _, old_log_probs = outputs.logits, outputs.entropy, outputs.logprobs
-            # if episode_idx == 0:
+            # if torch.distributed.get_rank() == 0 and episode_idx == 0:
             #     logger.info(f"input_ids {input_ids_batch.shape}, logits {logits.shape}, log_probs {old_log_probs.shape}")
             #     logger.info(f"logits chunk 0: {logits[0]}")
             #     logger.info(f"old_log_probs chunk 0: {old_log_probs.reshape(-1, 56)[0]}")

@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import os
+
+from cosmos_rl.policy.model.vla.parallelize import apply_vla_fsdp
 os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Suppress warning when forking with tokenizers
 
 import threading
@@ -645,7 +647,8 @@ class VLARolloutWorker(RolloutWorkerBase):
             self.rollout.init_engine(
                 quantization="none",  # VLA models don't use quantization
                 seed=self.config.rollout.seed,
-                load_format="dummy"  # Structure only, weights from policy worker
+                load_format="dummy",  # Structure only, weights from policy worker
+                parallel_dims=self.parallel_dims
             )
             elapsed = time.time() - start_time
             logger.info(f"[VLA Rollout] ✅ Engine initialization completed in {elapsed:.2f}s")
@@ -1109,6 +1112,7 @@ class VLARolloutWorker(RolloutWorkerBase):
                 logger.info(f"[VLA Rollout] Non-src replica initializing engine with dummy weights...")
                 self.rollout.init_engine(
                     quantization="none",
+                    parallel_dims=self.parallel_dims,
                     seed=self.config.rollout.seed,
                     load_format="dummy"
                 )
