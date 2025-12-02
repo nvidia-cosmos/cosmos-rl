@@ -1,0 +1,6 @@
+# Pin torch packages to CUDA 12.8 nightly versions
+# This prevents any dependency from installing CPU-only versions on ARM builds.
+torch==2.10.0.dev20251029+cu128
+torchvision==0.25.0.dev20251030
+torchaudio==2.10.0.dev20251030
+

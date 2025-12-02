@@ -74,6 +74,7 @@ from cosmos_rl.utils.api_suffix import (
     COSMOS_API_ROLLOUT_SHARD_RECV_INSTS_SUFFIX,
     COSMOS_API_GET_TRAINABLE_PARAMS_SUFFIX,
 )
+from cosmos_rl.utils.decorators import monitor_status
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker, worker_entry_parser
 from cosmos_rl.utils.payload import extract_rollouts
 from fastapi.responses import Response
@@ -508,7 +509,7 @@ def _serialize_replicas(replicas: Dict[str, Replica]) -> List[Dict]:
         result.append(replica.to_dict())
     return result
 
-
+@monitor_status(name="Cosmos-RL Web Panel", mode="web_panel")
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     data_packer: Optional[BaseDataPacker] = None,

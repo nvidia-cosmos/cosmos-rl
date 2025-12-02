@@ -30,6 +30,8 @@ import toml
 import tempfile
 import copy
 
+from cosmos_rl.utils.decorators import monitor_status
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")
 
@@ -734,7 +736,7 @@ def get_hostname_from_host(ip):
         logger.error(f"Error: {e}")
         return None
 
-
+@monitor_status(name="Cosmos-RL Launcher", mode="launch")
 def main():
     args, parser = parse_args()
     if args.debug:

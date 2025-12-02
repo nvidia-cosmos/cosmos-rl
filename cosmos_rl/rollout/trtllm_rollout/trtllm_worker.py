@@ -540,10 +540,19 @@ class CosmosTRTLLMWorker(TrtLLMRolloutWorker, PyExecutor):
 
         current_step = broadcast_command.weight_step
         if current_step is not None and current_step > 0:
-            should_do_validation = self.config.validation.enable and (
-                current_step % self.config.validation.freq == 0
-                or current_step == broadcast_command.total_steps
-            )
+            should_do_validation = False
+            if self.config.validation.enable:
+                if self.config.validation.freq_in_epoch > 0:
+                    # Epoch-based validation (takes priority)
+                    # For rollout workers, we rely on the controller to determine validation timing
+                    # This is handled by the validation command from controller
+                    should_do_validation = False  # Will be activated by validation command
+                elif self.config.validation.freq > 0:
+                    # Step-based validation (fallback)
+                    should_do_validation = (
+                        current_step % self.config.validation.freq == 0
+                        or current_step == broadcast_command.total_steps
+                    )
             if should_do_validation:
                 self.cosmos_weight_sync_queue.put(
                     ValidationInstruction(current_step, broadcast_command.total_steps)

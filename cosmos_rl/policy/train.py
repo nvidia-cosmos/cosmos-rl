@@ -22,7 +22,10 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
 from cosmos_rl.dispatcher.api.client import APIClient
 
+from cosmos_rl.utils.decorators import monitor_status
 
+
+@monitor_status(name="Cosmos-RL Policy", mode="train")
 def main(*args, **kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 

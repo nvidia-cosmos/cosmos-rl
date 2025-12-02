@@ -19,6 +19,7 @@ import toml
 from torch.utils.data import Dataset
 from datasets import concatenate_datasets
 import cosmos_rl.utils.util as util
+from cosmos_rl.utils.decorators import monitor_status
 from cosmos_rl.launcher.worker_entry import main as launch_dispatcher
 from cosmos_rl.policy.config import Config
 
@@ -53,7 +54,8 @@ class SFTRawTextDataset(Dataset):
         return raw_item
 
 
-if __name__ == "__main__":
+@monitor_status(name="Cosmos-RL Dummy SFT Dataset", mode="dataset")
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_known_args()[0]
@@ -76,3 +78,6 @@ if __name__ == "__main__":
     launch_dispatcher(
         dataset=SFTRawTextDataset(dataset=train_dataset),
     )
+
+if __name__ == "__main__":
+    main()
