@@ -59,6 +59,7 @@ def is_deepep_supported():
             print(f"Failed to import deep_ep: {e}")
     return supported
 
+
 @dataclass
 class MoEArgs:
     n_routed_experts: int
