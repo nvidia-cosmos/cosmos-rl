@@ -505,6 +505,7 @@ class PolicyStatusManager:
                 # In colocated mode, we initially trigger data fetch for step 1 since the rollouts are generated locally.
                 self.current_step += 1
                 for replica in valid_replicas:
+                    self.remain_samples_num -= self.config.train.train_batch_per_replica
                     command.DataFetchCommand.trigger(
                         replica=replica,
                         items_count=self.config.train.train_batch_per_replica,
@@ -718,6 +719,7 @@ class PolicyStatusManager:
 
         if not hasattr(self, "report_data_list"):
             self.report_data_list = []
+
         self.report_data_list.append(report_data)
         if self.all_reduced():
             self.samples_on_the_fly -= self.config.train.train_batch_per_replica * len(
@@ -831,15 +833,23 @@ class PolicyStatusManager:
                                 policy_report_data[k] = np.mean(
                                     [data.get(k, 0) for data in self.report_data_list]
                                 )
+                    if self.config.mode == "colocated":
+                        for data in self.report_data_list:
+                            # Handle dynamic sampling statistics update in colocated mode
+                            self.update_dynamic_sampling_statistics(data)
 
                     if len(self.filter_records) > 0:
                         total_samples_for_filtering = sum(
                             v for v in self.filter_records.values()
                         )
-                        for k, v in self.filter_records.items():
-                            policy_report_data.update(
-                                {f"rollout/{k}_ratio": v / total_samples_for_filtering}
-                            )
+                        if total_samples_for_filtering > 0:
+                            for k, v in self.filter_records.items():
+                                policy_report_data.update(
+                                    {
+                                        f"rollout/{k}_ratio": v
+                                        / total_samples_for_filtering
+                                    }
+                                )
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
                     )

@@ -14,7 +14,6 @@
 # limitations under the License.
 
 from typing import List, Optional, Callable, Any, Type, Union
-from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.replica import Replica
 from cosmos_rl.dispatcher.protocol import Role, RolloutRequest
@@ -23,6 +22,7 @@ from cosmos_rl.utils.wandb_logger import (
     is_wandb_available,
     init_wandb,
 )
+from cosmos_rl.utils.util import is_master_rank
 import cosmos_rl.utils.network_util as network_util
 import torch
 from torch.utils.data import Dataset
@@ -83,7 +83,6 @@ class ColocatedController(Controller):
 
     def setup(
         self,
-        parallel_dims: ParallelDims,
         policy: ColocatedPolicyControlWorker,
         rollout: ColocatedRolloutControlWorker,
         command_dispatcher: CommandDispatcher,
@@ -99,7 +98,6 @@ class ColocatedController(Controller):
         """
         Setup the colocated controller with policy and rollout workers.
         Args:
-            parallel_dims (ParallelDims): The parallelism dimensions.
             policy (ColocatedPolicyControlWorker): The policy trainer instance.
             rollout (ColocatedRolloutControlWorker): The rollout worker instance.
             command_dispatcher (CommandDispatcher): The command dispatcher for issuing commands.
@@ -112,7 +110,6 @@ class ColocatedController(Controller):
             val_sampler (Optional[Callable]): The validation data sampler.
             val_batch_sampler (Optional[Callable]): The validation data batch sampler.
         """
-        self.parallel_dims = parallel_dims
         self.remote_command_manager = CommandDispatcher(
             [policy.replica_name, rollout.replica_name],
         )
@@ -316,6 +313,13 @@ class ColocatedController(Controller):
             )
         return need_sync_weight
 
+    def advance_iteration(self):
+        """
+        Advance the training iteration for new iteration of rollout and policy.
+        """
+        self.train_report_data[self.current_step] = {}
+        self.current_step += 1
+
     def rollout_completed_for_data_fetch_n_training(self, required_rollouts: int):
         """
         Notify the controller that rollouts have been completed and trigger data fetch command.
@@ -324,7 +328,6 @@ class ColocatedController(Controller):
             required_rollouts (int): Number of rollouts that have been completed.
         """
         do_save = False
-        self.current_step += 1
 
         if self.current_step == self.total_steps:
             # Always save checkpoint at the last step
@@ -415,19 +418,19 @@ class ColocatedController(Controller):
                 "rollout/filter_reward_max": np.max(filter_rewards).item(),
                 "rollout/filter_reward_min": np.min(filter_rewards).item(),
             }
-            self.train_report_data[self.current_step] = report_data
+            self.train_report_data.setdefault(self.current_step, {}).update(report_data)
 
     def put_rollouts(self, rollout: RolloutRequest):
         """
         Put rollouts into the policy's data queue.
         This method extracts rollouts from the rollout request and enqueues them for training.
         """
+        for k, v in rollout.metrics.items():
+            # Handle dynamic sampling statistics update in colocated mode
+            self.train_report_data.setdefault(self.current_step, {})[k] = (
+                self.train_report_data.get(self.current_step, {}).get(k, 0) + v
+            )
         rollouts_list = extract_rollouts(rollout.payloads, rollout.is_end)
-        # Update the statistics for dynamic sampling used for metrics collection
-        # if self.config.train.train_policy.variant == "dapo":
-        #     self.policy_status_manager.update_dynamic_sampling_statistics(
-        #         rollout.metrics
-        #     )
         # Flatten the rollouts into a single list
         rollouts = [
             rollout
@@ -438,7 +441,7 @@ class ColocatedController(Controller):
         gathered_rollouts = dist_util.all_gather_object_cpu(
             rollouts,
             device=torch.device("cpu"),
-            group=self.parallel_dims.mesh["dp"].get_group(),
+            group=self.rollout.parallel_dims.mesh["dp"].get_group(),
         )
         rollouts = [rollout for sublist in gathered_rollouts for rollout in sublist]
         if len(rollouts) > 0:
@@ -446,7 +449,10 @@ class ColocatedController(Controller):
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"
                 f"example: rollouts[0]\n{rollouts[0]}"
             )
-        if self.parallel_dims.mesh["dp"].get_local_rank() == 0:
+        assert (
+            self.rollout.parallel_dims.cp_coord[1] == 1
+        ), "Colocated rollout worker only supports cp size 1."
+        if self.rollout.parallel_dims.mesh["dp"].get_local_rank() == 0:
             for rollout in rollouts:
                 self.policy.data_queue.put_nowait(rollout)
 
@@ -478,3 +484,17 @@ class ColocatedController(Controller):
         if isinstance(self.policy.trainer.model, HFModel):
             return self.policy.trainer.model.model
         return self.policy.trainer.model
+
+    def training_end_ack(self):
+        """
+        Send the training end acknowledgment to the controller.
+        Args:
+        """
+        if is_master_rank(self.policy.parallel_dims, self.policy.global_rank):
+            self.policy.api_client.post_policy_train_ack(
+                self.policy.replica_name,
+                self.current_step - 1,
+                self.current_step - 1,
+                False,
+                {},
+            )

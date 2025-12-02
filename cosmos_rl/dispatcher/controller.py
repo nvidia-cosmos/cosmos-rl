@@ -223,7 +223,7 @@ class Controller:
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
 
-        if not is_validation:
+        if not is_validation and not self.config.mode == "colocated":
             # Throttle the generation speed:
             # 1. Detect the current left pending rollouts in all policy replicas.
             # 2. Check the config.train.train_policy.allowed_outdated_steps.
@@ -249,6 +249,7 @@ class Controller:
             (not is_validation)
             and self.config.train.train_policy.on_policy
             and len(self.rollout_status_manager.replica_scaling_log) == 0
+            and not self.config.mode == "colocated"
         ):
             # Fully Synchronized mode is enabled, we need to tag the prompt with specific weight-version
             global_batch_size = (

@@ -73,9 +73,11 @@ class ColocatedPolicyControlWorker(RLPolicyWorker):
             return False
         return False
 
-    def consume_command(self, command_type: Type[Command] = Command) -> bool:
+    def consume_command(
+        self, command_type: Type[Command] = Command, no_exec=False
+    ) -> bool:
         """
-        Consume one command from controller.
+        Consume one command from the command dispatcher.
         """
         if self.global_rank == 0:
             commands = []
@@ -116,6 +118,8 @@ class ColocatedPolicyControlWorker(RLPolicyWorker):
             return False
         cmd = self.command_buffer.get_nowait()
         assert isinstance(cmd, command_type), f"Invalid command type: {type(cmd)}"
+        if no_exec:
+            return False
         logger.debug(f"[Policy] Executing command: {cmd}")
         abort = self.execute_command(cmd)
         return abort

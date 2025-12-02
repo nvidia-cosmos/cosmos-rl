@@ -52,15 +52,21 @@ class ColocatedRLControlWorker:
             parallel_dims (ParallelDims): The parallelism dimensions.
         """
         self.config = config
-        self.parallel_dims = parallel_dims
         self.policy = ColocatedPolicyControlWorker(
             config,
             parallel_dims,
             **kwargs,
         )
+        # Setting up rollout parallel dims
+        rollout_parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
+        rollout_parallel_dims.build_mesh(device_type="cuda")
+        assert (
+            rollout_parallel_dims.world_size == parallel_dims.world_size
+        ), "Rollout and Policy parallel dims must have the same world size in colocated mode."
+
         self.rollout = ColocatedRolloutControlWorker(
             config,
-            parallel_dims,
+            rollout_parallel_dims,
             **kwargs,
         )
         self.command_dispatcher = CommandDispatcher(
@@ -96,7 +102,6 @@ class ColocatedRLControlWorker:
         """
         self.controller = ColocatedController()
         self.controller.setup(
-            parallel_dims=self.parallel_dims,
             policy=self.policy,
             rollout=self.rollout,
             command_dispatcher=self.command_dispatcher,
@@ -130,16 +135,17 @@ class ColocatedRLControlWorker:
 
         is_end = False
         while not is_end:
+            self.controller.advance_iteration()
             assert (
                 self.config.train.train_batch_per_replica
                 % self.config.rollout.n_generation
-                % self.parallel_dims.mesh["dp"].size()
+                % self.rollout.parallel_dims.mesh["dp"].size()
                 == 0
-            ), f"train_batch_per_replica {self.config.train.train_batch_per_replica} must be divisible by n_generation {self.config.rollout.n_generation} and data parallel size {self.parallel_dims.mesh['dp'].size()}."
+            ), f"train_batch_per_replica {self.config.train.train_batch_per_replica} must be divisible by n_generation {self.config.rollout.n_generation} and data parallel size {self.rollout.parallel_dims.mesh['dp'].size()}."
             n_prompts_per_train = (
                 self.config.train.train_batch_per_replica
                 // self.config.rollout.n_generation
-                // self.parallel_dims.mesh["dp"].size()
+                // self.rollout.parallel_dims.mesh["dp"].size()
             )
             while n_prompts_per_train > 0:
                 logger.debug(
@@ -155,17 +161,24 @@ class ColocatedRLControlWorker:
                 self.controller.pending_policy_samples_all_replicas()
                 < self.config.train.train_batch_per_replica
             ):
+                if self.controller.pending_policy_samples() > 0:
+                    logger.debug(
+                        f"[Rollout] Not enough rollouts generated for training in DAPO. Current pending samples: {self.controller.pending_policy_samples()}, required: {self.config.train.train_batch_per_replica}. Keep generating rollouts..."
+                    )
                 is_end, _ = self.rollout.rollout_for_one_minor_step()
                 self.rollout.report_rollouts(block=True)
                 if is_end:
                     break
-            if self.controller.pending_policy_samples_all_replicas() <= 0:
-                break
-
-            self.controller.rollout_completed_for_data_fetch_n_training(
-                self.controller.pending_policy_samples_all_replicas()
-            )
-            self.policy.consume_command(DataFetchCommand)
+            pending_samples = self.controller.pending_policy_samples_all_replicas()
+            self.controller.rollout_completed_for_data_fetch_n_training(pending_samples)
+            if pending_samples >= self.config.train.train_batch_per_replica:
+                self.policy.consume_command(DataFetchCommand)
+            else:
+                logger.warning(
+                    f"[Rollout] No enough prompts to generate rollouts {pending_samples} < {self.config.train.train_batch_per_replica}."
+                )
+                self.policy.consume_command(DataFetchCommand, no_exec=True)
+                self.controller.training_end_ack()
 
             need_sync_weight = (
                 self.controller.rollout_consume_one_step_commands_util_r2r()
@@ -179,6 +192,9 @@ class ColocatedRLControlWorker:
 
                 # Process the RolloutToRolloutBroadcast command
                 self.rollout.consume_command(RolloutToRolloutBroadcastCommand)
+
+            if self.rollout.shutdown_signal.is_set():
+                is_end = True
 
     def execute(self):
         """
