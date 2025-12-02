@@ -24,7 +24,7 @@ from functools import partial
 
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.policy.trainer.sft_trainer import async_safe_ce
+from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import async_safe_ce
 from cosmos_rl.dispatcher.data.packer.qwen3_vl_data_packer import (
     Qwen3_VL_DataPacker,
 )

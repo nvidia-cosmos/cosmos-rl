@@ -29,10 +29,8 @@ from cosmos_rl.rollout.worker.rollout_control_worker import (
 class LLMRolloutWorker(WorkerBase):
     def __init__(self, **kwargs):
         # For LLM, config is retrieved from controller, so we pass None to the base class.
-        # self.config will be set in worker_init.
-        super().__init__(None, **kwargs)
+        super().__init__(None)
 
-    def worker_init(self, **kwargs):
         api_client = APIClient(role="ROLLOUT")
         metadata = api_client.get_controller_metadata()
 
