@@ -228,9 +228,12 @@ def apply_fsdp(
         logger.info("Applying FSDP to the language model embed_tokens")
         fully_shard(model.embed_tokens, **fsdp_config, reshard_after_forward=True)
     fully_shard(model.language_model, **fsdp_config, reshard_after_forward=True)
-    # No need to shard the whole model wrapper and model.model again
-    # The whole model and model.model is already inclued in the above shards
-    # fully_shard(model.model, **fsdp_config, reshard_after_forward=True)
+    if model.model is not model.language_model:
+        # model.model might be the same with model.language_model which is already shard above,
+        # so we only shard it when not the same to avoid redundant sharding assertion error.
+        fully_shard(model.model, **fsdp_config, reshard_after_forward=True)
+    # No need to shard the whole model wrapper since the whole model only has model.model
+    # The whole model is already included in the above shards
 
 
 def apply_ddp(
