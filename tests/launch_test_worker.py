@@ -332,11 +332,7 @@ class TestPolicyWorker:
     def execute(self):
         assert self.trainer is not None, "[Policy] Trainer has not been built."
         try:
-            with torch.autocast(
-                device_type="cuda",
-                dtype=util.str2torch_dtype(self.config.train.param_dtype),
-            ):
-                self.main_loop()
+            self.main_loop()
         except Exception as e:
             import traceback
 
