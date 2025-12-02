@@ -221,7 +221,7 @@ class DeepseekV3MoEModel(BaseModel):
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
-        save_dcp: bool=False,
+        save_dcp: bool = False,
         revision: Optional[str] = None,
     ):
         dcp_checkpoint_path = os.path.join(

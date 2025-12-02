@@ -76,6 +76,7 @@ class MoEArgs:
     moe_inter_dim: int
     norm_topk_prob: bool = False
     fake_balanced_gate: bool = False
+    enable_router_bias: bool = False
 
 
 class MLP(nn.Module):
@@ -460,10 +461,14 @@ class Gate(nn.Module):
         self.weight = nn.Parameter(
             torch.empty(args.n_routed_experts, args.dim), requires_grad=self.train_gate
         )
-        self.e_score_correction_bias = nn.Parameter(
-            torch.empty(args.n_routed_experts), requires_grad=False
-        )
         self.e_score_correction_bias_master = None
+        self.enable_router_bias = args.enable_router_bias
+        if self.enable_router_bias:
+            self.e_score_correction_bias = nn.Parameter(
+                torch.empty(args.n_routed_experts), requires_grad=False
+            )
+        else:
+            self.e_score_correction_bias = None
 
         # Cumulative expert load is a tensor representing the number of tokens
         # routed to each expert on the current rank, accumulated across gradient

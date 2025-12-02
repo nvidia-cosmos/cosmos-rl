@@ -418,6 +418,7 @@ class Qwen3MoE(BaseModel):
             aux_loss_coeff=model_args.aux_loss_coeff,
             score_func=getattr(model_args.hf_config, "scoring_func", "softmax"),
             route_scale=getattr(model_args.hf_config, "routed_scaling_factor", 1.0),
+            enable_router_bias=False,
             dim=model_args.dim,
             moe_inter_dim=model_args.ffn_dim,
         )

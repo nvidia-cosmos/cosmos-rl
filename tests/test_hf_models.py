@@ -27,6 +27,7 @@ from cosmos_rl.policy.model.hf_models import HFModel
 from cosmos_rl.policy.config import Config as CosmosConfig, ParallelismConfig
 from accelerate import init_on_device
 
+
 @contextmanager
 def cosmos_default_dtype(dtype: torch.dtype):
     old = torch.get_default_dtype()
@@ -57,6 +58,7 @@ def test_cosmos_hf_model(model, inputs):
     with torch.no_grad():
         logits = model(**inputs)
         return logits[:, -1, :]
+
 
 class TestHFModel(unittest.TestCase):
     def test_post_to_empty_hook(self):
@@ -169,11 +171,11 @@ class TestHFModel(unittest.TestCase):
                         max_position_embeddings=max_position_embeddings,
                     )
             cosmos_hf_model._apply(
-                    lambda t: torch.empty_like(t, device="cuda")
-                    if t.device.type == "meta"
-                    else t.to("cuda"),
-                    recurse=True,
-                )
+                lambda t: torch.empty_like(t, device="cuda")
+                if t.device.type == "meta"
+                else t.to("cuda"),
+                recurse=True,
+            )
             cosmos_hf_model.post_to_empty_hook(CosmosConfig())
             parallel_dims = ParallelDims.from_config(ParallelismConfig(tp_size=1))
             cosmos_hf_model.load_hf_weights(
