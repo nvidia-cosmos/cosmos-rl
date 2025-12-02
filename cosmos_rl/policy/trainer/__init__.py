@@ -564,6 +564,8 @@ class Trainer(CommMixin):
         len_params = 0
         # It's a HFModel, we need to sync the named buffers
         state_dict = self.model.state_dict()
+        for name, buffer in self.model.named_buffers():
+            logger.info(f"LMS: {name}, dtype: {buffer.dtype}, shape: {buffer.shape}, device: {buffer.device}")
         state_dict.update(dict(self.model.named_buffers()))
         model_state_dict = [state_dict]
 
@@ -588,10 +590,10 @@ class Trainer(CommMixin):
                     dest_name, obj, in_place=obj.is_cuda
                 )
                 if is_send:
-                    logger.info(f"LMS: send {dest_name} {local_view.shape} {local_view.dtype} {local_view.device}")
+                    # logger.info(f"LMS: send {dest_name} {local_view.shape} {local_view.dtype} {local_view.device}")
                     send_hook(local_view)
                 else:
-                    logger.info(f"LMS: recv {dest_name} {local_view.shape} {local_view.dtype} {local_view.device}")
+                    # logger.info(f"LMS: recv {dest_name} {local_view.shape} {local_view.dtype} {local_view.device}")
                     recv_hook(local_view)
                     if isinstance(obj, torch.distributed.tensor.DTensor):
                         to_write = obj.to_local()
