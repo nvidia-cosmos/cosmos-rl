@@ -307,6 +307,7 @@ class GRPOTrainer(Trainer):
         self.replica_batch_for_this_step = 0
         self.mini_batch = self.grpo_config.mini_batch
         self.batch_size_per_optimize = self.grpo_config.batch_size_per_optimize
+        self.current_global_step = 0  # Track current weight version for on-policy filtering
 
         # For Polocy to Rollout weight mapping
         self.policy_to_rollout_insts = None
@@ -937,6 +938,7 @@ class GRPOTrainer(Trainer):
 
         assert self.replica_name == command.replica_name
         self.replica_batch_for_this_step = command.items_count
+        self.current_global_step = command.global_step  # Track for on-policy filtering
 
         is_fake_step = self.replica_batch_for_this_step == 0
         if not is_fake_step:
@@ -1399,7 +1401,7 @@ class GRPOTrainer(Trainer):
         # Recompute log_probs on policy side before training
         # This recomputes old_log_probs using the current policy (before updates)
         # to ensure consistency and avoid stale values from rollout phase
-        use_saved_batches = True #hasattr(self.config, 'vla') and hasattr(self.config.vla, 'use_saved_batches') and self.config.vla.use_saved_batches
+        use_saved_batches = False #hasattr(self.config, 'vla') and hasattr(self.config.vla, 'use_saved_batches') and self.config.vla.use_saved_batches
         
         if use_saved_batches:
             # Use dispatch pattern: only rank 0 loads, then scatter to all workers
@@ -1486,6 +1488,7 @@ class GRPOTrainer(Trainer):
             trial_id = getattr(policy_input, 'trial_id', -1)
             gen_idx = getattr(policy_input, 'gen_idx', -1)
             num_steps = policy_input.num_steps
+            weight_version = getattr(policy_input, 'weight_version', -1)
 
             episode_data = self.data_packer.policy_collate_fn([policy_input], max_steps=64)
             padded_num_steps = episode_data['input_ids'].shape[1]
@@ -1498,7 +1501,7 @@ class GRPOTrainer(Trainer):
             #logger.info(f"episode_logprob_masks: {episode_logprob_masks.shape}")
             episode_mask_sum = episode_logprob_masks.sum()
             logger.info(
-                f"[VLA Train] Episode {episode_idx+1}/{len(policy_inputs)}: "
+                f"[VLA Train] Episode {episode_idx+1}/{len(policy_inputs)}: task {task_id}_{trial_id}_{gen_idx}, weight_version={weight_version}, "
                 f"{num_steps} chunks, {episode_mask_sum // 7} episode steps, advantage={advantage}, temperature={self.config.train.train_policy.temperature}"
             )
             

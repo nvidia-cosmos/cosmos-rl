@@ -1328,6 +1328,7 @@ class VLARolloutWorker(RolloutWorkerBase):
                     'task_id': env_info.get('task_id', 0),
                     'trial_id': env_info.get('trial_id', 0),
                     'gen_idx': env_info.get('gen_idx', 0),
+                    'weight_version': self.current_weight_version if self.current_weight_version > 1 else 0
                 }
                 
                 # Add trajectory data if available (from dedicated vla_trajectory field)

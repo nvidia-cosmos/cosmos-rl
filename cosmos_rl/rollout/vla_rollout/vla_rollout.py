@@ -100,7 +100,7 @@ class VLARollout(RolloutBase):
         # Success rate thresholds for GRPO filtering (default member variables)
         # NOTE: These are different from PPO epsilon_low/high which are clipping ratios!
         self.success_rate_threshold_low = 0.1
-        self.success_rate_threshold_high = 1
+        self.success_rate_threshold_high = 0.9
         
         logger.info(f"Initialized VLA rollout for task suite: {self.task_suite}")
         logger.info(f"GRPO filtering: success_rate ∈ [{self.success_rate_threshold_low:.2f}, {self.success_rate_threshold_high:.2f}]")

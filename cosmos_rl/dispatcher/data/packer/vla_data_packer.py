@@ -145,6 +145,7 @@ class VLADataPacker(DataPacker):
         task_id = sample.metadata.get('task_id', 0)
         trial_id = sample.metadata.get('trial_id', 0)
         gen_idx = sample.metadata.get('gen_idx', 0)
+        weight_version = sample.metadata.get('weight_version', -1)
         
         # Handle both stacked tensors and lists
         if isinstance(input_ids_data, torch.Tensor) and input_ids_data.dim() >= 2:
@@ -234,15 +235,16 @@ class VLADataPacker(DataPacker):
         # Chunking will be handled in train_vla() for gradient accumulation
         class RLPolicyInput:
             """Per-step structured input for VLA training"""
-            def __init__(self, per_step_data, pixel_values, task_id, trial_id, gen_idx):
+            def __init__(self, per_step_data, pixel_values, task_id, trial_id, gen_idx, weight_version):
                 self.per_step_data = per_step_data  # List of dicts, one per step
                 self.pixel_values = pixel_values  # List of tensors, one per step
                 self.num_steps = len(per_step_data)
                 self.task_id = task_id
                 self.trial_id = trial_id
                 self.gen_idx = gen_idx
-        
-        return RLPolicyInput(per_step_data, pixel_values_list, task_id, trial_id, gen_idx)
+                self.weight_version = weight_version
+
+        return RLPolicyInput(per_step_data, pixel_values_list, task_id, trial_id, gen_idx, weight_version)
 
     
     def policy_compute_max_len(self, processed_samples: List[Any]) -> int:
