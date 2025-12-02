@@ -590,10 +590,10 @@ class Trainer(CommMixin):
                     dest_name, obj, in_place=obj.is_cuda
                 )
                 if is_send:
-                    # logger.info(f"LMS: send {dest_name} {local_view.shape} {local_view.dtype} {local_view.device}")
+                    logger.info(f"LMS: send {dest_name} {local_view.shape} {local_view.dtype} {local_view.device}")
                     send_hook(local_view)
                 else:
-                    # logger.info(f"LMS: recv {dest_name} {local_view.shape} {local_view.dtype} {local_view.device}")
+                    logger.info(f"LMS: recv {dest_name} {local_view.shape} {local_view.dtype} {local_view.device}")
                     recv_hook(local_view)
                     if isinstance(obj, torch.distributed.tensor.DTensor):
                         to_write = obj.to_local()
