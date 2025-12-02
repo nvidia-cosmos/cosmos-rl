@@ -86,6 +86,12 @@ class CommMixin:
         )
 
         self.api_client = APIClient(self.role)
+
+        policy_type = self.config.train.train_policy.type
+        if policy_type != "sft":
+            # if not sft, we have to init redis
+            self.init_redis()
+
         self.register_to_controller()
 
     def init_data_packer(
@@ -262,14 +268,8 @@ class CommMixin:
 
 
 class WorkerBase(ABC):
-    def __init__(self, config: Any, **kwargs):
+    def __init__(self, config: Any):
         self.config = config
-        # Forward the args and kwargs to the worker_init method.
-        self.worker_init(**kwargs)
-
-    @abstractmethod
-    def worker_init(self, **kwargs):
-        raise RuntimeError("worker_init method must be implemented")
 
     @abstractmethod
     def execute(self):
