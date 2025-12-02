@@ -116,7 +116,7 @@ fi
 LAUNCH_BINARY="torchrun"
 
 if [ "$TYPE" == "rollout" ]; then
-  DEFAULT_MODULE="cosmos_rl.rollout.rollout_entrance"
+  DEFAULT_MODULE="cosmos_rl.rollout.rollout_entry"
   export COSMOS_ROLE="Rollout"
   if [ "$BACKEND" == "trtllm" ]; then
     LAUNCH_BINARY="mpirun"

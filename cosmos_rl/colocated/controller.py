@@ -364,10 +364,10 @@ class ColocatedController(Controller):
                 f"[Controller] DataFetchCommand details: {data_fetch_cmd} at step {self.current_step}"
             )
             if not self.config.train.resume:
-                assert data_fetch_cmd.do_save == (
-                    do_save and self.config.train.ckpt.enable_checkpoint
-                ), f"Expected do_save { (do_save
-                    and self.config.train.ckpt.enable_checkpoint)} but got {data_fetch_cmd.do_save}"
+                assert (
+                    data_fetch_cmd.do_save
+                    == (do_save and self.config.train.ckpt.enable_checkpoint)
+                ), f"Expected do_save {(do_save and self.config.train.ckpt.enable_checkpoint)} but got {data_fetch_cmd.do_save}"
                 assert (
                     self.current_step == data_fetch_cmd.global_step
                 ), f"Expected global_step {self.current_step} but got {data_fetch_cmd.global_step}"
