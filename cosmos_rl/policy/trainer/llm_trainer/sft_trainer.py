@@ -647,16 +647,6 @@ class SFTTrainer(LLMTrainer):
             )
         )
 
-    def model_resume_from_checkpoint(self):
-        ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizers,
-            scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
-            model_name_or_path=self.config.policy.model_name_or_path,
-            revision=self.config.policy.model_revision,
-        )
-        return ckpt_extra_vars
-
     def build_lr_schedulers(self):
         # just for instantiating this class.
         pass
