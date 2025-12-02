@@ -512,6 +512,7 @@ class HFModel(BaseModel):
 
         hf_model = self.model_class.from_pretrained(
             model_name_or_path,
+            dtype=dtype,
             **kwargs,
         ).to(device="cpu", dtype=dtype)
 

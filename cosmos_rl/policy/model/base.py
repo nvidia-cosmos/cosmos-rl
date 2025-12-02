@@ -471,11 +471,12 @@ class ModelRegistry:
         return model_type in ModelRegistry._MODEL_REGISTRY
 
     @classmethod
-    def build_model(cls, config: CosmosConfig):
+    def build_model(cls, config: CosmosConfig, hf_config_args={}):
         model_name_or_path = config.policy.model_name_or_path
         model = None
         hf_config = util.retry(AutoConfig.from_pretrained)(
-            model_name_or_path, trust_remote_code=True
+            model_name_or_path, trust_remote_code=True,
+            **hf_config_args
         )
         model_type = hf_config.model_type
         is_supported_model_type = model_type in ModelRegistry._MODEL_REGISTRY
@@ -488,6 +489,9 @@ class ModelRegistry:
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
         hf_config.torch_dtype = util.str2torch_dtype(config.train.param_dtype)
+        hf_config.dtype = util.str2torch_dtype(config.train.param_dtype)
+        if hasattr(hf_config, "vision_config"):
+            hf_config.vision_config.dtype = util.str2torch_dtype(config.train.param_dtype)
         cosmos_default_dtype = util.str2torch_dtype(
             config.train.master_dtype
             if config.train.master_dtype is not None
