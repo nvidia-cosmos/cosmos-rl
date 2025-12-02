@@ -194,7 +194,6 @@ class LLMTrainer(Trainer):
         len_params = 0
         # It's a HFModel, we need to sync the named buffers
         state_dict = self.model.state_dict()
-        state_dict.update(dict(self.model.named_buffers()))
         model_state_dict = [state_dict]
 
         if has_reference_model:
@@ -207,6 +206,7 @@ class LLMTrainer(Trainer):
                         value, device="cpu"
                     )
             model_state_dict.append(self.reference_state_dict)
+        model_state_dict[0].update(dict(self.model.named_buffers()))
 
         # 1. Sync all model states
         for state_to_sync in model_state_dict:
