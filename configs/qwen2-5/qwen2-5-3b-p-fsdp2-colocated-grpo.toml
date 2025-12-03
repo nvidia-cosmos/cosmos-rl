@@ -45,6 +45,7 @@ experiment_name = "None"
 
 [train.train_policy]
 type = "grpo"
+trainer_type = "custom_grpo_example"
 dataset.name = "openai/gsm8k"
 dataset.subset = "main"
 dataset.split = "train"

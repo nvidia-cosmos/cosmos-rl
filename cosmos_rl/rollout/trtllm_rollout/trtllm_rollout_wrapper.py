@@ -204,12 +204,14 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         payloads[i].completed_conversations,
                         payloads[i].completion_logprobs,
                         payloads[i].completion_token_ids,
+                        payloads[i].tensor_dict,
                         _,
                     ) = self.data_packer.get_rollout_output(
                         payloads[i].completions,
                         payloads[i].completed_conversations,
                         payloads[i].completion_logprobs,
                         payloads[i].completion_token_ids,
+                        payloads[i].tensor_dict,
                     )
                     # when using local dataset, we don't need to send the prompt/conversation to the controller
                     if self.config.train.local_dataset:
@@ -234,7 +236,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         if prompt_queue.empty():
             payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
-            if self.config.train.local_dataset:
+            if self.config.train.local_dataset and not self.config.train.tensor_native:
                 is_validation = kwargs.get("validation_step", None) is not None
                 for payload in payloads:
                     payload["prompt"] = self.data_fetcher.get_payload_by_index(

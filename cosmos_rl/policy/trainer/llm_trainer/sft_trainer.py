@@ -58,6 +58,7 @@ def async_safe_ce(
     target_packing_mask: Optional[torch.Tensor] = None,
     dp_group: Optional[torch.distributed.ProcessGroup] = None,
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
+    **kwargs,
 ) -> torch.Tensor:
     if output_packing_mask is not None:
         output = (

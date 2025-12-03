@@ -74,6 +74,7 @@ def compute_loss(
     rollout_per_token_logps: Optional[
         List[List[float]]
     ] = None,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
+    **kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
     current_advantages = torch.masked_select(current_advantages, logprob_masks)
@@ -395,7 +396,8 @@ def _swizzle_pp_grpo_forward(
             ref_per_token_logprobs.shape == current_per_token_logprobs.shape
         ), f"ref_per_token_logprobs.shape: {ref_per_token_logprobs.shape}, while it should be {current_per_token_logprobs.shape}"
 
-    loss, _, _ = compute_loss(
+    compute_loss_fn = trainer.loss_fn if hasattr(trainer, "loss_fn") else compute_loss
+    loss, _, _ = compute_loss_fn(
         current_per_token_logprobs,
         old_per_token_logprobs,
         ref_per_token_logprobs,
@@ -488,6 +490,7 @@ class GRPOTrainer(LLMTrainer):
         inter_policy_nccl: HighAvailabilitylNccl,
         is_master_replica: bool,
         do_save_checkpoint: bool = False,
+        **kwargs,
     ) -> Dict[str, Any]:
         pp_last_stage = (
             self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
@@ -1079,7 +1082,12 @@ class GRPOTrainer(LLMTrainer):
                                                 i_mu > 0 or need_compute_old_ahead
                                             ), "Only inner iteration should reuse `old_per_token_logps`"
 
-                                        loss, per_token_loss, kl_loss = compute_loss(
+                                        compute_loss_fn = (
+                                            self.loss_fn
+                                            if hasattr(self, "loss_fn")
+                                            else compute_loss
+                                        )
+                                        loss, per_token_loss, kl_loss = compute_loss_fn(
                                             current_per_token_logprobs,
                                             self.old_per_token_logps[local_mini_step],
                                             self.ref_per_token_logps[local_mini_step],
@@ -1320,6 +1328,7 @@ class GRPOTrainer(LLMTrainer):
         minibatch: Dict[str, Any],
         logits: torch.Tensor,
         is_full_logits: bool = False,
+        **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Compute the per-token log probabilities and advantages
@@ -1345,6 +1354,7 @@ class GRPOTrainer(LLMTrainer):
             is_full_logits=is_full_logits,
             label_packing_mask=minibatch.get("label_packing_mask", None),
             input_packing_mask=minibatch.get("input_packing_mask", None),
+            **kwargs,
         )
 
     @cached_property
