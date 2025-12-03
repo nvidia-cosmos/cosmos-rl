@@ -26,7 +26,9 @@ from cosmos_rl.rollout.rollout_base import RolloutBase
 from cosmos_rl.policy.config import Config
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.policy.model.base import ModelRegistry
 from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.utils import util
 from transformers import AutoTokenizer
 
 from .action_processing import VLAActionProcessor
@@ -100,7 +102,7 @@ class VLARollout(RolloutBase):
         # Success rate thresholds for GRPO filtering (default member variables)
         # NOTE: These are different from PPO epsilon_low/high which are clipping ratios!
         self.success_rate_threshold_low = 0.1
-        self.success_rate_threshold_high = 0.9
+        self.success_rate_threshold_high = 1 #0.9
         
         logger.info(f"Initialized VLA rollout for task suite: {self.task_suite}")
         logger.info(f"GRPO filtering: success_rate ∈ [{self.success_rate_threshold_low:.2f}, {self.success_rate_threshold_high:.2f}]")
@@ -158,10 +160,9 @@ class VLARollout(RolloutBase):
             logger.info(f"Initializing VLA engine with load_format={load_format}")
             
             model_path = self.config.policy.model_name_or_path
-            
+
             # Initialize the processor for VLA models using PrismaticProcessor
             # IMPORTANT: Must use PrismaticProcessor, not generic AutoProcessor!
-            logger.info(f"Loading VLA processor from {model_path} (type: {self.vla_type})")
             
             if self.vla_type == "openvla-oft":
                 from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import PrismaticProcessor
@@ -172,21 +173,10 @@ class VLARollout(RolloutBase):
                 model_path, 
                 trust_remote_code=True
             )
-            logger.info("✅ VLA processor loaded")
-            
-            # Initialize VLA model
-            logger.info(f"Initializing VLA model structure for {self.vla_type}")
-            
-            if load_format == "dummy":
-                # Load model structure only (weights will come from policy worker)
-                self._init_dummy_vla_model(model_path)
-            else:  # "auto"
-                # Load full model with weights (for checkpointing/resume)
-                self._init_full_vla_model(model_path)
+            self._init_dummy_vla_model(model_path)
             
             # Initialize VLA model inference
             self.model_inference = VLAModelInference(self.module, self.processor, self)
-            logger.info("✅ VLA model inference initialized")
             
             logger.info("✅ VLA engine initialization completed")
             
@@ -206,34 +196,19 @@ class VLARollout(RolloutBase):
         from cosmos_rl.policy.model.vla import VLAModel, VLAArgs
         from cosmos_rl.policy.model.vla_utils import create_vla_config
         
-        logger.info("Creating VLA model structure (dummy weights, for weight sync)...")
-        
         # Create VLA config with norm_stats
         vla_config, processor, tokenizer = create_vla_config(
             model_path,
             cosmos_config=self.config,
             model=self.vla_type
         )
-        
-        # Create VLA args
-        vla_args = VLAArgs(
-            vla_type=self.vla_type,
-            use_proprio=self.config.vla.use_proprio,
-            proprio_dim=self.config.vla.action_dim,
-            num_images_in_input=self.config.vla.num_images_in_input,
-            hf_config=vla_config
+
+        cosmos_default_dtype = util.str2torch_dtype(
+            self.config.train.master_dtype
+            if self.config.train.master_dtype is not None
+            else self.config.train.param_dtype
         )
-        
-        # Initialize model structure on CUDA directly (no meta device)
-        # Note: VLA models use TIMM vision backbone which is incompatible with meta tensors
-        logger.info("Initializing VLA model on CUDA (TIMM meta tensor incompatibility)")
-        vla_model = VLAModel(vla_args, init_device="cuda")
-        
-        # NOTE: Vision backbone weights will be synced via P2R NCCL
-        # The vision backbone IS trainable (not frozen) and will receive updates from policy workers
-        # All weights (vision_backbone + projector + language_model + action_head) initialized randomly
-        # and will be synced from policy worker via NCCL on first P2R weight sync
-        logger.info("✅ VLA model structure created with random weights (P2R sync will provide actual weights)")
+        vla_model = ModelRegistry.build_model(self.config).to(cosmos_default_dtype)
         
         # Save both the wrapper and inner module
         self.vla_model = vla_model  # Keep wrapper for weight_sync_transforms
@@ -252,79 +227,6 @@ class VLARollout(RolloutBase):
         logger.info(f"   Model has norm_stats: {hasattr(self.module, 'norm_stats')}")
         if hasattr(self.module, 'norm_stats'):
             logger.info(f"   norm_stats keys: {list(self.module.norm_stats.keys())}")
-    
-    def _init_full_vla_model(self, model_path: str):
-        """
-        Initialize VLA model with full weight loading (auto mode)
-        Used for standalone rollout or verification at init
-        
-        Uses HF's from_pretrained interface (like RLinf) - simple and fast
-        for single-GPU rollout with data parallelism.
-        """
-        from cosmos_rl.policy.model.vla import VLAModel, VLAArgs
-        from cosmos_rl.policy.model.vla_utils import create_vla_config
-        
-        logger.info("Loading full VLA model with weights (single-GPU, like RLinf)...")
-        
-        # Create VLA config (includes norm_stats from dataset_statistics.json)
-        vla_config, processor, tokenizer = create_vla_config(
-            model_path,
-            cosmos_config=self.config,
-            model=self.vla_type
-        )
-        
-        # Create VLA args
-        vla_args = VLAArgs(
-            vla_type=self.vla_type,
-            use_proprio=self.config.vla.use_proprio,
-            proprio_dim=self.config.vla.action_dim,
-            num_images_in_input=self.config.vla.num_images_in_input,
-            hf_config=vla_config
-        )
-        
-        # Initialize model structure
-        vla_model = VLAModel.from_model_args(vla_args)
-        
-        # Load weights using HF interface (simple, like RLinf)
-        device = torch.device(f"cuda:{torch.cuda.current_device()}")
-        vla_model.load_from_checkpoint(
-            model_name_or_path=model_path,
-            parallel_dims=None,  # Single GPU rollout (data parallelism only)
-            device=device
-        )
-        
-        # Save both the wrapper and inner module
-        self.vla_model = vla_model  # Keep wrapper for weight_sync_transforms
-        self.module = vla_model.model  # Inner OpenVLAForActionPrediction for inference
-        self.module.eval()
-        self.processor = vla_model.processor  # Save processor from load_from_checkpoint
-        self.tokenizer = tokenizer
-        self.hf_config = vla_config  # Save for shard info generation
-        
-        logger.info("✅ Full VLA model loaded with weights (single-GPU)")
-        logger.info(f"   Device: {device}")
-        logger.info(f"   Model has norm_stats: {hasattr(self.module, 'norm_stats')}")
-        if hasattr(self.module, 'norm_stats'):
-            logger.info(f"   norm_stats keys: {list(self.module.norm_stats.keys())}")
-    
-    # DEPRECATED: No longer needed - vision backbone weights are synced via P2R NCCL
-    def _load_frozen_vision_backbone_weights(self, model, model_path: str):
-        """
-        [DEPRECATED] Previously loaded vision backbone weights assuming they were frozen.
-        
-        This method is no longer used because:
-        1. Vision backbone IS trainable (not frozen)
-        2. All VLA weights (vision_backbone + projector + LLM + action_head) are synced via P2R NCCL
-        3. The VLAWeightMapper now defines parallelism strategies for complete P2R weight sync
-        
-        Historical context:
-        - Originally assumed vision backbone was frozen during training
-        - Loaded vision backbone weights once from checkpoint to avoid NCCL sync
-        - This was incorrect - vision backbone should be trained and synced like other components
-        """
-        logger.warning("[DEPRECATED] _load_frozen_vision_backbone_weights called but no longer used")
-        logger.warning("   Vision backbone weights will be synced via P2R NCCL instead")
-        return  # Early return - don't load anything
     
     def is_engine_initialized(self) -> bool:
         """Check if the VLA engine has been initialized"""
@@ -791,7 +693,7 @@ class VLARollout(RolloutBase):
             current_task_descriptions = task_descriptions
             
             vla_input = self.model_inference.process_input(current_inputs, current_task_descriptions)
-            vla_output = self.model_inference.generate_one_step(vla_input)
+            vla_output = self.model_inference.generate_one_step(vla_input, is_valid)
             
             actions = vla_output.get("action", np.random.randn(batch_size, NUM_ACTIONS_CHUNK, 7))
             

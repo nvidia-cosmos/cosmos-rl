@@ -2,7 +2,7 @@ redis = "12800"
 
 [train]
 resume = false
-epoch = 1000
+epoch = 1024
 output_dir = "./outputs/vla-validation-4p4r"
 epsilon = 1e-8
 optm_name = "AdamW"
@@ -13,10 +13,11 @@ optm_betas = [ 0.9, 0.999,]
 optm_warmup_steps = 0  # Short warmup for validation
 optm_grad_norm_clip = 1.0
 async_tp_enabled = false
-compile = true
-param_dtype = "bfloat16" # compute dtype of param/activation (not affected by autocast) 1. model.to(torch.bfloat16) affect buffer 2. from_pretrained(dtype) will not affect buffer dtype 3. fsdp behavior?
-fsdp_reduce_dtype = "float32" # nccl reduce dtype
-master_dtype = "bfloat16" # param/grad dtype in vram
+compile = false
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+master_dtype = "float32"
+transfer_dtype = "float32"
 fsdp_offload = true
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 8
@@ -30,7 +31,7 @@ model_gradient_checkpointing = true
 [logging]
 logger = ['console', 'wandb']
 project_name = "cosmos-rl-vla"
-experiment_name = "4p4r-self"
+experiment_name = "8p8r-ref-data"
 
 [train.train_policy]
 type = "grpo"
@@ -57,7 +58,7 @@ allowed_outdated_steps = 4
 
 [train.ckpt]
 enable_checkpoint = true
-save_freq = 30  # Save after first step for validation
+save_freq = 512  # Save after first step for validation
 save_mode = "async"
 
 [rollout]
@@ -74,7 +75,7 @@ enforce_eager = false
 n_init_replicas = 1  # Single replica (sharded across 4 GPUs via dp_shard_size)
 tp_size = 1  # No tensor parallelism
 cp_size = 1  # No context parallelism
-dp_shard_size = 4  # FSDP: Shard model across 4 GPUs (~34 GB per GPU instead of 75 GB)
+dp_shard_size = 8  # FSDP: Shard model across 4 GPUs (~34 GB per GPU instead of 75 GB)
 pp_size = 1  # No pipeline parallelism
 dp_replicate_size = 1  # Use 1 for now (can increase if DDP is enabled)
 cp_rotate_method = "allgather"

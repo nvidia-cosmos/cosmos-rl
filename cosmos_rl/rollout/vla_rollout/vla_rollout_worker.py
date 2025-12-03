@@ -36,6 +36,8 @@ from cosmos_rl.reward.reward_calculator import RewardDispatcher
 from cosmos_rl.utils.constant import COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.utils.pynccl import create_nccl_uid, create_nccl_comm, nccl_broadcast
+from cosmos_rl.utils import util
+from cosmos_rl.policy.model.base import ModelRegistry
 
 from .vla_rollout import VLARollout
 from cosmos_rl.utils.trajectory_buffer import save_trajectory_to_buffer, get_trajectory_buffer
@@ -974,28 +976,19 @@ class VLARolloutWorker(RolloutWorkerBase):
         logger.info(f"[VLA Rollout] Loading reference model from {model_path}...")
         
         # Create VLA config
-        vla_config, _, _ = create_vla_config(
-            model_path,
-            cosmos_config=self.config,
-            model=self.config.vla.vla_type
-        )
-        
-        # Create VLA args
-        vla_args = VLAArgs(
-            vla_type=self.config.vla.vla_type,
-            use_proprio=self.config.vla.use_proprio,
-            proprio_dim=self.config.vla.action_dim,
-            num_images_in_input=self.config.vla.num_images_in_input,
-            hf_config=vla_config
-        )
-        
-        # Load full model with weights from HF
-        reference_model = VLAModel.from_model_args(vla_args)
+        reference_model = ModelRegistry.build_model(self.config)
+
         reference_model.load_from_checkpoint(
             model_name_or_path=model_path,
             parallel_dims=None,
             device=device
         )
+        cosmos_default_dtype = util.str2torch_dtype(
+            self.config.train.master_dtype
+            if self.config.train.master_dtype is not None
+            else self.config.train.param_dtype
+        )
+        reference_model.to(cosmos_default_dtype)
         
         # Extract weights
         reference_weights = {

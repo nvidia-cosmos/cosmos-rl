@@ -296,7 +296,7 @@ class VLAModelInference:
         return batchdata
     
     @torch.no_grad()
-    def generate_one_step(self, prompts: Dict[str, torch.Tensor]) -> Dict[str, Any]:
+    def generate_one_step(self, prompts: Dict[str, torch.Tensor], is_valid: bool = False) -> Dict[str, Any]:
         """
         Generate one step of actions (matching SimpleVLA-RL's _generate_one_step)
         
@@ -311,16 +311,16 @@ class VLAModelInference:
         
         if vla_type == "openvla-oft":
             logger.debug(f"Using OpenVLA-OFT generation method")
-            return self._generate_one_step_oft(prompts)
+            return self._generate_one_step_oft(prompts, is_valid)
         elif vla_type == "openvla":
             logger.debug(f"Using OpenVLA generation method")
-            return self._generate_one_step_openvla(prompts)
+            return self._generate_one_step_openvla(prompts, is_valid)
         
         # Fallback to dummy implementation
         logger.warning(f"No VLA model specified (vla_type={vla_type}), using dummy action generation")
         return self._generate_dummy_step(prompts)
     
-    def _generate_one_step_oft(self, prompts: Dict[str, torch.Tensor]) -> Dict[str, Any]:
+    def _generate_one_step_oft(self, prompts: Dict[str, torch.Tensor], is_valid: bool = False) -> Dict[str, Any]:
         """Generate one step for OpenVLA-OFT (matching SimpleVLA-RL)"""
         input_ids = prompts['input_ids']
         attention_mask = prompts['attention_mask']
@@ -328,7 +328,6 @@ class VLAModelInference:
         proprio = prompts.get("proprio", None)
         
         # Generation parameters
-        do_sample = getattr(self.config, 'do_sample', True)
         temperature = getattr(self.config, 'temperature', 1.0)
         
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -339,7 +338,7 @@ class VLAModelInference:
                 proprio=proprio,
                 attention_mask=attention_mask,
                 padding_idx=getattr(self.processor.tokenizer, 'pad_token_id', 0),
-                do_sample=do_sample,
+                do_sample=not is_valid,
                 unnorm_key=getattr(self.config, 'unnorm_key', 'default'),
                 temperature=temperature,
             )
@@ -359,7 +358,7 @@ class VLAModelInference:
             }
 
     
-    def _generate_one_step_openvla(self, prompts: Dict[str, torch.Tensor]) -> Dict[str, Any]:
+    def _generate_one_step_openvla(self, prompts: Dict[str, torch.Tensor], is_valid: bool = False) -> Dict[str, Any]:
         """Generate one step for OpenVLA (matching SimpleVLA-RL)"""
         input_ids = prompts['input_ids']
         attention_mask = prompts['attention_mask']  
@@ -377,7 +376,7 @@ class VLAModelInference:
                         input_ids=input_ids,
                         pixel_values=pixel_values,
                         attention_mask=attention_mask,
-                        do_sample=do_sample,
+                        do_sample=not is_valid,
                         temperature=temperature,
                     )
                     

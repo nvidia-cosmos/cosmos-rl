@@ -1401,7 +1401,7 @@ class GRPOTrainer(Trainer):
         # Recompute log_probs on policy side before training
         # This recomputes old_log_probs using the current policy (before updates)
         # to ensure consistency and avoid stale values from rollout phase
-        use_saved_batches = False #hasattr(self.config, 'vla') and hasattr(self.config.vla, 'use_saved_batches') and self.config.vla.use_saved_batches
+        use_saved_batches = True #hasattr(self.config, 'vla') and hasattr(self.config.vla, 'use_saved_batches') and self.config.vla.use_saved_batches
         
         if use_saved_batches:
             # Use dispatch pattern: only rank 0 loads, then scatter to all workers

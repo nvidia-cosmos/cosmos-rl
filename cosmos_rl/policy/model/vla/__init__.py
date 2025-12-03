@@ -86,8 +86,8 @@ class VLAModel(BaseModel):
         with torch.device(init_device):
             self.model = OpenVLAForActionPrediction(self.hf_config)
 
-        self.model.to(dtype=torch.bfloat16)
-        self._replace_rope_modules_float32()
+        # self.model.to(dtype=torch.bfloat16)
+        # self._replace_rope_modules_float32()
 
         # Initialize additional attributes
         self.processor = None

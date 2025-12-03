@@ -677,8 +677,15 @@ class PolicyStatusManager:
                         rollout.completed_conversation[
                             -1
                         ].content += self.tokenizer.eos_token
-        self.rollout_buffer.put(rollout)
-        self.try_trigger_data_fetch_and_training()
+        rollout_weight_version = rollout.metadata.get('weight_version', -1)
+        allowed_staleness = self.config.train.train_policy.allowed_outdated_steps
+        min_acceptable_version = self.current_step - allowed_staleness
+        if rollout_weight_version > min_acceptable_version:
+            self.rollout_buffer.put(rollout)
+            self.try_trigger_data_fetch_and_training()
+        else:
+            logger.info(f"[Controller] Discarded rollout with weight_version {rollout_weight_version}, current_step={self.current_step}, allowed_staleness={allowed_staleness}")
+            return
 
     def put_rollouts(
         self, valid_rollouts: List[Rollout], invalid_rollouts: List[Rollout]
@@ -939,23 +946,9 @@ class PolicyStatusManager:
             n_discarded = 0
             for _ in range(items_count):
                 for replica in arrived_replicas:
-                    while True:
-                        rollout = self.rollout_buffer.get()
-                        rollout_weight_version = rollout.metadata.get('weight_version', -1)
-                        allowed_staleness = self.config.train.train_policy.allowed_outdated_steps
-                        min_acceptable_version = self.current_step - allowed_staleness
-                        if rollout_weight_version > min_acceptable_version:
-                            replica.put_rollout(rollout, self.redis_handler)
-                            rollouts_of_this_step.append(rollout)
-                            break
-                        else:
-                            n_discarded += 1
-                            logger.info(f"[Controller] Discarded rollout with weight_version {rollout_weight_version}, current_step={self.current_step}, allowed_staleness={allowed_staleness}")
-            if n_discarded > 0:
-                logger.info(
-                    f"[Controller] Discarded {n_discarded} outdated rollouts (weight_version < {min_acceptable_version} out of {items_count} in total, "
-                    f"current_step={self.current_step}, allowed_staleness={allowed_staleness})"
-                )
+                    rollout = self.rollout_buffer.get()
+                    replica.put_rollout(rollout, self.redis_handler)
+                    rollouts_of_this_step.append(rollout)
 
             # Decide whether to save checkpoint
             # First check if we need to save checkpoint based on epoch
