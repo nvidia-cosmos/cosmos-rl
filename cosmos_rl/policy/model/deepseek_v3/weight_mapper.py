@@ -428,7 +428,7 @@ def map_weight_parallel_dims(
         ".mlp.gate_proj.": -2,
         ".mlp.up_proj.": -2,
         ".mlp.down_proj.": -1,
-        ".mlp.experts.gate_and_up_proj.": 0,
+        ".mlp.experts.gate_up_proj.": 0,
         ".mlp.experts.down_proj.": 0,
         # deepseekv3 moe-related weights
         ".mlp.gate.": None,
