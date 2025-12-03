@@ -653,6 +653,14 @@ class SFTPolicyWorker(PolicyWorkerBase):
                             f"Step: {self.train_step}/{self.total_steps}, Loss: {report_data['train/loss_avg']:.5f}, Grad norm: {report_data['train/grad_norm']:.5f}, Learning rate: {report_data['train/learning_rate']:.5e}, Iteration time: {report_data['train/iteration_time']:.2f}s."
                         )
 
+                    for custom_logger_fn in self.custom_logger_fns:
+                        try:
+                            custom_logger_fn(report_data, self.train_step)
+                        except Exception as e:
+                            logger.warning(
+                                f"[SFT] Error calling custom logger function: {e}"
+                            )
+
                 if (
                     self.config.train.max_num_steps is not None
                     and self.train_step >= self.total_steps
