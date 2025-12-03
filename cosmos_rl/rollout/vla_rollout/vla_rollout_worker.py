@@ -40,6 +40,7 @@ import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.utils.pynccl import create_nccl_uid, create_nccl_comm, nccl_broadcast
 from cosmos_rl.utils import util
 from cosmos_rl.policy.model.base import ModelRegistry
+from cosmos_rl.utils.fsdp2_offload_utils import FSDP2OffloadManager
 
 from .vla_rollout import VLARollout
 from cosmos_rl.utils.trajectory_buffer import save_trajectory_to_buffer, get_trajectory_buffer
@@ -83,6 +84,21 @@ class VLARolloutWorker(RolloutWorkerBase):
         
         # Initialize VLA rollout engine
         self.rollout: VLARollout = VLARollout(self.config, self.tokenizer)
+        
+        # Initialize manual CPU offloading manager (params only for rollout - no training)
+        if config.train.offload_params:
+            self.offload_manager = FSDP2OffloadManager(
+                offload_params=True,
+                offload_grads=False,  # No gradients in rollout (inference only)
+                offload_optimizer=False,  # No optimizer in rollout
+                store_params_as_fp32=config.train.offload_store_fp32,
+                target_param_dtype=util.str2torch_dtype(config.train.param_dtype),
+            )
+            logger.info(
+                f"[VLA Rollout] Manual parameter offloading enabled (store_fp32={config.train.offload_store_fp32})"
+            )
+        else:
+            self.offload_manager = None
         
         # Environment management
         self.env_pool: Dict[str, Any] = {}
@@ -174,17 +190,17 @@ class VLARolloutWorker(RolloutWorkerBase):
         Request new prompts from the controller for both training and validation (borrowed from vLLM worker).
         """
         prompts_and_is_end = (None, False)
-        if self.global_rank == 0:
-            if prompt_queue.empty():
-                # blocking request
-                payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
-                prompts_and_is_end = (
-                    payloads if len(payloads) > 0 else None,
-                    is_end,
-                )
+        #if self.global_rank == 0:
+        if prompt_queue.empty():
+            # blocking request
+            payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
+            prompts_and_is_end = (
+                payloads if len(payloads) > 0 else None,
+                is_end,
+            )
 
         # Broadcast the prompts and is_end to all ranks
-        prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
+        #prompts_and_is_end = dist_utils.broadcast_object_cpu(prompts_and_is_end)
         prompts, is_end = prompts_and_is_end
         if prompts is not None:
             prompts = [
@@ -194,7 +210,6 @@ class VLARolloutWorker(RolloutWorkerBase):
         return is_end
 
     def consume_one_command(self, cmd_pred: Optional[Callable[[Command], bool]] = None):
-        """Consume one command from the queue (borrowed from vLLM worker)"""
         current_command = None
         if self.global_rank == 0:
             if not self._command_queue.empty():
@@ -213,16 +228,16 @@ class VLARolloutWorker(RolloutWorkerBase):
             handler = self.get_rollout_command_handler(type(current_command))
             if handler is None:
                 raise Exception(
-                    f"No such command supported in VLA rollout {current_command}"
+                    f"No such command supoorted in rollout {current_command}"
                 )
             try:
                 handler(self, current_command)
                 logger.debug(
-                    f"[VLA Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
+                    f"[Rollout] Command executed: {current_command._serialize()} for rank: {self.global_rank}"
                 )
             except Exception as e:
                 raise RuntimeError(
-                    f"[VLA Rollout] Command execution failed for {current_command._serialize()}"
+                    f"[Rollout] Command execution failed for {current_command._serialize()}"
                 ) from e
         return current_command
 
@@ -344,6 +359,11 @@ class VLARolloutWorker(RolloutWorkerBase):
                 
                 logger.info(f"[VLA Rollout] Running validation on {len(payloads)} prompts")
                 
+                # Load model parameters from CPU if manual offloading is enabled (before validation rollout)
+                if self.offload_manager is not None and hasattr(self, 'vla_model'):
+                    logger.info("[VLA Rollout] Loading model parameters from CPU for validation")
+                    self.offload_manager.load_for_inference(self.vla_model)
+                
                 # Run VLA rollout generation for validation (greedy, no replication, save videos)
                 rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
                     payloads=payloads,
@@ -351,6 +371,11 @@ class VLARolloutWorker(RolloutWorkerBase):
                     is_validation=True,  # Save videos for validation
                     global_steps=self.current_step,
                 )
+                
+                # Offload model parameters back to CPU after validation rollout
+                if self.offload_manager is not None and hasattr(self, 'vla_model'):
+                    logger.info("[VLA Rollout] Offloading model parameters to CPU after validation")
+                    self.offload_manager.offload_after_inference(self.vla_model)
                 
                 if rollout_results:
                     prompt_idxs.extend([idx for idx, _ in prompt_id_and_payload_list])
@@ -508,6 +533,11 @@ class VLARolloutWorker(RolloutWorkerBase):
                     payload for _, payload in new_prompt_id_and_payload_list
                 ]
                 
+                # Load model parameters from CPU if manual offloading is enabled (before rollout generation)
+                if self.offload_manager is not None and hasattr(self, 'vla_model'):
+                    logger.info("[VLA Rollout] Loading model parameters from CPU for rollout generation")
+                    self.offload_manager.load_for_inference(self.vla_model)
+                
                 # Use VLA rollout generation for training (with GRPO-style replication)
                 rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
                     payloads=new_payloads,
@@ -515,6 +545,11 @@ class VLARolloutWorker(RolloutWorkerBase):
                     is_validation=False,  # No video saving for training
                     global_steps=self.current_step,
                 )
+                
+                # Offload model parameters back to CPU after rollout generation
+                if self.offload_manager is not None and hasattr(self, 'vla_model'):
+                    logger.info("[VLA Rollout] Offloading model parameters to CPU after rollout generation")
+                    self.offload_manager.offload_after_inference(self.vla_model)
 
                 if len(rollout_results) == 0:
                     continue
@@ -652,6 +687,14 @@ class VLARolloutWorker(RolloutWorkerBase):
             )
             elapsed = time.time() - start_time
             logger.info(f"[VLA Rollout] ✅ Engine initialization completed in {elapsed:.2f}s")
+
+        # Load model parameters from CPU if manual offloading is enabled (before weight receive)
+        if self.offload_manager is not None and hasattr(self, 'vla_model'):
+            logger.info("[VLA Rollout] Loading model parameters from CPU for P2R weight receive")
+            self.offload_manager.load_for_inference(self.vla_model) 
+        # Store model reference for offloading (if not already stored)
+        if not hasattr(self, 'vla_model') and hasattr(self.rollout, 'vla_model'):
+            self.vla_model = self.rollout.vla_model
         
         # Only process if command is for this replica
         if command.dst_replica_name != self.replica_name:
@@ -711,7 +754,7 @@ class VLARolloutWorker(RolloutWorkerBase):
         
         # Receive weights from policy worker using instructions
         # ALWAYS verify first sync to ensure NCCL transfer is working correctly
-        do_verification = (self.current_weight_version == 0)
+        do_verification = False #(self.current_weight_version == 0)
         if do_verification:
             logger.info(f"[VLA Rollout] First weight sync - verification ENABLED (compulsory)")
         self._receive_weights_from_policy(communicator_index, command.trainable_only, do_verification)
@@ -765,6 +808,11 @@ class VLARolloutWorker(RolloutWorkerBase):
         else:
             logger.info(f"[VLA Rollout] Skipping validation check (current_step={current_step})")
         
+        # Offload model parameters back to CPU after weight receive
+        if self.offload_manager is not None:
+            logger.info("[VLA Rollout] Offloading model parameters to CPU after P2R weight receive")
+            self.offload_manager.offload_after_inference(self.vla_model)
+        
         logger.info(f"[VLA Rollout] ✅ Weight sync completed, version: {self.current_weight_version}")
     
     def _receive_weights_from_policy(self, communicator_index: int, trainable_only: bool, do_verification: bool = False):
@@ -787,6 +835,10 @@ class VLARolloutWorker(RolloutWorkerBase):
             logger.info(f"[VLA Rollout] Loading reference weights from HF checkpoint for verification...")
             reference_weights = self._load_reference_weights()
             logger.info(f"[VLA Rollout] ✅ Loaded {len(reference_weights)} reference parameters")
+
+        for m in self.rollout.vla_model.model.modules():
+            if isinstance(m, torch.distributed.fsdp.FSDPModule):
+                m.reshard()
         
         # Get model parameters dict
         model = self.rollout.module
@@ -848,7 +900,7 @@ class VLARolloutWorker(RolloutWorkerBase):
                         logger.warning(f"[VLA Rollout] Parameter {param_name} not found in model, skipping")
                         continue
                     
-                    target_param = model_params[param_name]
+                    target_param = model_params[param_name].to_local()
                     transferred_params += 1
                     
                     # Process each instruction for this parameter
@@ -866,6 +918,7 @@ class VLARolloutWorker(RolloutWorkerBase):
                         tensor_split_strategys = inst.slice_strategy
                         # assert r_rank == global_rank_of_rollout
                         vllm_tensor_view = recv_tensor.cosmos_slice(tensor_split_strategys)
+                        #recv_tensor = torch.empty_like(vllm_tensor_view).contiguous().to(vllm_tensor_view.device)
                         recv_tensor, inplace = recv_tensor_creator(vllm_tensor_view)
 
                         # TODO: need none-inplace support
@@ -879,6 +932,7 @@ class VLARolloutWorker(RolloutWorkerBase):
                         #     all_tensor_views_to_copy.append(
                         #         (vllm_tensor_view, recv_tensor, inst_dest_name)
                         #     )
+                        # torch.testing.assert_close(recv_tensor, vllm_tensor_view)
                         total_bytes_received += recv_tensor.numel() * recv_tensor.element_size()
             
             # Synchronize to ensure all receives complete

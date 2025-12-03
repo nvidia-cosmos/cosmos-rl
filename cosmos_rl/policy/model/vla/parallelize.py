@@ -184,13 +184,29 @@ def apply_vla_fsdp(
     
     This balances memory efficiency with communication overhead.
     """
-    from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
+    from torch.distributed.fsdp import MixedPrecisionPolicy
     from torch.distributed._composable.fsdp import fully_shard
     
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    
+    # NOTE: We don't use CPUOffloadPolicy here for two reasons:
+    # 1. It provides limited flexibility (can't separately control params/grads/optimizer)
+    # 2. It stores BF16 on CPU which causes numerical errors
+    # 
+    # Instead, use manual offloading with cosmos_rl.utils.fsdp2_offload_utils:
+    # - offload_params: Offload parameters (stores as FP32 on CPU for stability)
+    # - offload_grads: Offload gradients separately
+    # - offload_optimizer: Offload optimizer states (biggest memory savings)
+    #
+    # See examples/fsdp2_manual_offload_example.py for usage.
     if cpu_offload:
-        fsdp_config["offload_policy"] = CPUOffloadPolicy()
+        logger.warning(
+            "[FSDP2] cpu_offload=True is deprecated. "
+            "Use manual offloading instead (train.offload_params/offload_grads/offload_optimizer) "
+            "for better flexibility and numerical stability. "
+            "See cosmos_rl.utils.fsdp2_offload_utils and examples/fsdp2_manual_offload_example.py"
+        )
     
     n_layers = 0  # Track number of sharded layers
     

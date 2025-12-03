@@ -77,6 +77,7 @@ from cosmos_rl.utils.sequence_packing import (
 )
 from cosmos_rl.utils.balance_seqlen import rearrange_mini_batches
 from cosmos_rl.utils.saved_batch_loader import SavedBatchLoader, SavedBatchIterator
+from cosmos_rl.utils.fsdp2_offload_utils import FSDP2OffloadManager
 
 
 def compute_loss(
@@ -328,6 +329,26 @@ class GRPOTrainer(Trainer):
         self.prepare_shard_infos_for_weight_sync_insts()
         if config.train.train_policy.variant == "gspo":
             logger.info("[Policy] Use GSPO loss in RL.")
+        
+        # Initialize manual CPU offloading manager (flexible offloading like SimpleVLA-RL)
+        if config.train.offload_params or config.train.offload_grads or config.train.offload_optimizer:
+            self.offload_manager = FSDP2OffloadManager(
+                offload_params=config.train.offload_params,
+                offload_grads=config.train.offload_grads,
+                offload_optimizer=config.train.offload_optimizer,
+                store_params_as_fp32=config.train.offload_store_fp32,
+                target_param_dtype=str2torch_dtype(config.train.param_dtype),
+            )
+            logger.info(
+                f"[Policy] Manual offloading enabled: params={config.train.offload_params}, "
+                f"grads={config.train.offload_grads}, optimizer={config.train.offload_optimizer}, "
+                f"store_fp32={config.train.offload_store_fp32}"
+            )
+            # Offload after initialization
+            self.offload_manager.offload_all(self.model, self.optimizers)
+            logger.info("[Policy] Model and optimizer offloaded to CPU after initialization")
+        else:
+            self.offload_manager = None
 
     @torch.no_grad()
     def prepare_shard_infos_for_weight_sync_insts(self):
@@ -653,6 +674,12 @@ class GRPOTrainer(Trainer):
         recv = self.replica_name in command.dst_replica_names and not send
         if not send and not recv:
             return True
+        
+        # Load for inference (params only, no optimizer needed for P2P sync)
+        if self.offload_manager is not None:
+            logger.info("[Policy] Loading model parameters from CPU for P2P broadcast")
+            self.offload_manager.load_for_inference(self.model)
+        
         st = time.time()
         # TODO(zjx): there need failure tolerance for nccl send and recv, so get nccl param from command
         send_recv_hook = partial(
@@ -669,6 +696,12 @@ class GRPOTrainer(Trainer):
         logger.debug(
             f"[Policy] Policy2Policy Broadcast {len_params} parameters from {command.src_replica_name} (rank {self.inter_policy_nccl.get_replica_rank(command.src_replica_name)}) to {len(command.dst_replica_names)} replicas took {time_eclapsed:.3f} seconds."
         )
+        
+        # Offload after P2P sync
+        if self.offload_manager is not None:
+            logger.info("[Policy] Offloading model parameters to CPU after P2P broadcast")
+            self.offload_manager.offload_after_inference(self.model)
+        
         return False
 
     @Trainer.register_policy_command_handler(PolicyToPolicyUnicastCommand)
@@ -677,6 +710,12 @@ class GRPOTrainer(Trainer):
         recv = self.replica_name == command.dst_replica_name
         if not send and not recv:
             return False
+        
+        # Load for inference (params only, no optimizer needed for P2P sync)
+        if self.offload_manager is not None:
+            logger.info("[Policy] Loading model parameters from CPU for P2P unicast")
+            self.offload_manager.load_for_inference(self.model)
+        
         st = time.time()
         # TODO(zjx): there need failure tolerance for nccl send and recv, so get nccl param from command
         send_hook = partial(
@@ -696,6 +735,12 @@ class GRPOTrainer(Trainer):
         logger.debug(
             f"[Policy] Policy2Policy Unicast {len_params} parameters from {command.src_replica_name} (rank {self.inter_policy_nccl.get_replica_rank(command.src_replica_name)}) to {command.dst_replica_name} (rank {self.inter_policy_nccl.get_replica_rank(command.dst_replica_name)}) as sender {send} took {time_eclapsed:.3f} seconds."
         )
+        
+        # Offload after P2P sync
+        if self.offload_manager is not None:
+            logger.info("[Policy] Offloading model parameters to CPU after P2P unicast")
+            self.offload_manager.offload_after_inference(self.model)
+        
         return False
 
     @cached_property
@@ -721,11 +766,19 @@ class GRPOTrainer(Trainer):
         logger.info(f"[Policy] Command src_size: {command.src_replica_size}, dst_size: {command.dst_replica_size}")
         #return False
         
+        # Load parameters from CPU if manual offloading is enabled (no need for optimizer during weight sync)
+        if self.offload_manager is not None:
+            logger.info("[Policy] Loading model parameters from CPU for P2R weight sync")
+            self.offload_manager.load_for_inference(self.model)
+        
         assert command.src_replica_size == self.world_size
         if not command.src_replica_name == self.replica_name:
             logger.error(
                 f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
             )
+            # Offload back before returning
+            if self.offload_manager is not None:
+                self.offload_manager.offload_after_inference(self.model)
             return False
 
         comm_id = {}
@@ -843,6 +896,12 @@ class GRPOTrainer(Trainer):
                                     local_view = local_view()
                                 else:
                                     pass
+                                
+                                # Unwrap DTensor to local tensor before slicing (FSDP2 compat)
+                                if isinstance(local_view, torch.distributed.tensor.DTensor):
+                                    local_view = local_view.to_local()
+                                    logger.debug(f"[Policy] Unwrapped DTensor to local for P2R send: {dest_name}")
+                                
                                 local_view = local_view.to(
                                     str2torch_dtype(self.config.train.transfer_dtype)
                                 )
@@ -881,6 +940,12 @@ class GRPOTrainer(Trainer):
         logger.debug(
             f"[Policy] All {len(self.policy_to_rollout_insts)} at step {command.weight_step} send operations of finished in {time_eclapsed:.3f} seconds with {total_bytes_sent / (1024 * 1024)} MB sent. While {skipped_params_cnt} non-trainable splitted params skipped and {transferred_params_cnt} splitted params transferred."
         )
+        
+        # Offload parameters back to CPU after weight sync
+        if self.offload_manager is not None:
+            logger.info("[Policy] Offloading model parameters to CPU after P2R weight sync")
+            self.offload_manager.offload_after_inference(self.model)
+        
         return False
 
     @Trainer.register_policy_command_handler(WeightResumeCommand)
@@ -964,6 +1029,11 @@ class GRPOTrainer(Trainer):
                     new_lr_schedulers.load_state_dict(self.lr_schedulers.state_dict())
                 self.lr_schedulers = new_lr_schedulers
                 self.lr_schedulers_updated = True
+            # Load model/optimizer from CPU if manual offloading is enabled
+            if self.offload_manager is not None:
+                logger.info("[Policy] Loading model and optimizer from CPU for training")
+                self.offload_manager.load_for_training(self.model, self.optimizers)
+            
             # Route to VLA-specific training if applicable
             is_vla = hasattr(self.config, 'vla') and self.config.vla is not None
             if is_vla:
@@ -980,6 +1050,11 @@ class GRPOTrainer(Trainer):
                     remain_samples_num=command.remain_samples_num,
                     do_save_checkpoint=command.do_save,
                 )
+            
+            # Offload model/optimizer back to CPU after training
+            if self.offload_manager is not None:
+                logger.info("[Policy] Offloading model and optimizer to CPU after training")
+                self.offload_manager.offload_after_training(self.model, self.optimizers)
         else:
             report_data = {}
             logger.info(

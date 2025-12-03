@@ -16,11 +16,16 @@ async_tp_enabled = false
 compile = true
 param_dtype = "bfloat16" # compute dtype of param/activation (not affected by autocast) 1. model.to(torch.bfloat16) affect buffer 2. from_pretrained(dtype) will not affect buffer dtype 3. fsdp behavior?
 fsdp_reduce_dtype = "float32" # nccl reduce dtype
-master_dtype = "bfloat16" # param/grad dtype in vram
-fsdp_offload = true
+master_dtype = "float32" # param/grad dtype in vram
+transfer_dtype = "float32"
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 8
 sync_weight_interval = 4
+offload_params= false
+offload_grads = true
+offload_optimizer = true
+offload_store_fp32 = true
+# fsdp_offload = true
 
 [policy]
 model_name_or_path = "Haozhan72/Openvla-oft-SFT-libero10-trajall"

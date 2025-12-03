@@ -579,6 +579,25 @@ class TrainingConfig(BaseModel):
         default=1,
         description="The interval of train step for synchronizing weights between replicas.",
     )
+    
+    # Manual CPU offloading options (provides granular control like SimpleVLA-RL)
+    offload_params: bool = Field(
+        default=False,
+        description="Whether to manually offload parameters to CPU. Provides more control than fsdp_offload.",
+    )
+    offload_grads: bool = Field(
+        default=False,
+        description="Whether to manually offload gradients to CPU.",
+    )
+    offload_optimizer: bool = Field(
+        default=False,
+        description="Whether to manually offload optimizer states to CPU (biggest memory savings).",
+    )
+    offload_store_fp32: bool = Field(
+        default=True,
+        description="When using manual offload, store parameters as FP32 on CPU for numerical stability (vs BF16).",
+    )
+    
     deterministic: bool = Field(
         default=False,
         description="Whether to use deterministic training. If set to True, will use deterministic training, which is expected to be slower.",

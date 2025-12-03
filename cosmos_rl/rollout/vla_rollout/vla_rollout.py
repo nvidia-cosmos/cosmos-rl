@@ -213,18 +213,24 @@ class VLARollout(RolloutBase):
         self.vla_model = vla_model  # Keep wrapper for weight_sync_transforms
         # Apply parallelism to the model
         parallelize_fn, _ = vla_model.parallelize_fn
-        self.config.train.fsdp_offload = True
         self.config.train.fsdp_reshard_after_forward = "never"
         parallelize_fn(vla_model, parallel_dims, self.config, pp_loss_fn=None)
         self.module = vla_model.model  # Inner OpenVLAForActionPrediction for inference
         self.module.eval()
+
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        self.vla_model.load_hf_weights(
+            self.config.policy.model_name_or_path,
+            parallel_dims,
+            device,
+            revision=self.config.policy.model_revision,
+        )
         
         # Save processor, tokenizer, and config for later use
         self.processor = processor
         self.tokenizer = tokenizer
         self.hf_config = vla_config  # Save for shard info generation
         
-        device = torch.device(f"cuda:{torch.cuda.current_device()}")
         logger.info(f"✅ VLA model structure initialized on {device}")
         logger.info(f"   ALL weights (vision_backbone + projector + LLM + action_head) will be synced via P2R NCCL")
         logger.info(f"   Vision backbone IS trainable (not frozen)")

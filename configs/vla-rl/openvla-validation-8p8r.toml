@@ -4,7 +4,7 @@ redis = "12800"
 resume = false
 epoch = 1024
 output_dir = "./outputs/vla-validation-4p4r"
-epsilon = 1e-7
+epsilon = 1e-8
 optm_name = "AdamW"
 optm_lr = 5e-6
 optm_impl = "fused"
@@ -17,10 +17,15 @@ compile = true
 param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 master_dtype = "float32"
-fsdp_offload = false
+transfer_dtype = "float32"
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 128
 sync_weight_interval = 4
+offload_params= false
+offload_grads = true
+offload_optimizer = true
+offload_store_fp32 = true
+# fsdp_offload = true
 
 [policy]
 model_name_or_path = "Haozhan72/Openvla-oft-SFT-libero10-trajall"
@@ -80,10 +85,10 @@ dp_replicate_size = 1  # Use 1 for now (can increase if DDP is enabled)
 cp_rotate_method = "allgather"
 
 [rollout.parallelism]
-n_init_replicas = 8  # 4 rollout workers
+n_init_replicas = 1  # 4 rollout workers
 tp_size = 1
 cp_size = 1
-dp_shard_size = 1
+dp_shard_size = 8
 pp_size = 1
 dp_replicate_size = 1
 
