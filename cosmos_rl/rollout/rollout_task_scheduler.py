@@ -16,7 +16,7 @@
 import asyncio
 import torch
 import threading
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Set
 from queue import Queue
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -56,7 +56,7 @@ class RolloutTaskScheduler:
     This scheduler implements a producer-consumer pattern:
     - Internally manages task_queue and complete_queue
     - Accepts payloads via put_rollout() method
-    - Runs a background async loop that monitors task_queue in a separate thread
+    - Runs a background async loop that monitors task_queue (in separate thread or async mode)
     - Controls concurrent generation based on max_concurrent_requests
     - Calls rollout engine's rollout_generation() for each payload
     - Provides get() method to retrieve completed results
@@ -72,8 +72,9 @@ class RolloutTaskScheduler:
     - Support for pause/resume during critical operations (e.g., weight sync)
     - Context manager for temporary pause (with scheduler.paused())
     - Graceful shutdown with active task completion
+    - Dual operation modes: thread-based (start/stop) or async-based (start_async/stop_async)
 
-    Usage Example:
+    Usage Example (Thread Mode):
     ```python
     # Initialize the scheduler
     scheduler = RolloutTaskScheduler(
@@ -119,7 +120,32 @@ class RolloutTaskScheduler:
     scheduler.stop()
     ```
 
+    Usage Example (Async Mode):
+    ```python
+    # Initialize the scheduler
+    scheduler = RolloutTaskScheduler(
+        rollout_engine=rollout_engine,
+        data_packer=data_packer,
+        max_concurrent_requests=10
+    )
+
+    # Start the scheduler in async mode
+    await scheduler.start_async()
+
+    # Submit tasks (same as thread mode)
+    scheduler.put_rollout(task1)
+    scheduler.put_rollout(task2)
+
+    # Wait for all tasks to complete
+    await scheduler.wait_all_tasks_completed()
+
+    # Stop the scheduler
+    await scheduler.stop_async()
+    ```
+
     Architecture:
+
+    Thread Mode (start/stop):
     ```
     Main Thread                    Worker Thread (separate event loop)
     ┌─────────────┐               ┌──────────────────────────────┐
@@ -138,6 +164,30 @@ class RolloutTaskScheduler:
     └─────────────┘               │   rollout_generation()      │
                                   └──────────────────────────────┘
     ```
+
+    Async Mode (start_async/stop_async):
+    ```
+    Async Context (same event loop)
+    ┌────────────────────────────────────────────┐
+    │ put_rollout ──► task_queue                 │
+    │                     │                      │
+    │ await start_async() │                      │
+    │         │           ▼                      │
+    │         │      _worker_loop()              │
+    │         │       ├─ create_task()           │
+    │         │       ├─ max_concurrent          │
+    │         │       └─ _generate_single()      │
+    │         │                                  │
+    │ get() ◄── complete_queue                   │
+    │                                            │
+    │ await stop_async()                         │
+    │         │                                  │
+    │         └─► _worker_task (awaited)         │
+    └────────────────────────────────────────────┘
+    ```
+
+    Note: The scheduler supports either thread mode OR async mode, not both simultaneously.
+    The mode is determined by which start method is called first (start() or start_async()).
     """
 
     def __init__(
@@ -171,8 +221,12 @@ class RolloutTaskScheduler:
         # Track running state
         self._running = threading.Event()
         self._paused = threading.Event()
-        self._worker_thread = None
-        self._loop = None
+        self._worker_thread = (
+            None  # Thread object when running in thread mode (start())
+        )
+        self._worker_task = (
+            None  # asyncio.Task when running in async mode (start_async())
+        )
 
         # Track active tasks
         self.active_tasks: Set[asyncio.Task] = set()
@@ -347,15 +401,26 @@ class RolloutTaskScheduler:
         This creates a new thread that runs an independent asyncio event loop.
         The worker thread monitors the task_queue and manages concurrent task execution.
 
+        Note: Cannot be used together with start_async() - only one mode can be active at a time.
+
         Thread Safety:
             Uses threading.Event() for _running flag to ensure thread-safe state management.
+
+        Raises:
+            AssertionError: If start_async() was already called (async mode is active)
         """
+        assert (
+            self._worker_task is None
+        ), "Not support to start the scheduler worker loop both in thread and async mode"
+
         if self._running.is_set():
             logger.warning("[RolloutTaskScheduler] Scheduler is already running")
             return
 
         self._running.set()
-        self._worker_thread = threading.Thread(target=self._run_event_loop, daemon=True)
+        self._worker_thread = threading.Thread(
+            target=self._run_event_loop, daemon=True, name="RolloutTaskSchedulerWorker"
+        )
         self._worker_thread.start()
 
         logger.info("[RolloutTaskScheduler] Background worker started")
@@ -388,6 +453,61 @@ class RolloutTaskScheduler:
         if wait and self._worker_thread:
             self._worker_thread.join(timeout=10)
 
+        logger.info("[RolloutTaskScheduler] Background worker stopped")
+
+    async def start_async(self):
+        """
+        Start the scheduler worker loop asynchronously in the current event loop.
+
+        Unlike start() which creates a separate worker thread with its own event loop,
+        this method runs the worker loop as an async task in the current event loop.
+        This is useful when the scheduler needs to run in the same event loop as the
+        calling code (e.g., in async applications or notebooks).
+
+        Note: Cannot be used together with start() - only one mode can be active at a time.
+
+        Thread Safety:
+            Uses threading.Event() for _running flag to ensure thread-safe state management.
+
+        Raises:
+            AssertionError: If start() was already called (thread mode is active)
+        """
+        assert (
+            self._worker_thread is None
+        ), "Not support to start the scheduler worker loop both in thread and async mode"
+
+        if self._running.is_set():
+            logger.warning("[RolloutTaskScheduler] Scheduler is already running")
+            return
+
+        self._running.set()
+        self._worker_task = asyncio.create_task(self._worker_loop())
+        logger.info("[RolloutTaskScheduler] Background worker started")
+
+    async def stop_async(self, wait: bool = True):
+        """
+        Stop the scheduler asynchronously.
+
+        This method stops the async worker loop started by start_async().
+        It signals the worker to stop and optionally waits for it to complete.
+
+        Args:
+            wait: Whether to wait for the worker task to finish (default: True).
+                  If True, awaits the worker task until it completes.
+                  If False, returns immediately without waiting.
+
+        Thread Safety:
+            Uses threading.Event.clear() for atomic state change visible to worker loop.
+        """
+        if not self._running.is_set():
+            logger.warning("[RolloutTaskScheduler] Scheduler is not running")
+            return
+
+        logger.info("[RolloutTaskScheduler] Stopping background worker...")
+
+        self._running.clear()
+        if wait and self._worker_task:
+            await self._worker_task
         logger.info("[RolloutTaskScheduler] Background worker stopped")
 
     def pause(self):
@@ -649,23 +769,3 @@ class RolloutTaskScheduler:
             "completed_results": self.completed_results(),
             "max_concurrent_requests": self.max_concurrent_requests,
         }
-
-    # TODO(zjx): below are some HACKs in this class, be careful when calling them.
-    def get_front_prompt_weight_version(self) -> Tuple[bool, int]:
-        """
-        Get the weight version of the front task in the task queue.
-
-        This is a HACK method that directly accesses the internal queue structure.
-        Use with caution as it bypasses the normal queue interface.
-
-        Returns:
-            A tuple of (has_task, weight_version):
-                - has_task: True if there is a task in the queue, False otherwise
-                - weight_version: The weight version from the front task's payload (0 if queue is empty)
-        """
-
-        if self.task_queue.empty():
-            return (False, 0)
-
-        rollout_task: RolloutTask = self.task_queue.queue[0]
-        return (True, rollout_task.payload.weight_version)

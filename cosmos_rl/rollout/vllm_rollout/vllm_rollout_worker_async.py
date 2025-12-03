@@ -419,7 +419,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
     def request_new_prompts(
         self, batch_size: int, validation_step: Optional[int] = None, **kwargs
-    ):
+    ) -> Tuple[List[RLPayload], bool]:
         """
         Request new prompts from the controller for both training and validation.
         """
@@ -463,23 +463,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         prompts_and_is_end: Tuple[List[RLPayload], bool] = (
             dist_utils.broadcast_object_cpu(prompts_and_is_end)
         )
-        prompts, is_end = prompts_and_is_end
-        if prompts is not None:
-            sp = (
-                self.sampling_params
-                if validation_step is None
-                else self.validation_sampling_params
-            )
-            tasks = [
-                RolloutTask(
-                    idx=prompt.prompt_idx,
-                    payload=prompt,
-                    sampling_params=sp,
-                )
-                for prompt in prompts
-            ]
-            self.scheduler.put_rollout_batch(tasks)
-        return is_end
+        return prompts_and_is_end
 
     async def consume_one_command(
         self, cmd_pred: Optional[Callable[[Command], bool]] = None
@@ -609,19 +593,49 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                     self.reward_dispatcher.dequeue_rewards_cal()
                 )
 
-    @torch.no_grad()
-    async def do_generate(self):
-        logger.debug(f"[Rollout] generate start for rank {self.global_rank}")
+    async def try_fetch_new_prompts(self):
+        if self.state.prompt_fetch_end():
+            return
 
-        # we enqueue tasks by batch in the main loop, so we need to collect all task results here.
-        await self.scheduler.wait_all_tasks_completed()
+        # try fetching new prompts
+        if (
+            self.scheduler.pending_tasks()
+            > self.config.rollout.async_config.max_concurrent_requests
+        ):
+            return
 
-        rollout_results: List[CompletedRollout] = []
+        prompts, no_more_prompts = await asyncio.to_thread(
+            self.request_new_prompts, self.batch_size
+        )
+        if no_more_prompts:
+            logger.info(
+                f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
+            )
+            self.state.set_prompt_fetch_end()
 
-        # TODO(zjx): maybe we have'nt put enough task in the scheduler. so there are not enough rollout results.
+        # packing the prompts into tasks and put into the scheduler
+        if prompts is not None:
+            tasks = [
+                RolloutTask(
+                    idx=prompt.prompt_idx,
+                    payload=prompt,
+                    sampling_params=self.sampling_params,
+                )
+                for prompt in prompts
+                # filter the prompts with valid weight version for fully synchronized mode
+                if prompt.weight_version <= self.current_weight_version
+            ]
+            self.scheduler.put_rollout_batch(tasks)
+
+    async def check_generate_results(self) -> bool:
+        """
+        Check if there are enough rollout results to report.
+
+        Returns:
+            True if there are enough rollout results to report, False otherwise.
+        """
         # make sure all prompts are completed before reporting.
-        while len(rollout_results) < self.batch_size:
-            rollout_results.extend(self.scheduler.get_all())
+        rollout_results: List[CompletedRollout] = self.scheduler.get_all()
 
         # we need filter the result with valid completions or valid completed_conversations
         valid_results: list[CompletedRollout] = []
@@ -631,8 +645,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             valid_results = filter_valid_single_turn_rollout_results(
                 rollout_results, self.eos_token
             )
-
-        logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
         should_report = (
             self.parallel_dims.tp_coord[0] == 0
@@ -659,68 +671,60 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                 self.current_weight_version,
             )
 
-            if (
-                self.state.prompt_fetch_end()
-                and self.scheduler.is_all_tasks_completed()
-            ):
-                self.state.set_prompt_consume_end()
+        # Report rollouts (dequeue from reward_dispatcher)
+        _, is_validation, _, _ = await asyncio.to_thread(self.report_rollouts)
+        assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
 
     async def main_loop_async(self):
         """Main loop with async scheduler integration (coroutine version)."""
 
         self.lazy_initialize_rollout_engine(load_format="auto")
 
-        while not self.shutdown_signal.is_set():
-            # Sync consume command
-            await self.consume_command(cmd_pred=None)
+        try:
+            # Start scheduler's worker loop as a coroutine
+            await self.scheduler.start_async()
 
-            if self.validation_flag.is_set():
-                # If encounter validation flag during last rollout generation or this command fetch, do validation first.
-                await self.do_validation()
+            while not self.shutdown_signal.is_set():
+                # All operations run in the same event loop, enabling true async concurrency
+                await self.consume_command(cmd_pred=None)
 
-            # If weight is not ready, nothing else to do.
-            if not self.state.weight_synced():
-                continue
+                if self.validation_flag.is_set():
+                    # If encounter validation flag during last rollout generation or this command fetch, do validation first.
+                    await self.do_validation()
 
-            # try fetching new prompts if no ending signal is set
-            if not self.state.prompt_fetch_end():
-                self.scheduler.pause()  # for those prmpts, we don't want to generate them immediately.
-                no_more_prompts = self.request_new_prompts(self.batch_size)
-                if no_more_prompts:
-                    logger.info(
-                        f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
-                    )
-                    self.state.set_prompt_fetch_end()
-
-            # Report rollouts (dequeue from reward_dispatcher)
-            _, is_validation, _, _ = self.report_rollouts()
-            assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
-
-            # Check if all prompts are consumed
-            if self.state.prompt_consume_end():
-                # Send end signal to the controller
-                # Because we first report_rollouts() to the controller, so we don't need to check the reward_dispatcher queue here.
-                self.shutdown_signal.set()
-                if self.global_rank == 0:
-                    self.send_end_signal()
-            elif self.scheduler.task_queue.empty():
-                continue
-            else:
-                # Check if the weight version is valid for current prompts
-                has_front_prompt, front_prompt_weight_version = (
-                    self.scheduler.get_front_prompt_weight_version()
-                )
-                if not has_front_prompt:
-                    continue
-                is_valid_prompt_for_current_weight_version = (
-                    front_prompt_weight_version <= self.current_weight_version
-                )
-                if not is_valid_prompt_for_current_weight_version:
-                    # Fully Synchronized mode is enabled, we need to wait until the weight version is updated
+                # If weight is not ready, nothing else to do.
+                if not self.state.weight_synced():
+                    await asyncio.sleep(0)
                     continue
 
-                self.scheduler.resume()  # resume the scheduler to generate the prompts
-                await self.do_generate()
+                # check if we should finish the rollout generation worker
+                if (
+                    self.state.prompt_fetch_end()
+                    and self.scheduler.is_all_tasks_completed()
+                    # all reward calculation tasks are reported
+                    and self.reward_dispatcher.is_empty()
+                ):
+                    self.state.set_prompt_consume_end()
+
+                # Check if all prompts are consumed, if so, send end signal to the controller.
+                if self.state.prompt_consume_end():
+                    # Send end signal to the controller
+                    # Because we first report_rollouts() to the controller, so we don't need to check the reward_dispatcher queue here.
+                    self.shutdown_signal.set()
+                    if self.global_rank == 0:
+                        self.send_end_signal()
+                    continue
+
+                # execute the fetch and generate process (async version)
+                await self.try_fetch_new_prompts()
+                await self.check_generate_results()
+
+                # This allows other coroutines to process
+                await asyncio.sleep(0)
+        finally:
+            # Stop scheduler gracefully
+            logger.info("[RolloutWorkerAsync] Stopping scheduler worker loop")
+            await self.scheduler.stop_async()
 
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
@@ -728,8 +732,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         """Main work method - runs the async event loop."""
         # Initialize scheduler after engine is ready
         self.init_scheduler()
-        # we need all rank run the scheduler in the same time.
-        self.scheduler.start()
 
         # Start the thread with daemon=True
         if self.global_rank == 0:
@@ -740,6 +742,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             self.background_thread.start()
 
         # Run the async main loop
+        # IMPORTANT: vLLM engine, scheduler, and all async operations run in this single event loop
         logger.info("[RolloutWorkerAsync] Starting async event loop")
         try:
             asyncio.run(self.main_loop_async())
@@ -748,9 +751,6 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             import traceback
 
             traceback.print_exc()
-        finally:
-            logger.info("[RolloutWorkerAsync] Stopping scheduler")
-            self.scheduler.stop(wait=True)
 
         self.inference_stream.synchronize()
         self.handle_shutdown()
