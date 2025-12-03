@@ -77,8 +77,7 @@ class SFTDataset(Dataset):
             self.cache = cache.DiskCache(cache_folder)
 
     def __len__(self):
-        # return len(self.dataset)
-        return 20
+        return len(self.dataset)
 
     def __getitem__(self, idx):
         # we only cache on_the_fly result
