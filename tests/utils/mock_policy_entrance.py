@@ -188,15 +188,6 @@ def main(*args, **kwargs):
                 parallel_dims=parallel_dims,
                 **kwargs,
             )
-            policy_worker.setup(
-                config=cosmos_config,
-                dataset=kwargs.get("dataset", None),
-                val_dataset=kwargs.get("val_dataset", None),
-                sampler=kwargs.get("sampler", None),
-                batch_sampler=kwargs.get("batch_sampler", None),
-                val_sampler=kwargs.get("val_sampler", None),
-                val_batch_sampler=kwargs.get("val_batch_sampler", None),
-            )
             policy_worker.main_loop()
         elif policy_type == "grpo":
             logger.info("Starting GRPO training...")

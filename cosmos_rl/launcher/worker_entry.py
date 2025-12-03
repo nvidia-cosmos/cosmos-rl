@@ -1,5 +1,5 @@
 import os
-from typing import Optional, List, Callable, Union
+from typing import Optional, List, Callable, Union, Dict
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -16,6 +16,7 @@ def main(
     val_reward_fns: Optional[List[Callable]] = None,
     val_data_packer: Optional[BaseDataPacker] = None,
     custom_logger_fns: Optional[List[Callable]] = None,
+    hook_fns: Optional[Dict[str, Callable]] = None,
     sampler: Optional[Callable] = None,
     batch_sampler: Optional[Callable] = None,
     val_sampler: Optional[Callable] = None,
@@ -40,6 +41,7 @@ def main(
             val_reward_fns=val_reward_fns,
             val_data_packer=val_data_packer,
             custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
             sampler=sampler,
             batch_sampler=batch_sampler,
             val_sampler=val_sampler,
@@ -56,6 +58,8 @@ def main(
             val_data_packer=val_data_packer,
             sampler=sampler,
             batch_sampler=batch_sampler,
+            custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
             val_sampler=val_sampler,
             val_batch_sampler=val_batch_sampler,
         )
@@ -71,6 +75,8 @@ def main(
             val_reward_fns=val_reward_fns,
             data_packer=data_packer,
             val_data_packer=val_data_packer,
+            custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
         )
         return
 

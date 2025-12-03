@@ -88,6 +88,7 @@ class Controller:
         dataset: Optional[Dataset] = None,
         val_dataset: Optional[Dataset] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
+        hook_fns: Optional[Dict[str, Callable]] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
@@ -177,6 +178,7 @@ class Controller:
             current_step=self.data_fetcher.ckpt_extra_info.get("step", 0),
             max_num_steps=config.train.max_num_steps,
             custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
         )
         self.rollout_status_manager.setup(config, self.redis_controller)
 

@@ -22,7 +22,6 @@ from torch.utils.data import Dataset
 from typing import Callable, Optional
 from cosmos_rl.utils.logging import logger
 from typing import List
-from cosmos_rl.policy.config import Config
 from cosmos_rl.colocated.utils import CommandDispatcher
 from cosmos_rl.policy.worker.colocated.policy_control import (
     ColocatedPolicyControlWorker,
@@ -77,9 +76,18 @@ class ColocatedRLControlWorker:
         self.policy.set_command_dispatcher(self.command_dispatcher)
         self.rollout.set_command_dispatcher(self.command_dispatcher)
 
+        self.setup(
+            dataset=kwargs.get("dataset", None),
+            val_dataset=kwargs.get("val_dataset", None),
+            sampler=kwargs.get("sampler", None),
+            batch_sampler=kwargs.get("batch_sampler", None),
+            val_sampler=kwargs.get("val_sampler", None),
+            val_batch_sampler=kwargs.get("val_batch_sampler", None),
+            custom_logger_fns=kwargs.get("custom_logger_fns", []),
+        )
+
     def setup(
         self,
-        config: Config,
         dataset: Optional[Dataset] = None,
         val_dataset: Optional[Dataset] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
@@ -91,7 +99,6 @@ class ColocatedRLControlWorker:
         """
         Setup the Colocated GRPO Control Worker.
         Args:
-            config (Config): The configuration object.
             dataset (Optional[Dataset]): The training dataset.
             val_dataset (Optional[Dataset]): The validation dataset.
             custom_logger_fns (Optional[List[Callable]]): Custom logger functions.
@@ -105,7 +112,7 @@ class ColocatedRLControlWorker:
             policy=self.policy,
             rollout=self.rollout,
             command_dispatcher=self.command_dispatcher,
-            config=config,
+            config=self.config,
             dataset=dataset,
             val_dataset=val_dataset,
             custom_logger_fns=custom_logger_fns,

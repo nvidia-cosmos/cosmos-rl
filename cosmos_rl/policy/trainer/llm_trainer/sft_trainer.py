@@ -414,7 +414,7 @@ class SFTTrainer(LLMTrainer):
 
         return report_data
 
-    def validate(self, val_global_batch, train_step: int, total_steps: int):
+    def step_validation(self, val_global_batch, train_step: int, total_steps: int):
         if not self.config.validation.enable:
             return
         if self.parallel_dims.dp_replicate_coord[0] != 0:
