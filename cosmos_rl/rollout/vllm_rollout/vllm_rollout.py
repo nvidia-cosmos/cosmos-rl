@@ -244,7 +244,7 @@ class vLLMRollout(RolloutBase):
 
             # Check if the model has MoE
             # Note: even though deepseek_v3 is MoE, EP in rollout is not supported for it yet
-            moe_model_type = {"qwen3_moe", "qwen3_vl_moe, deepseek_v3"}
+            moe_model_type = {"qwen3_moe", "qwen3_vl_moe", "deepseek_v3"}
             multimodal_type = {"qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe"}
 
             model_type = self.model_config.model_type
