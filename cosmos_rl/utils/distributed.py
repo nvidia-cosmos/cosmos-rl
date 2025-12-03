@@ -366,7 +366,11 @@ def all_gather_object_cpu(obj, device=torch.device("cpu"), group=None):
     if world_size == 1:
         return [obj]
 
-    obj_lst = [None for i in range(world_size)]
+    obj_lst = (
+        [None for i in range(world_size)]
+        if group is None
+        else [None for i in range(group.size())]
+    )
     dist.all_gather_object(obj_lst, obj, group=group)
     return obj_lst
 

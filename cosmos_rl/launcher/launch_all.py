@@ -841,6 +841,15 @@ def main():
             min_n_gpus_policy = min_n_gpus_policy * n_policy
             n_policy = 1
 
+    is_colocated = cosmos_config.get("mode", "disaggregated") == "colocated"
+    if is_colocated:
+        assert (
+            n_policy == n_rollouts
+        ), "Colocated mode only supports equal number of policy and rollout replicas"
+        assert (
+            min_n_gpus_policy == min_n_gpus_rollout
+        ), "Colocated mode requires policy and rollout to have the same GPU requirements"
+
     # Handle Lepton mode
     if args.lepton_mode:
         from leptonai.api.v2.client import APIClient
@@ -1001,7 +1010,7 @@ cosmos-rl --config config.toml"""
         global_launch_settings = replica_placement(
             list(range(num_gpus_per_node)),
             n_policy,
-            n_rollouts,
+            0 if is_colocated else n_rollouts,
             min_n_gpus_policy,
             min_n_gpus_rollout,
             replica_script="",
@@ -1284,7 +1293,7 @@ cosmos-rl --config config.toml"""
     global_launch_settings = replica_placement(
         available_gpus,
         n_policy,
-        n_rollouts,
+        0 if is_colocated else n_rollouts,
         min_n_gpus_policy,
         min_n_gpus_rollout,
         replica_script,
@@ -1306,8 +1315,9 @@ cosmos-rl --config config.toml"""
         )
     assert (
         len(available_gpus) * num_workers
-        >= min_n_gpus_policy * n_policy + min_n_gpus_rollout * n_rollouts
-    ), f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * n_rollouts}, Available: {len(available_gpus)}"
+        >= min_n_gpus_policy * n_policy
+        + min_n_gpus_rollout * (0 if is_colocated else n_rollouts)
+    ), f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * (0 if is_colocated else n_rollouts)}, Available: {len(available_gpus)}"
 
     if "LEPTON_JOB_WORKER_INDEX" in os.environ:
         prefix = os.environ.get(

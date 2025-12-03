@@ -500,6 +500,27 @@ class PolicyStatusManager:
             # Set all policy replicas to `ready`
             for replica in valid_replicas:
                 self.set_status(replica.name, PolicyStatus.READY)
+
+            if self.config.mode == "colocated":
+                # In colocated mode, we initially trigger data fetch for step 1 since the rollouts are generated locally.
+                self.current_step += 1
+                for replica in valid_replicas:
+                    self.remain_samples_num -= self.config.train.train_batch_per_replica
+                    command.DataFetchCommand.trigger(
+                        replica=replica,
+                        items_count=self.config.train.train_batch_per_replica,
+                        global_step=self.current_step,
+                        total_steps=self.total_steps,
+                        # `remain_samples_num` is just for checkpointing the training progress
+                        remain_samples_num=self.remain_samples_num,
+                        # Only `do_save` when checkpointing is enabled
+                        do_save=False,
+                        redis_handler=self.redis_handler,
+                    )
+                    self.set_status(replica.name, PolicyStatus.RUNNING)
+                    logger.info(
+                        f"[Controller] Policy Replica {replica.name} is ready in colocated mode."
+                    )
         elif (
             not self.policy_init_done
             and len(valid_replicas) < config.policy.parallelism.n_init_replicas
@@ -698,6 +719,7 @@ class PolicyStatusManager:
 
         if not hasattr(self, "report_data_list"):
             self.report_data_list = []
+
         self.report_data_list.append(report_data)
         if self.all_reduced():
             self.samples_on_the_fly -= self.config.train.train_batch_per_replica * len(
@@ -767,8 +789,6 @@ class PolicyStatusManager:
                         ]
                     )
                     train_step = self.report_data_list[0]["train_step"]
-                    self.report_data_list = []
-
                     policy_report_data = {
                         "train/loss_avg": total_loss_avg,
                         "train/loss_max": total_loss_max,
@@ -780,18 +800,60 @@ class PolicyStatusManager:
                         "train/entropy": total_entropy,
                         "train/effective_entropy": total_effective_entropy,
                     }
+                    all_keys = set().union(*[r.keys() for r in self.report_data_list])
+                    # Handle other metrics with suffixes for update to wandb and logging
+                    for k in all_keys:
+                        if k not in policy_report_data:
+                            if k.endswith("_max"):
+                                policy_report_data[k] = np.max(
+                                    [data.get(k, 0) for data in self.report_data_list]
+                                )
+                            elif k.endswith("_min"):
+                                policy_report_data[k] = np.min(
+                                    [data.get(k, 0) for data in self.report_data_list]
+                                )
+                            elif k.endswith("_sum"):
+                                policy_report_data[k] = np.sum(
+                                    [data.get(k, 0) for data in self.report_data_list]
+                                )
+                            elif k.endswith("_std"):
+                                # Approximate stddev calculation
+                                policy_report_data[k] = math.sqrt(
+                                    sum(
+                                        s**2
+                                        for s in [
+                                            data.get(k, 0)
+                                            for data in self.report_data_list
+                                        ]
+                                    )
+                                    / len(self.report_data_list)
+                                )
+                            else:
+                                # including _mean and _avg suffixes
+                                policy_report_data[k] = np.mean(
+                                    [data.get(k, 0) for data in self.report_data_list]
+                                )
+                    if self.config.mode == "colocated":
+                        for data in self.report_data_list:
+                            # Handle dynamic sampling statistics update in colocated mode
+                            self.update_dynamic_sampling_statistics(data)
 
                     if len(self.filter_records) > 0:
                         total_samples_for_filtering = sum(
                             v for v in self.filter_records.values()
                         )
-                        for k, v in self.filter_records.items():
-                            policy_report_data.update(
-                                {f"rollout/{k}_ratio": v / total_samples_for_filtering}
-                            )
+                        if total_samples_for_filtering > 0:
+                            for k, v in self.filter_records.items():
+                                policy_report_data.update(
+                                    {
+                                        f"rollout/{k}_ratio": v
+                                        / total_samples_for_filtering
+                                    }
+                                )
                     self.train_report_data.setdefault(train_step, {}).update(
                         policy_report_data
                     )
+                    self.report_data_list = []
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
@@ -883,6 +945,10 @@ class PolicyStatusManager:
         """
         Check if the rollouts are enough.
         """
+        if self.config.mode == "colocated":
+            # Colocated mode always has enough rollouts since they are locally prepared.
+            return True
+
         return self.total_pending_rollouts() >= (
             self.config.train.train_batch_per_replica
             * len(self.get_all_atoms_arrived_replicas())
@@ -934,11 +1000,13 @@ class PolicyStatusManager:
             # FIXME: (lms) will this dipatch style cause non-alignment with VeRL?
             # This dispatch style will cause rollouts from same prompt may be dispatched to different replicas.
             # Interleave-style data dispatch
-            for _ in range(items_count):
-                for replica in arrived_replicas:
-                    rollout = self.rollout_buffer.get()
-                    replica.put_rollout(rollout, self.redis_handler)
-                    rollouts_of_this_step.append(rollout)
+            if not self.config.mode == "colocated":
+                # Colocated mode no need real rollout dispatching since they are all local.
+                for _ in range(items_count):
+                    for replica in arrived_replicas:
+                        rollout = self.rollout_buffer.get()
+                        replica.put_rollout(rollout, self.redis_handler)
+                        rollouts_of_this_step.append(rollout)
 
             # Decide whether to save checkpoint
             # First check if we need to save checkpoint based on epoch

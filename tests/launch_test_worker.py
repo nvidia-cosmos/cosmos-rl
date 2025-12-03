@@ -31,7 +31,7 @@ from queue import Queue
 from cosmos_rl.policy.trainer.optm import build_lr_schedulers
 from cosmos_rl.policy.trainer import GRPOTrainer, SFTTrainer, LLMTrainer
 from cosmos_rl.policy.worker import SFTPolicyWorker, RLPolicyWorker
-from cosmos_rl.rollout.worker.rollout_control_worker import (
+from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
@@ -1034,7 +1034,7 @@ def run_dummy_policy(args: argparse.Namespace):
 
 def run_dummy_rollout(args: argparse.Namespace):
     """Run as a dummy rollout process for testing purposes"""
-    from cosmos_rl.rollout.rollout_entrance import run_rollout
+    from cosmos_rl.rollout.rollout_entry import run_rollout
 
     def dummy_sync_weight_from_policy(self, command):
         self.state.set_weight_synced()

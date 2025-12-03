@@ -50,7 +50,7 @@ CUR_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 CTRL_ENTRY = "cosmos_rl.dispatcher.run_web_panel"
 POLICY_ENTRY = "cosmos_rl.policy.train"
-ROLLOUT_ENTRY = "cosmos_rl.rollout.rollout_entrance"
+ROLLOUT_ENTRY = "cosmos_rl.rollout.rollout_entry"
 
 
 def _launch_controller(cfg_file: str, port: int):

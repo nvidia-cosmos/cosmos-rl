@@ -256,6 +256,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
                 "train_policy": {"mini_batch": 1},
                 "fp8": {"enable_fp8": False},
                 "async_tp_enabled": False,
+                "force_use_hf": False,
                 # "sequence_packing": True,
             },
             "rollout": {

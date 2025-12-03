@@ -61,7 +61,7 @@ def main(
         )
         return
     else:
-        from cosmos_rl.rollout.rollout_entrance import run_rollout
+        from cosmos_rl.rollout.rollout_entry import run_rollout
 
         run_rollout(
             dataset=dataset,

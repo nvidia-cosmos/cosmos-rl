@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from cosmos_rl.dispatcher.command import RolloutToRolloutBroadcastCommand
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.policy.trainer import GRPOTrainer
+from cosmos_rl.colocated.rl_worker import ColocatedRLControlWorker
 from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
 import torch
@@ -24,6 +26,9 @@ from cosmos_rl.dispatcher.api.client import APIClient
 from typing import List
 from cosmos_rl.dispatcher.data.schema import Rollout
 import math
+from cosmos_rl.rollout.worker.colocated.rollout_control import (
+    ColocatedRolloutControlWorker,
+)
 
 
 def mock_for_decoupled_loss():
@@ -111,6 +116,32 @@ def mock_for_custom_rollout():
     GRPOTrainer.compute_logprobs = compute_logprobs
 
 
+def mock_for_colocated():
+    origin_broadcast_to_all_rollout_replica = (
+        ColocatedRolloutControlWorker.broadcast_to_all_rollout_replica
+    )
+
+    def broadcast_to_all_rollout_replica_fake(
+        self,
+        broadcast_command,
+    ) -> None:
+        origin_broadcast_to_all_rollout_replica(
+            self,
+            broadcast_command,
+        )
+        if broadcast_command.replica_should_stop():
+            assert (
+                self.current_weight_version
+                == broadcast_command.total_steps
+                == broadcast_command.weight_step
+            )
+            assert self.current_weight_version == 2
+
+    ColocatedRolloutControlWorker.register_rollout_command_handler(
+        RolloutToRolloutBroadcastCommand
+    )(broadcast_to_all_rollout_replica_fake)
+
+
 def main(*args, **kwargs):
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 
@@ -146,9 +177,28 @@ def main(*args, **kwargs):
     elif args.test == "custom_rollout":
         # Apply the mock for custom rollout testing
         mock_for_custom_rollout()
+    elif args.test == "colocated":
+        mock_for_colocated()
 
     try:
-        if policy_type == "grpo":
+        if cosmos_config.mode == "colocated":
+            logger.info("Starting colocated RL worker...")
+            policy_worker = ColocatedRLControlWorker(
+                config=cosmos_config,
+                parallel_dims=parallel_dims,
+                **kwargs,
+            )
+            policy_worker.setup(
+                config=cosmos_config,
+                dataset=kwargs.get("dataset", None),
+                val_dataset=kwargs.get("val_dataset", None),
+                sampler=kwargs.get("sampler", None),
+                batch_sampler=kwargs.get("batch_sampler", None),
+                val_sampler=kwargs.get("val_sampler", None),
+                val_batch_sampler=kwargs.get("val_batch_sampler", None),
+            )
+            policy_worker.main_loop()
+        elif policy_type == "grpo":
             logger.info("Starting GRPO training...")
             worker = RLPolicyWorker(
                 config=cosmos_config,

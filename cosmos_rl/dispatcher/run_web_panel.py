@@ -554,7 +554,7 @@ def main(
                 val_batch_sampler=val_batch_sampler,
             )
         else:
-            from cosmos_rl.rollout.rollout_entrance import run_rollout
+            from cosmos_rl.rollout.rollout_entry import run_rollout
 
             run_rollout(
                 dataset=dataset,

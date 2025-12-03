@@ -22,6 +22,7 @@ from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
 from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
+from cosmos_rl.colocated.rl_worker import ColocatedRLControlWorker
 
 
 def policy_entry(**kwargs):
@@ -46,8 +47,23 @@ def policy_entry(**kwargs):
     parallel_dims.build_mesh(device_type="cuda")
 
     policy_type = cosmos_config.train.train_policy.type
-
-    if policy_type == "grpo":
+    if cosmos_config.mode == "colocated":
+        logger.info("Starting colocated RL worker...")
+        policy_worker = ColocatedRLControlWorker(
+            config=cosmos_config,
+            parallel_dims=parallel_dims,
+            **kwargs,
+        )
+        policy_worker.setup(
+            config=cosmos_config,
+            dataset=kwargs.get("dataset", None),
+            val_dataset=kwargs.get("val_dataset", None),
+            sampler=kwargs.get("sampler", None),
+            batch_sampler=kwargs.get("batch_sampler", None),
+            val_sampler=kwargs.get("val_sampler", None),
+            val_batch_sampler=kwargs.get("val_batch_sampler", None),
+        )
+    elif policy_type == "grpo":
         policy_worker = RLPolicyWorker(
             config=cosmos_config,
             parallel_dims=parallel_dims,
