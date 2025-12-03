@@ -419,6 +419,7 @@ def map_weight_parallel_dims(
         ".self_attn.q_a_layernorm.": None,
         ".self_attn.q_b_proj.": 0,
         ".self_attn.kv_a_proj_with_mqa.": None,
+        ".self_attn.fused_qkv_a_proj.": None,
         ".self_attn.kv_a_layernorm.": None,
         ".self_attn.kv_b_proj.": 0,
         ".self_attn.o_proj.": 1,
@@ -427,6 +428,8 @@ def map_weight_parallel_dims(
         ".mlp.gate_proj.": -2,
         ".mlp.up_proj.": -2,
         ".mlp.down_proj.": -1,
+        ".mlp.experts.gate_and_up_proj.": 0,
+        ".mlp.experts.down_proj.": 0,
         # deepseekv3 moe-related weights
         ".mlp.gate.": None,
         ".mlp.shared_experts.gate_proj.": 0,
