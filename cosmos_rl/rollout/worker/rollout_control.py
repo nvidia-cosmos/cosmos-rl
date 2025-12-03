@@ -768,6 +768,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         p.completion_token_ids = rr.completion_token_ids
                         if self.rollout.rollout_config.multi_turn_config.enable:
                             p.completed_conversations = rr.completed_conversations
+                        if self.config.train.tensor_native:
+                            p.tensor_dict = rr.tensor_dict
                     validation_payloads.extend(payloads_list)
 
             if is_end:
@@ -801,12 +803,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                             payloads[i].completed_conversations,
                             payloads[i].completion_logprobs,
                             payloads[i].completion_token_ids,
+                            payloads[i].tensor_dict,
                             _,
                         ) = self.val_data_packer.get_rollout_output(
                             payloads[i].completions,
                             payloads[i].completed_conversations,
                             payloads[i].completion_logprobs,
                             payloads[i].completion_token_ids,
+                            payloads[i].tensor_dict,
                         )
                         if self.config.train.train_policy.rollout_as_token_ids:
                             payloads[i].completions = [""] * len(
@@ -1161,7 +1165,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 is_validation = kwargs.get("validation_step", None) is not None
 
                 if len(payloads) > 0:
-                    if self.config.train.local_dataset:
+                    if (
+                        self.config.train.local_dataset
+                        and not self.config.train.tensor_native
+                    ):
                         for payload in payloads:
                             payload["prompt"] = self.data_fetcher.get_payload_by_index(
                                 payload["prompt_idx"],
@@ -1347,12 +1354,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         payloads[i].completed_conversations,
                         payloads[i].completion_logprobs,
                         payloads[i].completion_token_ids,
+                        payloads[i].tensor_dict,
                         _,
                     ) = self.data_packer.get_rollout_output(
                         payloads[i].completions,
                         payloads[i].completed_conversations,
                         payloads[i].completion_logprobs,
                         payloads[i].completion_token_ids,
+                        payloads[i].tensor_dict,
                     )
                     # when using local dataset, we don't need to send the prompt/conversation to the controller
                     if self.config.train.local_dataset:
@@ -1455,7 +1464,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         # we need filter the result with valid completions or valid completed_conversations
         valid_result: List[RolloutResult] = []
         valid_payloads_list: List[RLPayload] = []
-        if self.rollout.rollout_config.multi_turn_config.enable:
+        if self.config.train.tensor_native:
+            for payload, rr in zip(payloads_list, rollout_results):
+                if rr.tensor_dict is not None and len(rr.tensor_dict) > 0:
+                    valid_result.append(rr)
+                    valid_payloads_list.append(payload)
+        elif self.rollout.rollout_config.multi_turn_config.enable:
             for payload, rr in zip(payloads_list, rollout_results):
                 valid_conversations: List[ConversationType] = []
                 # remove those result without valid assistant message
@@ -1520,6 +1534,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completion_token_ids = result.completion_token_ids
                 if self.rollout.rollout_config.multi_turn_config.enable:
                     old_payload.completed_conversations = result.completed_conversations
+                if self.config.train.tensor_native:
+                    old_payload.tensor_dict = result.tensor_dict
                 valid_payloads.append(old_payload)
 
             self.reward_dispatcher.enqueue_rewards_cal(

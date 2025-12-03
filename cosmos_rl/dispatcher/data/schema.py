@@ -113,6 +113,11 @@ class RLPayload(BaseModel):
         default=None, description="The logprobs of each completion."
     )
 
+    tensor_dict: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="A dictionary of tensors related to the rollout in tensor native mode.",
+    )
+
     @staticmethod
     def collate_fn(
         batch: List["IdxAndRLPayload"],

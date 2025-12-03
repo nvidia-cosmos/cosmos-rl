@@ -102,6 +102,11 @@ class DatasetConfig(BaseModel):
 class SFTDataConfig(BaseModel):
     type: Literal["sft"]
 
+    trainer_type: str = Field(
+        default="sft",
+        description="Type of the trainer for SFT.",
+    )
+
     dataset: DatasetConfig = Field(
         default_factory=DatasetConfig,
         description="Dataset configuration for SFT training. It includes dataset name, subset, revision, train split, and test split.",
@@ -237,6 +242,12 @@ class OverlongRewardConfig(BaseModel):
 
 class GrpoConfig(BaseModel):
     type: Literal["grpo"]
+
+    trainer_type: str = Field(
+        default="grpo",
+        description="Type of the trainer for GRPO.",
+    )
+
     variant: str = Field(
         default="grpo",
         description="Variant of the GRPO, currently support `grpo`, `gspo`, `dapo`",
@@ -654,6 +665,11 @@ class TrainingConfig(BaseModel):
     force_use_hf: Optional[bool] = Field(
         default=False,
         description="Whether to force using Huggingface dataset even if local dataset is available.",
+    )
+
+    tensor_native: bool = Field(
+        default=False,
+        description="Whether to use native tensor mode for training with no text as input output.",
     )
 
     # --------- smoke-test helpers ---------

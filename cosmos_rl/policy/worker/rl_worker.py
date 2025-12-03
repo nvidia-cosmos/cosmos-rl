@@ -616,7 +616,7 @@ class RLPolicyWorker(PolicyWorkerBase):
             assert all(
                 rollout.prompt_idx >= 0 for rollout in rollouts
             ), "All rollouts from controller should have a valid prompt index"
-            if self.config.train.local_dataset:
+            if self.config.train.local_dataset and not self.config.train.tensor_native:
                 for i in range(len(rollouts)):
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx
@@ -744,7 +744,7 @@ class RLPolicyWorker(PolicyWorkerBase):
         )
 
         self.trainer = TrainerRegistry.get_trainer_cls(
-            self.config.train.train_policy.type
+            self.config.train.train_policy.trainer_type
         )(
             self.config,
             self.parallel_dims,

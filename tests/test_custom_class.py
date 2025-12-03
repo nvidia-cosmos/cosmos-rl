@@ -100,6 +100,7 @@ class TestCustomRolloutOutput(unittest.TestCase):
                 completed_conversations=None,
                 logprobs=None,
                 token_ids=None,
+                tensor_dicts=None,
                 **kwargs,
             ):
                 uuids = []
@@ -111,7 +112,14 @@ class TestCustomRolloutOutput(unittest.TestCase):
                     id = uuid.uuid4()
                     self.kv_store[str(id)] = item
                     uuids.append(str(id))
-                return uuids, completed_conversations, logprobs, token_ids, kwargs
+                return (
+                    uuids,
+                    completed_conversations,
+                    logprobs,
+                    token_ids,
+                    tensor_dicts,
+                    kwargs,
+                )
 
         data_packer = TestDataPacker()
 
@@ -145,6 +153,7 @@ class TestCustomRolloutOutput(unittest.TestCase):
                 (
                     payloads[i].completions,
                     payloads[i].completed_conversations,
+                    _,
                     _,
                     _,
                     _,
