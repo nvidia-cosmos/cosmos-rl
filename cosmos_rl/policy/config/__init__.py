@@ -348,6 +348,14 @@ class GrpoConfig(BaseModel):
         "training speed, but may be numerically unstable for long training runs.",
     )
 
+    unbiased_kl_estimate: bool = Field(
+        default=False,
+        description=(
+            "Unbiased K3 with IS: D_KL ≈ E_{π_old}[ w · ( r − log r − 1 ) ], w=π_θ/π_old, r=π_ref/π_θ.\n"
+            "Ref: DeepSeek-V3.2 Sec.3.1 (Unbiased KL Estimate): https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf"
+        ),
+    )
+
     aipo_rho: Optional[float] = Field(
         default=None,
         description="Rho value for AIPO (Asynchronous Importance weighted Policy Optimization). The clipping constant of the importance sampling ratio, suggest [2,10]. "
