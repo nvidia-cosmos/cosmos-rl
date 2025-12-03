@@ -610,7 +610,8 @@ class PolicyStatusManager:
                         "val/reward_max": max_reward,
                         "val/reward_min": min_reward,
                         "val/rollout_count": len(rewards),
-                        "val/total_steps": self.total_steps,  # the total steps of the training when current validation step is triggered. This total_steps may change due to dynamic sampling.
+                        "val/step": validation_step,
+                        "val/train_total_steps": self.total_steps,  # the total steps of the training when current validation step is triggered. This total_steps may change due to dynamic sampling.
                     }
                     logger.info(
                         f"[Controller] Validation finished, average reward: {avg_reward}, total rollouts: {len(rewards)}, max reward: {max_reward}, min reward: {min_reward}, std reward: {std_reward} at step {validation_step}"
