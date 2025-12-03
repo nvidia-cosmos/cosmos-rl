@@ -239,6 +239,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if self.config.train.compile and self.config.validation.enable:
             torch._dynamo.config.cache_size_limit = 64
 
+        self.hook_fns = hook_fns if hook_fns is not None else {}
+
         # Prepare wandb
         if "wandb" in self.config.logging.logger and is_wandb_available():
             # Only initialize wandb on the first dp replicate coord and first rank for policy
@@ -267,7 +269,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
         self.custom_logger_fns = (
             custom_logger_fns if custom_logger_fns is not None else []
         )
-        self.hook_fns = hook_fns if hook_fns is not None else {}
 
     def setup(
         self,
@@ -526,9 +527,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
         # Call pre_validation_hook
         if self.pre_validation_hook is not None:
-            self.pre_validation_hook(
-                self, current_epoch=current_epoch, is_last_step=is_last_step
-            )
+            report_data = {
+                "current_epoch": current_epoch,
+                "is_last_step": is_last_step,
+            }
+            self.pre_validation_hook(self, report_data=report_data)
 
         # validation
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")

@@ -76,6 +76,10 @@ class RLPolicyWorker(PolicyWorkerBase):
         ), "config must be a CosmosConfig object for this trainer"
         super().__init__(config, parallel_dims=parallel_dims)
 
+        # For hooks and custom logger functions
+        self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
+        self.hook_fns = kwargs.get("hook_fns", {})
+
         self.report_data = {}
         self.upload_thread = None
 
@@ -108,10 +112,6 @@ class RLPolicyWorker(PolicyWorkerBase):
             master_rank=0,
             shutdown_event=self.shutdown_signal,
         )
-
-        # For hooks and custom logger functions
-        self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
-        self.hook_fns = kwargs.get("hook_fns", {})
 
         # For command fetch
         self.fetch_command_buffer = Queue()

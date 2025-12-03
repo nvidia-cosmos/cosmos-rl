@@ -16,9 +16,10 @@
 import os
 import torch
 import time
-from typing import Any
+from typing import Any, List, Dict
 import argparse
 from multiprocessing import shared_memory, Event as mp_Event
+from unittest.mock import Mock
 import numpy as np
 import torch.distributed as dist
 import toml
@@ -88,7 +89,6 @@ from torch.utils.data import DataLoader, DistributedSampler, Sampler, BatchSampl
 from cosmos_rl.policy.worker.sft_worker import collate_fn, construct_dataset
 from torch.utils.data import Dataset
 from datasets import concatenate_datasets
-from typing import List
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.dispatcher.algo.reward import boxed_math_reward_fn
@@ -1767,12 +1767,14 @@ def run_reward_check():
     rollout.handle_shutdown()
 
 
-def run_sft_custom_sampler():
+def run_sft_custom_sampler_and_hooks():
     config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
     )
     config.train.train_policy.dataloader_shuffle = False
+    config.validation.enable = True
+    config.validation.freq = 1
     parallel_dims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
@@ -1867,6 +1869,31 @@ def run_sft_custom_sampler():
         shuffle=False,
         drop_last=False,
     )
+
+    # hooks
+    pre_validation_hook_mock = Mock()
+    pre_per_step_validation_hook_mock = Mock()
+    post_per_step_validation_hook_mock = Mock()
+    post_validation_hook_mock = Mock()
+
+    def pre_validation_hook(trainer, report_data: Dict[str, Any]):
+        pre_validation_hook_mock(trainer, report_data)
+
+    def pre_per_step_validation_hook(trainer, report_data: Dict[str, Any]):
+        pre_per_step_validation_hook_mock(trainer, report_data)
+
+    def post_per_step_validation_hook(trainer, report_data: Dict[str, Any]):
+        post_per_step_validation_hook_mock(trainer, report_data)
+
+    def post_validation_hook(trainer, report_data: Dict[str, Any]):
+        post_validation_hook_mock(trainer, report_data)
+
+    hook_fns = {
+        "pre_validation_hook": pre_validation_hook,
+        "pre_per_step_validation_hook": pre_per_step_validation_hook,
+        "post_per_step_validation_hook": post_per_step_validation_hook,
+        "post_validation_hook": post_validation_hook,
+    }
     sft_worker = SFTPolicyWorker(
         config=config,
         parallel_dims=parallel_dims,
@@ -1875,6 +1902,7 @@ def run_sft_custom_sampler():
         val_data_packer=DecoderOnlyLLMDataPacker(),
         sampler=test_sampler,
         val_sampler=test_sampler,
+        hook_fns=hook_fns,
     )
     cnt = 0
     for it in sft_worker.train_data_loader:
@@ -1886,6 +1914,12 @@ def run_sft_custom_sampler():
         assert len(it) == 1
         cnt += 1
     assert cnt == 8
+
+    sft_worker.validate(current_epoch=0, is_last_step=True)
+    assert pre_validation_hook_mock.call_count >= 1
+    assert pre_per_step_validation_hook_mock.call_count >= 1
+    assert post_per_step_validation_hook_mock.call_count >= 1
+    assert post_validation_hook_mock.call_count >= 1
 
     sft_worker = SFTPolicyWorker(
         config=config,
@@ -2473,7 +2507,7 @@ async def main():
         run_sft_validation()
         exit(0)
     elif mode == "sft_for_custom_sampler":
-        run_sft_custom_sampler()
+        run_sft_custom_sampler_and_hooks()
         exit(0)
     elif mode == "reward_execution_check":
         run_reward_check()
