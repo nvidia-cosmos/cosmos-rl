@@ -310,7 +310,6 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         worker.heartbeat_thread = None
         # Skip weight sync preparation in test since we don't need it
         worker.state.set_weight_synced()
-        worker.setup()
         worker.work()
 
         self.assertEqual(
