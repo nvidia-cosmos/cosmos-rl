@@ -140,6 +140,7 @@ class PolicyStatusManager:
         current_step: int = 0,
         max_num_steps: Optional[int] = None,
         custom_logger_fns: Optional[List[Callable]] = None,
+        hook_fns: Optional[Dict[str, Callable]] = None,
     ):
         self.redis_handler = redis_handler
         self.config = config
@@ -151,6 +152,7 @@ class PolicyStatusManager:
         self.custom_logger_fns = (
             custom_logger_fns if custom_logger_fns is not None else []
         )
+        self.hook_fns = hook_fns if hook_fns is not None else {}
         self.data_fetcher = data_fetcher
 
         self.recompute_total_steps()
@@ -608,7 +610,7 @@ class PolicyStatusManager:
                         "val/reward_max": max_reward,
                         "val/reward_min": min_reward,
                         "val/rollout_count": len(rewards),
-                        "val/step": validation_step,
+                        "val/total_steps": self.total_steps,  # the total steps of the training when current validation step is triggered. This total_steps may change due to dynamic sampling.
                     }
                     logger.info(
                         f"[Controller] Validation finished, average reward: {avg_reward}, total rollouts: {len(rewards)}, max reward: {max_reward}, min reward: {min_reward}, std reward: {std_reward} at step {validation_step}"
@@ -618,6 +620,16 @@ class PolicyStatusManager:
                             data=report_data,
                             step=validation_step,
                         )
+
+                    # call custom logger fns
+                    for custom_logger_fn in self.custom_logger_fns:
+                        try:
+                            custom_logger_fn(report_data, validation_step)
+                        except Exception as e:
+                            logger.warning(
+                                f"[Controller] Error calling custom logger function: {e}"
+                            )
+
             except Exception as e:
                 logger.error(f"[Controller] Error reporting validation results: {e}")
 
@@ -799,6 +811,7 @@ class PolicyStatusManager:
                         "train/grad_norm": total_grad_norm,
                         "train/entropy": total_entropy,
                         "train/effective_entropy": total_effective_entropy,
+                        "train/total_steps": total_steps,
                     }
                     all_keys = set().union(*[r.keys() for r in self.report_data_list])
                     # Handle other metrics with suffixes for update to wandb and logging
@@ -869,12 +882,16 @@ class PolicyStatusManager:
                                 f"Dynamic sampling rewards distribution so far: {self.filter_records}."
                             )
                     self.filter_records = {}
-                    for logger_fn in self.custom_logger_fns:
+                    for custom_logger_fn in self.custom_logger_fns:
+                        # We add a separate try-except block to handle the error of custom logger function.
+                        # This is to avoid the error of custom logger function affecting the fundamental logging system.
                         try:
-                            logger_fn(self.train_report_data[train_step], train_step)
+                            custom_logger_fn(
+                                self.train_report_data[train_step], train_step
+                            )
                         except Exception as e:
                             logger.warning(
-                                f"[Controller] Warning reporting customized training results: {e}"
+                                f"[Controller] [Controller] Error calling custom logger function: {e}"
                             )
                 except Exception as e:
                     import traceback

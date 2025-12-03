@@ -46,22 +46,19 @@ def policy_entry(**kwargs):
     init_distributed()
     parallel_dims.build_mesh(device_type="cuda")
 
+    custom_logger_fns = kwargs.get("custom_logger_fns", [])
+    hook_fns = kwargs.get("hook_fns", {})
+
     policy_type = cosmos_config.train.train_policy.type
+
     if cosmos_config.mode == "colocated":
         logger.info("Starting colocated RL worker...")
         policy_worker = ColocatedRLControlWorker(
             config=cosmos_config,
             parallel_dims=parallel_dims,
+            custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
             **kwargs,
-        )
-        policy_worker.setup(
-            config=cosmos_config,
-            dataset=kwargs.get("dataset", None),
-            val_dataset=kwargs.get("val_dataset", None),
-            sampler=kwargs.get("sampler", None),
-            batch_sampler=kwargs.get("batch_sampler", None),
-            val_sampler=kwargs.get("val_sampler", None),
-            val_batch_sampler=kwargs.get("val_batch_sampler", None),
         )
     elif policy_type == "grpo":
         policy_worker = RLPolicyWorker(
@@ -71,6 +68,9 @@ def policy_entry(**kwargs):
             data_packer=kwargs.get("data_packer", None),
             val_dataset=kwargs.get("val_dataset", None),
             val_data_packer=kwargs.get("val_data_packer", None),
+            # custom logger functions and hook functions haven't been used in RLPolicyWorker yet
+            custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
         )
     elif policy_type == "sft":
         custom_sft_dataset = kwargs.get("dataset")
@@ -86,6 +86,8 @@ def policy_entry(**kwargs):
             batch_sampler=kwargs.get("batch_sampler", None),
             val_sampler=kwargs.get("val_sampler", None),
             val_batch_sampler=kwargs.get("val_batch_sampler", None),
+            custom_logger_fns=custom_logger_fns,
+            hook_fns=hook_fns,
         )
     else:
         raise ValueError(f"Unknown policy type: {policy_type}")

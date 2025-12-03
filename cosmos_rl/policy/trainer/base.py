@@ -148,6 +148,13 @@ class Trainer(ABC):
         raise NotImplementedError("train_step method must be implemented")
 
     @abstractmethod
+    def step_validation(self):
+        """
+        One step of validation.
+        """
+        raise NotImplementedError("step_validation method must be implemented")
+
+    @abstractmethod
     def export_safetensors(
         self,
         output_dir: str,

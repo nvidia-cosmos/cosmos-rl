@@ -569,3 +569,9 @@ class LLMTrainer(Trainer):
             revision=self.config.policy.model_revision,
         )
         return ckpt_extra_vars
+
+    def step_validation(self):
+        # By default, add an empty step_validation for LLM trainer.
+        # For GRPO, validation is handled in rollout side, so this method is not needed.
+        # For SFT trainer, we will override this method in sft_trainer.py.
+        pass

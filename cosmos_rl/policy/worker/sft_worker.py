@@ -16,7 +16,7 @@
 
 import os
 import torch
-from typing import Optional, Union, Callable, Dict, Any
+from typing import Optional, Union, Callable, Dict, Any, List
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from itertools import islice
@@ -226,6 +226,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
         data_packer: Optional[BaseDataPacker] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
+        custom_logger_fns: Optional[List[Callable]] = None,
+        hook_fns: Optional[Dict[str, Callable]] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
@@ -261,6 +263,12 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_dataset=val_dataset,
         )
 
+        # For hooks and custom logger functions
+        self.custom_logger_fns = (
+            custom_logger_fns if custom_logger_fns is not None else []
+        )
+        self.hook_fns = hook_fns if hook_fns is not None else {}
+
     def setup(
         self,
         data_packer: Optional[BaseDataPacker] = None,
@@ -271,6 +279,32 @@ class SFTPolicyWorker(PolicyWorkerBase):
             data_packer=data_packer,
             val_data_packer=val_data_packer,
         )
+        self.setup_hooks()
+
+    def setup_hooks(self):
+        if "pre_validation_hook" in self.hook_fns:
+            self.pre_validation_hook = self.hook_fns["pre_validation_hook"]
+        else:
+            self.pre_validation_hook = None
+
+        if "pre_per_step_validation_hook" in self.hook_fns:
+            self.pre_per_step_validation_hook = self.hook_fns[
+                "pre_per_step_validation_hook"
+            ]
+        else:
+            self.pre_per_step_validation_hook = None
+
+        if "post_per_step_validation_hook" in self.hook_fns:
+            self.post_per_step_validation_hook = self.hook_fns[
+                "post_per_step_validation_hook"
+            ]
+        else:
+            self.post_per_step_validation_hook = None
+
+        if "post_validation_hook" in self.hook_fns:
+            self.post_validation_hook = self.hook_fns["post_validation_hook"]
+        else:
+            self.post_validation_hook = None
 
     def build_runner(
         self,
@@ -482,7 +516,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
         else:
             self._save_freq = self.config.train.ckpt.save_freq
 
-    def validate(self, is_last_step: bool = False):
+    def validate(self, current_epoch: int, is_last_step: bool = False):
         if not self.config.validation.enable:
             return None
         if self.parallel_dims.dp_replicate_coord[0] != 0:
@@ -490,16 +524,76 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if self.train_step % self.config.validation.freq != 0 and not is_last_step:
             return None
 
+        # Call pre_validation_hook
+        if self.pre_validation_hook is not None:
+            self.pre_validation_hook(
+                self, current_epoch=current_epoch, is_last_step=is_last_step
+            )
+
         # validation
         logger.info(f"Validation at step {self.train_step}/{self.total_steps}...")
         val_total_loss = 0.0
-        for val_global_batch in tqdm(self.val_data_loader, desc="Validation"):
-            val_score = self.trainer.validate(
+
+        for batch_index, val_global_batch in enumerate(
+            tqdm(self.val_data_loader, desc="Validation")
+        ):
+            # Call pre_per_step_validation_hook
+            if self.pre_per_step_validation_hook is not None:
+                report_data = {
+                    "current_epoch": current_epoch,
+                    "batch_index": batch_index,
+                }
+                self.pre_per_step_validation_hook(self, report_data=report_data)
+
+            val_score = self.trainer.step_validation(
                 val_global_batch, self.train_step, self.total_steps
             )
+
+            # Call post_per_step_validation_hook
+            if self.post_per_step_validation_hook is not None:
+                report_data = {
+                    "current_epoch": current_epoch,
+                    "batch_index": batch_index,
+                    "val_score": val_score,
+                }
+                self.post_per_step_validation_hook(self, report_data=report_data)
+
             val_total_loss += val_score
+
         val_avg_loss = val_total_loss / len(self.val_data_loader.dataset)
-        logger.info(f"Validation loss: {val_avg_loss}")
+        logger.info(
+            f"[SFT] Validation loss: {val_avg_loss} for train step {self.train_step}/{self.total_steps}, epoch {current_epoch}"
+        )
+
+        # Call post_validation_hook
+        if self.post_validation_hook is not None:
+            report_data = {
+                "current_epoch": current_epoch,
+                "val_avg_loss": val_avg_loss,
+            }
+            self.post_validation_hook(self, report_data=report_data)
+
+        # Call custom logger functions
+        report_data = {
+            "val/cur_epoch": current_epoch,
+            "val/avg_loss": val_avg_loss,
+            "val/train_epochs": self.epoch,
+            "val/total_steps": self.total_steps,
+            "val/train_step": self.train_step,
+        }
+
+        if util.is_master_rank(self.parallel_dims, self.global_rank):
+            if "wandb" in self.config.logging.logger and is_wandb_available():
+                log_wandb(
+                    data=report_data,
+                    step=self.train_step,
+                )
+            for custom_logger_fn in self.custom_logger_fns:
+                try:
+                    custom_logger_fn(report_data, current_epoch)
+                except Exception as e:
+                    logger.warning(f"[SFT] Error calling custom logger function: {e}")
+
         return val_avg_loss
 
     def main_loop(self):
@@ -511,7 +605,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
             )
 
-        for cur_epoch in range(self.start_epoch, self.epoch):
+        cur_epoch = self.start_epoch
+        for _ in range(self.start_epoch, self.epoch):
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:
                 # if [profiler.enable_nsys] is true, cudaProfilerStart() / cudaProfilerStop() are used to trigger nsys capture
@@ -561,7 +656,9 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 ):
                     break  # break outer epoch loop
 
-                val_avg_loss = self.validate(is_last_step=False)
+                val_avg_loss = self.validate(
+                    current_epoch=cur_epoch, is_last_step=False
+                )
 
                 self.trainer.checkpointing(
                     total_steps=self.total_steps,
@@ -574,8 +671,10 @@ class SFTPolicyWorker(PolicyWorkerBase):
 
                 self.profiler.step()
 
+            cur_epoch += 1
+
         # Finally: validation and save checkpoint
-        val_avg_loss = self.validate(is_last_step=True)
+        val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=True)
         self.trainer.checkpointing(
             total_steps=self.total_steps,
             train_step=self.train_step,

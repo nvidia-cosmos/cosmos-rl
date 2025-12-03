@@ -77,6 +77,15 @@ class ColocatedRLControlWorker:
         self.policy.set_command_dispatcher(self.command_dispatcher)
         self.rollout.set_command_dispatcher(self.command_dispatcher)
 
+        self.setup(
+            dataset=kwargs.get("dataset", None),
+            val_dataset=kwargs.get("val_dataset", None),
+            sampler=kwargs.get("sampler", None),
+            batch_sampler=kwargs.get("batch_sampler", None),
+            val_sampler=kwargs.get("val_sampler", None),
+            val_batch_sampler=kwargs.get("val_batch_sampler", None),
+        )
+
     def setup(
         self,
         config: Config,

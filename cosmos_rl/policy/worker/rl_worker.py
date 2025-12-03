@@ -109,6 +109,10 @@ class RLPolicyWorker(PolicyWorkerBase):
             shutdown_event=self.shutdown_signal,
         )
 
+        # For hooks and custom logger functions
+        self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
+        self.hook_fns = kwargs.get("hook_fns", {})
+
         # For command fetch
         self.fetch_command_buffer = Queue()
         self.command_buffer = Queue()
