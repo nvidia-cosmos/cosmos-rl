@@ -77,7 +77,8 @@ class SFTDataset(Dataset):
             self.cache = cache.DiskCache(cache_folder)
 
     def __len__(self):
-        return len(self.dataset)
+        # return len(self.dataset)
+        return 20
 
     def __getitem__(self, idx):
         # we only cache on_the_fly result
@@ -581,7 +582,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
             "val/cur_epoch": current_epoch,
             "val/avg_loss": val_avg_loss,
             "val/train_epochs": self.epoch,
-            "val/total_steps": self.total_steps,
+            "val/total_steps": self.total_steps,  # This total_steps is for training
             "val/train_step": self.train_step,
         }
 
@@ -593,7 +594,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
                 )
             for custom_logger_fn in self.custom_logger_fns:
                 try:
-                    custom_logger_fn(report_data, current_epoch)
+                    custom_logger_fn(report_data, self.train_step)
                 except Exception as e:
                     logger.warning(f"[SFT] Error calling custom logger function: {e}")
 
