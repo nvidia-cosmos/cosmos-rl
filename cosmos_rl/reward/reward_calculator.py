@@ -58,11 +58,20 @@ class RolloutGroup:
         assert (
             self.reference_answer is not None
         ), "[RolloutGroup] Reference answer is not provided"
+        assert (
+            self.payload.completions is not None and len(self.payload.completions) > 0
+        ), "[RolloutGroup] Completions are not provided correctly, please check the `rollout_generation` to make sure its returned `RolloutResult.completions` has a length of the number of generated samples."
         rewards = [
+            # Pass tensor_dict if exists for tensor native mode so that reward functions can use it to compute reward directly from tensors
             algo.compute_reward(
-                completion, self.reference_answer, prompt=self.payload.prompt
+                completion,
+                self.reference_answer,
+                prompt=self.payload.prompt,
+                tensor_dict={k: v[i] for k, v in self.payload.tensor_dict.items()}
+                if self.payload.tensor_dict
+                else None,
             )
-            for completion in self.payload.completions
+            for i, completion in enumerate(self.payload.completions)
         ]
         logger.debug(f"[RolloutGroup] Rewards: {rewards}")
         advantages = algo.compute_advantage([r[0] for r in rewards])
@@ -219,6 +228,8 @@ class RewardCalculator:
     def query_reference_answer(
         self, prompt_idx: int, dataset_type: str = "train"
     ) -> Any:
+        if prompt_idx < 0:
+            return ""  # Return empty string for invalid prompt index
         return self.data_fetcher.query_reference_answer(prompt_idx, dataset_type)
 
     def compute_validation_rewards(
@@ -238,9 +249,10 @@ class RewardCalculator:
                 step: the weight step where the payloads are generated
         """
 
-        assert all(
-            payload.prompt_idx >= 0 for payload in payloads
-        ), "[Reward] All payloads should have a valid prompt index"
+        if not all(payload.prompt_idx >= 0 for payload in payloads):
+            logger.warning(
+                "[Reward] Not all payloads should have a valid prompt index, reference answers may not be used."
+            )
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
                 prompt_idx=payload.prompt_idx,
@@ -308,9 +320,10 @@ class RewardCalculator:
         if is_validation:
             return self.compute_validation_rewards(payloads, step)
 
-        assert all(
-            payload.prompt_idx >= 0 for payload in payloads
-        ), "[Reward] All payloads should have a valid prompt index"
+        if not all(payload.prompt_idx >= 0 for payload in payloads):
+            logger.warning(
+                "[Reward] Not all payloads should have a valid prompt index, reference answers may not be used."
+            )
         # Placeholder for advantage computation logic
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
@@ -330,7 +343,7 @@ class RewardCalculator:
         ]
         payload_list: List[RLPayload] = []
         # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
-        for rollouts_group in rollouts_list:
+        for idx, rollouts_group in enumerate(rollouts_list):
             rollout_tokens = [
                 rollout.completion_token_ids
                 if self.config.train.train_policy.rollout_as_token_ids
@@ -390,9 +403,6 @@ class RewardCalculator:
                         ],
                         advantages=[rollout.advantage for rollout in rollouts_group],
                         valid=True,
-                        completions_token_length=[
-                            len(rollout_tokens[i]) for i in range(len(rollouts_group))
-                        ],
                         completion_logprobs=[
                             rollout.completion_logprobs
                             if rollout.completion_logprobs is not None
@@ -407,6 +417,7 @@ class RewardCalculator:
                         ],
                     )
                 )
+                payload_list[-1].tensor_dict = payloads[idx].tensor_dict
             else:
                 # If the rewards are all the same, we need to sample one rollout from the group
                 payload_list.append(
@@ -428,9 +439,6 @@ class RewardCalculator:
                         ],
                         advantages=[rollout.advantage for rollout in rollouts_group],
                         valid=False,
-                        completions_token_length=[
-                            len(rollout_tokens[i]) for i in range(len(rollouts_group))
-                        ],
                         completion_logprobs=[
                             rollout.completion_logprobs
                             if rollout.completion_logprobs is not None
@@ -445,6 +453,7 @@ class RewardCalculator:
                         ],
                     )
                 )
+                payload_list[-1].tensor_dict = payloads[idx].tensor_dict
         return payload_list, False, step
 
 

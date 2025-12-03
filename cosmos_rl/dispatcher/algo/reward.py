@@ -399,6 +399,7 @@ class Reward:
                 data_packer=self.data_packer,
                 config=self.config,
                 tokenizer=self.tokenizer,
+                **kwargs,
             )
             total_reward += weight * val
             filter_reward += filter * val
@@ -411,6 +412,7 @@ class Reward:
                 data_packer=self.data_packer,
                 config=self.config,
                 tokenizer=self.tokenizer,
+                **kwargs,
             )
             filter_reward += val * weight
 
