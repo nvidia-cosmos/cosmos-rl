@@ -287,8 +287,10 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         return gate_proj_weight, up_proj_weight
 
     def _split_fused_qkv_a_proj_weight(self, weight: torch.Tensor):
-        # weight has shape [2 * x, hidden_dim]
-        # split it into [x, hidden_dim] and [x, hidden_dim]
+        # fused_qkv_a_proj has shape [q_lora_rank + kv_lora_rank + qk_rope_head_dim, hidden_dim]
+        # q_a_proj : [q_lora_rank, hidden_dim]
+        # kv_a_proj_with_mqa : [kv_lora_rank + qk_rope_head_dim, hidden_dim]
+        # split fused_qkv_a_proj into [q_lora_rank, hidden_dim] and [kv_lora_rank + qk_rope_head_dim, hidden_dim]
         split_idx = self.config.q_lora_rank
         q_a_proj_weight = weight[:split_idx, :]
         kv_a_proj_with_mqa_weight = weight[split_idx:, :]
