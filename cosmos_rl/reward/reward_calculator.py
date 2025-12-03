@@ -646,3 +646,11 @@ class RewardDispatcher:
                 return None, False, -1, False
         else:
             return None, False, -1, True
+
+    def is_empty(self) -> bool:
+        """
+        Check if the task queue is empty.
+        Returns:
+            True if the task queue is empty, False otherwise.
+        """
+        return self.task_queue.empty()
