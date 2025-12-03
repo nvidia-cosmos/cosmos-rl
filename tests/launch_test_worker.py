@@ -1650,14 +1650,44 @@ def run_sft_validation():
         def __len__(self):
             return 1
 
+    # hooks
+    pre_validation_hook_mock = Mock()
+    pre_per_step_validation_hook_mock = Mock()
+    post_per_step_validation_hook_mock = Mock()
+    post_validation_hook_mock = Mock()
+
+    def pre_validation_hook(trainer, report_data: Dict[str, Any]):
+        pre_validation_hook_mock(trainer, report_data)
+
+    def pre_per_step_validation_hook(trainer, report_data: Dict[str, Any]):
+        pre_per_step_validation_hook_mock(trainer, report_data)
+
+    def post_per_step_validation_hook(trainer, report_data: Dict[str, Any]):
+        post_per_step_validation_hook_mock(trainer, report_data)
+
+    def post_validation_hook(trainer, report_data: Dict[str, Any]):
+        post_validation_hook_mock(trainer, report_data)
+
+    hook_fns = {
+        "pre_validation_hook": pre_validation_hook,
+        "pre_per_step_validation_hook": pre_per_step_validation_hook,
+        "post_per_step_validation_hook": post_per_step_validation_hook,
+        "post_validation_hook": post_validation_hook,
+    }
+
     sft_worker = SFTPolicyWorker(
         config=config,
         parallel_dims=parallel_dims,
         val_dataset=TestDatasetSFTVal,
         val_data_packer=DecoderOnlyLLMDataPacker(),
+        hook_fns=hook_fns,
     )
     assert len(sft_worker.val_data_loader) == 1
-    sft_worker.validate(is_last_step=True)
+    sft_worker.validate(current_epoch=0, is_last_step=True)
+    assert pre_validation_hook_mock.call_count >= 1
+    assert pre_per_step_validation_hook_mock.call_count >= 1
+    assert post_per_step_validation_hook_mock.call_count >= 1
+    assert post_validation_hook_mock.call_count >= 1
 
 
 def run_reward_check():
@@ -1767,7 +1797,7 @@ def run_reward_check():
     rollout.handle_shutdown()
 
 
-def run_sft_custom_sampler_and_hooks():
+def run_sft_custom_sampler():
     config_dict = load_simple_sft_config()
     config = CosmosConfig.from_dict(
         config_dict,
@@ -1870,30 +1900,6 @@ def run_sft_custom_sampler_and_hooks():
         drop_last=False,
     )
 
-    # hooks
-    pre_validation_hook_mock = Mock()
-    pre_per_step_validation_hook_mock = Mock()
-    post_per_step_validation_hook_mock = Mock()
-    post_validation_hook_mock = Mock()
-
-    def pre_validation_hook(trainer, report_data: Dict[str, Any]):
-        pre_validation_hook_mock(trainer, report_data)
-
-    def pre_per_step_validation_hook(trainer, report_data: Dict[str, Any]):
-        pre_per_step_validation_hook_mock(trainer, report_data)
-
-    def post_per_step_validation_hook(trainer, report_data: Dict[str, Any]):
-        post_per_step_validation_hook_mock(trainer, report_data)
-
-    def post_validation_hook(trainer, report_data: Dict[str, Any]):
-        post_validation_hook_mock(trainer, report_data)
-
-    hook_fns = {
-        "pre_validation_hook": pre_validation_hook,
-        "pre_per_step_validation_hook": pre_per_step_validation_hook,
-        "post_per_step_validation_hook": post_per_step_validation_hook,
-        "post_validation_hook": post_validation_hook,
-    }
     sft_worker = SFTPolicyWorker(
         config=config,
         parallel_dims=parallel_dims,
@@ -1902,7 +1908,6 @@ def run_sft_custom_sampler_and_hooks():
         val_data_packer=DecoderOnlyLLMDataPacker(),
         sampler=test_sampler,
         val_sampler=test_sampler,
-        hook_fns=hook_fns,
     )
     cnt = 0
     for it in sft_worker.train_data_loader:
@@ -1914,12 +1919,6 @@ def run_sft_custom_sampler_and_hooks():
         assert len(it) == 1
         cnt += 1
     assert cnt == 8
-
-    sft_worker.validate(current_epoch=0, is_last_step=True)
-    assert pre_validation_hook_mock.call_count >= 1
-    assert pre_per_step_validation_hook_mock.call_count >= 1
-    assert post_per_step_validation_hook_mock.call_count >= 1
-    assert post_validation_hook_mock.call_count >= 1
 
     sft_worker = SFTPolicyWorker(
         config=config,
@@ -2507,7 +2506,7 @@ async def main():
         run_sft_validation()
         exit(0)
     elif mode == "sft_for_custom_sampler":
-        run_sft_custom_sampler_and_hooks()
+        run_sft_custom_sampler()
         exit(0)
     elif mode == "reward_execution_check":
         run_reward_check()
