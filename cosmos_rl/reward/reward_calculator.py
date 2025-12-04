@@ -228,8 +228,6 @@ class RewardCalculator:
     def query_reference_answer(
         self, prompt_idx: int, dataset_type: str = "train"
     ) -> Any:
-        if prompt_idx < 0:
-            return ""  # Return empty string for invalid prompt index
         return self.data_fetcher.query_reference_answer(prompt_idx, dataset_type)
 
     def compute_validation_rewards(
@@ -249,10 +247,9 @@ class RewardCalculator:
                 step: the weight step where the payloads are generated
         """
 
-        if not all(payload.prompt_idx >= 0 for payload in payloads):
-            logger.warning(
-                "[Reward] Not all payloads should have a valid prompt index, reference answers may not be used."
-            )
+        assert all(
+            payload.prompt_idx >= 0 for payload in payloads
+        ), "[Reward] All payloads should have a valid prompt index"
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
                 prompt_idx=payload.prompt_idx,
@@ -320,10 +317,9 @@ class RewardCalculator:
         if is_validation:
             return self.compute_validation_rewards(payloads, step)
 
-        if not all(payload.prompt_idx >= 0 for payload in payloads):
-            logger.warning(
-                "[Reward] Not all payloads should have a valid prompt index, reference answers may not be used."
-            )
+        assert all(
+            payload.prompt_idx >= 0 for payload in payloads
+        ), "[Reward] All payloads should have a valid prompt index"
         # Placeholder for advantage computation logic
         rollout_groups: List[RolloutGroup] = [
             RolloutGroup(
@@ -415,9 +411,9 @@ class RewardCalculator:
                             else []
                             for rollout in rollouts_group
                         ],
+                        tensor_dict=payloads[idx].tensor_dict,
                     )
                 )
-                payload_list[-1].tensor_dict = payloads[idx].tensor_dict
             else:
                 # If the rewards are all the same, we need to sample one rollout from the group
                 payload_list.append(
@@ -451,9 +447,9 @@ class RewardCalculator:
                             else []
                             for rollout in rollouts_group
                         ],
+                        tensor_dict=payloads[idx].tensor_dict,
                     )
                 )
-                payload_list[-1].tensor_dict = payloads[idx].tensor_dict
         return payload_list, False, step
 
 

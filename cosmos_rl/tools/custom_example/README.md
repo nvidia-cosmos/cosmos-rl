@@ -118,7 +118,7 @@ Your custom rollout engine should implement the following key methods:
      - `completions` - List of generated completion strings
      - `completion_logprobs` - (Optional) Log probabilities for each token
      - `completion_token_ids` - (Optional) Token IDs for completions
-     - `tensor_dict` - Dict of key to tensor lists for the case where the generated results are a set of of native tensors
+     - `tensor_dict` - (Optional) Dict of key to tensor lists for the case where the generated results are a set of of native tensors
 
 4. **`init_engine()`** - Initialize the underlying model/engine
    - Loads the model from HuggingFace or other sources

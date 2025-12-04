@@ -812,6 +812,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                             payloads[i].completion_token_ids,
                             payloads[i].tensor_dict,
                         )
+                        assert not payloads[
+                            i
+                        ].tensor_dict, "tensor_dict should be processed in get_rollout_output if any."
                         if self.config.train.train_policy.rollout_as_token_ids:
                             payloads[i].completions = [""] * len(
                                 payloads[i].completions
@@ -1363,6 +1366,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         payloads[i].completion_token_ids,
                         payloads[i].tensor_dict,
                     )
+                    assert (
+                        not payloads[i].tensor_dict
+                    ), "tensor_dict should be processed in get_rollout_output if any."
                     # when using local dataset, we don't need to send the prompt/conversation to the controller
                     if self.config.train.local_dataset:
                         payloads[i].prompt = None
