@@ -104,7 +104,7 @@ class VLARollout(RolloutBase):
         # Success rate thresholds for GRPO filtering (default member variables)
         # NOTE: These are different from PPO epsilon_low/high which are clipping ratios!
         self.success_rate_threshold_low = 0.1
-        self.success_rate_threshold_high = 0.9
+        self.success_rate_threshold_high = 1 #0.9
         
         logger.info(f"Initialized VLA rollout for task suite: {self.task_suite}")
         logger.info(f"GRPO filtering: success_rate ∈ [{self.success_rate_threshold_low:.2f}, {self.success_rate_threshold_high:.2f}]")
@@ -214,20 +214,20 @@ class VLARollout(RolloutBase):
         # Apply parallelism to the model
         parallelize_fn, _ = vla_model.parallelize_fn
         self.config.train.fsdp_reshard_after_forward = "never"
-        if torch.distributed.get_rank() == 0:
-            logger.info(f"pre parallelize model: {vla_model}")
-            logger.info(f"pre parallelize config: {self.config}")
+        # if torch.distributed.get_rank() == 0:
+        #     logger.info(f"pre parallelize model: {vla_model}")
+        #     logger.info(f"pre parallelize config: {self.config}")
         parallelize_fn(vla_model, parallel_dims, self.config, pp_loss_fn=None)
         self.module = vla_model.model  # Inner OpenVLAForActionPrediction for inference
         self.module.eval()
 
         device = torch.device(f"cuda:{torch.cuda.current_device()}")
-        self.vla_model.load_hf_weights(
-            self.config.policy.model_name_or_path,
-            parallel_dims,
-            device,
-            revision=self.config.policy.model_revision,
-        )
+        # self.vla_model.load_hf_weights(
+        #     self.config.policy.model_name_or_path,
+        #     parallel_dims,
+        #     device,
+        #     revision=self.config.policy.model_revision,
+        # )
         
         # Save processor, tokenizer, and config for later use
         self.processor = processor
@@ -839,6 +839,45 @@ class VLARollout(RolloutBase):
                 trajectories[episode_idx]['pixel_values'].append(step_data['pixel_values'][episode_idx])
                 trajectories[episode_idx]['responses'].append(step_data['responses'][episode_idx])
         
+
+        # #load saved batch from /root/SimpleVLA-RL/saved_training_batches
+        # batch_dir = '/root/SimpleVLA-RL/saved_training_batches'
+        # from cosmos_rl.utils.saved_batch_loader import SavedBatchLoader, SavedBatchIterator
+        # loader = SavedBatchLoader(batch_dir=batch_dir, episodes_per_step=128, device='cpu')
+        # iterator = SavedBatchIterator(loader)
+        # policy_inputs_all, advantages_all, meta_info = next(iterator)
+        # saved_episode = policy_inputs_all[0]
+# 
+        # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# 
+        # stacked_input_ids = torch.stack([saved_episode.per_step_data[i]['input_ids'] for i in range(len(saved_episode.per_step_data))]).to(device)
+        # stacked_attention_mask = torch.stack([saved_episode.per_step_data[i]['attention_mask'] for i in range(len(saved_episode.per_step_data))]).to(device)
+        # stacked_pixel_values = torch.stack([saved_episode.pixel_values[i] for i in range(len(saved_episode.pixel_values))]).to(device)
+        # stacked_responses = torch.stack([saved_episode.per_step_data[i]['responses'] for i in range(len(saved_episode.per_step_data))]).to(device)
+        # stacked_old_log_prob = torch.stack([saved_episode.per_step_data[i]['old_log_prob'] for i in range(len(saved_episode.per_step_data))]).to(device)
+# 
+        # with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            # with torch.no_grad():
+                # outputs = self.vla_model.forward_with_trajectory_structure(
+                    # input_ids=stacked_input_ids,
+                    # pixel_values=stacked_pixel_values,
+                    # attention_mask=stacked_attention_mask,
+                    # labels=stacked_responses,
+                    # temperature=1.6,
+                    # proprio=None
+                # )
+                # rollout_logits = outputs.logits
+                # rollout_log_probs = outputs.logprobs.squeeze(0)
+                # diff = (rollout_log_probs - stacked_old_log_prob).abs()
+                # if torch.distributed.get_rank() == 0:
+                    # logger.info(f"saved_log_probs {stacked_old_log_prob.shape}, saved_log_probs {stacked_old_log_prob}")
+                    # logger.info(f"  Absolute differences:")
+                    # logger.info(f"    Mean: {diff.mean().item():.6f}")
+                    # logger.info(f"    Max: {diff.max().item():.6f}")
+                    # logger.info(f"    Min: {diff.min().item():.6f}")
+                    # logger.info(f"    Std: {diff.std().item():.6f}")
+                    # logger.info(f"    diff[0:10]: {diff[0:10]}")
+        
         # Compute old_log_probs for each episode by replaying trajectory
         for episode_idx in range(group_size):
             traj = trajectories[episode_idx]
@@ -850,7 +889,7 @@ class VLARollout(RolloutBase):
             responses_batch = torch.stack(traj['responses']).to(device)
             
             # Compute old_log_probs
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 outputs = self.vla_model.forward_with_trajectory_structure(
                     input_ids=input_ids_batch,
                     pixel_values=pixel_values_batch,

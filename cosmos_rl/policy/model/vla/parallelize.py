@@ -184,7 +184,7 @@ def apply_vla_fsdp(
     
     This balances memory efficiency with communication overhead.
     """
-    from torch.distributed.fsdp import MixedPrecisionPolicy
+    from torch.distributed.fsdp import MixedPrecisionPolicy, CPUOffloadPolicy
     from torch.distributed._composable.fsdp import fully_shard
     
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
@@ -207,6 +207,7 @@ def apply_vla_fsdp(
             "for better flexibility and numerical stability. "
             "See cosmos_rl.utils.fsdp2_offload_utils and examples/fsdp2_manual_offload_example.py"
         )
+        fsdp_config["offload_policy"] = CPUOffloadPolicy()
     
     n_layers = 0  # Track number of sharded layers
     

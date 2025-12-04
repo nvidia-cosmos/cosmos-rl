@@ -47,7 +47,7 @@ class LIBERODataset(Dataset):
 
         benchmark_dict = libero_bench.get_benchmark_dict()
         task_suite = benchmark_dict[self.task_suite_name]()
-        num_tasks_in_suite = task_suite.n_tasks
+        num_tasks_in_suite = 1 #task_suite.n_tasks
         dataframes = []
         
         if self.task_suite_name in ["libero_10", "libero_90", "libero_goal",  "libero_object",  "libero_spatial"]:
@@ -112,7 +112,7 @@ def vla_reward_fn(to_be_evaluated: str, reference: Optional[Any] = None, prompt=
 if __name__ == "__main__":
 
     def get_dataset(config: CosmosConfig) -> Dataset:
-        return LIBERODataset(num_trials_per_task=50, train_val="train")
+        return LIBERODataset(num_trials_per_task=4, train_val="train")
 
     def get_val_dataset(config: CosmosConfig) -> Dataset:
         return LIBERODataset(num_trials_per_task=50, train_val="val")

@@ -764,7 +764,14 @@ class GRPOTrainer(Trainer):
         logger.info(f"[Policy] Received P2R command: {command.src_replica_name} -> {command.dst_replica_name}")
         logger.info(f"[Policy] My replica: {self.replica_name}, Global rank: {self.global_rank}, World size: {self.world_size}")
         logger.info(f"[Policy] Command src_size: {command.src_replica_size}, dst_size: {command.dst_replica_size}")
+        # if torch.distributed.get_rank() == 0:
+        #     for name, param in self.model.named_parameters():
+        #         logger.info(f"[Policy] {name} param.requires_grad: {param.requires_grad}, param.shape: {param.shape}, param.dtype: {param.dtype}")
         #return False
+
+        sentinel_tensor = self.model.model.language_model.model.lm_head.weight.full_tensor()
+        if torch.distributed.get_rank() == 0:
+            logger.info(f"[Policy] Sentinel tensor: {sentinel_tensor.shape}, {sentinel_tensor.dtype}, {sentinel_tensor}")
         
         # Load parameters from CPU if manual offloading is enabled (no need for optimizer during weight sync)
         if self.offload_manager is not None:

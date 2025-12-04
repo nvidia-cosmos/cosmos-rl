@@ -191,15 +191,20 @@ class VLAModel(BaseModel):
             Output with logits: (batch*steps, output_len, 256) if return_action_logits_only
                           else: (batch*steps, output_len, vocab_size)
         """
+        # if torch.distributed.get_rank() == 0:
+        #     logger.info(f"input_ids {input_ids.shape}, {input_ids.dtype}, {input_ids}")
+        #     logger.info(f"attention_mask {attention_mask.shape}, {attention_mask[0].dtype}, {attention_mask}")
+        #     logger.info(f"pixel_values {pixel_values.shape}, {pixel_values[0].dtype}, {pixel_values}")
+        #     logger.info(f"labels {labels.shape}, {labels[0].dtype}, {labels}")
+        #     logger.info(f"temperature {temperature}")
         
         # Use autocast to compute in bfloat16 (params are stored in float32 via master_dtype)
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            outputs = self.forward(
-                input_ids=input_ids,
-                pixel_values=pixel_values,
-                attention_mask=attention_mask,
-                **kwargs
-            )
+        outputs = self.forward(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            attention_mask=attention_mask,
+            **kwargs
+        )
         
         # Get raw logits: (batch*steps, output_len, vocab)
         logits = outputs.logits
@@ -214,14 +219,18 @@ class VLAModel(BaseModel):
         # Apply temperature scaling
         logits = logits.div(temperature)
 
+       
+        # Compute entropy: -sum(p * log(p))
+        probs = F.softmax(logits, dim=-1)
+
         logp = F.log_softmax(logits, dim=-1)
         logpy = torch.gather(logp, dim=-1, index=labels_remapped.unsqueeze(-1))
         logpy = logpy.squeeze(-1)
-        
-        # Compute entropy: -sum(p * log(p))
-        probs = F.softmax(logits, dim=-1)
         entropy = -(probs * logp).sum(dim=-1)  # (batch, seq_len)
-        
+
+        # if torch.distributed.get_rank() == 0:
+        #     logger.info(f"rollout_log_probs {logp.shape}, rollout_log_probs {logp}")
+
         outputs.logits = logits
         outputs.entropy = entropy
         outputs.logprobs = logpy

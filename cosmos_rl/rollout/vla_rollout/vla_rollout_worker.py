@@ -473,6 +473,7 @@ class VLARolloutWorker(RolloutWorkerBase):
     def main_loop(self):
         """Main processing loop (adapted from vLLM worker for VLA rollouts)"""
         while not self.shutdown_signal.is_set():
+            #logger.info(f"[VLA Rollout] Main loop: consume command")
             self.consume_command(cmd_pred=None)
             
             # If weight is not ready, nothing else to do.
@@ -687,6 +688,8 @@ class VLARolloutWorker(RolloutWorkerBase):
             )
             elapsed = time.time() - start_time
             logger.info(f"[VLA Rollout] ✅ Engine initialization completed in {elapsed:.2f}s")
+        #self.state.set_weight_synced()
+        #return
 
         # Load model parameters from CPU if manual offloading is enabled (before weight receive)
         if self.offload_manager is not None and hasattr(self, 'vla_model'):
@@ -884,7 +887,9 @@ class VLARolloutWorker(RolloutWorkerBase):
         if not hasattr(self, 'inference_stream'):
             self.inference_stream = torch.cuda.Stream()
         
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
         with torch.cuda.stream(self.inference_stream):
+            recv_tensor_pairs = []
             # Process each instruction group
             for insts_group in self.policy_to_rollout_recv_insts:
                 # Process each parameter in this group
@@ -927,13 +932,18 @@ class VLARolloutWorker(RolloutWorkerBase):
                         # assert r_rank == global_rank_of_rollout
                         vllm_tensor_view = recv_tensor.cosmos_slice(tensor_split_strategys)
                         recv_tensor, inplace = recv_tensor_creator(vllm_tensor_view)
-
                         # TODO: need none-inplace support
                         assert inplace, "recv_tensor_creator should return inplace tensor"
                         logger.debug(
                             f"[Rollout] Recving tensor {param_name} from policy rank {p_rank} to rollout rank {r_rank}, shape {vllm_tensor_view.shape} of {recv_tensor.shape} with dtype {vllm_tensor_view.dtype}."
                         )
-                        nccl_recv(recv_tensor, p_rank, communicator_index)
+
+                        if recv_tensor.device != device:
+                            recv_tensor_cuda = torch.empty_like(recv_tensor).contiguous().to(device)
+                            nccl_recv(recv_tensor_cuda, p_rank, communicator_index)
+                            recv_tensor_pairs.append((recv_tensor, recv_tensor_cuda))
+                        else:
+                            nccl_recv(recv_tensor, p_rank, communicator_index)
                         # inplace copy
                         # if not inplace:
                         #     all_tensor_views_to_copy.append(
@@ -944,7 +954,13 @@ class VLARolloutWorker(RolloutWorkerBase):
             
             # Synchronize to ensure all receives complete
             self.inference_stream.synchronize()
+
+            for recv_tensor, recv_tensor_cuda in recv_tensor_pairs:
+                recv_tensor.copy_(recv_tensor_cuda)
         
+        sentinel_tensor = self.vla_model.model.language_model.model.lm_head.weight.full_tensor()
+        if torch.distributed.get_rank() == 0:
+            logger.info(f"[Policy] Sentinel tensor: {sentinel_tensor.shape}, {sentinel_tensor.dtype}, {sentinel_tensor}")
         elapsed = time.time() - st
         throughput_gbps = (total_bytes_received / elapsed) / (1024 ** 3) if elapsed > 0 else 0
         

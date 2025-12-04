@@ -10,6 +10,8 @@ from cosmos_rl.policy.model.vla_utils import create_vla_config
 from cosmos_rl.utils.saved_batch_loader import SavedBatchLoader, SavedBatchIterator
 from cosmos_rl.utils.logging import logger
 import argparse
+from cosmos_rl.utils import util
+from cosmos_rl.policy.model.base import ModelRegistry
 
 def verify_model(config_path):
     # 1. Load Config
@@ -37,17 +39,11 @@ def verify_model(config_path):
         model=config.vla.vla_type
     )
 
-    vla_args = VLAArgs(
-        vla_type=config.vla.vla_type,
-        use_proprio=config.vla.use_proprio,
-        proprio_dim=config.vla.action_dim,
-        num_images_in_input=config.vla.num_images_in_input,
-        hf_config=vla_config
-    )
+    cosmos_default_dtype = util.str2torch_dtype(config.train.master_dtype)
+    model = ModelRegistry.build_model(config).to(cosmos_default_dtype)
 
     # 3. Load Model
     logger.info("Loading VLAModel...")
-    model = VLAModel.from_model_args(vla_args)
     model.load_from_checkpoint(
         model_name_or_path=model_path,
         parallel_dims=None,
@@ -55,8 +51,15 @@ def verify_model(config_path):
     )
     model.to(device)
     model.eval()
+
+    # for name, param in model.named_parameters():
+    #     logger.info(f"{name} param.requires_grad: {param.requires_grad}, param.shape: {param.shape}, param.dtype: {param.dtype}")
     
     logger.info("✅ Model loaded successfully")
+
+    logger.info("=" * 80)
+    logger.info(f"[TEST] inv_freq saved in model: {model.model.language_model.model.rotary_emb.inv_freq}")
+    logger.info("=" * 80)
 
     # 4. Load Saved Batch and Verify (following vla_rollout.py pattern)
     logger.info("=" * 80)
@@ -92,11 +95,11 @@ def verify_model(config_path):
             saved_old_log_prob = step_0['old_log_prob']  # (56,)
             
             logger.info(f"[TEST] Input shapes:")
-            logger.info(f"  input_ids: {test_input_ids.shape}")
-            logger.info(f"  attention_mask: {test_attention_mask.shape}")
-            logger.info(f"  pixel_values: {test_pixel_values.shape}")
-            logger.info(f"  responses: {test_responses.shape}")
-            logger.info(f"  saved_old_log_prob: {saved_old_log_prob.shape}")
+            logger.info(f"  input_ids: {test_input_ids.shape}, {test_input_ids.dtype}")
+            logger.info(f"  attention_mask: {test_attention_mask.shape}, {test_attention_mask.dtype}")
+            logger.info(f"  pixel_values: {test_pixel_values.shape}, {test_pixel_values.dtype}")
+            logger.info(f"  responses: {test_responses.shape}, {test_responses.dtype}")
+            logger.info(f"  saved_old_log_prob: {saved_old_log_prob.shape}, {saved_old_log_prob.dtype}")
             
             # Decode text if tokenizer available
             if tokenizer:
@@ -110,17 +113,18 @@ def verify_model(config_path):
                 logger.info(f"\n[TEST] Testing with temperature={temp}")
                 
                 # Compute logprobs using model's forward_with_trajectory_structure
-                with torch.no_grad():
-                    test_outputs = model.forward_with_trajectory_structure(
-                        input_ids=test_input_ids,
-                        pixel_values=test_pixel_values,
-                        attention_mask=test_attention_mask,
-                        labels=test_responses,
-                        temperature=temp,
-                        proprio=None
-                    )
-                    rollout_logits = test_outputs.logits
-                    rollout_log_probs = test_outputs.logprobs.squeeze(0)  # (56,)
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    with torch.no_grad():
+                        test_outputs = model.forward_with_trajectory_structure(
+                            input_ids=test_input_ids,
+                            pixel_values=test_pixel_values,
+                            attention_mask=test_attention_mask,
+                            labels=test_responses,
+                            temperature=temp,
+                            proprio=None
+                        )
+                        rollout_logits = test_outputs.logits
+                        rollout_log_probs = test_outputs.logprobs.squeeze(0)  # (56,)
                 
                 logger.info(f"  Computed logprobs:")
                 logger.info(f"    logits shape: {rollout_logits.shape}, dtype: {rollout_logits.dtype}")

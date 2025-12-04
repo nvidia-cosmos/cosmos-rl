@@ -126,9 +126,9 @@ class Trainer(CommMixin):
             parallelize_fn, _ = model.parallelize_fn
             # `pp_scheduler` is used for both `sft` and `RLHF`
             # `pp_scheduler_val` is used only for `sft`, since `RLHF` does not require policy model via validation
-            if torch.distributed.get_rank() == 0:
-                logger.info(f"pre parallelize model: {model}")
-                logger.info(f"pre parallelize config: {config}")
+            # if torch.distributed.get_rank() == 0:
+            #     logger.info(f"pre parallelize model: {model}")
+            #     logger.info(f"pre parallelize config: {config}")
             self.pp_scheduler, self.pp_scheduler_val = parallelize_fn(
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )

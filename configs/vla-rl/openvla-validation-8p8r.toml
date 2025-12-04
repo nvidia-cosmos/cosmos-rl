@@ -21,11 +21,11 @@ transfer_dtype = "float32"
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 128
 sync_weight_interval = 4
-offload_params= false
-offload_grads = true
-offload_optimizer = true
-offload_store_fp32 = true
-# fsdp_offload = true
+# offload_params= false
+# offload_grads = true
+# offload_optimizer = true
+# offload_store_fp32 = true
+fsdp_offload = true
 
 [policy]
 model_name_or_path = "Haozhan72/Openvla-oft-SFT-libero10-trajall"
@@ -62,7 +62,7 @@ allowed_outdated_steps = 4
 
 [train.ckpt]
 enable_checkpoint = true
-save_freq = 512  # Save after first step for validation
+save_freq = 1000  # Save after first step for validation
 save_mode = "async"
 
 [rollout]
