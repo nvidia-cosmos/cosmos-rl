@@ -26,9 +26,6 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.packer import DataPacker
-from cosmos_rl.dispatcher.data.packer.multi_turn import (
-    ConversationType,
-)
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vllm_version_check, vLLMRollout
@@ -220,10 +217,9 @@ class vLLMRolloutAsync(RolloutBase):
             self._engine_initialized = False
             self.rollout_engine.shutdown()
 
-    def _get_request_id(self, prompt_idx: int):
-        return str(f"req_{prompt_idx}")
+    def _get_request_id(self, prompt_idx: int, child_idx: int = 0):
+        return str(f"req_{prompt_idx}_{child_idx}")
 
-    @torch.no_grad()
     async def rollout_generation_single_turn(
         self,
         payloads: List[RLPayload],
@@ -247,8 +243,6 @@ class vLLMRolloutAsync(RolloutBase):
             len(payloads) == 1
         ), "vLLM async rollout only support one prompt at a time."
 
-        request_id = self._get_request_id(payloads[0].prompt_idx)
-
         # Pack the payloads into prompts for vllm.
         prompts = []
         for pl in payloads:
@@ -262,34 +256,42 @@ class vLLMRolloutAsync(RolloutBase):
         else:
             new_prompts = prompts
 
-        response: List[RolloutResult] = []
-
+        completions = []
         stream = torch.cuda.current_stream() if stream is None else stream
         try:
             with torch.cuda.stream(stream):
-                async for result in self.rollout_engine.generate(
-                    prompt=new_prompts[0],
-                    sampling_params=sampling_params,
-                    # there is no request tracking now.
-                    request_id=request_id,
-                ):
-                    if result.finished:
-                        response.append(
-                            RolloutResult(
-                                prompt=payloads[0].prompt,
-                                completions=[out.text for out in result.outputs],
-                            )
-                        )
-                        break
+                cur_prompt = new_prompts[0]
+                cur_payload = payloads[0]
+                n_generation = sampling_params.n
+                sp = copy.deepcopy(sampling_params)
+                sp.n = 1
+
+                # TODO(zjx): support auto batching inference in vllm async rollout.
+                # Manually control the generation of n requests to avoid long results slowing down generation speed in FINAL_ONLY mode
+                for child_idx in range(n_generation):
+                    async for result in self.rollout_engine.generate(
+                        prompt=cur_prompt,
+                        sampling_params=sp,
+                        request_id=self._get_request_id(
+                            cur_payload.prompt_idx, child_idx
+                        ),
+                    ):
+                        if result.finished:
+                            completions.append(result.outputs[0].text)
+                            break
         except Exception as e:
             logger.error(f"[Rollout] Failed in rollout generation: {str(e)}")
             import traceback
 
             traceback.print_exc()
             return []
-        return response
+        return [
+            RolloutResult(
+                prompt=payloads[0].prompt,
+                completions=completions,
+            )
+        ]
 
-    @torch.no_grad()
     async def rollout_generation_multi_turn(
         self,
         payloads: List[RLPayload],
@@ -301,85 +303,9 @@ class vLLMRolloutAsync(RolloutBase):
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
-        stream = torch.cuda.current_stream() if stream is None else stream
-
-        request_id = self._get_request_id(payloads[0].prompt_idx)
-
-        async def generation_multi_turn_for_one_payload(
-            current_conversation: ConversationType,
-        ):
-            assistant_turn_count = 0
-            assert (
-                payload.conversation is not None
-            ), "Conversation should not be None for multi-turn rollout generation."
-            while (
-                assistant_turn_count
-                < self.rollout_config.multi_turn_config.max_assistant_turns
-            ):
-                # Pack the payloads into prompts for vllm.
-                prompts = [data_packer.get_rollout_input(current_conversation)]
-                prompts = data_packer.rollout_collate_fn(prompts)
-
-                with torch.cuda.stream(stream):
-                    async for result in self.rollout_engine.generate(
-                        prompt=prompts[0],
-                        sampling_params=sampling_params,
-                        request_id=request_id,
-                    ):
-                        if result.finished:
-                            responses = [result.outputs[0].text]
-                            break
-
-                # TODO(zjx): support multi-path conversations search for multi-turn rollout generation
-                # extend the conversation with the rollout result
-                current_conversation = data_packer.extend_conversation(
-                    current_conversation,
-                    responses,
-                    ground_truth=payload.reference_answer,
-                )
-
-                # check if the sequence length is reached the max_sequence_length
-                if (
-                    len(result.prompt_token_ids) + len(result.outputs[0].token_ids)
-                    > self.rollout_config.max_response_length
-                ):
-                    logger.warning(
-                        "[Rollout] The sequence length is reached the max_response_length, stop the multi-turn generation."
-                    )
-                    break
-
-                assistant_turn_count += 1
-
-            # return the last assistant message as the completion to compute the reward in controller
-            completion = current_conversation[-1].content
-            return current_conversation, completion
-
-        n_generation = sampling_params.n
-        sampling_params = copy.deepcopy(sampling_params)
-        sampling_params.n = 1
-        response: List[RolloutResult] = []
-        for payload in payloads:
-            conversations = []
-            completions = []
-            for _ in range(n_generation):
-                (
-                    new_conversation,
-                    completion,
-                ) = await generation_multi_turn_for_one_payload(
-                    copy.deepcopy(payload.conversation)
-                )
-                conversations.append(new_conversation)
-                completions.append(completion)
-
-            response.append(
-                RolloutResult(
-                    conversation=payload.conversation,
-                    completions=completions,
-                    completed_conversations=conversations,
-                )
-            )
-
-        return response
+        raise NotImplementedError(
+            "Multi-turn rollout is not supported in vLLM async rollout."
+        )
 
     async def rollout_generation(
         self,

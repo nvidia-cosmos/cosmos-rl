@@ -543,10 +543,20 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         is_end = False
         while True:
             if not is_end:
-                is_end = self.request_new_prompts(
+                prompts, is_end = self.request_new_prompts(
                     self.val_batch_size,
                     validation_step=self.current_step,
                 )
+                if prompts is not None:
+                    tasks = [
+                        RolloutTask(
+                            idx=prompt.prompt_idx,
+                            payload=prompt,
+                            sampling_params=self.val_sampling_params,
+                        )
+                        for prompt in prompts
+                    ]
+                    self.scheduler.put_rollout_batch(tasks)
 
             # wait all tasks are completed
             while self.scheduler.completed_results() != self.val_batch_size:
