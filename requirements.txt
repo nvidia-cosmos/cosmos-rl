@@ -5,7 +5,7 @@ datasets
 pydantic
 math_verify
 pybind11[global]
-vllm>=0.10.0
+vllm>=0.8.5
 torch>=2.6.0
 torchvision>=0.21.0
 torchao>=0.10.0
