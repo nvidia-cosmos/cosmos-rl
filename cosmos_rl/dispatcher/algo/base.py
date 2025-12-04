@@ -23,7 +23,7 @@ REGISTERED_ALGOs = {}
 class RuleBasedAlgo(ABC):
     @abstractmethod
     def compute_reward(
-        self, to_be_evaluated: Any, reference: Any, prompt: Any = None
+        self, to_be_evaluated: Any, reference: Any, prompt: Any = None, **kwargs
     ) -> Tuple[float, float]:
         return 0.0, 0.0
 

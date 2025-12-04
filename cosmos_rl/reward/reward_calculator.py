@@ -58,11 +58,20 @@ class RolloutGroup:
         assert (
             self.reference_answer is not None
         ), "[RolloutGroup] Reference answer is not provided"
+        assert (
+            self.payload.completions is not None and len(self.payload.completions) > 0
+        ), "[RolloutGroup] Completions are not provided correctly, please check the `rollout_generation` to make sure its returned `RolloutResult.completions` has a length of the number of generated samples."
         rewards = [
+            # Pass tensor_dict if exists for tensor native mode so that reward functions can use it to compute reward directly from tensors
             algo.compute_reward(
-                completion, self.reference_answer, prompt=self.payload.prompt
+                completion,
+                self.reference_answer,
+                prompt=self.payload.prompt,
+                tensor_dict={k: v[i] for k, v in self.payload.tensor_dict.items()}
+                if self.payload.tensor_dict
+                else None,
             )
-            for completion in self.payload.completions
+            for i, completion in enumerate(self.payload.completions)
         ]
         logger.debug(f"[RolloutGroup] Rewards: {rewards}")
         advantages = algo.compute_advantage([r[0] for r in rewards])
@@ -330,7 +339,7 @@ class RewardCalculator:
         ]
         payload_list: List[RLPayload] = []
         # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
-        for rollouts_group in rollouts_list:
+        for idx, rollouts_group in enumerate(rollouts_list):
             rollout_tokens = [
                 rollout.completion_token_ids
                 if self.config.train.train_policy.rollout_as_token_ids
@@ -390,9 +399,6 @@ class RewardCalculator:
                         ],
                         advantages=[rollout.advantage for rollout in rollouts_group],
                         valid=True,
-                        completions_token_length=[
-                            len(rollout_tokens[i]) for i in range(len(rollouts_group))
-                        ],
                         completion_logprobs=[
                             rollout.completion_logprobs
                             if rollout.completion_logprobs is not None
@@ -405,6 +411,7 @@ class RewardCalculator:
                             else []
                             for rollout in rollouts_group
                         ],
+                        tensor_dict=payloads[idx].tensor_dict,
                     )
                 )
             else:
@@ -428,9 +435,6 @@ class RewardCalculator:
                         ],
                         advantages=[rollout.advantage for rollout in rollouts_group],
                         valid=False,
-                        completions_token_length=[
-                            len(rollout_tokens[i]) for i in range(len(rollouts_group))
-                        ],
                         completion_logprobs=[
                             rollout.completion_logprobs
                             if rollout.completion_logprobs is not None
@@ -443,6 +447,7 @@ class RewardCalculator:
                             else []
                             for rollout in rollouts_group
                         ],
+                        tensor_dict=payloads[idx].tensor_dict,
                     )
                 )
         return payload_list, False, step
