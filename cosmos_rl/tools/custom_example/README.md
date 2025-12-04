@@ -112,6 +112,7 @@ Your custom rollout engine should implement the following key methods:
    - Takes a list of `RLPayload` objects containing inputs and metadata for rollout generation
    - Takes a `torch.cuda.Stream` for asynchronous execution on the stream
    - Takes a `BaseDataPacker` for data formatting and processing
+   - Takes a `DataFetcherBase` for access training dataset and validation dataset to fetch data if needed
    - Takes an `is_validation` flag to distinguish validation from training generation
    - Returns a list of `RolloutResult` objects containing:
      - `prompt` - The original prompt

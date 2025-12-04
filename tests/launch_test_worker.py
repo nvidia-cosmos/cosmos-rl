@@ -1083,6 +1083,7 @@ def run_dummy_rollout(args: argparse.Namespace):
             payloads: List[RLPayload],
             stream,
             data_packer,
+            data_fetcher,
             is_validation: bool = False,
             *args,
             **kwargs,

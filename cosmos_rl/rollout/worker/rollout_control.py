@@ -763,6 +763,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     payloads=payloads_list,
                     stream=self.inference_stream,
                     data_packer=self.val_data_packer,
+                    data_fetcher=self.data_fetcher,
                     is_validation=True,
                 )
                 if rollout_results:
@@ -1446,6 +1447,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             payloads=payloads_list,
             stream=self.inference_stream,
             data_packer=self.data_packer,
+            data_fetcher=self.data_fetcher,
             is_validation=False,
         )
 
