@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional, Callable, Tuple
 from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from torch.utils.data import Dataset
 from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
 from cosmos_rl.dispatcher.algo.reward import Reward
@@ -527,9 +527,12 @@ class RewardDispatcher:
             val_data_packer,
         )
         if num_workers > 0:
-            # ThreadPoolExecutor is used here to avoid the overhead of ProcessPoolExecutor
+            # ThreadPoolExecutor is used here to avoid the overhead of ProcessPoolExecutor in non-text mode.
             # Unlike ProcessPoolExecutor, ThreadPoolExecutor can parse the tensors, videos, images directly
-            self.executor = ThreadPoolExecutor(
+            executor = (
+                ThreadPoolExecutor if config.train.non_text else ProcessPoolExecutor
+            )
+            self.executor = executor(
                 max_workers=num_workers,
                 initializer=worker_init,
                 initargs=(

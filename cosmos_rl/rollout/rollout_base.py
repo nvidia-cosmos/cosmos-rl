@@ -24,6 +24,7 @@ from cosmos_rl.policy.model import WeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 import torch
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 
 
 class RolloutBase(ABC):
@@ -61,6 +62,7 @@ class RolloutBase(ABC):
         payloads: List[RLPayload] | List[Dict[str, torch.Tensor]],
         stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
+        data_fetcher: DataFetcherBase,
         is_validation: bool = False,
         *args,
         **kwargs,
@@ -71,6 +73,7 @@ class RolloutBase(ABC):
             payloads: The list of payloads for generation or the list of dictionaries of tensors as input in tensor native mode.
             stream: The CUDA stream for generation.
             data_packer: The data packer for packing the data.
+            data_fetcher: The data fetcher for fetching the data, can access dataset and validation dataset from it.
             is_validation: Whether the rollout is for validation.
 
         Returns:

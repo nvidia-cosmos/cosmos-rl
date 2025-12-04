@@ -312,6 +312,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         completions: List[List[str]] = self.rollout.rollout_generation(
                             payloads=payloads_list,
                             data_packer=self.val_data_packer,
+                            data_fetcher=self.data_fetcher,
                             sampling_params=self.val_sampling_params,
                         )
                         if completions:
@@ -390,6 +391,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 completions: List[List[str]] = self.rollout.rollout_generation(
                     payloads=payloads,
                     data_packer=self.data_packer,
+                    data_fetcher=self.data_fetcher,
                     sampling_params=self.sampling_params,
                 )
 
