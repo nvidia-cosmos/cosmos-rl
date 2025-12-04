@@ -688,8 +688,8 @@ class VLARolloutWorker(RolloutWorkerBase):
             )
             elapsed = time.time() - start_time
             logger.info(f"[VLA Rollout] ✅ Engine initialization completed in {elapsed:.2f}s")
-        #self.state.set_weight_synced()
-        #return
+        # self.state.set_weight_synced()
+        # return
 
         # Load model parameters from CPU if manual offloading is enabled (before weight receive)
         if self.offload_manager is not None and hasattr(self, 'vla_model'):
@@ -955,9 +955,10 @@ class VLARolloutWorker(RolloutWorkerBase):
             # Synchronize to ensure all receives complete
             self.inference_stream.synchronize()
 
-            for recv_tensor, recv_tensor_cuda in recv_tensor_pairs:
-                # torch.testing.assert_close(recv_tensor.to(recv_tensor_cuda.device), recv_tensor_cuda, atol=0, rtol=0)
-                recv_tensor.copy_(recv_tensor_cuda)
+        torch.cuda.synchronize()
+        for recv_tensor, recv_tensor_cuda in recv_tensor_pairs:
+            # torch.testing.assert_close(recv_tensor.to(recv_tensor_cuda.device), recv_tensor_cuda, atol=0, rtol=0)
+            recv_tensor.copy_(recv_tensor_cuda)
         
         sentinel_tensor = self.vla_model.model.language_model.lm_head.weight.full_tensor()
         if torch.distributed.get_rank() == 0:

@@ -767,7 +767,7 @@ class GRPOTrainer(Trainer):
         # if torch.distributed.get_rank() == 0:
         #     for name, param in self.model.named_parameters():
         #         logger.info(f"[Policy] {name} param.requires_grad: {param.requires_grad}, param.shape: {param.shape}, param.dtype: {param.dtype}")
-        #return False
+        # return False
 
         sentinel_tensor = self.model.model.language_model.lm_head.weight.full_tensor()
         if torch.distributed.get_rank() == 0:

@@ -222,12 +222,12 @@ class VLARollout(RolloutBase):
         self.module.eval()
 
         device = torch.device(f"cuda:{torch.cuda.current_device()}")
-        # self.vla_model.load_hf_weights(
-        #     self.config.policy.model_name_or_path,
-        #     parallel_dims,
-        #     device,
-        #     revision=self.config.policy.model_revision,
-        # )
+        self.vla_model.load_hf_weights(
+            self.config.policy.model_name_or_path,
+            parallel_dims,
+            device,
+            revision=self.config.policy.model_revision,
+        )
         
         # Save processor, tokenizer, and config for later use
         self.processor = processor
