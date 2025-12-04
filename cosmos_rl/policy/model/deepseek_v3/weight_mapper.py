@@ -268,11 +268,11 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w13_weight", "gate_up_proj.weight"
+                    "experts.w13_weight", "experts.gate_up_proj.weight"
                 )
             elif "experts.w2_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
-                    "experts.w2_weight", "down_proj.weight"
+                    "experts.w2_weight", "experts.down_proj.weight"
                 )
         return rollout_weight_name
 
@@ -285,6 +285,16 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         gate_proj_weight = weight[..., :split_idx, :]
         up_proj_weight = weight[..., split_idx:, :]
         return gate_proj_weight, up_proj_weight
+
+    def _split_fused_qkv_a_proj_weight(self, weight: torch.Tensor):
+        # fused_qkv_a_proj has shape [q_lora_rank + kv_lora_rank + qk_rope_head_dim, hidden_dim]
+        # q_a_proj : [q_lora_rank, hidden_dim]
+        # kv_a_proj_with_mqa : [kv_lora_rank + qk_rope_head_dim, hidden_dim]
+        # split fused_qkv_a_proj into [q_lora_rank, hidden_dim] and [kv_lora_rank + qk_rope_head_dim, hidden_dim]
+        split_idx = self.config.q_lora_rank
+        q_a_proj_weight = weight[:split_idx, :]
+        kv_a_proj_with_mqa_weight = weight[split_idx:, :]
+        return q_a_proj_weight, kv_a_proj_with_mqa_weight
 
     def rollout_prepare_recv(
         self, vllm_model: Any
@@ -322,7 +332,7 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
             logger.info(
                 f"[Rollout] param vllm_name {param_name} hf_name: {compatible_key}"
             )
-            if "gate_up_proj" in compatible_key:
+            if "gate_up_proj" in compatible_key and ".experts" not in param_name:
                 # split gate and up proj
                 gate_proj_weight, up_proj_weight = self._split_gate_up_proj_weight(
                     param
@@ -336,6 +346,29 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
                 up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
                 compatible_weight_map[up_proj_weight_key] = up_proj_weight
                 group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
+            elif "fused_qkv_a_proj" in compatible_key:
+                # Defined in vllm/model_executor/models/deepseek_v2.py(vllm >= 0.10.0)
+                # self.packed_modules_mapping["fused_qkv_a_proj"] = [
+                #     "q_a_proj",
+                #     "kv_a_proj_with_mqa",
+                # ]
+                q_a_proj_weight, kv_a_proj_with_mqa_weight = (
+                    self._split_fused_qkv_a_proj_weight(param)
+                )
+                q_a_proj_weight_key = compatible_key.replace(
+                    "fused_qkv_a_proj", "q_a_proj"
+                )
+                compatible_weight_map[q_a_proj_weight_key] = q_a_proj_weight
+                group_keys.append((q_a_proj_weight_key, q_a_proj_weight.ndim))
+                kv_a_proj_with_mqa_weight_key = compatible_key.replace(
+                    "fused_qkv_a_proj", "kv_a_proj_with_mqa"
+                )
+                compatible_weight_map[kv_a_proj_with_mqa_weight_key] = (
+                    kv_a_proj_with_mqa_weight
+                )
+                group_keys.append(
+                    (kv_a_proj_with_mqa_weight_key, kv_a_proj_with_mqa_weight.ndim)
+                )
             else:
                 compatible_weight_map[compatible_key] = param
                 group_keys.append((compatible_key, param.ndim))
@@ -347,11 +380,21 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         name = util.clear_weight_name(name)
 
         name = name[6:]
-        name = name.replace(".mlp.experts.down_projs", ".mlp.down_proj.weight")
-        name = name.replace(".mlp.experts.up_projs", ".mlp.up_proj.weight")
-        name = name.replace(".mlp.experts.gate_projs", ".mlp.gate_proj.weight")
+        name = name.replace(".mlp.experts.down_projs", ".mlp.experts.down_proj.weight")
+        name = name.replace(
+            ".mlp.experts.gate_and_up_projs", ".mlp.experts.gate_up_proj.weight"
+        )
 
         return name
+
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        for key in ["q_a_proj", "kv_a_proj_with_mqa"]:
+            if key in weight_key:
+                return weight_key.replace(key, "fused_qkv_a_proj")
+        for key in ["gate_proj", "up_proj"]:
+            if key in weight_key and ".experts" not in weight_key:
+                return weight_key.replace(key, "gate_up_proj")
+        return weight_key  # return full weight key
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("deepseek_v3")]
@@ -378,6 +421,7 @@ def map_weight_parallel_dims(
         ".self_attn.q_a_layernorm.": None,
         ".self_attn.q_b_proj.": 0,
         ".self_attn.kv_a_proj_with_mqa.": None,
+        ".self_attn.fused_qkv_a_proj.": None,
         ".self_attn.kv_a_layernorm.": None,
         ".self_attn.kv_b_proj.": 0,
         ".self_attn.o_proj.": 1,
@@ -386,6 +430,8 @@ def map_weight_parallel_dims(
         ".mlp.gate_proj.": -2,
         ".mlp.up_proj.": -2,
         ".mlp.down_proj.": -1,
+        ".mlp.experts.gate_up_proj.": 0,
+        ".mlp.experts.down_proj.": 0,
         # deepseekv3 moe-related weights
         ".mlp.gate.": None,
         ".mlp.shared_experts.gate_proj.": 0,
