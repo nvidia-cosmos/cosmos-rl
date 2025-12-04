@@ -220,6 +220,17 @@ class vLLMRolloutAsync(RolloutBase):
     def _get_request_id(self, prompt_idx: int, child_idx: int = 0):
         return str(f"req_{prompt_idx}_{child_idx}")
 
+    async def _sub_generate_task(
+        self, prompt: Any, sampling_params: SamplingParams, request_id: str
+    ) -> str:
+        async for result in self.rollout_engine.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+        ):
+            if result.finished:
+                return result.outputs[0].text
+
     async def rollout_generation_single_turn(
         self,
         payloads: List[RLPayload],
@@ -263,22 +274,23 @@ class vLLMRolloutAsync(RolloutBase):
                 cur_prompt = new_prompts[0]
                 cur_payload = payloads[0]
                 n_generation = sampling_params.n
+
+                # Manually control the generation of n requests to avoid long results slowing down generation speed in FINAL_ONLY mode
                 sp = copy.deepcopy(sampling_params)
                 sp.n = 1
 
-                # TODO(zjx): support auto batching inference in vllm async rollout.
-                # Manually control the generation of n requests to avoid long results slowing down generation speed in FINAL_ONLY mode
-                for child_idx in range(n_generation):
-                    async for result in self.rollout_engine.generate(
-                        prompt=cur_prompt,
-                        sampling_params=sp,
-                        request_id=self._get_request_id(
-                            cur_payload.prompt_idx, child_idx
-                        ),
-                    ):
-                        if result.finished:
-                            completions.append(result.outputs[0].text)
-                            break
+                tasks = [
+                    asyncio.create_task(
+                        self._sub_generate_task(
+                            cur_prompt,
+                            sp,
+                            self._get_request_id(cur_payload.prompt_idx, child_idx),
+                        )
+                    )
+                    for child_idx in range(n_generation)
+                ]
+                results = await asyncio.gather(*tasks)
+                completions = [result for result in results if result is not None]
         except Exception as e:
             logger.error(f"[Rollout] Failed in rollout generation: {str(e)}")
             import traceback
