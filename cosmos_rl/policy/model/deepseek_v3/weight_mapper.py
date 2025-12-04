@@ -94,19 +94,6 @@ def map_key_from_hf(name: str, src_model_type: str) -> str:
     return "model." + name
 
 
-def vllm_version_check():
-    try:
-        import vllm
-
-        vllm_version = vllm.__version__
-        if vllm_version < "0.10.0":
-            raise RuntimeError(
-                f"GRPO requires vLLM version >= 0.10.0 for Deepseek support, but found version {vllm_version}"
-            )
-    except ImportError:
-        raise ValueError("vLLM is not installed")
-
-
 def convert_weight_from_hf(
     tensor: torch.Tensor,
     name: str,
@@ -337,8 +324,6 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
 
             Where "compatible_key" is the HuggingFace param name
         """
-        # Check vLLM version
-        vllm_version_check()
         recv_key_n_rank_list = []
         compatible_weight_map = {}
         for param_name, param in vllm_model.named_parameters():
