@@ -115,10 +115,9 @@ Your custom rollout engine should implement the following key methods:
    - Takes an `is_validation` flag to distinguish validation from training generation
    - Returns a list of `RolloutResult` objects containing:
      - `prompt` - The original prompt
-     - `completions` - List of generated completion strings
+     - `completions` - List of generated completion strings, or list of any objects such as tensors and videos for native tensor mode, video mode, or any other non-text modes
      - `completion_logprobs` - (Optional) Log probabilities for each token
      - `completion_token_ids` - (Optional) Token IDs for completions
-     - `tensor_dict` - (Optional) Dict of key to tensor lists for the case where the generated results are a set of of native tensors
 
 4. **`init_engine()`** - Initialize the underlying model/engine
    - Loads the model from HuggingFace or other sources

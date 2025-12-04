@@ -1775,7 +1775,6 @@ def run_reward_check():
     rollout.setup(
         dataset=TestDatasetReward,
         reward_fns=[custom_reward_fn],
-        num_workers=1,
     )
     rollout.lazy_initialize_rollout_engine("auto")
 

@@ -667,9 +667,9 @@ class TrainingConfig(BaseModel):
         description="Whether to force using Huggingface dataset even if local dataset is available.",
     )
 
-    tensor_native: bool = Field(
+    non_text: bool = Field(
         default=False,
-        description="Whether to use native tensor mode for training with no text as input output.",
+        description="Whether train in non-text mode. If set to True, the inputs and outputs are not pure text, but may contain other modalities like images, videos, tensors, etc.",
     )
 
     # --------- smoke-test helpers ---------

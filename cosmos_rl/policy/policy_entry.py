@@ -56,8 +56,6 @@ def policy_entry(**kwargs):
         policy_worker = ColocatedRLControlWorker(
             config=cosmos_config,
             parallel_dims=parallel_dims,
-            custom_logger_fns=custom_logger_fns,
-            hook_fns=hook_fns,
             **kwargs,
         )
     elif policy_type == "grpo":

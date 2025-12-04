@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional, Callable, Tuple
 from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from torch.utils.data import Dataset
 from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
 from cosmos_rl.dispatcher.algo.reward import Reward
@@ -62,14 +62,12 @@ class RolloutGroup:
             self.payload.completions is not None and len(self.payload.completions) > 0
         ), "[RolloutGroup] Completions are not provided correctly, please check the `rollout_generation` to make sure its returned `RolloutResult.completions` has a length of the number of generated samples."
         rewards = [
-            # Pass tensor_dict if exists for tensor native mode so that reward functions can use it to compute reward directly from tensors
+            # completion can be any objects such as tensors and videos in tensor native or video modes,
+            # so that reward functions can compute reward directly from tensors or videos
             algo.compute_reward(
                 completion,
                 self.reference_answer,
                 prompt=self.payload.prompt,
-                tensor_dict={k: v[i] for k, v in self.payload.tensor_dict.items()}
-                if self.payload.tensor_dict
-                else None,
             )
             for i, completion in enumerate(self.payload.completions)
         ]
@@ -175,6 +173,11 @@ class RewardCalculator:
             data_packer (Optional[BaseDataPacker]): The data packer for processing the payloads.
             val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
         """
+        if hasattr(self, "rl_algo"):
+            logger.warning(
+                "[RewardCalculator] RewardCalculator is already setup, returning directly."
+            )
+            return
         self.config = config
         self.tokenizer = util.setup_tokenizer(self.config.policy.model_name_or_path)
         self.data_fetcher = data_fetcher
@@ -411,7 +414,6 @@ class RewardCalculator:
                             else []
                             for rollout in rollouts_group
                         ],
-                        tensor_dict=payloads[idx].tensor_dict,
                     )
                 )
             else:
@@ -447,7 +449,6 @@ class RewardCalculator:
                             else []
                             for rollout in rollouts_group
                         ],
-                        tensor_dict=payloads[idx].tensor_dict,
                     )
                 )
         return payload_list, False, step
@@ -476,7 +477,7 @@ class RewardDispatcher:
         val_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[BaseDataPacker] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
-        num_workers: int = 8,
+        num_workers: int = 2,
     ) -> None:
         """
         Setup the RewardCalculator with the given configuration and datasets.
@@ -515,8 +516,20 @@ class RewardDispatcher:
                 data_fetcher=data_fetcher,
             )
 
+        worker_init(
+            config,
+            dataset,
+            reward_fns,
+            filter_reward_fns,
+            val_dataset,
+            val_reward_fns,
+            data_packer,
+            val_data_packer,
+        )
         if num_workers > 0:
-            self.executor = ProcessPoolExecutor(
+            # ThreadPoolExecutor is used here to avoid the overhead of ProcessPoolExecutor
+            # Unlike ProcessPoolExecutor, ThreadPoolExecutor can parse the tensors, videos, images directly
+            self.executor = ThreadPoolExecutor(
                 max_workers=num_workers,
                 initializer=worker_init,
                 initargs=(

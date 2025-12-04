@@ -72,7 +72,10 @@ class RLPayload(BaseModel):
     )
 
     # For rollout generation result, we add following fields:
-    completions: Optional[List[str]] = Field(
+    # In tensor native, video, or any other mode, it can be a list of any type of objects.
+    # The object type can be defined by the `rollout_generation` implementation.
+    # For non-text objects, it will be converted by the `get_rollout_output` of `data_packer` into final serializable format.
+    completions: Optional[List[Union[str, Any]]] = Field(
         default=None,
         description="The generated completions for the prompt, In multi-turn conversation, it is a list of last message for each turn.",
     )
@@ -111,11 +114,6 @@ class RLPayload(BaseModel):
 
     completion_logprobs: Optional[List[List[float]]] = Field(
         default=None, description="The logprobs of each completion."
-    )
-
-    tensor_dict: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="A dictionary of tensors related to the rollout in tensor native mode.",
     )
 
     @staticmethod
