@@ -352,6 +352,7 @@ class GrpoConfig(BaseModel):
         default=False,
         description=(
             "Unbiased K3 with IS: D_KL ≈ E_{π_old}[ w · ( r − log r − 1 ) ], w=π_θ/π_old, r=π_ref/π_θ.\n"
+            "Note: This option is ignored when `kl_beta` is 0.0.\n"
             "Ref: DeepSeek-V3.2 Sec.3.1 (Unbiased KL Estimate): https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf"
         ),
     )
