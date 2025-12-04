@@ -205,14 +205,18 @@ def create_vla_config(
         model = cosmos_config.vla.vla_type or kwargs.get("model", None)
     else:
         model = kwargs.get("model", None)
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
     
     # Create processor and tokenizer based on VLA type
     
     if model == "openvla-oft":
         from cosmos_rl.policy.model.vla.openvla_oft.configuration_prismatic import OpenVLAConfig
-        from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import PrismaticProcessor
+        from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import PrismaticProcessor, PrismaticImageProcessor
         logger.info(f"Creating OpenVLA-OFT processor from {name_or_path}")
         AutoConfig.register("openvla", OpenVLAConfig)
+        AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+        AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
         processor = PrismaticProcessor.from_pretrained(name_or_path, trust_remote_code=True)
         tokenizer = processor.tokenizer
         

@@ -28,7 +28,8 @@ offload_store_fp32 = true
 # fsdp_offload = true
 
 [policy]
-model_name_or_path = "Haozhan72/Openvla-oft-SFT-libero10-trajall"
+#model_name_or_path = "Haozhan72/Openvla-oft-SFT-libero10-trajall"
+model_name_or_path = "/root/SimpleVLA-RL/output_ckpt/Lepton-SimpleVLA-RL/vla-lib10_model10j_lr10_tmp16_nsample8_clip08-128_batch64_ppominibs128_node2/actor/global_step_24"
 model_max_length = 4096
 model_gradient_checkpointing = true
 
@@ -100,7 +101,7 @@ top_k = 0
 [validation]
 enable = true
 freq = 16
-val_before_train = false
+val_before_train = true
 batch_size = 8
 dataset.name = "libero"
 dataset.subset = "libero_10"

@@ -104,7 +104,7 @@ class VLARollout(RolloutBase):
         # Success rate thresholds for GRPO filtering (default member variables)
         # NOTE: These are different from PPO epsilon_low/high which are clipping ratios!
         self.success_rate_threshold_low = 0.1
-        self.success_rate_threshold_high = 1 #0.9
+        self.success_rate_threshold_high = 0.9
         
         logger.info(f"Initialized VLA rollout for task suite: {self.task_suite}")
         logger.info(f"GRPO filtering: success_rate ∈ [{self.success_rate_threshold_low:.2f}, {self.success_rate_threshold_high:.2f}]")
@@ -214,6 +214,9 @@ class VLARollout(RolloutBase):
         # Apply parallelism to the model
         parallelize_fn, _ = vla_model.parallelize_fn
         self.config.train.fsdp_reshard_after_forward = "never"
+        if torch.distributed.get_rank() == 0:
+            logger.info(f"pre parallelize model: {vla_model}")
+            logger.info(f"pre parallelize config: {self.config}")
         parallelize_fn(vla_model, parallel_dims, self.config, pp_loss_fn=None)
         self.module = vla_model.model  # Inner OpenVLAForActionPrediction for inference
         self.module.eval()

@@ -118,19 +118,22 @@ class Trainer(CommMixin):
                 self.model_converter = FP8ModelConverter(config, parallel_dims)
                 self.model_converter.convert_model(model)
 
-        if config.train.fsdp_offload:
-            model.to_empty(device="cpu")
+        # if config.train.fsdp_offload:
+        #     model.to_empty(device="cpu")
 
         try:
             # Apply parallelism to the model
             parallelize_fn, _ = model.parallelize_fn
             # `pp_scheduler` is used for both `sft` and `RLHF`
             # `pp_scheduler_val` is used only for `sft`, since `RLHF` does not require policy model via validation
+            if torch.distributed.get_rank() == 0:
+                logger.info(f"pre parallelize model: {model}")
+                logger.info(f"pre parallelize config: {config}")
             self.pp_scheduler, self.pp_scheduler_val = parallelize_fn(
                 model, parallel_dims, config, pp_loss_fn=self.pp_loss_fn
             )
-            if not config.train.fsdp_offload:
-                model.to_empty(device=self.device)
+            # if not config.train.fsdp_offload:
+            #     model.to_empty(device=self.device)
             model.post_to_empty_hook(config)
             if config.policy.lora is not None:
                 from cosmos_rl.policy.lora.plugin import reinitialize_lora_params

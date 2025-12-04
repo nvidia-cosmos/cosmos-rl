@@ -836,9 +836,11 @@ class VLARolloutWorker(RolloutWorkerBase):
             reference_weights = self._load_reference_weights()
             logger.info(f"[VLA Rollout] ✅ Loaded {len(reference_weights)} reference parameters")
 
-        for m in self.rollout.vla_model.model.modules():
-            if isinstance(m, torch.distributed.fsdp.FSDPModule):
-                m.reshard()
+        # Reshard FSDP2 modules before weight sync
+        # When reshard_after_forward=False, parameters stay in all-gathered state
+        # We need to reshard to free full weights and update only the local shards
+        logger.info("[VLA Rollout] Resharding FSDP2 modules before weight sync...")
+        self._reshard_fsdp2_modules()
         
         # Get model parameters dict
         model = self.rollout.module
@@ -900,7 +902,7 @@ class VLARolloutWorker(RolloutWorkerBase):
                         logger.warning(f"[VLA Rollout] Parameter {param_name} not found in model, skipping")
                         continue
                     
-                    target_param = model_params[param_name].to_local()
+                    target_param = model_params[param_name]
                     transferred_params += 1
                     
                     # Process each instruction for this parameter
@@ -911,14 +913,19 @@ class VLARolloutWorker(RolloutWorkerBase):
                         if r_rank != self.global_rank:
                             continue  # This instruction is for a different rollout rank
 
+                        # Unwrap DTensor if needed (FSDP2 compatibility)
+                        param_data = target_param.data
+                        if isinstance(param_data, torch.distributed.tensor.DTensor):
+                            param_data = param_data.to_local()
+                            logger.debug(f"[VLA Rollout] Unwrapped DTensor for {param_name}")
+                        
                         # For VLA models (no model parallelism), we expect full tensors
                         # The slice strategy should be empty or indicate full tensor
-                        recv_tensor = target_param.data if target_param.data.is_contiguous() else target_param.data.contiguous()
+                        recv_tensor = param_data if param_data.is_contiguous() else param_data.contiguous()
                         
                         tensor_split_strategys = inst.slice_strategy
                         # assert r_rank == global_rank_of_rollout
                         vllm_tensor_view = recv_tensor.cosmos_slice(tensor_split_strategys)
-                        #recv_tensor = torch.empty_like(vllm_tensor_view).contiguous().to(vllm_tensor_view.device)
                         recv_tensor, inplace = recv_tensor_creator(vllm_tensor_view)
 
                         # TODO: need none-inplace support
@@ -1016,6 +1023,55 @@ class VLARolloutWorker(RolloutWorkerBase):
         This is needed for establishing NCCL communicators between policy and rollout workers.
         """
         return self.api_client.post_nccl_comm_acceptor(unique_id_key)
+    
+    def _reshard_fsdp2_modules(self):
+        """
+        Manually trigger reshard on FSDP2 modules.
+        
+        This is necessary when reshard_after_forward=False, which keeps full parameters
+        in memory after forward pass. Before weight sync, we need to:
+        1. Reshard to free full parameters and go back to local shards only
+        2. Update the shards via NCCL
+        3. On next forward, FSDP2 will all-gather again to create new full weights
+        
+        For FSDP2 (torch.distributed._composable.fsdp), call .reshard() directly on modules.
+        """
+        if not hasattr(self.rollout, 'vla_model') or self.rollout.vla_model is None:
+            return
+        
+        vla_model = self.rollout.vla_model
+        actual_model = vla_model.model if hasattr(vla_model, 'model') else vla_model
+        
+        # Reshard language model layers (they were individually sharded in apply_vla_fsdp)
+        if hasattr(actual_model, 'language_model') and actual_model.language_model is not None:
+            llm = actual_model.language_model
+            if hasattr(llm, 'model') and hasattr(llm.model, 'layers'):
+                for layer in llm.model.layers:
+                    if hasattr(layer, 'reshard'):
+                        layer.reshard()
+                        logger.info(f"[VLA Rollout] Resharded LLM layer")
+            
+            # Reshard embed_tokens, norm, and lm_head
+            for module_name in ['embed_tokens', 'norm']:
+                if hasattr(llm.model, module_name):
+                    module = getattr(llm.model, module_name)
+                    if hasattr(module, 'reshard'):
+                        module.reshard()
+                        logger.info(f"[VLA Rollout] Resharded {module_name}")
+            
+            if hasattr(llm, 'lm_head') and hasattr(llm.lm_head, 'reshard'):
+                llm.lm_head.reshard()
+                logger.info("[VLA Rollout] Resharded lm_head")
+        
+        # Reshard vision backbone and projector (also individually sharded)
+        for module_name in ['vision_backbone', 'projector']:
+            if hasattr(actual_model, module_name):
+                module = getattr(actual_model, module_name)
+                if hasattr(module, 'reshard'):
+                    module.reshard()
+                    logger.info(f"[VLA Rollout] Resharded {module_name}")
+        
+        logger.info("[VLA Rollout] ✅ FSDP2 modules resharded successfully")
     
     def _load_reference_weights(self) -> Dict[str, torch.Tensor]:
         """
@@ -1210,10 +1266,16 @@ class VLARolloutWorker(RolloutWorkerBase):
                         
                         transferred_params_cnt += 1
                         
+                        # Unwrap DTensor if needed (FSDP2 compatibility)
+                        param_data = parameter.data
+                        if isinstance(param_data, torch.distributed.tensor.DTensor):
+                            param_data = param_data.to_local()
+                            logger.debug(f"[VLA Rollout] Unwrapped DTensor for R2R broadcast: {name}")
+                        
                         # Ensure parameter is contiguous for NCCL
-                        recv_tensor = parameter
-                        if not parameter.is_contiguous():
-                            recv_tensor = parameter.contiguous()
+                        recv_tensor = param_data
+                        if not param_data.is_contiguous():
+                            recv_tensor = param_data.contiguous()
                         
                         # Broadcast parameter across all replicas
                         nccl_broadcast(
@@ -1221,8 +1283,8 @@ class VLARolloutWorker(RolloutWorkerBase):
                         )
                         
                         # Copy back if we made it contiguous
-                        if not parameter.is_contiguous():
-                            parameter.copy_(recv_tensor)
+                        if not param_data.is_contiguous():
+                            param_data.copy_(recv_tensor)
                     
                     # Mark weight as synced on first broadcast
                     if not self.state.weight_synced():
