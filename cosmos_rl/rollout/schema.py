@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Union, Dict, Any
+from typing import List, Optional, Union, Any
 from pydantic import BaseModel
 from cosmos_rl.dispatcher.data.schema import ConversationType
 
@@ -26,7 +26,10 @@ class RolloutResult(BaseModel):
     conversation: Optional[ConversationType] = None
 
     # The generated completions for the prompt, In multi-turn conversation, it is a list of last message for each turn.
-    completions: List[str]
+    # In tensor native, video, or any other mode, it can be a list of any type of objects.
+    # The object type can be defined by the `rollout_generation` implementation.
+    # For non-text objects, it will be converted by the `get_rollout_output` of `data_packer` into final serializable format.
+    completions: List[Union[str, Any]]
 
     # The generated conversation history for the prompt.
     completed_conversations: Optional[List[ConversationType]] = None
@@ -36,6 +39,3 @@ class RolloutResult(BaseModel):
 
     # The token ids of the generated completions
     completion_token_ids: Optional[List[List[int]]] = None
-
-    # The dictionary of tensor as outputs for the rollout engine in tensor native mode.
-    tensor_dict: Optional[Dict[str, Any]] = None

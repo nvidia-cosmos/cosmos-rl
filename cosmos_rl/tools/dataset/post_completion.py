@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Optional, Any, List, Union
+from typing import Optional, Any, List, Union
 from torch.utils.data import Dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -129,7 +129,6 @@ class PostCompletionSampleDataPacker(DecoderOnlyLLMDataPacker):
         completed_conversations: Optional[List[Any]],
         logprobs: Optional[List[Any]],
         token_ids: Optional[List[Any]],
-        tensor_dicts: Optional[Dict[str, Any]],
         **kwargs,
     ) -> Optional[List[Any]]:
         """
@@ -215,7 +214,6 @@ class PostCompletionSampleDataPacker(DecoderOnlyLLMDataPacker):
             completed_conversations_uuids,
             logprobs,
             token_ids,
-            tensor_dicts,
             kwargs,
         )
 

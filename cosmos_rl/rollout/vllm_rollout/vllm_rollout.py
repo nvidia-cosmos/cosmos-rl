@@ -14,6 +14,7 @@
 # limitations under the License.
 import os
 
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
     apply_fp8_linear_patch,
@@ -609,6 +610,7 @@ class vLLMRollout(RolloutBase):
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
+        data_fetcher: DataFetcherBase,
         is_validation: bool = False,
         **kwargs,
     ) -> List[RolloutResult]:

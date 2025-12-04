@@ -15,6 +15,7 @@
 
 from typing import List, Optional
 
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from cosmos_rl.utils.logging import logger
 
 import tensorrt_llm
@@ -126,6 +127,7 @@ class TRTLLM_Rollout(RolloutBase):
         self,
         payloads: List[RLPayload],
         data_packer: BaseDataPacker,
+        data_fetcher: DataFetcherBase,
         sampling_params: SamplingParams,
     ) -> List[List[str]]:
         if not self._engine_initialized:

@@ -112,13 +112,13 @@ Your custom rollout engine should implement the following key methods:
    - Takes a list of `RLPayload` objects containing inputs and metadata for rollout generation
    - Takes a `torch.cuda.Stream` for asynchronous execution on the stream
    - Takes a `BaseDataPacker` for data formatting and processing
+   - Takes a `DataFetcherBase` for access training dataset and validation dataset to fetch data if needed
    - Takes an `is_validation` flag to distinguish validation from training generation
    - Returns a list of `RolloutResult` objects containing:
      - `prompt` - The original prompt
-     - `completions` - List of generated completion strings
+     - `completions` - List of generated completion strings, or list of any objects such as tensors and videos for native tensor mode, video mode, or any other non-text modes
      - `completion_logprobs` - (Optional) Log probabilities for each token
      - `completion_token_ids` - (Optional) Token IDs for completions
-     - `tensor_dict` - (Optional) Dict of key to tensor lists for the case where the generated results are a set of of native tensors
 
 4. **`init_engine()`** - Initialize the underlying model/engine
    - Loads the model from HuggingFace or other sources

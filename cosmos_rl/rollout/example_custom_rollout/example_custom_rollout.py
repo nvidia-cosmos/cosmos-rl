@@ -29,6 +29,7 @@ from torch.distributed.fsdp import (
     register_fsdp_forward_method,
     FSDPModule,
 )
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 
 
 """
@@ -64,6 +65,7 @@ class ExampleHFRollout(RolloutBase):
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
+        data_fetcher: DataFetcherBase,
         is_validation: bool = False,
         *args,
         **kwargs,

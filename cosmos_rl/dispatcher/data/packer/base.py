@@ -116,12 +116,11 @@ class BaseDataPacker(ABC):
         completed_conversations: List[Any],
         logprobs: List[Any],
         token_ids: List[Any],
-        tensor_dicts: Dict[str, Any],
         **kwargs,
     ) -> List[Any]:
         """
         Post-process to get the rollout outputs from the rollout engine
-        Include handling the completions, the completed_conversations for multi-turn case, the logprobs of completions, the token ids of completions, and the dict of tensors for tensor native case
+        Include handling the completions, the completed_conversations for multi-turn case, the logprobs of completions, the token ids of completions, etc.
         Can combine all these together to put in some external storage and return the corresponding uuids, replace the completions with the uuids and return
         Later in `get_policy_input`, we can fetch all the datas from the external storage using the uuids located at `rollout_output` argument
         """
@@ -130,7 +129,6 @@ class BaseDataPacker(ABC):
             completed_conversations,
             logprobs,
             token_ids,
-            tensor_dicts,
             kwargs,
         )
 

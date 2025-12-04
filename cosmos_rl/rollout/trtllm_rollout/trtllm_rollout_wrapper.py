@@ -21,7 +21,10 @@ from typing import List, Tuple, Optional, Any, Callable, Union
 from torch.utils.data import Dataset
 import multiprocessing as mp
 
-from cosmos_rl.utils.constant import COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK
+from cosmos_rl.utils.constant import (
+    COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK,
+    COSMOS_REWARD_DISPATCHER_CONCURRENCY,
+)
 
 
 from cosmos_rl.utils.logging import logger
@@ -159,7 +162,6 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
         val_dataset: Optional[Dataset] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
         val_reward_fns: Optional[List[Callable]] = None,
-        num_workers: int = 8,
     ):
         # setup data packer first
         self.init_data_packer(
@@ -187,7 +189,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
             val_reward_fns=val_reward_fns,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
-            num_workers=num_workers,
+            num_workers=COSMOS_REWARD_DISPATCHER_CONCURRENCY,
         )
 
     def report_rollouts(self, block=False):
@@ -204,14 +206,12 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         payloads[i].completed_conversations,
                         payloads[i].completion_logprobs,
                         payloads[i].completion_token_ids,
-                        payloads[i].tensor_dict,
                         _,
                     ) = self.data_packer.get_rollout_output(
                         payloads[i].completions,
                         payloads[i].completed_conversations,
                         payloads[i].completion_logprobs,
                         payloads[i].completion_token_ids,
-                        payloads[i].tensor_dict,
                     )
                     # when using local dataset, we don't need to send the prompt/conversation to the controller
                     if self.config.train.local_dataset:
@@ -236,7 +236,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         if prompt_queue.empty():
             payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
-            if self.config.train.local_dataset and not self.config.train.tensor_native:
+            if self.config.train.local_dataset and not self.config.train.non_text:
                 is_validation = kwargs.get("validation_step", None) is not None
                 for payload in payloads:
                     payload["prompt"] = self.data_fetcher.get_payload_by_index(
@@ -312,6 +312,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                         completions: List[List[str]] = self.rollout.rollout_generation(
                             payloads=payloads_list,
                             data_packer=self.val_data_packer,
+                            data_fetcher=self.data_fetcher,
                             sampling_params=self.val_sampling_params,
                         )
                         if completions:
@@ -390,6 +391,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
                 completions: List[List[str]] = self.rollout.rollout_generation(
                     payloads=payloads,
                     data_packer=self.data_packer,
+                    data_fetcher=self.data_fetcher,
                     sampling_params=self.sampling_params,
                 )
 

@@ -29,6 +29,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import (
     COSMOS_REWARD_DISPATCHER_PAYLOAD_PER_TASK,
+    COSMOS_REWARD_DISPATCHER_CONCURRENCY,
 )
 import cosmos_rl.utils.distributed as dist_utils
 from cosmos_rl.rollout.rollout_base import RolloutRegistry, RolloutBase
@@ -181,7 +182,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         val_dataset: Optional[Dataset] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
         val_reward_fns: Optional[List[Callable]] = None,
-        num_workers: int = 8,
     ):
         # setup data packer first
         self.init_data_packer(
@@ -198,6 +198,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             is_rl=True,
         )
 
+        # Only the last stage of rollout pipeline and tp_coord == 0 need to report rollouts
+        self.should_report = self.parallel_dims.tp_coord[0] == 0 and (
+            self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
+        )
+
         self.reward_dispatcher.setup(
             config=self.config,
             data_fetcher=self.data_fetcher,
@@ -208,9 +213,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             val_reward_fns=val_reward_fns,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
-            num_workers=num_workers
-            if self.parallel_dims.tp_coord[0] == 0
-            and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
+            num_workers=COSMOS_REWARD_DISPATCHER_CONCURRENCY
+            if self.should_report
             else 0,
         )
 
@@ -759,6 +763,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     payloads=payloads_list,
                     stream=self.inference_stream,
                     data_packer=self.val_data_packer,
+                    data_fetcher=self.data_fetcher,
                     is_validation=True,
                 )
                 if rollout_results:
@@ -768,8 +773,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         p.completion_token_ids = rr.completion_token_ids
                         if self.rollout.rollout_config.multi_turn_config.enable:
                             p.completed_conversations = rr.completed_conversations
-                        if self.config.train.tensor_native:
-                            p.tensor_dict = rr.tensor_dict
                     validation_payloads.extend(payloads_list)
 
             if is_end:
@@ -777,11 +780,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         # Clear the flag to indicate validation is done.
         self.validation_flag.clear()
-        should_report = self.parallel_dims.tp_coord[0] == 0 and (
-            self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1
-        )
 
-        if should_report:
+        if self.should_report:
             self.reward_dispatcher.enqueue_rewards_cal(
                 validation_payloads, True, self.current_step
             )
@@ -803,18 +803,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                             payloads[i].completed_conversations,
                             payloads[i].completion_logprobs,
                             payloads[i].completion_token_ids,
-                            payloads[i].tensor_dict,
                             _,
                         ) = self.val_data_packer.get_rollout_output(
                             payloads[i].completions,
                             payloads[i].completed_conversations,
                             payloads[i].completion_logprobs,
                             payloads[i].completion_token_ids,
-                            payloads[i].tensor_dict,
                         )
-                        assert not payloads[
-                            i
-                        ].tensor_dict, "tensor_dict should be processed in get_rollout_output if any."
                         if self.config.train.train_policy.rollout_as_token_ids:
                             payloads[i].completions = [""] * len(
                                 payloads[i].completions
@@ -1170,7 +1165,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if len(payloads) > 0:
                     if (
                         self.config.train.local_dataset
-                        and not self.config.train.tensor_native
+                        and not self.config.train.non_text
                     ):
                         for payload in payloads:
                             payload["prompt"] = self.data_fetcher.get_payload_by_index(
@@ -1357,18 +1352,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         payloads[i].completed_conversations,
                         payloads[i].completion_logprobs,
                         payloads[i].completion_token_ids,
-                        payloads[i].tensor_dict,
                         _,
                     ) = self.data_packer.get_rollout_output(
                         payloads[i].completions,
                         payloads[i].completed_conversations,
                         payloads[i].completion_logprobs,
                         payloads[i].completion_token_ids,
-                        payloads[i].tensor_dict,
                     )
-                    assert (
-                        not payloads[i].tensor_dict
-                    ), "tensor_dict should be processed in get_rollout_output if any."
                     # when using local dataset, we don't need to send the prompt/conversation to the controller
                     if self.config.train.local_dataset:
                         payloads[i].prompt = None
@@ -1457,6 +1447,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             payloads=payloads_list,
             stream=self.inference_stream,
             data_packer=self.data_packer,
+            data_fetcher=self.data_fetcher,
             is_validation=False,
         )
 
@@ -1470,9 +1461,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         # we need filter the result with valid completions or valid completed_conversations
         valid_result: List[RolloutResult] = []
         valid_payloads_list: List[RLPayload] = []
-        if self.config.train.tensor_native:
+        if self.config.train.non_text:
             for payload, rr in zip(payloads_list, rollout_results):
-                if rr.tensor_dict is not None and len(rr.tensor_dict) > 0:
+                if rr.completions is not None and len(rr.completions) > 0:
                     valid_result.append(rr)
                     valid_payloads_list.append(payload)
         elif self.rollout.rollout_config.multi_turn_config.enable:
@@ -1525,11 +1516,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
 
-        should_report = (
-            self.parallel_dims.tp_coord[0] == 0
-            and (self.parallel_dims.pp_coord[0] == self.parallel_dims.pp_coord[1] - 1)
-            and len(valid_result) > 0
-        )
+        should_report = self.should_report and len(valid_result) > 0
         if should_report:
             valid_payloads: List[RLPayload] = []
             # only the first tp rank in the rollout replica will post the completion to the controller.
@@ -1540,8 +1527,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completion_token_ids = result.completion_token_ids
                 if self.rollout.rollout_config.multi_turn_config.enable:
                     old_payload.completed_conversations = result.completed_conversations
-                if self.config.train.tensor_native:
-                    old_payload.tensor_dict = result.tensor_dict
                 valid_payloads.append(old_payload)
 
             self.reward_dispatcher.enqueue_rewards_cal(

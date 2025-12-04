@@ -100,7 +100,6 @@ class TestCustomRolloutOutput(unittest.TestCase):
                 completed_conversations=None,
                 logprobs=None,
                 token_ids=None,
-                tensor_dicts=None,
                 **kwargs,
             ):
                 uuids = []
@@ -117,7 +116,6 @@ class TestCustomRolloutOutput(unittest.TestCase):
                     completed_conversations,
                     logprobs,
                     token_ids,
-                    tensor_dicts,
                     kwargs,
                 )
 
@@ -153,7 +151,6 @@ class TestCustomRolloutOutput(unittest.TestCase):
                 (
                     payloads[i].completions,
                     payloads[i].completed_conversations,
-                    _,
                     _,
                     _,
                     _,
