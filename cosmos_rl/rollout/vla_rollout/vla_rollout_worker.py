@@ -956,9 +956,10 @@ class VLARolloutWorker(RolloutWorkerBase):
             self.inference_stream.synchronize()
 
             for recv_tensor, recv_tensor_cuda in recv_tensor_pairs:
+                # torch.testing.assert_close(recv_tensor.to(recv_tensor_cuda.device), recv_tensor_cuda, atol=0, rtol=0)
                 recv_tensor.copy_(recv_tensor_cuda)
         
-        sentinel_tensor = self.vla_model.model.language_model.model.lm_head.weight.full_tensor()
+        sentinel_tensor = self.vla_model.model.language_model.lm_head.weight.full_tensor()
         if torch.distributed.get_rank() == 0:
             logger.info(f"[Policy] Sentinel tensor: {sentinel_tensor.shape}, {sentinel_tensor.dtype}, {sentinel_tensor}")
         elapsed = time.time() - st

@@ -769,7 +769,7 @@ class GRPOTrainer(Trainer):
         #         logger.info(f"[Policy] {name} param.requires_grad: {param.requires_grad}, param.shape: {param.shape}, param.dtype: {param.dtype}")
         #return False
 
-        sentinel_tensor = self.model.model.language_model.model.lm_head.weight.full_tensor()
+        sentinel_tensor = self.model.model.language_model.lm_head.weight.full_tensor()
         if torch.distributed.get_rank() == 0:
             logger.info(f"[Policy] Sentinel tensor: {sentinel_tensor.shape}, {sentinel_tensor.dtype}, {sentinel_tensor}")
         
@@ -908,6 +908,8 @@ class GRPOTrainer(Trainer):
                                 if isinstance(local_view, torch.distributed.tensor.DTensor):
                                     local_view = local_view.to_local()
                                     logger.debug(f"[Policy] Unwrapped DTensor to local for P2R send: {dest_name}")
+                                
+                                # logger.info(f"[Policy] local_view {dest_name} : {local_view.shape}, {local_view.dtype}")
                                 
                                 local_view = local_view.to(
                                     str2torch_dtype(self.config.train.transfer_dtype)

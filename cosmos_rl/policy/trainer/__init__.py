@@ -112,6 +112,13 @@ class Trainer(CommMixin):
         self.init_comm()
         model = ModelRegistry.build_model(config)
 
+        cosmos_default_dtype = util.str2torch_dtype(
+            self.config.train.master_dtype
+            if self.config.train.master_dtype is not None
+            else self.config.train.param_dtype
+        )
+        model.to(cosmos_default_dtype)
+
         # FP8 settings
         with torch.device("meta"):
             if config.train.fp8.enable_fp8:
