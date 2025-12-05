@@ -312,7 +312,10 @@ class GrpoConfig(BaseModel):
 
     positive_nll_coef: Optional[float] = Field(
         default=None,
-        description="Coefficient for Positive Example LM Loss. Set a positive value to enable; None disables the feature.",
+        description=(
+            "[Optional] Coefficient for Positive Example LM Loss. Set a positive value to enable; None disables.\n"
+            "Ref: VAPO Sec. 4.3 (Positive Example LM Loss): https://arxiv.org/pdf/2504.05118"
+        ),
     )
 
     lower_bound_ratio: float = Field(
@@ -346,6 +349,15 @@ class GrpoConfig(BaseModel):
         default=0.0,
         description="KL coefficient. If `0.0`, the reference model is not loaded, reducing memory usage and improving "
         "training speed, but may be numerically unstable for long training runs.",
+    )
+
+    unbiased_kl_estimate: bool = Field(
+        default=False,
+        description=(
+            "[Optional] Unbiased K3 with IS: D_KL ≈ E_{π_old}[ w · ( r − log r − 1 ) ], w=π_θ/π_old, r=π_ref/π_θ.\n"
+            "Note: This option is ignored when `kl_beta` is 0.0.\n"
+            "Ref: DeepSeek-V3.2 Sec.3.1 (Unbiased KL Estimate): https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf"
+        ),
     )
 
     aipo_rho: Optional[float] = Field(

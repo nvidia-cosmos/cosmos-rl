@@ -196,7 +196,16 @@ def compute_loss(
         kl_ratio = ref_per_token_logps - current_token_logps
         # For numerical stability
         kl_ratio = torch.clamp(kl_ratio, min=-20, max=20)
-        kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
+        if config.train.train_policy.unbiased_kl_estimate:
+            importance_sampling_ratio = torch.exp(
+                current_token_logps - old_per_token_logps
+            )
+            kl_loss = (
+                importance_sampling_ratio * (torch.exp(kl_ratio) - kl_ratio - 1)
+            ).clamp(min=-10, max=10)
+        else:
+            kl_loss = (torch.exp(kl_ratio) - kl_ratio - 1).clamp(min=-10, max=10)
+
     else:
         kl_loss = torch.zeros_like(per_token_loss)
 
