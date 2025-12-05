@@ -804,3 +804,21 @@ class DistKVStore:
                     self.counter += 1
                     break
         return cmd
+
+
+def is_dist_avail_and_initialized():
+    return dist.is_available() and dist.is_initialized()
+
+
+def get_global_rank():
+    """Get global rank."""
+    if not is_dist_avail_and_initialized():
+        return 0
+    return dist.get_rank()
+
+
+def get_world_size():
+    """Get world size."""
+    if not is_dist_avail_and_initialized():
+        return 1
+    return dist.get_world_size()
