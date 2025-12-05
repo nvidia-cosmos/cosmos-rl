@@ -224,6 +224,16 @@ class Controller:
         validation_step: Optional[int] = None,
     ) -> Tuple[List[RLPayload], bool]:
         is_validation = validation_step is not None
+        # Tag the prompt with specific weight-version for weight version control in on-policy training or outdated rollout control.
+        rollouts_per_global_batch = self.config.train.train_batch_per_replica * len(
+            self.policy_status_manager
+        )
+        global_batch_size = math.ceil(
+            rollouts_per_global_batch / self.config.rollout.n_generation
+        )  # global_batch_size: number of prompts needed for single policy step.
+        weight_version_for_current_batch = (
+            self.policy_status_manager.consumed_samples_num // rollouts_per_global_batch
+        )
 
         if not is_validation and not self.config.mode == "colocated":
             # Throttle the generation speed:
@@ -233,10 +243,11 @@ class Controller:
             current_pending_rollouts = self.policy_status_manager.samples_on_the_fly
             if (
                 current_pending_rollouts
-                > (self.config.train.train_policy.allowed_outdated_steps + 1)
-                * len(self.policy_status_manager)
-                * self.config.train.train_batch_per_replica
-            ):
+                >= (self.config.train.train_policy.allowed_outdated_steps + 1)
+                * rollouts_per_global_batch
+            ) and self.config.train.train_policy.variant != "dapo":
+                # For non dapo variant, we only need to control the number of outdated weight versions when fetching new prompts.
+                # Since the number of fetched prompts is directly related to the number of rollouts to be trained.
                 n = min(
                     n,
                     self.config.train.train_policy.outdated_rollout_fetch_batch_size,
@@ -246,6 +257,41 @@ class Controller:
                     logger.warning(
                         f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
                     )
+            if (
+                self.config.train.train_policy.variant == "dapo"
+                and self.config.train.train_policy.max_retry_for_on_policy > 0
+            ):
+                # In DAPO, we also need to control the number of outdated weight versions when fetching new prompts.
+                # Estimating the number of outdated weight versions when the generation results of these fetched prompts start training based on the total pending rollouts
+                estimated_delta_weight_version = (
+                    self.policy_status_manager.total_pending_rollouts()
+                    // rollouts_per_global_batch
+                )
+                allowed_unfinished_weight_versions = (
+                    self.config.train.train_policy.allowed_outdated_steps
+                    - estimated_delta_weight_version
+                )
+                # Estimating the number of unfinished rollouts based on the samples on the fly and the pending rollouts
+                estimated_unfinished_rollouts = max(
+                    self.policy_status_manager.samples_on_the_fly
+                    - self.policy_status_manager.total_pending_rollouts(),
+                    0,
+                )
+                if (
+                    estimated_unfinished_rollouts
+                    >= (1 + allowed_unfinished_weight_versions)
+                    * self.config.train.train_policy.max_retry_for_on_policy
+                    * rollouts_per_global_batch
+                ):
+                    n = min(
+                        n,
+                        self.config.train.train_policy.outdated_rollout_fetch_batch_size,
+                    )
+                    if n > 0:
+                        # Log only when n is reduced but not when set to 0 since 0 is logged too frequently
+                        logger.warning(
+                            f"[Controller] Current pending rollouts {current_pending_rollouts} is larger than the allowed outdated version count {self.config.train.train_policy.allowed_outdated_steps * len(self.policy_status_manager)}. Generate with batch {n}"
+                        )
 
         if (
             (not is_validation)
@@ -253,20 +299,6 @@ class Controller:
             and len(self.rollout_status_manager.replica_scaling_log) == 0
             and not self.config.mode == "colocated"
         ):
-            # Fully Synchronized mode is enabled, we need to tag the prompt with specific weight-version
-            global_batch_size = (
-                self.config.train.train_batch_per_replica
-                * len(self.policy_status_manager)
-                // self.config.rollout.n_generation
-            )  # global_batch_size: number of prompts needed for single policy step.
-            num_of_valid_prompts_consumed = (
-                self.policy_status_manager.consumed_samples_num
-                // self.config.rollout.n_generation
-            )
-            weight_version_for_current_batch = (
-                num_of_valid_prompts_consumed // global_batch_size
-            )
-
             if self.config.train.train_policy.variant != "dapo":
                 # Fully Synchronized mode is enabled and no dapo variant, we need to ensure that for each weight version, we fetch exactly global_batch_size prompts.
                 if (

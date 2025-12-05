@@ -54,6 +54,7 @@ def extract_rollouts(
                 n_ignore_prefix_tokens=n_ignore_prefix_tokens,
                 completion_token_ids=completion_token_ids,
                 completion_logprobs=completion_logprobs,
+                weight_version=payload.weight_version,
             )
             for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, filter_reward, completion_token_ids, completion_logprobs in zip(
                 payload.completions,

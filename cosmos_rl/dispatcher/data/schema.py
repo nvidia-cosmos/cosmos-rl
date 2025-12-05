@@ -176,3 +176,7 @@ class Rollout(BaseModel):
     completion_logprobs: Optional[List[float]] = Field(
         default=None, description="The logprobs of each completion."
     )
+
+    weight_version: int = Field(
+        default=0, description="The weight version for the rollout."
+    )
