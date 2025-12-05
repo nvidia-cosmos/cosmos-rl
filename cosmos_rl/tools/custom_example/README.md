@@ -169,6 +169,10 @@ Execute the launcher with both the updated configuration file including the cust
 cosmos-rl --config configs/qwen2-5/qwen2-5-3b-p-fsdp2-colocated-grpo.toml tools/example/custom_grpo_trainer.py
 ```
 
+**Portability to both `colocated` and `disaggregated` mode**
+The above launching example is in colocated mode by default, where the policy and rollout replica shared the same GPUs within the same process. The customization can seamlessly ports to disaggregated case where the policy and rollout replica are on separate GPUs and processes. By only 
+replacing the line `mode = "colocated"` with `mode = "disaggregated"` in `configs/qwen2-5/qwen2-5-3b-p-fsdp2-colocated-grpo.toml`, the disaggregated workflow can be launched using exactly the same command. The customization is totally portable and can be directly used in either `colocated` or `disaggregated` mode.
+
 ## Implementation Notes
 
 **Model Processing:**

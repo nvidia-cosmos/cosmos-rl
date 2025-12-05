@@ -463,6 +463,8 @@ async def put_rollout_group(rollout: RolloutRequest):
             for rollouts_group in rollouts_list
             for rollout in rollouts_group  # rollouts_group: all rollouts of the same prompt.
         ]
+        # Filter out outdated rollouts
+        rollouts = controller.policy_status_manager.filter_outdated_rollouts(rollouts)
         if len(rollouts) > 0:
             logger.debug(
                 f"[RolloutGroup] from replica: {rollout.src_replica_name} with {len(rollout.payloads)} samples:"

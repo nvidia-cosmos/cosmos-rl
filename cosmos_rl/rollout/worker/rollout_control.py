@@ -771,6 +771,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         p.completions = rr.completions
                         p.completion_logprobs = rr.completion_logprobs
                         p.completion_token_ids = rr.completion_token_ids
+                        p.weight_version = self.current_weight_version
                         if self.rollout.rollout_config.multi_turn_config.enable:
                             p.completed_conversations = rr.completed_conversations
                     validation_payloads.extend(payloads_list)
@@ -1525,6 +1526,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completions = result.completions
                 old_payload.completion_logprobs = result.completion_logprobs
                 old_payload.completion_token_ids = result.completion_token_ids
+                old_payload.weight_version = self.current_weight_version
                 if self.rollout.rollout_config.multi_turn_config.enable:
                     old_payload.completed_conversations = result.completed_conversations
                 valid_payloads.append(old_payload)
