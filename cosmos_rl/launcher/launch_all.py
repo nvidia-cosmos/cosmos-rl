@@ -736,7 +736,11 @@ def get_hostname_from_host(ip):
         logger.error(f"Error: {e}")
         return None
 
-@monitor_status(name="Cosmos-RL Launcher", mode="launch")
+@monitor_status(
+    name="Cosmos-RL Launcher",
+    mode="launch",
+    logger=logger
+)
 def main():
     args, parser = parse_args()
     if args.debug:
