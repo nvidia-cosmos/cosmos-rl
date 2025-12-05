@@ -38,7 +38,6 @@ from cosmos_rl.dispatcher.data.packer.multi_turn import (
 from cosmos_rl.dispatcher.data import RLPayload
 from contextlib import contextmanager
 import cosmos_rl.utils.util as util
-from cosmos_rl.utils.decorators import monitor_status
 
 
 class GSM8kDataset(Dataset):
@@ -361,8 +360,7 @@ class GSM8kDataPacker(DataPacker):
         return conversation
 
 
-@monitor_status(name="Cosmos-RL GSM8k GRPO Dataset", mode="dataset")
-def main()
+def main():
 
     def get_dataset(config: CosmosConfig) -> Dataset:
         return GSM8kDataset()

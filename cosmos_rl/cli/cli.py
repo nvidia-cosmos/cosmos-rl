@@ -22,7 +22,6 @@ from . import profiler
 from . import nccl
 from . import algo
 from .utils import console
-from cosmos_rl.utils.decorators import monitor_status
 
 
 @click.group()
@@ -48,7 +47,6 @@ def get_ip_from_hostname(hostname):
     return ip_address
 
 
-@monitor_status(name="Cosmos-RL CLI", mode="cli")
 def main():
     """Main CLI entry point with status monitoring."""
     try:

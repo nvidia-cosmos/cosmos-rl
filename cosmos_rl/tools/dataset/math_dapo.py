@@ -21,7 +21,6 @@ from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.algo.reward import direct_math_reward_fn, overlong_reward_fn
 from torch.utils.data import ConcatDataset
-from cosmos_rl.utils.decorators import monitor_status
 import cosmos_rl.utils.util as util
 
 
@@ -99,7 +98,6 @@ def custom_reward_fn(
     return reward
 
 
-@monitor_status(name="Cosmos-RL Math DAPO Dataset", mode="dataset")
 def main():
 
     def get_dataset(config: CosmosConfig) -> Dataset:

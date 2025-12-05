@@ -27,7 +27,6 @@ import pydantic
 import toml
 import torch.utils.data
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.decorators import monitor_status
 
 from cosmos_reason1_utils.text import create_conversation
 from cosmos_reason1_utils.vision import VisionConfig
@@ -116,7 +115,6 @@ class CustomDataset(torch.utils.data.Dataset):
         return conversations
 
 
-@monitor_status(name="Cosmos-RL Custom SFT with Separate Datasets", mode="sft")
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

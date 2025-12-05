@@ -6,10 +6,7 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from torch.utils.data import Dataset
 import argparse
 
-from cosmos_rl.utils.decorators import monitor_status
 
-
-@monitor_status(name="Cosmos-RL Worker Entry", mode="worker")
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
     data_packer: Optional[BaseDataPacker] = None,

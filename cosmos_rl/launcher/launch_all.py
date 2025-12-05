@@ -30,7 +30,7 @@ import toml
 import tempfile
 import copy
 
-from cosmos_rl.utils.decorators import monitor_status
+from nvidia_tao_core.loggers.decorators import monitor_status
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosmos")

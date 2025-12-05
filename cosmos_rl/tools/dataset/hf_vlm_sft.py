@@ -21,7 +21,6 @@ from cosmos_rl.policy.config import Config
 from cosmos_rl.policy.config import Config as CosmosConfig
 import argparse
 import toml
-from cosmos_rl.utils.decorators import monitor_status
 
 
 class HFVLMSFTDataset(Dataset):
@@ -64,7 +63,6 @@ class HFVLMSFTDataset(Dataset):
         return conversations
 
 
-@monitor_status(name="Cosmos-RL HF VLM SFT Dataset", mode="dataset")
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)

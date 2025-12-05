@@ -26,7 +26,6 @@ import tempfile
 import subprocess
 import json
 import toml
-from cosmos_rl.utils.decorators import monitor_status
 from argparse import REMAINDER
 import copy
 
@@ -157,7 +156,6 @@ def compute_nodes(
     return node_launch_metadata
 
 
-@monitor_status(name="Cosmos-RL SLURM Dispatch", mode="dispatch")
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-name", type=str, default="cosmos_job")

@@ -22,7 +22,6 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.data.packer import DecoderOnlyLLMDataPacker, DataPacker
 from cosmos_rl.utils.modelscope import modelscope_load_dataset
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.decorators import monitor_status
 import cosmos_rl.utils.util as util
 
 
@@ -380,7 +379,6 @@ class MathDataPacker(DataPacker):
         )
 
 
-@monitor_status(name="Cosmos-RL Math GRPO Dataset", mode="dataset")
 def main():
 
     def get_dataset(config: CosmosConfig) -> Dataset:
