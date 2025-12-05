@@ -30,3 +30,4 @@ rouge_score
 bert-score
 accelerate
 kernels
+nvidia-tao-core==6.25.11

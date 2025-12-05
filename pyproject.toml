@@ -24,10 +24,6 @@ Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
 [project.scripts]
 cosmos-rl = "cosmos_rl.launcher.launch_all:main"
 cosmos-rl-train = "cosmos_rl.launcher.launch_all:main"
-cosmos-rl-evaluate = "cosmos_rl.evaluation.evaluate:main"
-cosmos-rl-inference = "cosmos_rl.inference.inference:main"
-cosmos-rl-inference-microservice = "cosmos_rl.inference.infer_microservices:main"
-cosmos-rl-quantize = "cosmos_rl.quantization.quantize:main"
 cosmos-cli = "cosmos_rl.cli.cli:main"
 
 [tool.setuptools]

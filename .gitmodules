@@ -1,3 +1,0 @@
-[submodule "tao-core"]
-	path = tao-core
-	url = ssh://git@gitlab-master.nvidia.com:12051/arahmed/tao-core.git
