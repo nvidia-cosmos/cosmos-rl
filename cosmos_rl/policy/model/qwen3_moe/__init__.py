@@ -16,6 +16,8 @@
 import re
 import os
 import torch
+import torch.distributed as dist
+
 from torch import nn
 import torch.nn.functional as F
 from safetensors import safe_open
@@ -594,12 +596,20 @@ class Qwen3MoE(BaseModel):
             parallel_dims (ParallelDims): Parallel dimensions definition.
             info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
+        # Get current rank and world size for distributed loading
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+        else:
+            rank = 0
+            world_size = 1
+
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
-        safetensors_files = [
-            f for f in os.listdir(model_path) if f.endswith(".safetensors")
-        ]
+        safetensors_files = sorted(
+            [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+        )
 
         self_state_dict = self.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
@@ -613,79 +623,211 @@ class Qwen3MoE(BaseModel):
         embed_tokens_weight_key = "model.embed_tokens.weight"
         weights_of_ckpt_names = set()
         reserved = {}
-        for f in safetensors_files:
-            weights_of_ckpt = {}
-            ckpt = safe_open(
-                os.path.join(model_path, f), framework="pt", device=str(device)
-            )
-            keys = ckpt.keys()
-            for name in keys:
-                ckpt_tensor = ckpt.get_tensor(name)
-                weights_of_ckpt[name] = ckpt_tensor
-                weights_of_ckpt_names.add(name)
-                if name == embed_tokens_weight_key:
-                    reserved[name] = ckpt_tensor
 
-            for name in weights_of_ckpt.keys():
-                tensor = weights_of_ckpt[name]
-                dest_name, shared_weight = convert_weight_from_hf(
-                    tensor,
-                    name,
-                    model_type,
-                    parallel_dims,
-                    n_experts=self.model_args.n_experts,
+        # Mapping from dtype to integer for broadcasting
+        dtype_to_int = {
+            torch.float32: 0,
+            torch.float16: 1,
+            torch.bfloat16: 2,
+            torch.int64: 3,
+            torch.int32: 4,
+            torch.int8: 5,
+            torch.uint8: 6,
+            torch.float8_e4m3fn: 7,
+            torch.float8_e5m2: 8,
+        }
+        # Mapping from integer to dtype for broadcasting
+        int_to_dtype = {
+            0: torch.float32,
+            1: torch.float16,
+            2: torch.bfloat16,
+            3: torch.int64,
+            4: torch.int32,
+            5: torch.int8,
+            6: torch.uint8,
+            7: torch.float8_e4m3fn,
+            8: torch.float8_e5m2,
+        }
+
+        # Step 1: Each rank reads its assigned safetensors files in parallel
+        # Distribute files across ranks: rank i reads files where file_idx % world_size == i
+        rank_tensors = {}  # {tensor_name: tensor_data} for this rank
+        rank_tensor_metadata = {}  # {tensor_name: (shape, dtype)} for this rank
+        file_to_rank_map = {}  # {filename: rank} mapping
+
+        for file_idx, f in enumerate(safetensors_files):
+            file_rank = file_idx % world_size
+            file_to_rank_map[f] = file_rank
+            if rank == file_rank:
+                # This rank is responsible for reading this file
+                ckpt = safe_open(
+                    os.path.join(model_path, f), framework="pt", device=str(device)
+                )
+                keys = list(ckpt.keys())
+                for name in keys:
+                    weights_of_ckpt_names.add(name)
+                    ckpt_tensor = ckpt.get_tensor(name)
+                    rank_tensors[name] = ckpt_tensor
+                    rank_tensor_metadata[name] = (
+                        list(ckpt_tensor.shape),
+                        dtype_to_int.get(ckpt_tensor.dtype, 0),
+                    )
+                    if name == embed_tokens_weight_key:
+                        reserved[name] = ckpt_tensor
+
+        # Step 2: Gather all tensor names from all ranks and build tensor-to-rank mapping
+        if world_size > 1:
+            # all_gather_object requires output list to be pre-initialized with world_size
+            all_tensor_names_lists = [None] * world_size
+            dist.all_gather_object(all_tensor_names_lists, list(weights_of_ckpt_names))
+            # Flatten the list and create a set
+            weights_of_ckpt_names = set()
+            for names_list in all_tensor_names_lists:
+                if names_list is not None:
+                    weights_of_ckpt_names.update(names_list)
+
+            # Build tensor-to-rank mapping: gather which rank has which tensors
+            # Create a dict mapping tensor_name -> rank for this rank
+            local_tensor_to_rank = {name: rank for name in rank_tensors.keys()}
+            all_tensor_to_rank_dicts = [None] * world_size
+            dist.all_gather_object(all_tensor_to_rank_dicts, local_tensor_to_rank)
+
+            # Merge all dicts to create global mapping
+            tensor_to_rank_map = {}
+            for rank_idx, tensor_dict in enumerate(all_tensor_to_rank_dicts):
+                if tensor_dict is not None:
+                    for tensor_name, _ in tensor_dict.items():
+                        if tensor_name not in tensor_to_rank_map:
+                            tensor_to_rank_map[tensor_name] = rank_idx
+                        # If duplicate, keep the first one (shouldn't happen, but just in case)
+        else:
+            all_tensor_names_lists = [list(weights_of_ckpt_names)]
+            tensor_to_rank_map = {name: 0 for name in rank_tensors.keys()}
+
+        # Step 3: Process each tensor - use pre-built mapping to find which rank has it
+        for name in sorted(weights_of_ckpt_names):
+            # Get rank from pre-built mapping
+            tensor_rank = tensor_to_rank_map.get(name)
+
+            if tensor_rank is None:
+                continue
+
+            # Get tensor from the rank that has it
+            if rank == tensor_rank:
+                ckpt_tensor = rank_tensors[name]
+                tensor_shape, tensor_dtype_int = rank_tensor_metadata[name]
+            else:
+                ckpt_tensor = None
+                tensor_shape = []
+                tensor_dtype_int = 0
+
+            # Broadcast tensor metadata (shape, dtype) from the rank that has it
+            if world_size > 1:
+                # Ensure all ranks participate in broadcast
+                if rank == tensor_rank:
+                    shape_len = len(tensor_shape)
+                    shape_len_tensor = torch.tensor(
+                        [shape_len], dtype=torch.long, device=device
+                    )
+                    shape_tensor = torch.tensor(
+                        tensor_shape, dtype=torch.long, device=device
+                    )
+                    dtype_int_tensor = torch.tensor(
+                        [tensor_dtype_int], dtype=torch.long, device=device
+                    )
+                else:
+                    shape_len_tensor = torch.zeros(1, dtype=torch.long, device=device)
+                    shape_tensor = None  # Will be created after knowing shape_len
+                    dtype_int_tensor = torch.zeros(1, dtype=torch.long, device=device)
+
+                # Broadcast shape length first
+                dist.broadcast(shape_len_tensor, src=tensor_rank)
+                shape_len = shape_len_tensor.item()
+
+                # Create shape_tensor with correct size for all ranks
+                if rank != tensor_rank:
+                    shape_tensor = torch.zeros(
+                        shape_len, dtype=torch.long, device=device
+                    )
+
+                # Broadcast shape values
+                dist.broadcast(shape_tensor, src=tensor_rank)
+
+                # Broadcast dtype
+                dist.broadcast(dtype_int_tensor, src=tensor_rank)
+
+                if rank != tensor_rank:
+                    tensor_shape = shape_tensor.cpu().tolist()
+                    tensor_dtype = int_to_dtype.get(
+                        dtype_int_tensor.item(), torch.float32
+                    )
+                    ckpt_tensor = torch.empty(
+                        tensor_shape, dtype=tensor_dtype, device=device
+                    )
+
+                # Broadcast the actual tensor data
+                dist.broadcast(ckpt_tensor, src=tensor_rank)
+
+            # Now all ranks have the tensor, process it
+            tensor = ckpt_tensor
+            dest_name, shared_weight = convert_weight_from_hf(
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                n_experts=self.model_args.n_experts,
+            )
+
+            if dest_name is None:
+                # This is due to the expert parallelism grouping
+                continue
+
+            expert_id = None
+            if match := re.search(  # noqa: F841
+                r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
+                dest_name,
+            ):
+                # remove `experts.$ID.` from dest_name
+                expert_id = int(match.group(2))
+                dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
+                # Convert expert_id to local_expert_id
+                n_local_experts = (
+                    self.model_args.n_experts
+                    // parallel_dims.tp
+                    // parallel_dims.dp_shard
                 )
 
-                if dest_name is None:
-                    # This is due to the expert parallelism grouping
-                    continue
+                expert_id = expert_id % n_local_experts
 
-                expert_id = None
-                if match := re.search(  # noqa: F841
-                    r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)",
-                    dest_name,
-                ):
-                    # remove `experts.$ID.` from dest_name
-                    expert_id = int(match.group(2))
-                    dest_name = dest_name.replace(f"experts.{expert_id}.", "experts.")
-                    # Convert expert_id to local_expert_id
-                    n_local_experts = (
-                        self.model_args.n_experts
-                        // parallel_dims.tp
-                        // parallel_dims.dp_shard
-                    )
+            if dest_name not in self_state_dict and parallel_dims.pp_enabled:
+                logger.info(
+                    f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
+                )
+                continue
+            slice_range = None
+            if "gate_proj" in dest_name:
+                dest_name = dest_name.replace("gate_proj", "gate_and_up_proj")
+                slice_range = slice(0, self.model_args.ffn_dim)
+            elif "up_proj" in dest_name:
+                dest_name = dest_name.replace("up_proj", "gate_and_up_proj")
+                slice_range = slice(self.model_args.ffn_dim, None)
 
-                    expert_id = expert_id % n_local_experts
-
-                if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                    logger.info(
-                        f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
-                    )
-                    continue
-                slice_range = None
-                if "gate_proj" in dest_name:
-                    dest_name = dest_name.replace("gate_proj", "gate_and_up_proj")
-                    slice_range = slice(0, self.model_args.ffn_dim)
-                elif "up_proj" in dest_name:
-                    dest_name = dest_name.replace("up_proj", "gate_and_up_proj")
-                    slice_range = slice(self.model_args.ffn_dim, None)
-
-                target_tensor = self_state_dict[dest_name]
-                if isinstance(target_tensor, torch.distributed.tensor.DTensor):
-                    target_tensor = target_tensor.to_local()
-                # Write to the correct expert of the target tensor
-                if expert_id is not None:
-                    target_tensor = target_tensor[expert_id]
-                if slice_range is not None:
-                    assert (
-                        target_tensor.shape[0] == 2 * self.model_args.ffn_dim
-                    ), f"Shape mismatch: {target_tensor.shape} != {2 * self.model_args.ffn_dim} for {dest_name}"
-                    target_tensor = target_tensor[slice_range]
+            target_tensor = self_state_dict[dest_name]
+            if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                target_tensor = target_tensor.to_local()
+            # Write to the correct expert of the target tensor
+            if expert_id is not None:
+                target_tensor = target_tensor[expert_id]
+            if slice_range is not None:
                 assert (
-                    target_tensor.shape == shared_weight.shape
-                ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
-                with torch.no_grad():
-                    target_tensor.data.copy_(shared_weight)
+                    target_tensor.shape[0] == 2 * self.model_args.ffn_dim
+                ), f"Shape mismatch: {target_tensor.shape} != {2 * self.model_args.ffn_dim} for {dest_name}"
+                target_tensor = target_tensor[slice_range]
+            assert (
+                target_tensor.shape == shared_weight.shape
+            ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
+            with torch.no_grad():
+                target_tensor.data.copy_(shared_weight)
 
         if (
             lm_head_weight_key not in weights_of_ckpt_names
@@ -693,8 +835,59 @@ class Qwen3MoE(BaseModel):
         ):
             # tied with embed_tokens.weight
             name = lm_head_weight_key
-            assert embed_tokens_weight_key in reserved
-            tensor = reserved[embed_tokens_weight_key]
+            if rank == 0:
+                assert embed_tokens_weight_key in reserved
+                tensor = reserved[embed_tokens_weight_key]
+            else:
+                # Other ranks need to get the tensor from rank 0
+                if world_size > 1:
+                    # Get shape and dtype from rank 0
+                    if rank == 0:
+                        tensor_shape = list(tensor.shape)
+                        shape_len = len(tensor_shape)
+                        tensor_dtype_int = dtype_to_int.get(tensor.dtype, 0)
+                    else:
+                        tensor_shape = []
+                        shape_len = 0
+                        tensor_dtype_int = 0
+
+                    # First broadcast the length of shape
+                    shape_len_tensor = torch.tensor(
+                        [shape_len], dtype=torch.long, device=device
+                    )
+                    dist.broadcast(shape_len_tensor, src=0)
+                    shape_len = shape_len_tensor.item()
+
+                    # Broadcast shape values (all ranks create tensor with same size)
+                    if rank == 0:
+                        shape_tensor = torch.tensor(
+                            tensor_shape, dtype=torch.long, device=device
+                        )
+                    else:
+                        shape_tensor = torch.zeros(
+                            shape_len, dtype=torch.long, device=device
+                        )
+                    dist.broadcast(shape_tensor, src=0)
+
+                    # Broadcast dtype as integer
+                    dtype_int_tensor = torch.tensor(
+                        [tensor_dtype_int], dtype=torch.long, device=device
+                    )
+                    dist.broadcast(dtype_int_tensor, src=0)
+
+                    if rank != 0:
+                        tensor_shape = shape_tensor.cpu().tolist()
+                        tensor_dtype = int_to_dtype.get(
+                            dtype_int_tensor.item(), torch.float32
+                        )
+                        tensor = torch.empty(
+                            tensor_shape, dtype=tensor_dtype, device=device
+                        )
+
+                    dist.broadcast(tensor, src=0)
+                else:
+                    tensor = reserved[embed_tokens_weight_key]
+
             dest_name, shared_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims
             )
