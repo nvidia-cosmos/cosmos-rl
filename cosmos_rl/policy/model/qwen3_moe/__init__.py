@@ -597,12 +597,35 @@ class Qwen3MoE(BaseModel):
             info_inly (bool): Only collect the tensor infomation without actual data loading.
         """
         # Get current rank and world size for distributed loading
+        # When dp_replicate > 1, we need to use a process group that excludes dp_replicate
+        # since each replica is independent and should load weights separately
         if dist.is_initialized():
-            rank = dist.get_rank()
-            world_size = dist.get_world_size()
+            if hasattr(parallel_dims, "mesh") and parallel_dims.dp_replicate_enabled:
+                # Use dp_cp_tp mesh which excludes dp_replicate
+                # This ensures we only communicate within the same replica
+                try:
+                    group = parallel_dims.mesh.get_group("dp_cp_tp")
+                    rank = dist.get_rank(group)
+                    world_size = dist.get_world_size(group)
+                except (KeyError, AttributeError):
+                    # Fallback: use dp_shard_cp or global group
+                    try:
+                        group = parallel_dims.mesh.get_group("dp_shard_cp")
+                        rank = dist.get_rank(group)
+                        world_size = dist.get_world_size(group)
+                    except (KeyError, AttributeError):
+                        # Final fallback: use global rank/world_size
+                        rank = dist.get_rank()
+                        world_size = dist.get_world_size()
+                        group = None
+            else:
+                rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                group = None
         else:
             rank = 0
             world_size = 1
+            group = None
 
         # Load all safetensors from `model_path`
         model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
@@ -679,7 +702,9 @@ class Qwen3MoE(BaseModel):
         if world_size > 1:
             # all_gather_object requires output list to be pre-initialized with world_size
             all_tensor_names_lists = [None] * world_size
-            dist.all_gather_object(all_tensor_names_lists, list(weights_of_ckpt_names))
+            dist.all_gather_object(
+                all_tensor_names_lists, list(weights_of_ckpt_names), group=group
+            )
             # Flatten the list and create a set
             weights_of_ckpt_names = set()
             for names_list in all_tensor_names_lists:
@@ -690,7 +715,9 @@ class Qwen3MoE(BaseModel):
             # Create a dict mapping tensor_name -> rank for this rank
             local_tensor_to_rank = {name: rank for name in rank_tensors.keys()}
             all_tensor_to_rank_dicts = [None] * world_size
-            dist.all_gather_object(all_tensor_to_rank_dicts, local_tensor_to_rank)
+            dist.all_gather_object(
+                all_tensor_to_rank_dicts, local_tensor_to_rank, group=group
+            )
 
             # Merge all dicts to create global mapping
             tensor_to_rank_map = {}
@@ -741,7 +768,7 @@ class Qwen3MoE(BaseModel):
                     dtype_int_tensor = torch.zeros(1, dtype=torch.long, device=device)
 
                 # Broadcast shape length first
-                dist.broadcast(shape_len_tensor, src=tensor_rank)
+                dist.broadcast(shape_len_tensor, src=tensor_rank, group=group)
                 shape_len = shape_len_tensor.item()
 
                 # Create shape_tensor with correct size for all ranks
@@ -751,10 +778,10 @@ class Qwen3MoE(BaseModel):
                     )
 
                 # Broadcast shape values
-                dist.broadcast(shape_tensor, src=tensor_rank)
+                dist.broadcast(shape_tensor, src=tensor_rank, group=group)
 
                 # Broadcast dtype
-                dist.broadcast(dtype_int_tensor, src=tensor_rank)
+                dist.broadcast(dtype_int_tensor, src=tensor_rank, group=group)
 
                 if rank != tensor_rank:
                     tensor_shape = shape_tensor.cpu().tolist()
@@ -766,7 +793,7 @@ class Qwen3MoE(BaseModel):
                     )
 
                 # Broadcast the actual tensor data
-                dist.broadcast(ckpt_tensor, src=tensor_rank)
+                dist.broadcast(ckpt_tensor, src=tensor_rank, group=group)
 
             # Now all ranks have the tensor, process it
             tensor = ckpt_tensor
@@ -855,7 +882,7 @@ class Qwen3MoE(BaseModel):
                     shape_len_tensor = torch.tensor(
                         [shape_len], dtype=torch.long, device=device
                     )
-                    dist.broadcast(shape_len_tensor, src=0)
+                    dist.broadcast(shape_len_tensor, src=0, group=group)
                     shape_len = shape_len_tensor.item()
 
                     # Broadcast shape values (all ranks create tensor with same size)
@@ -867,13 +894,13 @@ class Qwen3MoE(BaseModel):
                         shape_tensor = torch.zeros(
                             shape_len, dtype=torch.long, device=device
                         )
-                    dist.broadcast(shape_tensor, src=0)
+                    dist.broadcast(shape_tensor, src=0, group=group)
 
                     # Broadcast dtype as integer
                     dtype_int_tensor = torch.tensor(
                         [tensor_dtype_int], dtype=torch.long, device=device
                     )
-                    dist.broadcast(dtype_int_tensor, src=0)
+                    dist.broadcast(dtype_int_tensor, src=0, group=group)
 
                     if rank != 0:
                         tensor_shape = shape_tensor.cpu().tolist()
@@ -884,7 +911,7 @@ class Qwen3MoE(BaseModel):
                             tensor_shape, dtype=tensor_dtype, device=device
                         )
 
-                    dist.broadcast(tensor, src=0)
+                    dist.broadcast(tensor, src=0, group=group)
                 else:
                     tensor = reserved[embed_tokens_weight_key]
 
