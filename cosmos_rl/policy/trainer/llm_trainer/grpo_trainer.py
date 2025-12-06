@@ -59,6 +59,52 @@ class TrainerPhase(enum.Enum):
     TRAIN = "train"
 
 
+def _apply_off_policy_mask(
+    per_token_loss: torch.Tensor,
+    rollout_per_token_logps: Optional[torch.Tensor],
+    old_per_token_logps: torch.Tensor,
+    current_token_logps: torch.Tensor,
+    current_advantages: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    shifted_length: torch.Tensor,
+    off_policy_masking_delta: float,
+) -> torch.Tensor:
+    """
+    Off-Policy Sequence Masking.
+    Reference:
+    - DeepSeek-V3.2 Sec.3.1 Off-Policy Sequence Masking
+      https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf
+    """
+    masking_source_logps = (
+        rollout_per_token_logps
+        if rollout_per_token_logps is not None
+        else old_per_token_logps
+    )
+
+    # Compute per-sequence mean of log π_old − log π_θ
+    logprob_diff = masking_source_logps - current_token_logps
+    prefix_sum_for_logprob_diff = torch.cat(
+        [logprob_diff.new_zeros(1), logprob_diff]
+    ).cumsum(dim=0)
+    sum_diff = (
+        prefix_sum_for_logprob_diff[cu_seqlens[1:]]
+        - prefix_sum_for_logprob_diff[cu_seqlens[:-1]]
+    )
+    denom = shifted_length.to(prefix_sum_for_logprob_diff.dtype).clamp_min(1)
+    seq_mean_logprob_diff = sum_diff / denom
+
+    # Sequence-level advantage
+    advantage_by_sequence = current_advantages[cu_seqlens[:-1]]
+
+    # Apply the mask
+    seq_mask = (
+        (advantage_by_sequence >= 0)
+        | (seq_mean_logprob_diff <= off_policy_masking_delta)
+    ).to(per_token_loss.dtype)
+    per_token_loss = per_token_loss * seq_mask.repeat_interleave(shifted_length)
+    return per_token_loss
+
+
 def compute_loss(
     current_token_logps: torch.Tensor,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
     old_per_token_logps: torch.Tensor,  # per-token logprobs of shape `[n_tokens_of_logprobs]`
@@ -184,6 +230,19 @@ def compute_loss(
         )
         behav_imp_weight = torch.where(behav_mask, behav_imp_weight, 0.0)
         per_token_loss = per_token_loss * behav_imp_weight
+
+    off_policy_masking_delta = config.train.train_policy.off_policy_masking_delta
+    if off_policy_masking_delta is not None:
+        per_token_loss = _apply_off_policy_mask(
+            per_token_loss,
+            rollout_per_token_logps,
+            old_per_token_logps,
+            current_token_logps,
+            current_advantages,
+            cu_seqlens,
+            shifted_length,
+            off_policy_masking_delta,
+        )
 
     # Compute the KL divergence between the model and the reference model
     if config.train.train_policy.kl_beta != 0.0:
