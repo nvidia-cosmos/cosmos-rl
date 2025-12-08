@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import torch
 import numpy as np
 from typing import List, Dict, Any
@@ -531,7 +532,11 @@ class VLARollout(RolloutBase):
             task_ids.append(task_config['task_id'])
             trial_ids.append(task_config.get('trial_id', 0))
             max_steps_list.append(task_config['max_steps'])
-        
+
+        cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
+        os.environ['CUDA_VISIBLE_DEVICES'] = f'{torch.distributed.get_rank()}'
+        #logger.info(f"Setting CUDA_VISIBLE_DEVICES to {torch.distributed.get_rank() + 4}")
+
         # Spawn worker processes for each environment (stored in member variables)
         for idx in range(batch_size):
             task_name = task_suite_names[idx]
@@ -557,6 +562,7 @@ class VLARollout(RolloutBase):
             self.sim_input_queues.append(input_q)
             self.sim_output_queues.append(output_q)
         
+        os.environ['CUDA_VISIBLE_DEVICES'] = cuda_visible_devices
         logger.debug(f"Spawned {len(self.sim_processes)} worker processes (total sim pool: {len(self.sim_processes)})")
         
         # Collect initial observations from workers

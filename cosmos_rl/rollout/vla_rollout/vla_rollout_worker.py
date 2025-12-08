@@ -1067,7 +1067,6 @@ class VLARolloutWorker(RolloutWorkerBase):
                 for layer in llm.model.layers:
                     if hasattr(layer, 'reshard'):
                         layer.reshard()
-                        logger.info(f"[VLA Rollout] Resharded LLM layer")
             
             # Reshard embed_tokens, norm, and lm_head
             for module_name in ['embed_tokens', 'norm']:
@@ -1075,11 +1074,9 @@ class VLARolloutWorker(RolloutWorkerBase):
                     module = getattr(llm.model, module_name)
                     if hasattr(module, 'reshard'):
                         module.reshard()
-                        logger.info(f"[VLA Rollout] Resharded {module_name}")
             
             if hasattr(llm, 'lm_head') and hasattr(llm.lm_head, 'reshard'):
                 llm.lm_head.reshard()
-                logger.info("[VLA Rollout] Resharded lm_head")
         
         # Reshard vision backbone and projector (also individually sharded)
         for module_name in ['vision_backbone', 'projector']:
@@ -1087,7 +1084,6 @@ class VLARolloutWorker(RolloutWorkerBase):
                 module = getattr(actual_model, module_name)
                 if hasattr(module, 'reshard'):
                     module.reshard()
-                    logger.info(f"[VLA Rollout] Resharded {module_name}")
         
         logger.info("[VLA Rollout] ✅ FSDP2 modules resharded successfully")
     

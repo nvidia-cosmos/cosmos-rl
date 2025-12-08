@@ -121,6 +121,8 @@ class PolicyStatusManager:
 
         self.replica_scaling_log = []
 
+        self.discarded_rollouts = dict()
+
         # Validation
         self.val_iters: Dict[int, Iterator] = {}
         self.activated_val_iter: Optional[Iterator] = None
@@ -680,12 +682,16 @@ class PolicyStatusManager:
         rollout_weight_version = rollout.metadata.get('weight_version', -1)
         allowed_staleness = self.config.train.train_policy.allowed_outdated_steps
         min_acceptable_version = self.current_step - allowed_staleness
+
+        if rollout_weight_version not in self.discarded_rollouts:
+            self.discarded_rollouts[rollout_weight_version] = 0
+            logger.info(f"[Controller] Discard summary (weight_version:discarded_rollouts): {self.discarded_rollouts}")
+
         if rollout_weight_version > min_acceptable_version:
             self.rollout_buffer.put(rollout)
             self.try_trigger_data_fetch_and_training()
         else:
-            logger.info(f"[Controller] Discarded rollout with weight_version {rollout_weight_version}, current_step={self.current_step}, allowed_staleness={allowed_staleness}")
-            return
+            self.discarded_rollouts[rollout_weight_version] = self.discarded_rollouts[rollout_weight_version] + 1
 
     def put_rollouts(
         self, valid_rollouts: List[Rollout], invalid_rollouts: List[Rollout]
