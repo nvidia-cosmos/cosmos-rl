@@ -1359,7 +1359,7 @@ class GRPOTrainer(LLMTrainer):
         return logprobs_computing(
             minibatch["input_ids"],
             minibatch["logprob_masks"],
-            logits,
+            logits.to(dtype=str2torch_dtype(self.config.train.logprob_dtype)),
             is_full_logits=is_full_logits,
             label_packing_mask=minibatch.get("label_packing_mask", None),
             input_packing_mask=minibatch.get("input_packing_mask", None),
