@@ -487,12 +487,12 @@ class ModelRegistry:
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
-        hf_config.torch_dtype = util.str2torch_dtype(config.train.param_dtype)
         cosmos_default_dtype = util.str2torch_dtype(
             config.train.master_dtype
             if config.train.master_dtype is not None
             else config.train.param_dtype
         )
+        hf_config.torch_dtype = cosmos_default_dtype
 
         def _apply_model_post_processing(model, config):
             """Apply LoRA, liger kernel, and trainable map configurations to the model."""

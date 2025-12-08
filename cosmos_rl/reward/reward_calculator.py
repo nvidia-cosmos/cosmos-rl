@@ -272,7 +272,7 @@ class RewardCalculator:
         ]
         payload_list: List[RLPayload] = []
         # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
-        for rollouts_group in rollouts_list:
+        for idx, rollouts_group in enumerate(rollouts_list):
             payload_list.append(
                 RLPayload(
                     prompt=rollouts_group[0].prompt,
@@ -292,6 +292,7 @@ class RewardCalculator:
                         rollout.filter_reward for rollout in rollouts_group
                     ],
                     valid=True,
+                    weight_version=payloads[idx].weight_version,
                 )
             )
         return payload_list, True, step
@@ -414,6 +415,7 @@ class RewardCalculator:
                             else []
                             for rollout in rollouts_group
                         ],
+                        weight_version=payloads[idx].weight_version,
                     )
                 )
             else:
@@ -449,6 +451,7 @@ class RewardCalculator:
                             else []
                             for rollout in rollouts_group
                         ],
+                        weight_version=payloads[idx].weight_version,
                     )
                 )
         return payload_list, False, step

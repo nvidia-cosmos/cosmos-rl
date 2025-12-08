@@ -684,6 +684,8 @@ class PolicyStatusManager:
             and self.on_policy_rollout_completed
         ):
             # On-policy training has already completed the required samples for this policy step
+            # Filter out all these rollouts directly in remaining samples number
+            self.remain_samples_num -= len(rollouts)
             return completion_tokens_count, n_samples
 
         for rollout in rollouts:
@@ -695,8 +697,8 @@ class PolicyStatusManager:
                 )
             n_samples += 1
             self.put_rollout(rollout)
+            self.consumed_samples_num += 1
             if self.config.train.train_policy.on_policy:
-                self.consumed_samples_num += 1
                 if self.total_pending_rollouts() == 0:
                     self.on_policy_rollout_completed = True
                     break
@@ -715,6 +717,41 @@ class PolicyStatusManager:
         # Update the remaining samples number to reflect the filtering results
         self.remain_samples_num -= filter_records.get("filtered_positive", 0)
         self.remain_samples_num -= filter_records.get("filtered_negative", 0)
+
+    def filter_outdated_rollouts(self, rollouts: List[Rollout]) -> List[Rollout]:
+        """
+        Filter out the outdated rollouts based on the current step.
+        """
+        filtered_rollouts = []
+        for idx, rollout in enumerate(rollouts):
+            assert (
+                rollout.weight_version <= self.current_step
+            ), f"Rollout weight version {rollout.weight_version} is greater than current step {self.current_step}"
+            # Estimate the step when this rollout will be used for training
+            # This is estimated based on the current step, the number of pending rollouts,
+            # and the number of rollouts before this rollout in the current batch.
+            estimated_step = self.current_step + (
+                idx + self.total_pending_rollouts()
+            ) // (
+                self.config.train.train_batch_per_replica
+                * len(self.get_all_atoms_arrived_replicas())
+            )
+            if (
+                estimated_step - rollout.weight_version
+                <= self.config.train.train_policy.allowed_outdated_steps
+            ):
+                filtered_rollouts.append(rollout)
+            else:
+                logger.debug(
+                    f"[Controller] Filtered out outdated rollout with version {rollout.weight_version}, current step {self.current_step}, estimated step {estimated_step}, pending rollouts {self.total_pending_rollouts()}, preceeding rollouts in this batch {idx}, allowed_outdated_steps {self.config.train.train_policy.allowed_outdated_steps}"
+                )
+        # Update remaining samples number
+        self.remain_samples_num -= len(rollouts) - len(filtered_rollouts)
+        k = "outdated"
+        self.filter_records[k] = (
+            self.filter_records.get(k, 0) + len(rollouts) - len(filtered_rollouts)
+        )
+        return filtered_rollouts
 
     def train_ack(
         self,

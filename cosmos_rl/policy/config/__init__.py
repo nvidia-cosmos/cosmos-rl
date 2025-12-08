@@ -604,6 +604,11 @@ class TrainingConfig(BaseModel):
         description="The data type for transfer parameters between Policy and Rollout.",
         choices=["bfloat16", "float16", "float32"],
     )
+    logprob_dtype: str = Field(
+        default="float32",
+        description="The data type for logprobs calculation.",
+        choices=["bfloat16", "float16", "float32"],
+    )
 
     fsdp_reduce_dtype: str = Field(
         default="float32",
@@ -1169,8 +1174,8 @@ class Config(BaseModel):
             self.validation.dataset.split = [self.validation.dataset.split]
 
         if self.train.transfer_dtype is None:
-            # Default use param_dtype as transfer_dtype
-            self.train.transfer_dtype = self.train.param_dtype
+            # Default use master_dtype as transfer_dtype
+            self.train.transfer_dtype = self.train.master_dtype
         return self
 
 
