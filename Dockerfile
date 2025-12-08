@@ -268,15 +268,6 @@ RUN if [ "$TARGETARCH" != "amd64" ]; then \
         pip cache purge ; \
     fi
 
-# Installing TAO-Core
-RUN . /opt/venv/cosmos_rl/bin/activate && \
-    cd tao-core && \
-    bash release/python/build_wheel.sh && \
-    find dist/ -name "nvidia_tao_core*.whl" -type f | xargs -n 1 pip install && \
-    cp nvidia_tao_core/microservices/nginx.conf /etc/nginx/ && \
-    cd .. && \
-    rm -rf tao-core
-
 RUN pip uninstall -y ray
 
 
