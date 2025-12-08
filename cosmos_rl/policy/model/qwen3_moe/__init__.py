@@ -660,17 +660,7 @@ class Qwen3MoE(BaseModel):
             torch.float8_e5m2: 8,
         }
         # Mapping from integer to dtype for broadcasting
-        int_to_dtype = {
-            0: torch.float32,
-            1: torch.float16,
-            2: torch.bfloat16,
-            3: torch.int64,
-            4: torch.int32,
-            5: torch.int8,
-            6: torch.uint8,
-            7: torch.float8_e4m3fn,
-            8: torch.float8_e5m2,
-        }
+        int_to_dtype = {v: k for k, v in dtype_to_int.items()}
 
         # Step 1: Each rank reads its assigned safetensors files in parallel
         # Distribute files across ranks: rank i reads files where file_idx % world_size == i
