@@ -15,6 +15,7 @@
 
 import torch
 import os
+import time
 import random
 import numpy as np
 import json
@@ -553,11 +554,16 @@ class LLMTrainer(Trainer):
                 self.upload_thread.start()
 
     def model_load_from_hf(self):
+        start_time = time.time()
         self.model.load_hf_weights(
             self.config.policy.model_name_or_path,
             self.parallel_dims,
             self.device,
             revision=self.config.policy.model_revision,
+        )
+        end_time = time.time()
+        logger.info(
+            f"Time taken to load model from HF: {end_time - start_time:.2f} seconds"
         )
 
     def model_resume_from_checkpoint(self):
