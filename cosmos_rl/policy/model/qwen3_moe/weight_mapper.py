@@ -145,7 +145,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
                 )
                 yield from yield_weight(n_experts, up_proj_weight, "up_proj", layer_id)
             else:
-                yield_weight(n_experts, expert_weight, w_name, layer_id)
+                yield from yield_weight(n_experts, expert_weight, w_name, layer_id)
         else:
             yield name, expert_weight
 

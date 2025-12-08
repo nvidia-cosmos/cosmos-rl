@@ -924,7 +924,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         with torch.cuda.stream(self.inference_stream):
             logger.info(
-                f"Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
+                f"[Rollout] Starting to execute {len(self.policy_to_rollout_recv_insts)}; {total_params}, {total_recvs} weight sync receives ..."
             )
             # recv the weight from policy
             st = time.time()
