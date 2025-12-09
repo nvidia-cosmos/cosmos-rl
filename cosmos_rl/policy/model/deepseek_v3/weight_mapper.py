@@ -263,7 +263,7 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
     def __init__(self, hf_config: AutoConfig):
         super().__init__(hf_config)
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def _rollout_model_name_to_hf(self, rollout_weight_name: str) -> str:
         # TODO(aazzolini): 2.2. Implement name_to_hf correctly.
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
@@ -305,7 +305,7 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         method should exactly match policy_model.sorted_params.
 
         Args:
-           vllm_model: rollout nn.Module
+           rollout_model: rollout nn.Module
 
         Returns:
           Tuple[
@@ -325,8 +325,10 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
             Where "compatible_key" is the HuggingFace param name
         """
         group_keys = []
-        compatible_key = self._rollout_vllm_name_to_hf(param_name)
-        logger.info(f"[Rollout] param vllm_name {param_name} hf_name: {compatible_key}")
+        compatible_key = self._rollout_model_name_to_hf(param_name)
+        logger.info(
+            f"[Rollout] param rollout_name {param_name} hf_name: {compatible_key}"
+        )
         if "gate_up_proj" in compatible_key and ".experts" not in param_name:
             # split gate and up proj
             gate_proj_weight, up_proj_weight = self._split_gate_up_proj_weight(param)

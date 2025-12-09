@@ -38,7 +38,7 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             // self.config.text_config.num_attention_heads
         )
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def _rollout_model_name_to_hf(self, rollout_weight_name: str) -> str:
         converted_name = None
 
         if rollout_weight_name.startswith("language_model.model."):
@@ -106,7 +106,7 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
         self, param_name: str, param: torch.Tensor
     ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
         group_keys = []
-        compatible_key = self._rollout_vllm_name_to_hf(param_name)
+        compatible_key = self._rollout_model_name_to_hf(param_name)
         if "qkv_proj" in compatible_key:
             q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(
                 compatible_key, param

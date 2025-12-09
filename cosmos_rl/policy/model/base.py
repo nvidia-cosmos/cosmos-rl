@@ -609,24 +609,26 @@ class WeightMapper(ABC):
         and create the inplace view tensors for vllm model weights to be written by P2R weight sync.
         The final mapped name from this function should be consistent with the name from `policy_map_local_key_to_hf_key` for the same parameter.
         Rollout prepare recv list for P2R weight sync:
-            - vllm_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
+            - rollout_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
             - recv_key_n_rank_list: List[List[Tuple[str, int]]]: the list of grouped recv key and its tensor rank
         It call `rollout_map_local_key_n_param_to_hf_key_n_param` to do the mapping and splitting of weights specifically.
         """
         recv_key_n_shape_list = []
-        vllm_weight_inplace_view_map = {}
+        rollout_weight_inplace_view_map = {}
         self.map_to_unsplited_weight_name = {}
         for param_name, param in rollout_model.named_parameters():
             unsplited_weight_name, group_keys_n_params = (
                 self.rollout_map_local_key_n_param_to_hf_key_n_param(param_name, param)
             )
             recv_key_n_shape_list.append([(k, w.ndim) for k, w in group_keys_n_params])
-            vllm_weight_inplace_view_map.update({k: w for k, w in group_keys_n_params})
+            rollout_weight_inplace_view_map.update(
+                {k: w for k, w in group_keys_n_params}
+            )
             if len(group_keys_n_params) > 1:
                 self.map_to_unsplited_weight_name.update(
                     {k: unsplited_weight_name for k, w in group_keys_n_params}
                 )
-        return vllm_weight_inplace_view_map, recv_key_n_shape_list
+        return rollout_weight_inplace_view_map, recv_key_n_shape_list
 
     def rollout_map_local_key_n_param_to_hf_key_n_param(
         self, name: str, param: torch.Tensor
@@ -797,17 +799,17 @@ class WeightMapper(ABC):
 
     def cosmos_rollout_prepare_recv(
         self,
-        vllm_model: Any,
+        rollout_model: Any,
     ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
-        vllm_weight_inplace_view_map, recv_key_n_shape_list = self.rollout_prepare_recv(
-            vllm_model
+        rollout_weight_inplace_view_map, recv_key_n_shape_list = (
+            self.rollout_prepare_recv(rollout_model)
         )
-        final_vllm_weight_inplace_view_map = {}
+        final_rollout_weight_inplace_view_map = {}
         final_recv_key_n_shape_list = []
-        for key, value in vllm_weight_inplace_view_map.items():
+        for key, value in rollout_weight_inplace_view_map.items():
             if self.rollout_prepare_recv_filter(key):
                 continue
-            final_vllm_weight_inplace_view_map[key] = value
+            final_rollout_weight_inplace_view_map[key] = value
         total_count = 0
         for group_keys in recv_key_n_shape_list:
             group_key = group_keys[0][0]
@@ -816,9 +818,9 @@ class WeightMapper(ABC):
             final_recv_key_n_shape_list.append(group_keys)
             total_count += len(group_keys)
         assert (
-            len(final_vllm_weight_inplace_view_map) == total_count
-        ), f"{len(final_vllm_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
-        return final_vllm_weight_inplace_view_map, final_recv_key_n_shape_list
+            len(final_rollout_weight_inplace_view_map) == total_count
+        ), f"{len(final_rollout_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
+        return final_rollout_weight_inplace_view_map, final_recv_key_n_shape_list
 
     def update_tensor_view(
         self,

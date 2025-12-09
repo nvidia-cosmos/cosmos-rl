@@ -86,7 +86,7 @@ def replace_weight_of_quantized_module(
     for name, module in vllm_model.named_modules():
         # Here we use the compatible name as the key, aligned with what we do in
         # `cache_weight_of_quantized_module` and `rollout_prepare_recv`.
-        compatible_name = weight_mapper._rollout_vllm_name_to_hf(name + ".weight")
+        compatible_name = weight_mapper._rollout_model_name_to_hf(name + ".weight")
         if compatible_name in cached_weight_map:
             module.weight = cached_weight_map[compatible_name]
 
@@ -106,7 +106,7 @@ def cache_weight_of_quantized_module(
             continue
         elif isinstance(quant_method, Fp8LinearMethod):
             weight_name = name + ".weight"
-            compatible_name = weight_mapper._rollout_vllm_name_to_hf(weight_name)
+            compatible_name = weight_mapper._rollout_model_name_to_hf(weight_name)
             original_weight_map[compatible_name] = (
                 module.weight
             )  # qweight has shape [in_dim, out_dim]

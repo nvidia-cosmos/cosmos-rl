@@ -53,7 +53,7 @@ class HFModelWeightMapper(WeightMapper):
         self.is_vlm = getattr(self.config, "vision_config", None) is not None
         self.reverse_hf_conversion_mapping = None
 
-    def _rollout_vllm_name_to_hf(self, rollout_weight_name: str) -> str:
+    def _rollout_model_name_to_hf(self, rollout_weight_name: str) -> str:
         # Happen to be the same as policy name mapping.
         model_type = self.config.model_type
         if model_type == "gpt_oss":
@@ -139,7 +139,7 @@ class HFModelWeightMapper(WeightMapper):
         # Like: `self.lm_head = self.model.embed_tokens`
         # If we don't set `remove_duplicate` to False, the `lm_head` will not be included in the named_parameters.
         group_keys = []
-        compatible_key = self._rollout_vllm_name_to_hf(param_name)
+        compatible_key = self._rollout_model_name_to_hf(param_name)
         if ("qkv_proj" in compatible_key) or (
             "qkv" in compatible_key and not self.is_vlm
         ):

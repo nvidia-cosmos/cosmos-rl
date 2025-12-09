@@ -638,12 +638,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                                     w13_weight_name = f"{module_name}.w13_weight"
                                     w2_weight_name = f"{module_name}.w2_weight"
                                     w13_compatible_weight_name = (
-                                        self.weight_mapper._rollout_vllm_name_to_hf(
+                                        self.weight_mapper._rollout_model_name_to_hf(
                                             w13_weight_name
                                         )
                                     )
                                     w2_compatible_weight_name = (
-                                        self.weight_mapper._rollout_vllm_name_to_hf(
+                                        self.weight_mapper._rollout_model_name_to_hf(
                                             w2_weight_name
                                         )
                                     )
