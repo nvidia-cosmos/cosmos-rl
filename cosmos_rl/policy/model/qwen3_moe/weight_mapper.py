@@ -30,7 +30,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         )
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
-    def _rollout_model_name_to_hf(self, rollout_weight_name: str) -> str:
+    def rollout_map_local_key_to_hf_key(self, rollout_weight_name: str) -> str:
         if not rollout_weight_name == "lm_head.weight":
             if "experts.w13_weight" in rollout_weight_name:
                 return rollout_weight_name.replace(
@@ -83,7 +83,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         self, param_name: str, param: torch.Tensor
     ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
         group_keys = []
-        param_name_hf = self._rollout_model_name_to_hf(param_name)
+        param_name_hf = self.rollout_map_local_key_to_hf_key(param_name)
         # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
         if "qkv_proj" in param_name_hf:
             # only for language model
@@ -103,9 +103,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
         return param_name_hf, group_keys
 
     @torch.no_grad()
-    def policy_maybe_decompose_weights_to_hf_naming(
-        self, name, expert_weight: torch.Tensor
-    ):
+    def policy_map_local_key_for_export_tensor(self, name, expert_weight: torch.Tensor):
         # name is HF naming convention
         def yield_weight(n_experts, expert_weight, w_name, layer_id):
             for expert_id in range(n_experts):

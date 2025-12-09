@@ -34,7 +34,7 @@ class QwenVL25WeightMapper(WeightMapper):
         )
         self.head_dim = self.config.hidden_size // self.config.num_attention_heads
 
-    def _rollout_model_name_to_hf(self, rollout_weight_name: str) -> str:
+    def rollout_map_local_key_to_hf_key(self, rollout_weight_name: str) -> str:
         if self.backend == "vllm":
             # Happen to be the same as policy name mapping.
             return self.policy_map_local_key_to_hf_key(rollout_weight_name)
@@ -91,7 +91,7 @@ class QwenVL25WeightMapper(WeightMapper):
         self, param_name: str, param: torch.Tensor
     ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
         group_keys = []
-        compatible_key = self._rollout_model_name_to_hf(param_name)
+        compatible_key = self.rollout_map_local_key_to_hf_key(param_name)
 
         if "qkv_proj" in compatible_key:
             q_weight, k_weight, v_weight = self.__rollout_split_qkv_weight(

@@ -383,7 +383,7 @@ class LLMTrainer(Trainer):
             for (
                 _name,
                 _param,
-            ) in self.model.weight_mapper.policy_maybe_decompose_weights_to_hf_naming(
+            ) in self.model.weight_mapper.policy_map_local_key_for_export_tensor(
                 name, param
             ):
                 if _param is None:
