@@ -15,7 +15,7 @@
 
 import re
 import torch
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils.parallelism_registry import get_rollout_parallelism_strategy
 from cosmos_rl.utils import util
@@ -79,40 +79,28 @@ class Qwen3MoeWeightMapper(WeightMapper):
             gate_proj_weight, up_proj_weight = up_proj_weight, gate_proj_weight
         return gate_proj_weight, up_proj_weight
 
-    def rollout_prepare_recv(
-        self,
-        vllm_model,
-    ) -> Tuple[
-        Dict[str, torch.Tensor],
-        List[List[Tuple[str, torch.Size]]],
-    ]:
-        recv_key_n_rank_list = []
-        vllm_weight_inplace_view_map = {}
-        for param_name, param in vllm_model.named_parameters():
-            group_keys = []
-            param_name_hf = self._rollout_vllm_name_to_hf(param_name)
-            # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
-            if "qkv_proj" in param_name_hf:
-                # only for language model
-                # must be inplace slicing.
-                # split qkv weight
-                q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
-                    param_name_hf, param
-                )
-                q_proj_weight_key = param_name_hf.replace("qkv_proj", "q_proj")
-                k_proj_weight_key = param_name_hf.replace("qkv_proj", "k_proj")
-                v_proj_weight_key = param_name_hf.replace("qkv_proj", "v_proj")
-                vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                group_keys.append((q_proj_weight_key, q_weight.ndim))
-                vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                group_keys.append((k_proj_weight_key, k_weight.ndim))
-                vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                group_keys.append((v_proj_weight_key, v_weight.ndim))
-            else:
-                vllm_weight_inplace_view_map[param_name_hf] = param
-                group_keys.append((param_name_hf, param.ndim))
-            recv_key_n_rank_list.append(group_keys)
-        return vllm_weight_inplace_view_map, recv_key_n_rank_list
+    def rollout_map_local_key_n_param_to_hf_key_n_param(
+        self, param_name: str, param: torch.Tensor
+    ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
+        group_keys = []
+        param_name_hf = self._rollout_vllm_name_to_hf(param_name)
+        # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
+        if "qkv_proj" in param_name_hf:
+            # only for language model
+            # must be inplace slicing.
+            # split qkv weight
+            q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
+                param_name_hf, param
+            )
+            q_proj_weight_key = param_name_hf.replace("qkv_proj", "q_proj")
+            k_proj_weight_key = param_name_hf.replace("qkv_proj", "k_proj")
+            v_proj_weight_key = param_name_hf.replace("qkv_proj", "v_proj")
+            group_keys.append((q_proj_weight_key, q_weight))
+            group_keys.append((k_proj_weight_key, k_weight))
+            group_keys.append((v_proj_weight_key, v_weight))
+        else:
+            group_keys.append((param_name_hf, param))
+        return param_name_hf, group_keys
 
     @torch.no_grad()
     def policy_maybe_decompose_weights_to_hf_naming(
@@ -162,12 +150,3 @@ class Qwen3MoeWeightMapper(WeightMapper):
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("qwen3_moe")]
-
-    def get_unsplited_weight_name(self, weight_key: str) -> str:
-        for key in ["q_proj", "k_proj", "v_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "qkv_proj")
-        for key in ["gate_proj", "up_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "gate_and_up_proj")
-        return weight_key  # return full weight key

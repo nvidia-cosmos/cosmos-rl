@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 import torch
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 from cosmos_rl.policy.model.base import WeightMapper
 from cosmos_rl.utils import util
 from transformers import AutoConfig
@@ -53,54 +52,35 @@ class GPTWeightMapper(WeightMapper):
         up_proj_weight = weight[dim_0 // 2 :]
         return gate_proj_weight, up_proj_weight
 
-    def rollout_prepare_recv(
-        self,
-        vllm_model: Qwen2ForCausalLM,
-    ) -> Tuple[
-        Dict[str, torch.Tensor],
-        List[List[Tuple[str, torch.Size]]],
-    ]:
-        recv_key_n_shape_list = []
-        vllm_weight_inplace_view_map = {}
-        for param_name, param in vllm_model.named_parameters():
-            group_keys = []
-            compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            if "qkv_proj" in compatible_key:
-                # must be inplace slicing.
-                # split qkv weight
-                q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
-                    compatible_key, param
-                )
-                q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
-                k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
-                v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
-                vllm_weight_inplace_view_map[q_proj_weight_key] = q_weight
-                group_keys.append((q_proj_weight_key, q_weight.ndim))
-                vllm_weight_inplace_view_map[k_proj_weight_key] = k_weight
-                group_keys.append((k_proj_weight_key, k_weight.ndim))
-                vllm_weight_inplace_view_map[v_proj_weight_key] = v_weight
-                group_keys.append((v_proj_weight_key, v_weight.ndim))
-            elif "gate_up_proj" in compatible_key:
-                # split gate and up proj
-                gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
-                    compatible_key, param
-                )
-                gate_proj_weight_key = compatible_key.replace(
-                    "gate_up_proj", "gate_proj"
-                )
-                vllm_weight_inplace_view_map[gate_proj_weight_key] = gate_proj_weight
-                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
-
-                up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
-                vllm_weight_inplace_view_map[up_proj_weight_key] = up_proj_weight
-                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
-            else:
-                vllm_weight_inplace_view_map[compatible_key] = param
-                group_keys.append((compatible_key, param.ndim))
-
-            recv_key_n_shape_list.append(group_keys)
-
-        return vllm_weight_inplace_view_map, recv_key_n_shape_list
+    def rollout_map_local_key_n_param_to_hf_key_n_param(
+        self, param_name: str, param: torch.Tensor
+    ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
+        group_keys = []
+        compatible_key = self._rollout_vllm_name_to_hf(param_name)
+        if "qkv_proj" in compatible_key:
+            # must be inplace slicing.
+            # split qkv weight
+            q_weight, k_weight, v_weight = self._rollout_split_qkv_weight(
+                compatible_key, param
+            )
+            q_proj_weight_key = compatible_key.replace("qkv_proj", "q_proj")
+            k_proj_weight_key = compatible_key.replace("qkv_proj", "k_proj")
+            v_proj_weight_key = compatible_key.replace("qkv_proj", "v_proj")
+            group_keys.append((q_proj_weight_key, q_weight))
+            group_keys.append((k_proj_weight_key, k_weight))
+            group_keys.append((v_proj_weight_key, v_weight))
+        elif "gate_up_proj" in compatible_key:
+            # split gate and up proj
+            gate_proj_weight, up_proj_weight = self._split_gate_proj_weight(
+                compatible_key, param
+            )
+            gate_proj_weight_key = compatible_key.replace("gate_up_proj", "gate_proj")
+            group_keys.append((gate_proj_weight_key, gate_proj_weight))
+            up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
+            group_keys.append((up_proj_weight_key, up_proj_weight))
+        else:
+            group_keys.append((compatible_key, param))
+        return compatible_key, group_keys
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
@@ -108,12 +88,3 @@ class GPTWeightMapper(WeightMapper):
             if not name.startswith("model."):
                 name = "model." + name
         return name
-
-    def get_unsplited_weight_name(self, weight_key: str) -> str:
-        for key in ["q_proj", "k_proj", "v_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "qkv_proj")
-        for key in ["gate_proj", "up_proj"]:
-            if key in weight_key:
-                return weight_key.replace(key, "gate_up_proj")
-        return weight_key  # return full weight key

@@ -296,9 +296,9 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         kv_a_proj_with_mqa_weight = weight[split_idx:, :]
         return q_a_proj_weight, kv_a_proj_with_mqa_weight
 
-    def rollout_prepare_recv(
-        self, vllm_model: Any
-    ) -> Tuple[Dict[str, torch.Tensor], List[Tuple[str, torch.Size]]]:
+    def rollout_map_local_key_n_param_to_hf_key_n_param(
+        self, param_name: str, param: torch.Tensor
+    ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
         """
         Given the rollout (e.g. VLLM) nn.Module, return the list of HuggingFace-compatible
         parameter names along with their tensor views and shapes. Param names produced this
@@ -324,57 +324,36 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
 
             Where "compatible_key" is the HuggingFace param name
         """
-        recv_key_n_rank_list = []
-        compatible_weight_map = {}
-        for param_name, param in vllm_model.named_parameters():
-            group_keys = []
-            compatible_key = self._rollout_vllm_name_to_hf(param_name)
-            logger.info(
-                f"[Rollout] param vllm_name {param_name} hf_name: {compatible_key}"
+        group_keys = []
+        compatible_key = self._rollout_vllm_name_to_hf(param_name)
+        logger.info(f"[Rollout] param vllm_name {param_name} hf_name: {compatible_key}")
+        if "gate_up_proj" in compatible_key and ".experts" not in param_name:
+            # split gate and up proj
+            gate_proj_weight, up_proj_weight = self._split_gate_up_proj_weight(param)
+            gate_proj_weight_key = compatible_key.replace("gate_up_proj", "gate_proj")
+            group_keys.append((gate_proj_weight_key, gate_proj_weight))
+            up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
+            group_keys.append((up_proj_weight_key, up_proj_weight))
+        elif "fused_qkv_a_proj" in compatible_key:
+            # Defined in vllm/model_executor/models/deepseek_v2.py(vllm >= 0.10.0)
+            # self.packed_modules_mapping["fused_qkv_a_proj"] = [
+            #     "q_a_proj",
+            #     "kv_a_proj_with_mqa",
+            # ]
+            q_a_proj_weight, kv_a_proj_with_mqa_weight = (
+                self._split_fused_qkv_a_proj_weight(param)
             )
-            if "gate_up_proj" in compatible_key and ".experts" not in param_name:
-                # split gate and up proj
-                gate_proj_weight, up_proj_weight = self._split_gate_up_proj_weight(
-                    param
-                )
-                gate_proj_weight_key = compatible_key.replace(
-                    "gate_up_proj", "gate_proj"
-                )
-                compatible_weight_map[gate_proj_weight_key] = gate_proj_weight
-                group_keys.append((gate_proj_weight_key, gate_proj_weight.ndim))
-
-                up_proj_weight_key = compatible_key.replace("gate_up_proj", "up_proj")
-                compatible_weight_map[up_proj_weight_key] = up_proj_weight
-                group_keys.append((up_proj_weight_key, up_proj_weight.ndim))
-            elif "fused_qkv_a_proj" in compatible_key:
-                # Defined in vllm/model_executor/models/deepseek_v2.py(vllm >= 0.10.0)
-                # self.packed_modules_mapping["fused_qkv_a_proj"] = [
-                #     "q_a_proj",
-                #     "kv_a_proj_with_mqa",
-                # ]
-                q_a_proj_weight, kv_a_proj_with_mqa_weight = (
-                    self._split_fused_qkv_a_proj_weight(param)
-                )
-                q_a_proj_weight_key = compatible_key.replace(
-                    "fused_qkv_a_proj", "q_a_proj"
-                )
-                compatible_weight_map[q_a_proj_weight_key] = q_a_proj_weight
-                group_keys.append((q_a_proj_weight_key, q_a_proj_weight.ndim))
-                kv_a_proj_with_mqa_weight_key = compatible_key.replace(
-                    "fused_qkv_a_proj", "kv_a_proj_with_mqa"
-                )
-                compatible_weight_map[kv_a_proj_with_mqa_weight_key] = (
-                    kv_a_proj_with_mqa_weight
-                )
-                group_keys.append(
-                    (kv_a_proj_with_mqa_weight_key, kv_a_proj_with_mqa_weight.ndim)
-                )
-            else:
-                compatible_weight_map[compatible_key] = param
-                group_keys.append((compatible_key, param.ndim))
-            recv_key_n_rank_list.append(group_keys)
-
-        return compatible_weight_map, recv_key_n_rank_list
+            q_a_proj_weight_key = compatible_key.replace("fused_qkv_a_proj", "q_a_proj")
+            group_keys.append((q_a_proj_weight_key, q_a_proj_weight))
+            kv_a_proj_with_mqa_weight_key = compatible_key.replace(
+                "fused_qkv_a_proj", "kv_a_proj_with_mqa"
+            )
+            group_keys.append(
+                (kv_a_proj_with_mqa_weight_key, kv_a_proj_with_mqa_weight)
+            )
+        else:
+            group_keys.append((compatible_key, param))
+        return compatible_key, group_keys
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)
@@ -386,15 +365,6 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         )
 
         return name
-
-    def get_unsplited_weight_name(self, weight_key: str) -> str:
-        for key in ["q_a_proj", "kv_a_proj_with_mqa"]:
-            if key in weight_key:
-                return weight_key.replace(key, "fused_qkv_a_proj")
-        for key in ["gate_proj", "up_proj"]:
-            if key in weight_key and ".experts" not in weight_key:
-                return weight_key.replace(key, "gate_up_proj")
-        return weight_key  # return full weight key
 
     def get_rollout_parallelism_strategy(self):
         return [get_rollout_parallelism_strategy("deepseek_v3")]

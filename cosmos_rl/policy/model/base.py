@@ -599,10 +599,9 @@ class WeightMapper(ABC):
         """
         yield name, param
 
-    @abstractmethod
     def rollout_prepare_recv(
         self,
-        vllm_model: Any,
+        rollout_model: torch.nn.Module,
     ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
         """
         Prepare the rollout receive list for P2R weight synchronization.
@@ -612,8 +611,34 @@ class WeightMapper(ABC):
         Rollout prepare recv list for P2R weight sync:
             - vllm_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
             - recv_key_n_rank_list: List[List[Tuple[str, int]]]: the list of grouped recv key and its tensor rank
+        It call `rollout_map_local_key_n_param_to_hf_key_n_param` to do the mapping and splitting of weights specifically.
         """
-        pass
+        recv_key_n_shape_list = []
+        vllm_weight_inplace_view_map = {}
+        self.map_to_unsplited_weight_name = {}
+        for param_name, param in rollout_model.named_parameters():
+            unsplited_weight_name, group_keys_n_params = (
+                self.rollout_map_local_key_n_param_to_hf_key_n_param(param_name, param)
+            )
+            recv_key_n_shape_list.append([(k, w.ndim) for k, w in group_keys_n_params])
+            vllm_weight_inplace_view_map.update({k: w for k, w in group_keys_n_params})
+            if len(group_keys_n_params) > 1:
+                self.map_to_unsplited_weight_name.update(
+                    {k: unsplited_weight_name for k, w in group_keys_n_params}
+                )
+        return vllm_weight_inplace_view_map, recv_key_n_shape_list
+
+    def rollout_map_local_key_n_param_to_hf_key_n_param(
+        self, name: str, param: torch.Tensor
+    ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
+        """
+        Map the local parameter name and param to the Huggingface parameter name and param at rollout side.
+        It does the splitting of weights if needed.
+        The name should be consistent with the final name in `policy_map_local_key_to_hf_key` for the same parameter.
+        This is to make sure the mapped name is consistent between policy and rollout side.
+        Returns the mapped unsplited weight name and the list of splitted weight names and params.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
@@ -624,7 +649,6 @@ class WeightMapper(ABC):
         """
         pass
 
-    @abstractmethod
     def get_unsplited_weight_name(self, weight_key: str) -> str:
         """
         Get the unsplited weight name for a given weight key.
@@ -632,7 +656,16 @@ class WeightMapper(ABC):
         It is inverse of the split operations in function `rollout_prepare_recv` and only do for name tranferring.
         If no split in the weight key, return the original weight key.
         """
-        pass
+        assert hasattr(
+            self, "map_to_unsplited_weight_name"
+        ), "map_to_unsplited_weight_name is not set. Please call rollout_prepare_recv first."
+        if (
+            hasattr(self, "map_to_unsplited_weight_name")
+            and weight_key in self.map_to_unsplited_weight_name
+        ):
+            return self.map_to_unsplited_weight_name[weight_key]
+        else:
+            return weight_key
 
     def get_policy_parallelism_strategy(self):
         return []
