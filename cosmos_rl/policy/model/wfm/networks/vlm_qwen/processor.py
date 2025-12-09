@@ -50,49 +50,7 @@ class Processor:  # TODO (maxzhaoshuol): This should be inherit AutoProcessor, i
             "Qwen/Qwen2.5-VL-3B-Instruct",
             "Qwen/Qwen2-VL-2B-Instruct",
         ]:
-            if cache_dir is None:
-                cosmos_vision_gen_cache_dir = os.path.expanduser(
-                    os.getenv(
-                        "COSMOS_VISION_GEN_CACHE_DIR", "~/.cache/cosmos_vision_gen"
-                    )
-                )
-                # Use file locking to prevent race conditions during tokenizer download
-                cache_dir = os.path.join(cosmos_vision_gen_cache_dir, name)
-
-            lock_path = os.path.join(cache_dir, "lock.lock")
-            # Create a file lock to prevent multiple processes from downloading simultaneously
-            lock = filelock.FileLock(
-                lock_path, timeout=_LOCK_TIMEOUT_SECONDS
-            )  # 1 minute timeout for download
-
-            with lock:
-                # Check if tokenizer already exists (another process might have downloaded it)
-                if os.path.exists(cache_dir) and os.path.exists(
-                    os.path.join(cache_dir, "tokenizer.json")
-                ):
-                    logger.info(
-                        f"Tokenizer already exists in cache {cache_dir}, skipping download"
-                    )
-                else:
-                    logger.info("Downloading tokenizer to local cache...")
-                    backend_args = {
-                        "backend": "s3",
-                        "path_mapping": None,
-                        "s3_credential_path": os.environ.get(
-                            "PBSS_DIR_CREDENTIAL_PATH", "credentials/pbss_dir.secret"
-                        ),
-                    }
-                    os.makedirs(cache_dir, exist_ok=True)
-                    easy_io.copytree_to_local(
-                        f"s3://checkpoints/cosmos_reasoning1/{name}/",
-                        cache_dir,
-                        backend_args=backend_args,
-                    )
-                    logger.info(
-                        f"Successfully downloaded tokenizer to local cache {cache_dir}"
-                    )
-
-            self.processor = AutoProcessor.from_pretrained(cache_dir)
+            self.processor = AutoProcessor.from_pretrained(name)
             logger.info("Successfully loaded processor from local cache")
         else:
             raise ValueError(

@@ -15,8 +15,10 @@
 
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
+from typing import Optional
 from contextlib import nullcontext
 
+import os
 import torch
 import time
 import torch.nn as nn
@@ -30,6 +32,7 @@ from cosmos_rl.utils.wfm.distributed import (
     sync_model_states,
 )
 from cosmos_rl.utils.wfm.io.easy_io import easy_io
+from cosmos_rl.utils.util import resolve_model_path
 
 __all__ = [
     "WanVAE",
@@ -716,7 +719,7 @@ def _video_vae(
     device="cpu",
     s3_credential_path: str = "credentials/s3_training.secret",
     load_mean_std=False,
-    mean_std_path: str = "s3://checkpoints-us-east-1/cosmos_wfm_v2/pretrain_weights/tokenizer/wan2pt1/mean_std.pt",
+    mean_std_path: Optional[str] = None,
     **kwargs,
 ):
     """
@@ -823,10 +826,11 @@ class WanVAE:
     def __init__(
         self,
         z_dim=16,
-        vae_pth="s3://checkpoints-us-east-1/cosmos_wfm_v2/pretrain_weights/tokenizer/wan2pt1/Wan2.1_VAE.pth",
+        vae_pth="Wan-AI/Wan2.1-T2V-1.3B",
+        vae_filename="Wan2.1_VAE.pth",
         s3_credential_path: str = "credentials/s3_training.secret",
         load_mean_std=False,
-        mean_std_path: str = "s3://checkpoints-us-east-1/cosmos_wfm_v2/pretrain_weights/tokenizer/wan2pt1/mean_std.pt",
+        mean_std_path: Optional[str] = None,
         dtype=torch.float,
         device="cuda",
         is_amp=True,
@@ -875,6 +879,8 @@ class WanVAE:
         self.mean = torch.tensor(mean, dtype=dtype, device=device)
         self.std = torch.tensor(std, dtype=dtype, device=device)
         self.scale = [self.mean, 1.0 / self.std]
+        vae_local_folder = resolve_model_path(vae_pth)
+        vae_pth = os.path.join(vae_local_folder, vae_filename)
 
         # init model
         self.model, self.img_mean, self.img_std, self.video_mean, self.video_std = (
@@ -939,7 +945,10 @@ class Wan2pt1VAEInterface(VideoTokenizerInterface):
             load_mean_std=load_mean_std,
             vae_pth=kwargs.get(
                 "vae_pth",
-                "s3://checkpoints-us-east-1/cosmos_wfm_v2/pretrain_weights/tokenizer/wan2pt1/Wan2.1_VAE.pth",
+                "Wan-AI/Wan2.1-T2V-1.3B",
+            ),
+            vae_filename=kwargs.get(
+                "vae_filename", "Wan2.1_VAE.pth"
             ),
             s3_credential_path=kwargs.get(
                 "s3_credential_path", "credentials/s3_training.secret"
