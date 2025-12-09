@@ -296,9 +296,9 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
         kv_a_proj_with_mqa_weight = weight[split_idx:, :]
         return q_a_proj_weight, kv_a_proj_with_mqa_weight
 
-    def rollout_map_local_key_n_param_to_hf_key_n_param(
+    def rollout_split_local_key_n_param_to_hf_key_n_param(
         self, param_name: str, param: torch.Tensor
-    ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
+    ) -> List[Tuple[str, torch.Tensor]]:
         """
         Given the rollout (e.g. VLLM) nn.Module, return the list of HuggingFace-compatible
         parameter names along with their tensor views and shapes. Param names produced this
@@ -355,7 +355,7 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
             )
         else:
             group_keys.append((compatible_key, param))
-        return compatible_key, group_keys
+        return group_keys
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)

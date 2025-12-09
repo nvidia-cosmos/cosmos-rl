@@ -79,9 +79,9 @@ class Qwen3MoeWeightMapper(WeightMapper):
             gate_proj_weight, up_proj_weight = up_proj_weight, gate_proj_weight
         return gate_proj_weight, up_proj_weight
 
-    def rollout_map_local_key_n_param_to_hf_key_n_param(
+    def rollout_split_local_key_n_param_to_hf_key_n_param(
         self, param_name: str, param: torch.Tensor
-    ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
+    ) -> List[Tuple[str, torch.Tensor]]:
         group_keys = []
         param_name_hf = self.rollout_map_local_key_to_hf_key(param_name)
         # logger.info(f"[Rollout] param_name_hf: {param_name_hf}")
@@ -100,7 +100,7 @@ class Qwen3MoeWeightMapper(WeightMapper):
             group_keys.append((v_proj_weight_key, v_weight))
         else:
             group_keys.append((param_name_hf, param))
-        return param_name_hf, group_keys
+        return group_keys
 
     @torch.no_grad()
     def policy_map_local_key_for_export_tensor(self, name, expert_weight: torch.Tensor):

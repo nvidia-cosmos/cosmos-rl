@@ -102,9 +102,9 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
         up_proj_weight = weight[:, split_size:, :]
         return gate_proj_weight, up_proj_weight
 
-    def rollout_map_local_key_n_param_to_hf_key_n_param(
+    def rollout_split_local_key_n_param_to_hf_key_n_param(
         self, param_name: str, param: torch.Tensor
-    ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
+    ) -> List[Tuple[str, torch.Tensor]]:
         group_keys = []
         compatible_key = self.rollout_map_local_key_to_hf_key(param_name)
         if "qkv_proj" in compatible_key:
@@ -129,7 +129,7 @@ class Qwen3VLMoeWeightMapper(WeightMapper):
             group_keys.append((v_visual_proj_weight_key, v_weight))
         else:
             group_keys.append((compatible_key, param))
-        return compatible_key, group_keys
+        return group_keys
 
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         name = util.clear_weight_name(name)

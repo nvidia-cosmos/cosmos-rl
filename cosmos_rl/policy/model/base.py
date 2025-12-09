@@ -611,14 +611,17 @@ class WeightMapper(ABC):
         Rollout prepare recv list for P2R weight sync:
             - rollout_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
             - recv_key_n_rank_list: List[List[Tuple[str, int]]]: the list of grouped recv key and its tensor rank
-        It call `rollout_map_local_key_n_param_to_hf_key_n_param` to do the mapping and splitting of weights specifically.
+        It call `rollout_split_local_key_n_param_to_hf_key_n_param` to do the mapping and splitting of weights specifically.
         """
         recv_key_n_shape_list = []
         rollout_weight_inplace_view_map = {}
         self.map_to_unsplited_weight_name = {}
         for param_name, param in rollout_model.named_parameters():
-            unsplited_weight_name, group_keys_n_params = (
-                self.rollout_map_local_key_n_param_to_hf_key_n_param(param_name, param)
+            unsplited_weight_name = self.rollout_map_local_key_to_hf_key(param_name)
+            group_keys_n_params = (
+                self.rollout_split_local_key_n_param_to_hf_key_n_param(
+                    param_name, param
+                )
             )
             recv_key_n_shape_list.append([(k, w.ndim) for k, w in group_keys_n_params])
             rollout_weight_inplace_view_map.update(
@@ -630,15 +633,16 @@ class WeightMapper(ABC):
                 )
         return rollout_weight_inplace_view_map, recv_key_n_shape_list
 
-    def rollout_map_local_key_n_param_to_hf_key_n_param(
-        self, name: str, param: torch.Tensor
-    ) -> Tuple[str, List[Tuple[str, torch.Tensor]]]:
+    def rollout_split_local_key_n_param_to_hf_key_n_param(
+        self, param_name: str, param: torch.Tensor
+    ) -> List[Tuple[str, torch.Tensor]]:
         """
-        Map the local parameter name and param to the Huggingface parameter name and param at rollout side.
+        Map the local parameter name and param to the Huggingface parameter name and param at rollout side with splitting if needed.
         It does the splitting of weights if needed.
-        The name should be consistent with the final name in `policy_map_local_key_to_hf_key` for the same parameter.
-        This is to make sure the mapped name is consistent between policy and rollout side.
-        Returns the mapped unsplited weight name and the list of splitted weight names and params.
+        The returned names should be consistent with the final names in `policy_map_local_key_to_hf_key` for the same parameters.
+        This is to make sure the mapped names are consistent between policy and rollout side.
+        It can call `rollout_map_local_key_to_hf_key` to transform the base name format alongside the splitting logic.
+        Returns the list of splitted weight names and params.
         """
         raise NotImplementedError
 
@@ -646,8 +650,19 @@ class WeightMapper(ABC):
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         """
         Map the local parameter name to the Huggingface parameter name at policy side.
-        The name should be consistent with the final name in `rollout_prepare_recv` for the same parameter.
+        The name should be consistent with the final name in `rollout_prepare_recv` and `rollout_split_local_key_n_param_to_hf_key_n_param` for the same parameter.
         This is to make sure the mapped name is consistent between policy and rollout side.
+        """
+        pass
+
+    @abstractmethod
+    def rollout_map_local_key_to_hf_key(self, name: str) -> str:
+        """
+        Map the local parameter name to the Huggingface parameter name format at rollout side.
+        It only transforms the name format without splitting. `rollout_split_local_key_n_param_to_hf_key_n_param` will do the splitting if needed.
+        This can be called by `rollout_split_local_key_n_param_to_hf_key_n_param` to transform the base name format alongside the splitting logic.
+        The name format should be consistent with the final name in `policy_map_local_key_to_hf_key`.
+        This is to make sure the mapped name format is consistent between policy and rollout side.
         """
         pass
 
