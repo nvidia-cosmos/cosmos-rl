@@ -605,6 +605,10 @@ class WeightMapper(ABC):
         vllm_model: Any,
     ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
         """
+        Prepare the rollout receive list for P2R weight synchronization.
+        It does the splitting of weights if needed, maps the weight names to consistent naming convention with policy side,
+        and create the inplace view tensors for vllm model weights to be written by P2R weight sync.
+        The final mapped name from this function should be consistent with the name from `policy_map_local_key_to_hf_key` for the same parameter.
         Rollout prepare recv list for P2R weight sync:
             - vllm_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
             - recv_key_n_rank_list: List[List[Tuple[str, int]]]: the list of grouped recv key and its tensor rank
@@ -613,6 +617,21 @@ class WeightMapper(ABC):
 
     @abstractmethod
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
+        """
+        Map the local parameter name to the Huggingface parameter name at policy side.
+        The name should be consistent with the final name in `rollout_prepare_recv` for the same parameter.
+        This is to make sure the mapped name is consistent between policy and rollout side.
+        """
+        pass
+
+    @abstractmethod
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        """
+        Get the unsplited weight name for a given weight key.
+        This method is used to map the splitted weight names back to their original unsplitted names.
+        It is inverse of the split operations in function `rollout_prepare_recv` and only do for name tranferring.
+        If no split in the weight key, return the original weight key.
+        """
         pass
 
     def get_policy_parallelism_strategy(self):
