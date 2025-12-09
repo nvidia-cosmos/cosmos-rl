@@ -225,6 +225,8 @@ class DeepseekV3MoEModel(BaseModel):
     ):
         rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist.is_initialized() else 1
+        # If the model path is a local path, do not dequant the weights
+        dequant_weights = False if len(model_name_or_path.split("/")) > 2 else True
 
         def _broadcast_data(data, src_rank):
             container = [data]
@@ -262,8 +264,6 @@ class DeepseekV3MoEModel(BaseModel):
         reserved = {}
         scale_inv_paths = {}
 
-        dequant_weights = False
-
         # 2. Build Scale Map (Rank 0 scans headers quickly)
         if rank == 0:
             for f in safetensors_files:
@@ -275,7 +275,6 @@ class DeepseekV3MoEModel(BaseModel):
                 for name in keys:
                     if name.endswith("weight_scale_inv"):
                         scale_inv_paths[name] = os.path.join(model_path, f)
-                        dequant_weights = True
 
         scale_inv_paths = _broadcast_data(scale_inv_paths, src_rank=0)
 
