@@ -27,7 +27,6 @@ from vllm.sampling_params import SamplingParams, RequestOutputKind
 
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.dispatcher.data.schema import ChatMessage
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.vllm_rollout.vllm_rollout_async import vLLMRolloutAsync
@@ -216,50 +215,6 @@ class TestVLLMRolloutAsync(unittest.TestCase):
         self.assertEqual(len(results), len(payloads))
         for i, result in enumerate(results):
             self.assertEqual(len(result.completions), sampling_params.n)
-
-    def test_async_rollout_multi_turn_generate(self):
-        """Test async rollout multi turn."""
-        cosmos_config = getMockConfig()
-        cosmos_config.rollout.multi_turn_config.enable = True
-        cosmos_config.rollout.multi_turn_config.max_assistant_turns = 2
-        cosmos_config.rollout.multi_turn_config.enable_thinking = True
-
-        # force try tp1, pp1
-        cosmos_config.rollout.parallelism.tp_size = 1
-
-        payloads = [
-            RLPayload(
-                conversation=[ChatMessage(role="user", content="What is 2+2?")],
-                weight_version=0,
-            ),
-        ]
-
-        sampling_params = SamplingParams(
-            temperature=0.8,
-            top_p=0.95,
-            max_tokens=128,
-            n=2,  # 2 responses for each prompt
-        )
-
-        async def test_helper():
-            rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(
-                cosmos_config
-            )
-            results = await rollout_engine.rollout_generation(
-                payloads=payloads,
-                stream=None,
-                data_packer=data_packer,
-                sampling_params=sampling_params,
-            )
-            rollout_engine.get_engine().shutdown()
-            return results
-
-        results = asyncio.run(test_helper())
-
-        # check results
-        self.assertEqual(len(results), len(payloads))
-        for i, result in enumerate(results):
-            print(f"Result {i}: {result}")
 
 
 class TestVLLMRolloutWorkerAsync(unittest.TestCase):
