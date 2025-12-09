@@ -1,5 +1,5 @@
 import os
-from typing import Optional, List, Callable, Union, Dict
+from typing import Optional, List, Callable, Union, Dict, Iterable
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -9,6 +9,7 @@ import argparse
 
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+    dataloader: Optional[Callable[[CosmosConfig], Iterable]] = None,
     data_packer: Optional[BaseDataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
     filter_reward_fns: Optional[List[Callable]] = None,
@@ -34,6 +35,7 @@ def main(
 
         controller_main(
             dataset=dataset,
+            dataloader=dataloader,
             data_packer=data_packer,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
@@ -52,7 +54,9 @@ def main(
         from cosmos_rl.policy.train import main as policy_main
 
         policy_main(
+            args=args,
             dataset=dataset,
+            dataloader=dataloader,
             data_packer=data_packer,
             val_dataset=val_dataset,
             val_data_packer=val_data_packer,
@@ -68,6 +72,7 @@ def main(
         from cosmos_rl.rollout.rollout_entry import run_rollout
 
         run_rollout(
+            args=args,
             dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,

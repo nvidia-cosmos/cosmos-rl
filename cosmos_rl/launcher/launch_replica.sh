@@ -10,7 +10,7 @@ SCRIPT=""
 SCRIPT_ARGS=()
 CONFIG=""
 BACKEND="vllm"
-DIFFUSION_MODE="False"
+WFM_MODE="False"
 
 print_help() {
   echo ""
@@ -25,7 +25,7 @@ print_help() {
   echo "  --script <script>                  The user script to run before launch."
   echo "  --config <path>                    The path to the config file."
   echo "  --backend <vllm|trtllm>            The backend to use for the job. Default: vllm"
-  echo "  --diffusion-mode <True|False>      Whether to launch in diffusion mode. Default: False"
+  echo "  --wfm-mode <True|False>      Whether to launch in wfm mode. Default: False"
   echo "  --help                             Show this help message"
   echo "Examples:"
   echo "  ./launch_replica.sh --type rollout --ngpus 4 --log-rank 0,1"
@@ -75,8 +75,8 @@ while [[ $# -gt 0 ]]; do
     BACKEND="$2"
     shift 2
     ;;
-  --diffusion-mode)
-    DIFFUSION_MODE="$2"
+  --wfm-mode)
+    WFM_MODE="$2"
     shift 2
     ;;
   --help)
@@ -109,8 +109,8 @@ fi
 # Torch related
 set_env "TORCH_CPP_LOG_LEVEL" "ERROR"
 
-if [ "$DIFFUSION_MODE" == "True" ]; then
-  set_env "COSMOS_IS_DIFFUSION" "True"
+if [ "$WFM_MODE" == "True" ]; then
+  set_env "COSMOS_IS_WFM" "True"
 fi
 
 LAUNCH_BINARY="torchrun"

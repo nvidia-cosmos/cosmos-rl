@@ -20,7 +20,7 @@ from typing import Union
 
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-
+from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.dispatcher.protocol import Role
 from cosmos_rl.utils.logging import logger
@@ -79,7 +79,7 @@ class State:
 class RolloutWorkerBase(CommMixin):
     def __init__(
         self,
-        config: Union[CosmosConfig],
+        config: Union[CosmosConfig, CosmosVisionGenConfig],
         parallel_dims: ParallelDims,
     ) -> None:
         super().__init__()

@@ -33,5 +33,4 @@ You can either build docker image from source or install dependencies inside you
 .. code-block:: bash
 
     apt-get update && apt-get install redis-server
-    pip install -r requirements.txt
     pip install -e .

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from cosmos_rl.colocated.controller import ColocatedController
+from cosmos_rl.comm.base import WorkerBase
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import (
     ParallelDims,
@@ -36,7 +37,7 @@ from cosmos_rl.dispatcher.command import (
 )
 
 
-class ColocatedRLControlWorker:
+class ColocatedRLControlWorker(WorkerBase):
     """
     Colocated RL Control Worker class.
     Control both policy training and rollout generation control flow in colocated mode.
@@ -50,7 +51,10 @@ class ColocatedRLControlWorker:
             config (CosmosConfig): The configuration object.
             parallel_dims (ParallelDims): The parallelism dimensions.
         """
-        self.config = config
+        super(ColocatedRLControlWorker, self).__init__(config=config)
+        self.build_runner(config, parallel_dims, **kwargs)
+
+    def build_runner(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
         self.policy = ColocatedPolicyControlWorker(
             config,
             parallel_dims,
@@ -215,5 +219,8 @@ class ColocatedRLControlWorker:
             traceback.print_exc()
             raise e
         finally:
-            self.policy.destroy_worker()
-            # No need to destroy rollout worker separately in colocated mode
+            self.destroy_worker()
+
+    def destroy_worker(self):
+        self.policy.destroy_worker()
+        # No need to destroy rollout worker separately in colocated mode

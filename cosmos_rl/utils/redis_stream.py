@@ -31,6 +31,9 @@ class RedisOpType(enum.Enum):
     XADD = "add"
     XREAD = "read"
     PING = "ping"
+    SET = "set"
+    GET = "get"
+    DELETE = "delete"
 
 
 class RedisStreamHandler:
@@ -53,6 +56,57 @@ class RedisStreamHandler:
         self.latest_id_command = "0-0"
         self.latest_id_rollout = "0-0"
         self.ping()
+
+    def set_key_value(self, key: str, value: str):
+        # Add message to stream
+        try:
+            make_request_with_retry(
+                self.requests_for_alternative_clients(
+                    RedisOpType.SET,
+                    key,
+                    value,
+                ),
+                response_parser=None,
+                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
+            )
+        except Exception as e:
+            logger.error(f"Failed to write to Redis stream {key}: {e}")
+
+    def get_key_value(self, key: str):
+        try:
+            value = make_request_with_retry(
+                self.requests_for_alternative_clients(
+                    RedisOpType.GET,
+                    key,
+                ),
+                response_parser=None,
+                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
+            )
+            return value
+        except Exception as e:
+            logger.error(f"Failed to read from Redis key {key}: {e}")
+            return None
+
+    def remove_key(self, key: str):
+        """
+        Remove a key from Redis.
+
+        Args:
+            key (str): The key to remove.
+        """
+        try:
+            deleted_count = make_request_with_retry(
+                self.requests_for_alternative_clients(
+                    RedisOpType.DELETE,
+                    key,
+                ),
+                response_parser=None,
+                max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
+            )
+            return deleted_count
+        except Exception as e:
+            logger.error(f"Failed to delete key {key} from Redis: {e}")
+            return 0
 
     def publish_command(self, data, stream_name: str):
         """
@@ -208,6 +262,33 @@ class RedisStreamHandler:
         elif op == RedisOpType.PING:
             for redis_client in self.redis_clients:
                 calls.append(redis_client.ping)
+        elif op == RedisOpType.SET:
+            for redis_client in self.redis_clients:
+                calls.append(
+                    partial(
+                        redis_client.set,
+                        *args,
+                        **kwargs,
+                    )
+                )
+        elif op == RedisOpType.GET:
+            for redis_client in self.redis_clients:
+                calls.append(
+                    partial(
+                        redis_client.get,
+                        *args,
+                        **kwargs,
+                    )
+                )
+        elif op == RedisOpType.DELETE:
+            for redis_client in self.redis_clients:
+                calls.append(
+                    partial(
+                        redis_client.delete,
+                        *args,
+                        **kwargs,
+                    )
+                )
         else:
             raise ValueError(f"Unsupported operation type: {op}")
         return calls

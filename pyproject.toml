@@ -3,7 +3,39 @@ name = "cosmos_rl"
 description = "Cosmos-RL is a flexible and scalable Reinforcement Learning framework specialized for Physical AI applications."
 readme = "README.md"
 requires-python = ">=3.9"
-dynamic = ["dependencies", "version"]
+dynamic = ["version"]
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "transformers>=4.51.1,!=4.52.*,!=4.53.*", # 4.53.* error: https://github.com/vllm-project/vllm-ascend/pull/1482, 4.52.* warning: https://github.com/huggingface/transformers/pull/38366
+    "datasets",
+    "pydantic",
+    "math_verify",
+    "pybind11[global]",
+    "vllm>=0.8.5",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "torchao>=0.10.0",
+    "tensordict==0.7.2",
+    "toml",
+    "StrEnum",
+    "redis",
+    "msgpack",
+    "qwen_vl_utils",
+    "flash-attn",
+    "pynvml",
+    "boto3",
+    "modelscope",
+    "cloudpickle",
+    "click",
+    "rich",
+    "pyyaml",
+    "blobfile",
+    "nvidia-nccl-cu12>=2.26.2",
+    "liger_kernel",
+    "accelerate",
+    "kernels",
+]
 
 [build-system]
 requires = ["setuptools>=64", "setuptools-scm>=8"]
@@ -37,5 +69,18 @@ cosmos_rl = [
 [tool.setuptools.packages.find]
 include = ["cosmos_rl*"]
 
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+[project.optional-dependencies]
+wfm = [
+    "termcolor",
+    "aioboto3",
+    "aiobotocore",
+    "imageio",
+    "imageio-ffmpeg",
+    "webdataset",
+    "decord",
+    "trimesh",
+]
+vla = []
+all = [
+    "cosmos_rl[wfm,vla]",
+]

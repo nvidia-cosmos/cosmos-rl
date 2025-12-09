@@ -1,0 +1,41 @@
+[project]
+name = "cosmos_rl_reward"
+description = "Cosmos-RL-Reward is a package for handling the service to calculate various reward functions for world foundational models RL application" 
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["dependencies", "version"]
+
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+write_to = "cosmos_rl_reward/_version.py"
+# add .post1.devN to last tagged version (N is the number of commits
+# since the tagged commit)
+search_parent_directories = "true"
+version_scheme="no-guess-dev"
+# add git commit (and date if working dir is dirty) to the version tag
+local_scheme="node-and-date"
+
+[project.urls]
+Homepage = "https://github.com/nvidia-cosmos/cosmos-rl"
+
+[project.scripts]
+cosmos-rl-reward = "cosmos_rl_reward.launcher.reward_serve:main"
+cosmos-rl-reward-prepare = "cosmos_rl_reward.setup.env_prepare:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+cosmos_rl_reward = [
+    "configs/*.toml",
+    "setup/*.sh"
+]
+
+[tool.setuptools.packages.find]
+include = ["cosmos_rl_reward*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

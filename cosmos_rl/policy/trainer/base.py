@@ -107,7 +107,7 @@ class Trainer(ABC):
         self,
         config: CosmosConfig,
         parallel_dims: ParallelDims,
-        train_stream: torch.cuda.Stream,
+        train_stream: Optional[torch.cuda.Stream] = None,
         **kwargs,
     ):
         super().__init__()
