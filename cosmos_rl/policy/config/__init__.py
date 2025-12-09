@@ -758,6 +758,12 @@ class ParallelismConfig(BaseModel):
         return int(local_world_size)
 
 
+class RolloutParallelismConfig(ParallelismConfig, extra="forbid"):
+    n_init_replicas: int = ParallelismConfig.model_fields["n_init_replicas"].field_info
+    tp_size: int = ParallelismConfig.model_fields["tp_size"].field_info
+    pp_size: int = ParallelismConfig.model_fields["pp_size"].field_info
+
+
 class LoraConfig(BaseModel):
     r: int = Field(default=8, description="LoRA rank")
     lora_alpha: float = Field(default=8.0, description="LoRA alpha")
@@ -854,14 +860,6 @@ class PolicyConfig(BaseModel):
             self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
         ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
         return self
-
-
-class RolloutParallelismConfig(BaseModel, extra="forbid"):
-    n_init_replicas: int = Field(
-        default=1, description="Number of initial replicas to be created"
-    )
-    tp_size: int = Field(default=2, description="Tensor parallelism size")
-    pp_size: int = Field(default=1, description="Pipeline parallelism size")
 
 
 class SamplingConfig(BaseModel):
