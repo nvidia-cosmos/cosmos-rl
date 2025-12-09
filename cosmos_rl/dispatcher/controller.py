@@ -231,6 +231,7 @@ class Controller:
         global_batch_size = math.ceil(
             rollouts_per_global_batch / self.config.rollout.n_generation
         )  # global_batch_size: number of prompts needed for single policy step.
+        rollouts_per_global_batch = rollouts_per_global_batch or 1
         weight_version_for_current_batch = (
             self.policy_status_manager.consumed_samples_num // rollouts_per_global_batch
         )
