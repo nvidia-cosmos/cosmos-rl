@@ -856,7 +856,7 @@ class PolicyConfig(BaseModel):
         return self
 
 
-class RolloutParallelismConfig(BaseModel):
+class RolloutParallelismConfig(BaseModel, extra="forbid"):
     n_init_replicas: int = Field(
         default=1, description="Number of initial replicas to be created"
     )
