@@ -3,8 +3,12 @@
 #   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_BUILD_MODE=no-efa .
 # To build with AWS-EFA:
 #   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_BUILD_MODE=efa .
+# To build with specific dependency groups:
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_EXTRAS=all .
+#   docker build -t cosmos_rl:latest -f Dockerfile --build-arg COSMOS_RL_EXTRAS=wfm,vla .
 
 ARG COSMOS_RL_BUILD_MODE=efa
+ARG COSMOS_RL_EXTRAS=""
 
 ARG CUDA_VERSION=12.8.1
 
@@ -85,8 +89,6 @@ RUN pip install -U pip setuptools wheel packaging psutil
 # make sure the cuda version matches, we install it here.
 RUN pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
-COPY requirements.txt /workspace/cosmos_rl/requirements.txt
-
 # Install flash_attn separately
 # RUN pip install flash_attn==2.8.2 --no-build-isolation
 
@@ -95,8 +97,7 @@ RUN pip install \
     flash_attn==${FLASH_ATTN_VERSION} \
     vllm==0.11.0 \
     flashinfer-python \
-    transformer_engine[pytorch] --no-build-isolation \
-    -r /workspace/cosmos_rl/requirements.txt
+    transformer_engine[pytorch] --no-build-isolation
 
 # install apex
 RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https://github.com/NVIDIA/apex@bf903a2
@@ -189,4 +190,8 @@ RUN rm /workspace/*.whl
 FROM pre-package AS package
 
 COPY . /workspace/cosmos_rl
-RUN pip install /workspace/cosmos_rl && rm -rf /workspace/cosmos_rl
+RUN if [ -z "$COSMOS_RL_EXTRAS" ]; then \
+        pip install /workspace/cosmos_rl; \
+    else \
+        pip install "/workspace/cosmos_rl[$COSMOS_RL_EXTRAS]"; \
+    fi && rm -rf /workspace/cosmos_rl

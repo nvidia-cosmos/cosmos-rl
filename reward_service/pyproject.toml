@@ -3,7 +3,7 @@ name = "cosmos_rl_reward"
 description = "Cosmos-RL-Reward is a package for handling the service to calculate various reward functions for world foundational models RL application" 
 readme = "README.md"
 requires-python = ">=3.9"
-dynamic = ["dependencies", "version"]
+dynamic = ["version"]
 
 [build-system]
 requires = ["setuptools>=64", "setuptools-scm>=8"]
@@ -36,6 +36,3 @@ cosmos_rl_reward = [
 
 [tool.setuptools.packages.find]
 include = ["cosmos_rl_reward*"]
-
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
