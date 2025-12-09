@@ -628,6 +628,7 @@ async def run_rollout_recv_from_policy(shm_name, shm_size, rank, trainable_param
         rollout.policy_to_rollout_recv_insts = await generate_send_recv_insts(
             rollout.model, False, rank
         )
+        rollout.weight_mapper.map_to_unsplited_weight_name = {}
         rollout.policy_to_rollout_unicast = types.MethodType(
             DisaggregatedRolloutControlWorker.policy_to_rollout_unicast, rollout
         )

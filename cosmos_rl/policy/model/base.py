@@ -590,7 +590,7 @@ class WeightMapper(ABC):
         self.backend = "vllm"  # default rollout backend is vllm.
 
     @torch.no_grad()
-    def policy_maybe_decompose_weights_to_hf_naming(self, name, param):
+    def policy_map_local_key_for_export_tensor(self, name, param):
         """
         Transform the weight to the Huggingface weight store and naming convention.
         For example, Qwen3 MoE experts' weight of `gate_and_up_proj` are stacked in the 0th dimension(expert dimension) in cosmos-rl,
@@ -599,21 +599,90 @@ class WeightMapper(ABC):
         """
         yield name, param
 
-    @abstractmethod
     def rollout_prepare_recv(
         self,
-        vllm_model: Any,
+        rollout_model: torch.nn.Module,
     ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
         """
+        Prepare the rollout receive list for P2R weight synchronization.
+        It does the splitting of weights if needed, maps the weight names to consistent naming convention with policy side,
+        and create the inplace view tensors for vllm model weights to be written by P2R weight sync.
+        The final mapped name from this function should be consistent with the name from `policy_map_local_key_to_hf_key` for the same parameter.
         Rollout prepare recv list for P2R weight sync:
-            - vllm_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
+            - rollout_weight_inplace_view_map: Dict[str, torch.Tensor]: the map of vllm weight inplace view to be written by P2R weight sync
             - recv_key_n_rank_list: List[List[Tuple[str, int]]]: the list of grouped recv key and its tensor rank
+        It call `rollout_split_local_key_n_param_to_hf_key_n_param` to do the mapping and splitting of weights specifically.
+        """
+        recv_key_n_shape_list = []
+        rollout_weight_inplace_view_map = {}
+        self.map_to_unsplited_weight_name = {}
+        for param_name, param in rollout_model.named_parameters():
+            unsplited_weight_name = self.rollout_map_local_key_to_hf_key(param_name)
+            group_keys_n_params = (
+                self.rollout_split_local_key_n_param_to_hf_key_n_param(
+                    param_name, param
+                )
+            )
+            recv_key_n_shape_list.append([(k, w.ndim) for k, w in group_keys_n_params])
+            rollout_weight_inplace_view_map.update(
+                {k: w for k, w in group_keys_n_params}
+            )
+            if len(group_keys_n_params) > 1:
+                self.map_to_unsplited_weight_name.update(
+                    {k: unsplited_weight_name for k, w in group_keys_n_params}
+                )
+        return rollout_weight_inplace_view_map, recv_key_n_shape_list
+
+    def rollout_split_local_key_n_param_to_hf_key_n_param(
+        self, param_name: str, param: torch.Tensor
+    ) -> List[Tuple[str, torch.Tensor]]:
+        """
+        Map the local parameter name and param to the Huggingface parameter name and param at rollout side with splitting if needed.
+        It does the splitting of weights if needed.
+        The returned names should be consistent with the final names in `policy_map_local_key_to_hf_key` for the same parameters.
+        This is to make sure the mapped names are consistent between policy and rollout side.
+        It can call `rollout_map_local_key_to_hf_key` to transform the base name format alongside the splitting logic.
+        Returns the list of splitted weight names and params.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+        """
+        Map the local parameter name to the Huggingface parameter name at policy side.
+        The name should be consistent with the final name in `rollout_prepare_recv` and `rollout_split_local_key_n_param_to_hf_key_n_param` for the same parameter.
+        This is to make sure the mapped name is consistent between policy and rollout side.
         """
         pass
 
     @abstractmethod
-    def policy_map_local_key_to_hf_key(self, name: str) -> str:
+    def rollout_map_local_key_to_hf_key(self, name: str) -> str:
+        """
+        Map the local parameter name to the Huggingface parameter name format at rollout side.
+        It only transforms the name format without splitting. `rollout_split_local_key_n_param_to_hf_key_n_param` will do the splitting if needed.
+        This can be called by `rollout_split_local_key_n_param_to_hf_key_n_param` to transform the base name format alongside the splitting logic.
+        The name format should be consistent with the final name in `policy_map_local_key_to_hf_key`.
+        This is to make sure the mapped name format is consistent between policy and rollout side.
+        """
         pass
+
+    def get_unsplited_weight_name(self, weight_key: str) -> str:
+        """
+        Get the unsplited weight name for a given weight key.
+        This method is used to map the splitted weight names back to their original unsplitted names.
+        It is inverse of the split operations in function `rollout_prepare_recv` and only do for name tranferring.
+        If no split in the weight key, return the original weight key.
+        """
+        assert hasattr(
+            self, "map_to_unsplited_weight_name"
+        ), "map_to_unsplited_weight_name is not set. Please call rollout_prepare_recv first."
+        if (
+            hasattr(self, "map_to_unsplited_weight_name")
+            and weight_key in self.map_to_unsplited_weight_name
+        ):
+            return self.map_to_unsplited_weight_name[weight_key]
+        else:
+            return weight_key
 
     def get_policy_parallelism_strategy(self):
         return []
@@ -745,17 +814,17 @@ class WeightMapper(ABC):
 
     def cosmos_rollout_prepare_recv(
         self,
-        vllm_model: Any,
+        rollout_model: Any,
     ) -> Tuple[Dict[str, torch.Tensor], List[List[Tuple[str, int]]]]:
-        vllm_weight_inplace_view_map, recv_key_n_shape_list = self.rollout_prepare_recv(
-            vllm_model
+        rollout_weight_inplace_view_map, recv_key_n_shape_list = (
+            self.rollout_prepare_recv(rollout_model)
         )
-        final_vllm_weight_inplace_view_map = {}
+        final_rollout_weight_inplace_view_map = {}
         final_recv_key_n_shape_list = []
-        for key, value in vllm_weight_inplace_view_map.items():
+        for key, value in rollout_weight_inplace_view_map.items():
             if self.rollout_prepare_recv_filter(key):
                 continue
-            final_vllm_weight_inplace_view_map[key] = value
+            final_rollout_weight_inplace_view_map[key] = value
         total_count = 0
         for group_keys in recv_key_n_shape_list:
             group_key = group_keys[0][0]
@@ -764,9 +833,9 @@ class WeightMapper(ABC):
             final_recv_key_n_shape_list.append(group_keys)
             total_count += len(group_keys)
         assert (
-            len(final_vllm_weight_inplace_view_map) == total_count
-        ), f"{len(final_vllm_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
-        return final_vllm_weight_inplace_view_map, final_recv_key_n_shape_list
+            len(final_rollout_weight_inplace_view_map) == total_count
+        ), f"{len(final_rollout_weight_inplace_view_map)} != {total_count} in rollout recv instructions generation"
+        return final_rollout_weight_inplace_view_map, final_recv_key_n_shape_list
 
     def update_tensor_view(
         self,

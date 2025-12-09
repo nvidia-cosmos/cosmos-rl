@@ -637,15 +637,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                                 ) in self.get_underlying_model().named_modules():
                                     w13_weight_name = f"{module_name}.w13_weight"
                                     w2_weight_name = f"{module_name}.w2_weight"
-                                    w13_compatible_weight_name = (
-                                        self.weight_mapper._rollout_vllm_name_to_hf(
-                                            w13_weight_name
-                                        )
+                                    w13_compatible_weight_name = self.weight_mapper.rollout_map_local_key_to_hf_key(
+                                        w13_weight_name
                                     )
-                                    w2_compatible_weight_name = (
-                                        self.weight_mapper._rollout_vllm_name_to_hf(
-                                            w2_weight_name
-                                        )
+                                    w2_compatible_weight_name = self.weight_mapper.rollout_map_local_key_to_hf_key(
+                                        w2_weight_name
                                     )
 
                                     # mxfp4 weight and mxfp4 weight scale are in int8 data type.
