@@ -14,8 +14,10 @@
 # limitations under the License.
 
 import os
+from typing import Union
+
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
 from cosmos_rl.utils.logging import logger
 
 try:
@@ -44,40 +46,49 @@ def is_wandb_available() -> bool:
 wandb_run = None
 
 
-def init_wandb(config: CosmosConfig, parallel_dims: ParallelDims = None):
+def init_wandb(config: Union[CosmosConfig, CosmosVisionGenConfig]):
     # Avoid duplicate initialization of wandb
     if wandb.run is not None:
         logger.warning("Wandb is already initialized. Skipping initialization.")
         return
-    # Only initialize wandb on the first dp replicate coord and first rank for policy
-    if parallel_dims and parallel_dims.dp_replicate_coord[0] > 0:
-        return
-    global_rank = int(os.environ.get("RANK", 0))
-    if global_rank != 0:
-        return
 
-    output_dir = config.train.output_dir
-    logger.info(
-        f"Initialize wandb at {global_rank}, project: {config.logging.project_name}, experiment: {config.logging.experiment_name}. Saved to {output_dir}"
-    )
-    os.makedirs(output_dir, exist_ok=True)
-    if (
-        config.logging.experiment_name is None
-        or config.logging.experiment_name == "None"
-        or config.logging.experiment_name == ""
-    ):
-        experiment_name = output_dir
+    if isinstance(config, CosmosConfig):
+        output_dir = config.train.output_dir
+        project_name = config.logging.project_name
+        group_name = config.logging.group_name
+        wandb_id = config.train.timestamp
+        os.makedirs(output_dir, exist_ok=True)
+        if (
+            config.logging.experiment_name is None
+            or config.logging.experiment_name == "None"
+            or config.logging.experiment_name == ""
+        ):
+            experiment_name = output_dir
+        else:
+            experiment_name = os.path.join(
+                config.logging.experiment_name, config.train.timestamp
+            )
+    elif isinstance(config, CosmosVisionGenConfig):
+        output_dir = config.job.path_local
+        experiment_name = config.job.name
+        project_name = config.job.project
+        group_name = config.job.group
+        wandb_id = config.job.timestamp
     else:
-        experiment_name = os.path.join(
-            config.logging.experiment_name, config.train.timestamp
-        )
+        logger.error("Unsupported config type for wandb initialization.")
+        return None
+
+    logger.info(
+        f"Initialize wandb, project: {project_name}, experiment: {experiment_name}. Saved to {output_dir}"
+    )
     try:
         run = wandb.init(
-            project=config.logging.project_name,
+            project=project_name,
+            group=group_name,
             name=experiment_name,
             config=config.model_dump(),
             dir=output_dir,
-            id=config.train.timestamp,  # Use timestamp as the run ID
+            id=wandb_id,  # Use timestamp as the run ID
             resume="allow",
         )
         global wandb_run

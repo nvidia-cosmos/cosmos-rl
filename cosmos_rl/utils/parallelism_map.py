@@ -571,8 +571,8 @@ class ParallelTopoMapper:
                 ), f"MergedColumnParallelLinear {param_name} is not in packed_modules_mapping {packed_modules_mapping}."
                 tp_dim = output_dim
             elif isinstance(part, (RowParallelLinear)):
+                input_dim = getattr(param, "input_dim", 1)
                 if not is_bias:
-                    input_dim = getattr(param, "input_dim", 1)
                     assert (
                         input_dim is not None
                     ), f"RowParallelLinear {param_name} has no input_dim attribute."

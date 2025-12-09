@@ -34,11 +34,11 @@ def run_rollout(args: Optional[argparse.Namespace] = None, **kwargs):
                 "Error when parsing args. Did you use custom arguments in your script? If so, please check your custom script and pass `args` to this main function."
             )
             raise e
-    is_diffusion = os.environ.get("COSMOS_IS_DIFFUSION", "False").lower() == "true"
+    is_wfm = os.environ.get("COSMOS_IS_WFM", "False").lower() == "true"
 
-    if is_diffusion:
+    if is_wfm:
         raise NotImplementedError(
-            "Diffusion rollout is not supported with this entrance script yet."
+            "WFM rollout is not supported with this entrance script yet."
         )
     else:
         rollout_worker = LLMRolloutWorker(**kwargs)

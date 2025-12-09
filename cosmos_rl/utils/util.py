@@ -753,7 +753,9 @@ def retry(func=None, *, max_retry=10, max_delay=30.0):
     return decorator
 
 
-def write_redis_config(port, logfile, file_path="/opt/redis_config.conf"):
+def write_redis_config(
+    port, logfile, file_path="/opt/redis_config.conf", custom_config=None
+):
     """
     Write the redis config file.
     redis_config_path: the path to the redis config file.
@@ -797,6 +799,9 @@ rdbchecksum yes
 dbfilename dump.rdb
 dir /opt
 """
+    if custom_config is not None:
+        config_content += "\n" + custom_config + "\n"
+
     with open(file_path, "w") as file:
         file.write(config_content)
     return file_path

@@ -1,0 +1,441 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import collections
+import functools
+import numpy as np
+import os
+import random
+import time
+import torch
+import torch.nn as nn
+import termcolor
+import wandb
+
+from contextlib import ContextDecorator
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, List, Optional, Tuple, TypeVar, Union
+
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.wfm.distributed import get_rank
+
+T = TypeVar("T", bound=Callable[..., Any])
+
+IS_PREPROCESSED_KEY = "is_preprocessed"
+
+NUM_EMBEDDING_PADDING_TOKENS = 512
+
+VIDEO_RES_SIZE_INFO: dict[str, tuple[int, int]] = {
+    "1080": {
+        "1,1": (1024, 1024),
+        "4,3": (1440, 1056),
+        "3,4": (1056, 1440),
+        "16,9": (1920, 1056),
+        "9,16": (1056, 1920),
+    },
+    "1024": {
+        "1,1": (1024, 1024),
+        "4,3": (1280, 1024),
+        "3,4": (1024, 1280),
+        "16,9": (1280, 768),
+        "9,16": (768, 1280),
+    },
+    "720": {
+        "1,1": (960, 960),
+        "4,3": (960, 704),
+        "3,4": (704, 960),
+        "16,9": (1280, 704),
+        "9,16": (704, 1280),
+    },
+    "512": {
+        "1,1": (512, 512),
+        "4,3": (640, 512),
+        "3,4": (512, 640),
+        "16,9": (640, 384),
+        "9,16": (384, 640),
+    },
+    "480": {
+        "1,1": (480, 480),
+        "4,3": (640, 480),
+        "3,4": (480, 640),
+        "16,9": (768, 432),
+        "9,16": (432, 768),
+    },
+    # 720, 1280 is Wan2.1 specs
+    "480p": {
+        "1,1": (640, 640),
+        "4,3": (640, 480),
+        "3,4": (480, 640),
+        "16,9": (832, 480),
+        "9,16": (480, 832),
+    },
+    "720p": {
+        "1,1": (960, 960),
+        "4,3": (960, 720),
+        "3,4": (720, 960),
+        "16,9": (1280, 720),
+        "9,16": (720, 1280),
+    },
+    "720robocasa": {
+        "1,1": (720, 720),
+        "4,3": (960, 720),
+        "3,4": (720, 960),
+        "16,9": (1280, 720),
+        "9,16": (720, 1280),
+    },
+    "256": {
+        "1,1": (256, 256),
+        "4,3": (320, 256),
+        "3,4": (256, 320),
+        "16,9": (320, 192),
+        "9,16": (192, 320),
+    },
+}
+
+
+class DataType(str, Enum):
+    IMAGE = "image"
+    VIDEO = "video"
+    MIX = "mix"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class timer(ContextDecorator):  # noqa: N801
+    """Simple timer for timing the execution of code.
+
+    It can be used as either a context manager or a function decorator. The timing result will be logged upon exit.
+
+    Example:
+        def func_a():
+            time.sleep(1)
+        with timer("func_a"):
+            func_a()
+
+        @timer("func_b)
+        def func_b():
+            time.sleep(1)
+        func_b()
+    """
+
+    def __init__(self, context: str, debug: bool = False):
+        self.context = context
+        self.debug = debug
+
+    def __enter__(self) -> None:
+        self.tic = time.time()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:  # noqa: ANN001
+        time_spent = time.time() - self.tic
+        if self.debug:
+            logger.debug(f"Time spent on {self.context}: {time_spent:.4f} seconds")
+        else:
+            logger.info(f"Time spent on {self.context}: {time_spent:.4f} seconds")
+
+    def __call__(self, func: T) -> T:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):  # noqa: ANN202
+            tic = time.time()
+            result = func(*args, **kwargs)
+            time_spent = time.time() - tic
+            if self.debug:
+                logger.debug(f"Time spent on {self.context}: {time_spent:.4f} seconds")
+            else:
+                logger.info(f"Time spent on {self.context}: {time_spent:.4f} seconds")
+            return result
+
+        return wrapper  # type: ignore
+
+
+class TrainingTimer:
+    """Timer for timing the execution of code, aggregating over multiple training iterations.
+
+    It is used as a context manager to measure the execution time of code and store the timing results
+    for each function. The context managers can be nested.
+
+    Attributes:
+        results (dict): A dictionary to store timing results for various code.
+
+    Example:
+        timer = Timer()
+        for i in range(100):
+            with timer("func_a"):
+                func_a()
+        avg_time = sum(timer.results["func_a"]) / len(timer.results["func_a"])
+        print(f"func_a() took {avg_time} seconds.")
+    """
+
+    def __init__(self) -> None:
+        self.results = dict()
+        self.average_results = dict()
+        self.start_time = []
+        self.func_stack = []
+        self.reset()
+
+    def reset(self) -> None:
+        self.results = {key: [] for key in self.results}
+
+    def __enter__(self):
+        self.start_time.append(time.time())
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:  # noqa: ANN001
+        end_time = time.time()
+        result = end_time - self.start_time.pop()
+        key = self.func_stack.pop()
+        self.results.setdefault(key, [])
+        self.results[key].append(result)
+
+    def __call__(self, func_name: str):
+        self.func_stack.append(func_name)
+        return self
+
+    def __getattr__(self, func_name: str):
+        return self.__call__(func_name)
+
+    def nested(self, func_name: str):
+        return self.__call__(func_name)
+
+    def compute_average_results(self) -> dict[str, float]:
+        results = dict()
+        for key, value_list in self.results.items():
+            results[key] = sum(value_list) / len(value_list)
+        return results
+
+
+class Color:
+    """A convenience class to colorize strings in the console.
+
+    Example:
+        import
+        print("This is {Color.red('important')}.")
+    """
+
+    @staticmethod
+    def red(x: str) -> str:
+        return termcolor.colored(str(x), color="red")
+
+    @staticmethod
+    def green(x: str) -> str:
+        return termcolor.colored(str(x), color="green")
+
+    @staticmethod
+    def blue(x: str) -> str:
+        return termcolor.colored(str(x), color="blue")
+
+    @staticmethod
+    def cyan(x: str) -> str:
+        return termcolor.colored(str(x), color="cyan")
+
+    @staticmethod
+    def yellow(x: str) -> str:
+        return termcolor.colored(str(x), color="yellow")
+
+    @staticmethod
+    def magenta(x: str) -> str:
+        return termcolor.colored(str(x), color="magenta")
+
+    @staticmethod
+    def grey(x: str) -> str:
+        return termcolor.colored(str(x), color="grey")
+
+
+@dataclass
+class DenoisePrediction:
+    x0: torch.Tensor  # clean data prediction
+    eps: Optional[torch.Tensor] = None  # noise prediction
+    logvar: Optional[torch.Tensor] = (
+        None  # log variance of noise prediction, can be used a confidence / uncertainty
+    )
+
+
+def timeout_handler(timeout_period: float, signum: int, frame: int) -> None:
+    # What to do when the process gets stuck. For now, we simply end the process.
+    error_message = f"Timeout error: more than {timeout_period} seconds passed since the last iteration."
+    if get_rank() == 0:
+        wandb.alert(
+            title="Timeout error!", text=error_message, level=wandb.AlertLevel.ERROR
+        )
+    raise TimeoutError(error_message)
+
+
+def count_params(model: nn.Module, verbose=False) -> int:
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if verbose:
+        print(f"{model.__class__.__name__} has {total_params * 1.e-6:.2f} M params.")
+    return total_params
+
+
+def arch_invariant_rand(
+    shape: List[int] | Tuple[int],
+    dtype: torch.dtype,
+    device: str | torch.device,
+    seed: int | None = None,
+):
+    """Produce a GPU-architecture-invariant randomized Torch tensor.
+
+    Args:
+        shape (list or tuple of ints): Output tensor shape.
+        dtype (torch.dtype): Output tensor type.
+        device (torch.device): Device holding the output.
+        seed (int): Optional randomization seed.
+
+    Returns:
+        tensor (torch.tensor): Randomly-generated tensor.
+    """
+    # Create a random number generator, optionally seeded
+    rng = np.random.RandomState(seed)
+
+    # Generate random numbers using the generator
+    random_array = rng.standard_normal(shape).astype(
+        np.float32
+    )  # Use standard_normal for normal distribution
+
+    # Convert to torch tensor and return
+    return torch.from_numpy(random_array).to(dtype=dtype, device=device)
+
+
+def to(
+    data: Any,
+    device: str | torch.device | None = None,
+    dtype: torch.dtype | None = None,
+    memory_format: torch.memory_format = torch.preserve_format,
+) -> Any:
+    """Recursively cast data into the specified device, dtype, and/or memory_format.
+
+    The input data can be a tensor, a list of tensors, a dict of tensors.
+    See the documentation for torch.Tensor.to() for details.
+
+    Args:
+        data (Any): Input data.
+        device (str | torch.device): GPU device (default: None).
+        dtype (torch.dtype): data type (default: None).
+        memory_format (torch.memory_format): memory organization format (default: torch.preserve_format).
+
+    Returns:
+        data (Any): Data cast to the specified device, dtype, and/or memory_format.
+    """
+    assert (
+        device is not None or dtype is not None or memory_format is not None
+    ), "at least one of device, dtype, memory_format should be specified"
+    # TODO(snah): something weird (preserve_format) was hard-coded here.
+    if isinstance(data, torch.Tensor):
+        if (
+            memory_format == torch.channels_last
+            and data.dim() != 4
+            or memory_format == torch.channels_last_3d
+            and data.dim() != 5
+        ):
+            memory_format = torch.preserve_format  # do not change the memory format
+        is_cpu = (isinstance(device, str) and device == "cpu") or (
+            isinstance(device, torch.device) and device.type == "cpu"
+        )
+        data = data.to(
+            device=device,
+            dtype=dtype,
+            memory_format=memory_format,
+            non_blocking=(not is_cpu),
+        )
+        return data
+    elif isinstance(data, collections.abc.Mapping):
+        return type(data)(
+            {
+                key: to(
+                    data[key], device=device, dtype=dtype, memory_format=memory_format
+                )
+                for key in data
+            }
+        )
+    elif isinstance(data, collections.abc.Sequence) and not isinstance(
+        data, (str, bytes)
+    ):
+        return type(data)(
+            [
+                to(elem, device=device, dtype=dtype, memory_format=memory_format)
+                for elem in data
+            ]
+        )
+    else:
+        return data
+
+
+def disabled_train(self: Any, mode: bool = True) -> Any:
+    """Overwrite model.train with this function to make sure train/eval mode
+    does not change anymore."""
+    return self
+
+
+def print_environ_variables(env_vars: list[str]) -> None:
+    """Print a specific list of environment variables.
+
+    Args:
+        env_vars (list[str]): List of specified environment variables.
+    """
+    for env_var in env_vars:
+        if env_var in os.environ:
+            logger.info(
+                f"Environment variable {Color.green(env_var)}: {Color.yellow(os.environ[env_var])}"
+            )
+        else:
+            logger.warning(f"Environment variable {Color.green(env_var)} not set!")
+
+
+def set_random_seed(seed: int, by_rank: bool = False) -> None:
+    """Set random seed. This includes random, numpy, Pytorch.
+
+    Args:
+        seed (int): Random seed.
+        by_rank (bool): if true, each GPU will use a different random seed.
+    """
+    if by_rank:
+        seed += get_rank()
+    logger.info(f"Using random seed {seed}.")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)  # sets seed on the current CPU & all GPUs
+
+
+def get_data_batch_size(data: dict[str, torch.Tensor] | torch.Tensor) -> int:
+    """Get the batch size from a data batch, a (possibly hierarchical) dictionary of tensors.
+
+    Args:
+        data (dict[str, torch.Tensor]): Data batch (dictionary of tensors).
+
+    Returns:
+        batch_size (int): Data batch size.
+    """
+
+    def _get_batch_size(input_data: Any) -> Union[int, None]:
+        """
+        Helper function that recursively finds a tensor in the input data
+        (could be a nested dictionary) and returns its batch size.
+        """
+        if isinstance(input_data, torch.Tensor):
+            return len(input_data)
+        elif isinstance(input_data, collections.abc.Mapping):
+            for key, value in input_data.items():
+                batch_size = _get_batch_size(value)
+                if batch_size is not None:
+                    return batch_size
+        return None
+
+    batch_size = _get_batch_size(data)
+    if not isinstance(batch_size, int):
+        raise ValueError(
+            f"Batch size ({batch_size}) obtained from invalid data: {data}"
+        )
+    return batch_size

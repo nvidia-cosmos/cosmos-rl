@@ -98,6 +98,9 @@ RUN pip install \
     transformer_engine[pytorch] --no-build-isolation \
     -r /workspace/cosmos_rl/requirements.txt
 
+# install apex
+RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https://github.com/NVIDIA/apex@bf903a2
+
 ###################################################
 
 # Install nvshmem grouped_gemm and DeepEP for MoE
