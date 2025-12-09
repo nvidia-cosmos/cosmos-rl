@@ -758,10 +758,20 @@ class ParallelismConfig(BaseModel):
         return int(local_world_size)
 
 
-class RolloutParallelismConfig(ParallelismConfig, extra="forbid"):
-    n_init_replicas: int = ParallelismConfig.model_fields["n_init_replicas"]
-    tp_size: int = ParallelismConfig.model_fields["tp_size"]
-    pp_size: int = ParallelismConfig.model_fields["pp_size"]
+class RolloutParallelismConfig(ParallelismConfig):
+    @model_validator(mode="after")
+    def check_fields(self):
+        _fields_no_need_to_check = ["n_init_replicas", "tp_size", "pp_size"]
+        for field_name, field_value in RolloutParallelismConfig.model_fields.items():
+            if field_name not in _fields_no_need_to_check:
+                default_value = field_value.default
+                actual_value = getattr(self, field_name)
+                if actual_value != default_value:
+                    raise ValueError(
+                        f"Only {_fields_no_need_to_check} fields can be set for rollout parallelism."
+                    )
+
+        return self
 
 
 class LoraConfig(BaseModel):
