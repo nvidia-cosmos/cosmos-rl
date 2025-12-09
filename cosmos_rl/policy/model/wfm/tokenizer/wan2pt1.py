@@ -947,9 +947,7 @@ class Wan2pt1VAEInterface(VideoTokenizerInterface):
                 "vae_pth",
                 "Wan-AI/Wan2.1-T2V-1.3B",
             ),
-            vae_filename=kwargs.get(
-                "vae_filename", "Wan2.1_VAE.pth"
-            ),
+            vae_filename=kwargs.get("vae_filename", "Wan2.1_VAE.pth"),
             s3_credential_path=kwargs.get(
                 "s3_credential_path", "credentials/s3_training.secret"
             ),

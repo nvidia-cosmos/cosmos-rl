@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Optional
 
-import filelock
 import numpy as np
 import torch
 
@@ -28,7 +26,6 @@ except ImportError:
 from transformers.models.auto.processing_auto import AutoProcessor
 
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.wfm.io.easy_io import easy_io
 
 _LOCK_TIMEOUT_SECONDS = 60
 
