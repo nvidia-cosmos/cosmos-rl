@@ -666,11 +666,9 @@ class Qwen3MoE(BaseModel):
         # Distribute files across ranks: rank i reads files where file_idx % world_size == i
         rank_tensors = {}  # {tensor_name: tensor_data} for this rank
         rank_tensor_metadata = {}  # {tensor_name: (shape, dtype)} for this rank
-        file_to_rank_map = {}  # {filename: rank} mapping
 
         for file_idx, f in enumerate(safetensors_files):
             file_rank = file_idx % world_size
-            file_to_rank_map[f] = file_rank
             if rank == file_rank:
                 # This rank is responsible for reading this file
                 ckpt = safe_open(
@@ -722,70 +720,17 @@ class Qwen3MoE(BaseModel):
             tensor_to_rank_map = {name: 0 for name in rank_tensors.keys()}
 
         # Step 3: Process each tensor - use pre-built mapping to find which rank has it
-        # Pre-compile regex for expert weight detection
-        expert_weight_pattern = re.compile(
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(up_proj|gate_proj|down_proj)\.(weight|bias)"
-        )
-
-        # Get TP/EP group and DP group for expert weight broadcast
-        # Expert weights should only be broadcast to DP ranks within the same TP/EP group
-        tp_ep_group = None
-        dp_group_for_expert = None
-        if world_size > 1 and hasattr(parallel_dims, "mesh"):
-            try:
-                tp_ep_group = parallel_dims.mesh.get_group("tp_ep")
-            except (KeyError, AttributeError):
-                pass
-            # Try to get a DP group that's within the same TP/EP group
-            # dp_shard_cp should contain DP ranks within the same TP/EP group
-            try:
-                dp_group_for_expert = parallel_dims.mesh.get_group("dp_shard_cp")
-            except (KeyError, AttributeError):
-                pass
-
+        # All tensors are broadcast to all ranks
         for name in sorted(weights_of_ckpt_names):
-            # Check if this is an expert weight
-            dest_name = name.replace("model.", "")
-            is_expert_weight = bool(expert_weight_pattern.search(dest_name))
-
             # Get rank from pre-built mapping
             tensor_rank = tensor_to_rank_map.get(name)
 
             if tensor_rank is None:
                 continue
 
-            # For expert weights, only broadcast to DP ranks within the same TP/EP group
-            # For non-expert weights, broadcast to all ranks as before
-            if (
-                is_expert_weight
-                and tp_ep_group is not None
-                and dp_group_for_expert is not None
-            ):
-                # Check if both current rank and tensor_rank are in the same TP/EP group
-                try:
-                    # Get global ranks in the TP/EP group
-                    tp_ep_ranks = dist.get_process_group_ranks(tp_ep_group)
-                    # Only broadcast if both ranks are in the same TP/EP group
-                    if rank not in tp_ep_ranks or tensor_rank not in tp_ep_ranks:
-                        # Skip this tensor - it's not for this TP/EP group
-                        continue
-                    # Use dp_shard_cp group for broadcast (DP ranks within same TP/EP group)
-                    broadcast_group = dp_group_for_expert
-                    # Get ranks in the dp_shard_cp group
-                    dp_ranks = dist.get_process_group_ranks(dp_group_for_expert)
-                    # Convert tensor_rank to its rank within the dp_shard_cp group for broadcast src
-                    if tensor_rank in dp_ranks:
-                        tensor_rank_in_group = dp_ranks.index(tensor_rank)
-                    else:
-                        # tensor_rank is not in dp_shard_cp group, skip
-                        continue
-                except (RuntimeError, ValueError, IndexError):
-                    # Fallback: skip expert weight if group check fails
-                    continue
-            else:
-                # For non-expert weights, use the original group
-                broadcast_group = group
-                tensor_rank_in_group = tensor_rank
+            # All tensors broadcast to all ranks using the original group
+            broadcast_group = group
+            tensor_rank_in_group = tensor_rank
 
             # Get tensor from the rank that has it
             if rank == tensor_rank:
@@ -852,6 +797,13 @@ class Qwen3MoE(BaseModel):
                 )
 
             # Now all ranks have the tensor, process it
+            # Ensure ckpt_tensor is not None
+            if ckpt_tensor is None:
+                raise ValueError(
+                    f"Failed to get tensor {name} on rank {rank}. "
+                    f"tensor_rank={tensor_rank}, world_size={world_size}, "
+                    f"broadcast_group={broadcast_group}"
+                )
             tensor = ckpt_tensor
             dest_name, shared_weight = convert_weight_from_hf(
                 tensor,
