@@ -762,9 +762,9 @@ class RolloutParallelismConfig(ParallelismConfig):
     @model_validator(mode="after")
     def check_fields(self):
         _fields_no_need_to_check = ["n_init_replicas", "tp_size", "pp_size"]
-        for field_name, field_value in RolloutParallelismConfig.model_fields.items():
+        for field_name, field_info in RolloutParallelismConfig.model_fields.items():
             if field_name not in _fields_no_need_to_check:
-                default_value = field_value.default
+                default_value = field_info.default
                 actual_value = getattr(self, field_name)
                 if actual_value != default_value:
                     raise ValueError(
