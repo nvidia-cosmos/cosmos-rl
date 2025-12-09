@@ -16,6 +16,7 @@
 import os
 import re
 import torch
+import torch.distributed as dist
 import inspect
 from torch import nn
 from safetensors import safe_open
@@ -363,11 +364,42 @@ class HFModel(BaseModel):
         device: torch.device,
         revision: Optional[str] = None,
     ):
+        # Get current rank and world size for distributed loading
+        # When dp_replicate > 1, we need to use a process group that excludes dp_replicate
+        # since each replica is independent and should load weights separately
+        if dist.is_initialized():
+            if hasattr(parallel_dims, "mesh") and parallel_dims.dp_replicate_enabled:
+                # Use dp_cp_tp mesh which excludes dp_replicate
+                # This ensures we only communicate within the same replica
+                try:
+                    group = parallel_dims.mesh.get_group("dp_cp_tp")
+                    rank = dist.get_rank(group)
+                    world_size = dist.get_world_size(group)
+                except (KeyError, AttributeError):
+                    # Fallback: use dp_shard_cp or global group
+                    try:
+                        group = parallel_dims.mesh.get_group("dp_shard_cp")
+                        rank = dist.get_rank(group)
+                        world_size = dist.get_world_size(group)
+                    except (KeyError, AttributeError):
+                        # Final fallback: use global rank/world_size
+                        rank = dist.get_rank()
+                        world_size = dist.get_world_size()
+                        group = None
+            else:
+                rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                group = None
+        else:
+            rank = 0
+            world_size = 1
+            group = None
+
         model_type = self.hf_config.model_type
         model_path = resolve_model_path(model_name_or_path, revision=revision)
-        safetensors_files = [
-            f for f in os.listdir(model_path) if f.endswith(".safetensors")
-        ]
+        safetensors_files = sorted(
+            [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
+        )
 
         self_state_dict = self.model.state_dict()
         self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
@@ -391,59 +423,209 @@ class HFModel(BaseModel):
         hf_checkpoint_conversion_mapping = getattr(
             self.model, "_checkpoint_conversion_mapping", None
         )
-        for f in safetensors_files:
-            weights_of_ckpt = {}
-            ckpt = safe_open(
-                os.path.join(model_path, f), framework="pt", device=str(device)
+
+        # Mapping from dtype to integer for broadcasting
+        dtype_to_int = {
+            torch.float32: 0,
+            torch.float16: 1,
+            torch.bfloat16: 2,
+            torch.int64: 3,
+            torch.int32: 4,
+            torch.int8: 5,
+            torch.uint8: 6,
+            torch.float8_e4m3fn: 7,
+            torch.float8_e5m2: 8,
+        }
+        # Mapping from integer to dtype for broadcasting
+        int_to_dtype = {v: k for k, v in dtype_to_int.items()}
+
+        # Step 1: Each rank reads its assigned safetensors files in parallel
+        # Distribute files across ranks: rank i reads files where file_idx % world_size == i
+        rank_tensors = {}  # {tensor_name: tensor_data} for this rank
+        rank_tensor_metadata = {}  # {tensor_name: (shape, dtype)} for this rank
+
+        for file_idx, f in enumerate(safetensors_files):
+            file_rank = file_idx % world_size
+            if rank == file_rank:
+                # This rank is responsible for reading this file
+                ckpt = safe_open(
+                    os.path.join(model_path, f), framework="pt", device=str(device)
+                )
+                keys = list(ckpt.keys())
+                for name in keys:
+                    ckpt_tensor = ckpt.get_tensor(name)
+                    # Apply checkpoint conversion mapping if exists
+                    if hf_checkpoint_conversion_mapping is not None:
+                        for (
+                            pattern,
+                            replacement,
+                        ) in hf_checkpoint_conversion_mapping.items():
+                            if re.match(pattern, name):
+                                name = re.sub(pattern, replacement, name)
+                                break
+                    weights_of_ckpt_names.add(name)
+                    rank_tensors[name] = ckpt_tensor
+                    rank_tensor_metadata[name] = (
+                        list(ckpt_tensor.shape),
+                        dtype_to_int.get(ckpt_tensor.dtype, 0),
+                    )
+                    if name == embed_tokens_weight_key:
+                        reserved[name] = ckpt_tensor
+
+        # Step 2: Gather all tensor names from all ranks and build tensor-to-rank mapping
+        if world_size > 1:
+            # all_gather_object requires output list to be pre-initialized with world_size
+            all_tensor_names_lists = [None] * world_size
+            dist.all_gather_object(
+                all_tensor_names_lists, list(weights_of_ckpt_names), group=group
             )
-            keys = ckpt.keys()
-            for name in keys:
-                ckpt_tensor = ckpt.get_tensor(name)
-                if hf_checkpoint_conversion_mapping is not None:
-                    for (
-                        pattern,
-                        replacement,
-                    ) in hf_checkpoint_conversion_mapping.items():
-                        if re.match(pattern, name):
-                            name = re.sub(pattern, replacement, name)
-                            break
-                weights_of_ckpt[name] = ckpt_tensor
-                weights_of_ckpt_names.add(name)
-                if name == embed_tokens_weight_key:
-                    reserved[name] = ckpt_tensor
+            # Flatten the list and create a set
+            weights_of_ckpt_names = set()
+            for names_list in all_tensor_names_lists:
+                if names_list is not None:
+                    weights_of_ckpt_names.update(names_list)
 
-            for name in weights_of_ckpt.keys():
-                if name in self.tensor_names_to_skip:
-                    logger.info(f"Skipping {name} because it is in the skip list")
-                    continue
-                tensor = weights_of_ckpt[name]
-                tp_slice_dim = None
-                if self.tp_slice_dim_map is not None:
-                    tp_slice_dim = self.tp_slice_dim_map.get(name, None)
-                dest_name, shared_weight = convert_weight_from_hf(
-                    tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
-                )
-                target_tensor = self_state_dict[dest_name]
-                is_dist_tensor = isinstance(
-                    target_tensor, torch.distributed.tensor.DTensor
-                )
-                local_view = (
-                    target_tensor.to_local() if is_dist_tensor else target_tensor
-                )
-                assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
-                with torch.no_grad():
-                    local_view.data.copy_(shared_weight)
+            # Build tensor-to-rank mapping: gather which rank has which tensors
+            # Create a dict mapping tensor_name -> rank for this rank
+            local_tensor_to_rank = {name: rank for name in rank_tensors.keys()}
+            all_tensor_to_rank_dicts = [None] * world_size
+            dist.all_gather_object(
+                all_tensor_to_rank_dicts, local_tensor_to_rank, group=group
+            )
 
+            # Merge all dicts to create global mapping
+            tensor_to_rank_map = {}
+            for rank_idx, tensor_dict in enumerate(all_tensor_to_rank_dicts):
+                if tensor_dict is not None:
+                    for tensor_name, _ in tensor_dict.items():
+                        if tensor_name not in tensor_to_rank_map:
+                            tensor_to_rank_map[tensor_name] = rank_idx
+                        # If duplicate, keep the first one (shouldn't happen, but just in case)
+        else:
+            tensor_to_rank_map = {name: 0 for name in rank_tensors.keys()}
+
+        # Step 3: Process each tensor - use pre-built mapping to find which rank has it
+        # All tensors are broadcast to all ranks
+        for name in sorted(weights_of_ckpt_names):
+            # Skip tensors in the skip list
+            if name in self.tensor_names_to_skip:
+                logger.info(f"Skipping {name} because it is in the skip list")
+                continue
+
+            # Get rank from pre-built mapping
+            tensor_rank = tensor_to_rank_map.get(name)
+
+            if tensor_rank is None:
+                continue
+
+            # All tensors broadcast to all ranks using the original group
+            broadcast_group = group
+            tensor_rank_in_group = tensor_rank
+
+            # Get tensor from the rank that has it
+            if rank == tensor_rank:
+                ckpt_tensor = rank_tensors[name]
+                tensor_shape, tensor_dtype_int = rank_tensor_metadata[name]
+            else:
+                ckpt_tensor = None
+                tensor_shape = []
+                tensor_dtype_int = 0
+
+            # Broadcast tensor metadata (shape, dtype) from the rank that has it
+            if world_size > 1:
+                # Ensure all ranks participate in broadcast
+                if rank == tensor_rank:
+                    shape_len = len(tensor_shape)
+                    shape_len_tensor = torch.tensor(
+                        [shape_len], dtype=torch.long, device=device
+                    )
+                    shape_tensor = torch.tensor(
+                        tensor_shape, dtype=torch.long, device=device
+                    )
+                    dtype_int_tensor = torch.tensor(
+                        [tensor_dtype_int], dtype=torch.long, device=device
+                    )
+                else:
+                    shape_len_tensor = torch.zeros(1, dtype=torch.long, device=device)
+                    shape_tensor = None  # Will be created after knowing shape_len
+                    dtype_int_tensor = torch.zeros(1, dtype=torch.long, device=device)
+
+                # Broadcast shape length first
+                dist.broadcast(
+                    shape_len_tensor, src=tensor_rank_in_group, group=broadcast_group
+                )
+                shape_len = shape_len_tensor.item()
+
+                # Create shape_tensor with correct size for all ranks
+                if rank != tensor_rank:
+                    shape_tensor = torch.zeros(
+                        shape_len, dtype=torch.long, device=device
+                    )
+
+                # Broadcast shape values
+                dist.broadcast(
+                    shape_tensor, src=tensor_rank_in_group, group=broadcast_group
+                )
+
+                # Broadcast dtype
+                dist.broadcast(
+                    dtype_int_tensor, src=tensor_rank_in_group, group=broadcast_group
+                )
+
+                if rank != tensor_rank:
+                    tensor_shape = shape_tensor.cpu().tolist()
+                    tensor_dtype = int_to_dtype.get(
+                        dtype_int_tensor.item(), torch.float32
+                    )
+                    ckpt_tensor = torch.empty(
+                        tensor_shape, dtype=tensor_dtype, device=device
+                    )
+
+                # Broadcast the actual tensor data
+                dist.broadcast(
+                    ckpt_tensor, src=tensor_rank_in_group, group=broadcast_group
+                )
+
+            # Now all ranks have the tensor, process it
+            # Ensure ckpt_tensor is not None
+            if ckpt_tensor is None:
+                raise ValueError(
+                    f"Failed to get tensor {name} on rank {rank}. "
+                    f"tensor_rank={tensor_rank}, world_size={world_size}, "
+                    f"broadcast_group={broadcast_group}"
+                )
+            tensor = ckpt_tensor
+            # Save embed_tokens tensor for weight tying if needed
+            if name == embed_tokens_weight_key:
+                reserved[name] = tensor.clone()
+            tp_slice_dim = None
+            if self.tp_slice_dim_map is not None:
+                tp_slice_dim = self.tp_slice_dim_map.get(name, None)
+            dest_name, shared_weight = convert_weight_from_hf(
+                tensor, name, model_type, parallel_dims, tp_slice_dim=tp_slice_dim
+            )
+            target_tensor = self_state_dict[dest_name]
+            is_dist_tensor = isinstance(target_tensor, torch.distributed.tensor.DTensor)
+            local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
+            assert (
+                local_view.shape == shared_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+            with torch.no_grad():
+                local_view.data.copy_(shared_weight)
+
+        # Handle weight tying: lm_head shares weights with embed_tokens
         if (
             lm_head_weight_key not in weights_of_ckpt_names
             and embed_tokens_weight_key in weights_of_ckpt_names
         ):
-            # Handle weight tying: lm_head shares weights with embed_tokens
             name = lm_head_weight_key
-            assert embed_tokens_weight_key in reserved
+            # All ranks should have embed_tokens_weight_key tensor from Step 3
+            assert embed_tokens_weight_key in reserved, (
+                f"embed_tokens_weight_key {embed_tokens_weight_key} not found in reserved. "
+                f"This should have been saved during Step 3 processing."
+            )
             tensor = reserved[embed_tokens_weight_key]
+
             tp_slice_dim = None
             if self.tp_slice_dim_map is not None:
                 tp_slice_dim = self.tp_slice_dim_map.get(name, None)
