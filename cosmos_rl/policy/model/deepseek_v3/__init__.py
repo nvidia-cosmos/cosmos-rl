@@ -35,7 +35,6 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.kernel.moe import moe
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.deepseek_v3 import deepseekv3_mapped
-from cosmos_rl.policy.model.deepseek_v3.checkpoint_planner import RenameLoadPlanner
 from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
     DeepseekV3MoEWeightMapper,
     convert_weight_from_hf,
@@ -85,10 +84,6 @@ class DeepseekV3MoEModel(BaseModel):
 
         if hf_config.num_hidden_layers == 4:
             deepseek_config = deepseekv3_mapped.DeepseekConfig(n_layers=4)
-        elif hf_config.num_hidden_layers == 39:
-            deepseek_config = deepseekv3_mapped.DeepseekConfig(n_layers=39)
-        elif hf_config.num_hidden_layers == 47:
-            deepseek_config = deepseekv3_mapped.DeepseekConfig(n_layers=47)
         elif hf_config.num_hidden_layers == 61:
             deepseek_config = deepseekv3_mapped.DeepseekConfig()
         else:
@@ -226,13 +221,11 @@ class DeepseekV3MoEModel(BaseModel):
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
-        save_dcp: bool = False,
         revision: Optional[str] = None,
     ):
-
         rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist.is_initialized() else 1
-        
+
         def _broadcast_data(data, src_rank):
             container = [data]
             dist.broadcast_object_list(container, src=src_rank)
@@ -242,7 +235,7 @@ class DeepseekV3MoEModel(BaseModel):
         model_type = None
         safetensors_files = []
         model_path = ""
-        
+
         if rank == 0:
             model_type = retry(AutoConfig.from_pretrained)(
                 model_name_or_path, trust_remote_code=True
@@ -251,20 +244,20 @@ class DeepseekV3MoEModel(BaseModel):
             safetensors_files = [
                 f for f in os.listdir(model_path) if f.endswith(".safetensors")
             ]
-            safetensors_files.sort() # Ensure deterministic order
-        
+            safetensors_files.sort()  # Ensure deterministic order
+
         # Broadcast metadata
         setup_info = (model_type, safetensors_files, model_path) if rank == 0 else None
-        model_type, safetensors_files, model_path = _broadcast_data(setup_info, src_rank=0)
+        model_type, safetensors_files, model_path = _broadcast_data(
+            setup_info, src_rank=0
+        )
 
         self_state_dict = self.state_dict()
-        self_state_dict = {
-            clear_weight_name(k): v for k, v in self_state_dict.items()
-        }
+        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
 
         lm_head_weight_key = "model.lm_head.weight"
         embed_tokens_weight_key = "model.model.embed_tokens.weight"
-        
+
         weights_of_ckpt_names = set()
         reserved = {}
         scale_inv_paths = {}
@@ -283,7 +276,7 @@ class DeepseekV3MoEModel(BaseModel):
                     if name.endswith("weight_scale_inv"):
                         scale_inv_paths[name] = os.path.join(model_path, f)
                         dequant_weights = True
-        
+
         scale_inv_paths = _broadcast_data(scale_inv_paths, src_rank=0)
 
         # 3. Parallel Batch Loading
@@ -292,34 +285,34 @@ class DeepseekV3MoEModel(BaseModel):
         for batch_start in range(0, total_files, world_size):
             batch_end = min(batch_start + world_size, total_files)
             batch_files = safetensors_files[batch_start:batch_end]
-            
+
             # --- A. PARALLEL READ PHASE ---
             # Determine which file in this batch belongs to the current rank
             # rank 0 gets batch_files[0], rank 1 gets batch_files[1], etc.
             local_file_index = rank
             local_file_name = None
-            local_file_data = {} # Buffer to hold the full file in RAM
-            
+            local_file_data = {}  # Buffer to hold the full file in RAM
+
             if local_file_index < len(batch_files):
                 local_file_name = batch_files[local_file_index]
                 logger.info(f"Rank {rank} parallely reading: {local_file_name}")
-                
+
                 # Load the ENTIRE file into CPU RAM
                 f_path = os.path.join(model_path, local_file_name)
                 ckpt = retry(safe_open)(f_path, framework="pt", device=str(device))
                 for k in ckpt.keys():
                     local_file_data[k] = ckpt.get_tensor(k)
-            
-            # Barrier ensures all ranks have finished reading their assigned file 
+
+            # Barrier ensures all ranks have finished reading their assigned file
             # before we start the network-heavy broadcast phase.
             torch.distributed.barrier()
 
             # --- B. BROADCAST & PROCESS PHASE ---
             # Iterate through the batch. Each rank takes a turn being the 'sender'
-            for i, filename in enumerate(batch_files):
+            for i, _ in enumerate(batch_files):
                 owner_rank = (batch_start + i) % world_size
-                is_owner = (rank == owner_rank)
-                
+                is_owner = rank == owner_rank
+
                 # Owner knows the keys (from their local_file_data buffer)
                 current_file_keys = list(local_file_data.keys()) if is_owner else None
                 file_keys = _broadcast_data(current_file_keys, src_rank=owner_rank)
@@ -331,22 +324,26 @@ class DeepseekV3MoEModel(BaseModel):
                     # -- Owner Dequantizes locally --
                     if is_owner:
                         tensor = local_file_data[name]
-                        
+
                         if name.endswith("weight_scale_inv") or "layers.61" in name:
                             skip_weight = True
                         else:
                             if (
-                                "down_proj" in name
-                                or "up_proj" in name
-                                or "gate_proj" in name
-                                or "self_attn.kv_a_proj_with_mqa" in name
-                                or "self_attn.kv_b_proj" in name
-                                or "self_attn.o_proj" in name
-                                or "self_attn.q_a_proj" in name
-                                or "self_attn.q_b_proj" in name
-                            ) and "weight" in name and dequant_weights:
+                                (
+                                    "down_proj" in name
+                                    or "up_proj" in name
+                                    or "gate_proj" in name
+                                    or "self_attn.kv_a_proj_with_mqa" in name
+                                    or "self_attn.kv_b_proj" in name
+                                    or "self_attn.o_proj" in name
+                                    or "self_attn.q_a_proj" in name
+                                    or "self_attn.q_b_proj" in name
+                                )
+                                and "weight" in name
+                                and dequant_weights
+                            ):
                                 inv_name = name + "_scale_inv"
-                                
+
                                 # Try to find scale in local buffer first (fastest)
                                 if inv_name in local_file_data:
                                     inv_tensor = local_file_data[inv_name]
@@ -361,7 +358,9 @@ class DeepseekV3MoEModel(BaseModel):
 
                     # -- Sync Skip --
                     skip_val = 1 if skip_weight else 0
-                    skip_tensor = torch.tensor([skip_val], device=device, dtype=torch.int8)
+                    skip_tensor = torch.tensor(
+                        [skip_val], device=device, dtype=torch.int8
+                    )
                     dist.broadcast(skip_tensor, src=owner_rank)
                     if skip_tensor.item() == 1:
                         continue
@@ -373,15 +372,19 @@ class DeepseekV3MoEModel(BaseModel):
                         meta = (tensor.shape, tensor.dtype)
                     else:
                         meta = None
-                    tensor_shape, tensor_dtype = _broadcast_data(meta, src_rank=owner_rank)
+                    tensor_shape, tensor_dtype = _broadcast_data(
+                        meta, src_rank=owner_rank
+                    )
 
                     # -- Broadcast Data --
                     if not is_owner:
-                        tensor = torch.empty(tensor_shape, dtype=tensor_dtype, device=device)
-                    
+                        tensor = torch.empty(
+                            tensor_shape, dtype=tensor_dtype, device=device
+                        )
+
                     if is_owner:
                         tensor = tensor.to(device).contiguous()
-                    
+
                     dist.broadcast(tensor, src=owner_rank)
 
                     # -- Local Slicing/Sharding (All Ranks) --
@@ -413,7 +416,7 @@ class DeepseekV3MoEModel(BaseModel):
                     target_tensor = self_state_dict[dest_name]
                     if isinstance(target_tensor, torch.distributed.tensor.DTensor):
                         target_tensor = target_tensor.to_local()
-                    
+
                     if expert_id is not None:
                         n_local_experts = (
                             self.config.n_routed_experts
@@ -432,18 +435,20 @@ class DeepseekV3MoEModel(BaseModel):
                     assert (
                         target_tensor.shape == shared_weight.shape
                     ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
-                    
+
                     with torch.no_grad():
                         target_tensor.data.copy_(shared_weight)
-                    
+
                     del tensor
                     del shared_weight
-            
+
             # Cleanup buffer to free RAM for next batch
             del local_file_data
-            torch.cuda.empty_cache() 
+            torch.cuda.empty_cache()
             if rank == 0:
-                logger.info(f"Finished processing batch starting at index {batch_start}")
+                logger.info(
+                    f"Finished processing batch starting at index {batch_start}"
+                )
 
         if (
             lm_head_weight_key not in weights_of_ckpt_names
