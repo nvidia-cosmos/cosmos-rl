@@ -759,9 +759,9 @@ class ParallelismConfig(BaseModel):
 
 
 class RolloutParallelismConfig(ParallelismConfig, extra="forbid"):
-    n_init_replicas: int = ParallelismConfig.model_fields["n_init_replicas"].field_info
-    tp_size: int = ParallelismConfig.model_fields["tp_size"].field_info
-    pp_size: int = ParallelismConfig.model_fields["pp_size"].field_info
+    n_init_replicas: int = ParallelismConfig.model_fields["n_init_replicas"]
+    tp_size: int = ParallelismConfig.model_fields["tp_size"]
+    pp_size: int = ParallelismConfig.model_fields["pp_size"]
 
 
 class LoraConfig(BaseModel):
