@@ -66,10 +66,7 @@ save_mode = "async"
 [rollout.parallelism]
 n_init_replicas = 1
 tp_size = 2
-cp_size = 1
-dp_shard_size = 1
 pp_size = 1
-dp_replicate_size = 1
 
 [rollout.sampling_config]
 temperature = 0.9

@@ -856,23 +856,12 @@ class PolicyConfig(BaseModel):
         return self
 
 
-class RolloutParallelismConfig(ParallelismConfig):
+class RolloutParallelismConfig(BaseModel):
     n_init_replicas: int = Field(
         default=1, description="Number of initial replicas to be created"
     )
     tp_size: int = Field(default=2, description="Tensor parallelism size")
     pp_size: int = Field(default=1, description="Pipeline parallelism size")
-
-    # Fields below are that we do not want user to config it.
-    dp_replicate_size: int = Field(
-        default=1,
-        description="Data Parallelism size in replica mode, only 1 is supported for dynamic scaling purpose.",
-        choices=[1],
-    )
-    cp_size: int = Field(default=1, description="Context parallelism size")
-    dp_shard_size: int = Field(
-        default=-1, description="Data Parallelism size in sharded mode"
-    )
 
 
 class SamplingConfig(BaseModel):
