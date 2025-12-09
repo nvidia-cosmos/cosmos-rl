@@ -77,9 +77,7 @@ class DatasetConfig(BaseModel):
 
     revision: Optional[str] = Field(
         default="",
-        description={
-            "help": "Dataset git revision if exist, can be a branch name, a tag, or a commit hash."
-        },
+        description="Dataset git revision if exist, can be a branch name, a tag, or a commit hash.",
     )
 
     split: Union[str, List[str]] = Field(
@@ -100,7 +98,7 @@ class DatasetConfig(BaseModel):
 
 
 class SFTDataConfig(BaseModel):
-    type: Literal["sft"]
+    type: Literal["sft"] = "sft"
 
     trainer_type: str = Field(
         default="sft",
@@ -241,7 +239,7 @@ class OverlongRewardConfig(BaseModel):
 
 
 class GrpoConfig(BaseModel):
-    type: Literal["grpo"]
+    type: Literal["grpo"] = "grpo"
 
     trainer_type: str = Field(
         default="grpo",
@@ -599,7 +597,7 @@ class TrainingConfig(BaseModel):
         description="The data type for forward/backward. Outside forward/backward, params are in `master_dtype`",
         choices=["bfloat16", "float16", "float32"],
     )
-    transfer_dtype: str = Field(
+    transfer_dtype: Optional[str] = Field(
         default=None,
         description="The data type for transfer parameters between Policy and Rollout.",
         choices=["bfloat16", "float16", "float32"],
@@ -762,7 +760,7 @@ class LoraConfig(BaseModel):
     r: int = Field(default=8, description="LoRA rank")
     lora_alpha: float = Field(default=8.0, description="LoRA alpha")
     lora_dropout: float = Field(default=0.0, description="LoRA dropout")
-    target_modules: Union[List[str], str] = Field(
+    target_modules: Optional[Union[List[str], str]] = Field(
         default=None,
         description="LoRA target modules, can be a list of strings or 'all-linear'",
     )
