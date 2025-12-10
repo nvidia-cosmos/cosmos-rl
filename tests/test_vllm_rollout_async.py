@@ -55,10 +55,10 @@ def override_environment(port: int = 29500) -> dict[str, str]:
 
 
 class MockAPIClient(APIClient):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, config: CosmosConfig, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.config = getMockConfig()
+        self.config = config
 
         # load test dataset
         self.data_fetcher = ControllerDataFetcher(
@@ -72,6 +72,7 @@ class MockAPIClient(APIClient):
 
         # rollout_completion_payloads cache 1 batch of payloads for testing
         self.rollout_completion_payloads: List[RLPayload] = []
+        self.validation_completion_payloads: List[RLPayload] = []
 
     def post_rollout_shard_info(
         self,
@@ -102,6 +103,8 @@ class MockAPIClient(APIClient):
     def get_next_prompt(
         self, batch_size: int, validation_step: Optional[int] = None
     ) -> Tuple[List[Tuple[int, str]], bool]:
+        # masked validation_step for testing
+        validation_step = None
         payloads_list, is_end = self.data_fetcher.get_batched_prompt(
             batch_size, validation_step
         )
@@ -120,6 +123,7 @@ class MockAPIClient(APIClient):
         logger.info(
             f"[MockAPIClient] Post validation report: {len(report.payloads)} results"
         )
+        self.validation_completion_payloads.extend(report.payloads)
 
 
 def getMockConfig():
@@ -246,7 +250,10 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         # here dummy some functions to make the worker work
         def dummy_init_comm(self):
             self.api_client = MockAPIClient(
-                role="ROLLOUT", remote_ips=["localhost"], remote_port=8000
+                config=cosmos_config,
+                role="ROLLOUT",
+                remote_ips=["localhost"],
+                remote_port=8000,
             )
             self.data_packer = DecoderOnlyLLMDataPacker()
             self.val_data_packer = self.data_packer
@@ -270,6 +277,67 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         self.assertEqual(
             len(worker.api_client.rollout_completion_payloads),
             cosmos_config.rollout.batch_size * worker.api_client.max_iter,
+        )
+
+        # clean the test environment
+        worker.handle_shutdown()
+
+    def test_async_rollout_worker_validation(self):
+        """Test async rollout worker validation."""
+        cosmos_config = getMockConfig()
+        cosmos_config.rollout.parallelism.dp_shard_size = 1
+        cosmos_config.rollout.parallelism.tp_size = 1
+        cosmos_config.rollout.parallelism.pp_size = 1
+        cosmos_config.validation.enable = True
+        cosmos_config.validation.batch_size = 4
+        cosmos_config.validation.dataset = cosmos_config.train.train_policy.dataset
+
+        parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
+        from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker_async import (
+            vLLMRolloutWorkerAsync,
+        )
+
+        # here dummy some functions to make the worker work
+        def dummy_init_comm(self):
+            self.api_client = MockAPIClient(
+                config=cosmos_config,
+                role="ROLLOUT",
+                remote_ips=["localhost"],
+                remote_port=8000,
+            )
+            self.data_packer = DecoderOnlyLLMDataPacker()
+            self.val_data_packer = self.data_packer
+
+        def dummy(self):
+            pass
+
+        vLLMRolloutWorkerAsync.init_comm = dummy_init_comm
+        vLLMRolloutWorkerAsync.init_redis = dummy
+
+        worker = vLLMRolloutWorkerAsync(cosmos_config, parallel_dims)
+        worker.query_command_from_controller = functools.partial(dummy, worker)
+        worker.replica_name = str(uuid.uuid4())
+        worker.shutdown_signal = threading.Event()
+        worker.shutdown_mp_signal = threading.Event()
+        worker.heartbeat_thread = None
+        # Skip weight sync preparation in test since we don't need it
+        worker.state.set_weight_synced()
+
+        worker.init_scheduler()
+
+        async def test_helper():
+            worker.lazy_initialize_rollout_engine(load_format="auto")
+            try:
+                await worker.scheduler.start_async()
+                await worker.do_validation()
+            finally:
+                await worker.scheduler.stop_async()
+                worker.handle_shutdown()
+
+        asyncio.run(test_helper())
+        self.assertEqual(
+            len(worker.api_client.validation_completion_payloads),
+            cosmos_config.validation.batch_size * worker.api_client.max_iter,
         )
 
         # clean the test environment
