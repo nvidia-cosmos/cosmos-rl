@@ -48,15 +48,21 @@ _shared_experts_stream: Optional[torch.cuda.Stream] = None
 
 def is_deepep_supported():
     supported = False
-    # GroupedExpertsDeepEP requires both 'grouped_gemm' and 'deep_ep' packages to be installed.
-    if ops is not None:
-        try:
-            from deep_ep import Buffer  # noqa: F401
-            from deep_ep.utils import EventHandle, EventOverlap  # noqa: F401
+    # DeepEP is built for TORCH_CUDA_ARCH_LIST=9.0 by default
+    # which causes issues for older GPUs like L20
+    # Judging from https://github.com/deepseek-ai/DeepEP/issues/481 
+    # in order to install DeepEP for older architectures we would need to
+    # disable some features available for newer ones
+    if torch.cuda.get_device_properties().major >= 9:
+        # GroupedExpertsDeepEP requires both 'grouped_gemm' and 'deep_ep' packages to be installed.
+        if ops is not None:
+            try:
+                from deep_ep import Buffer  # noqa: F401
+                from deep_ep.utils import EventHandle, EventOverlap  # noqa: F401
 
-            supported = True
-        except ImportError as e:
-            print(f"Failed to import deep_ep: {e}")
+                supported = True
+            except ImportError as e:
+                print(f"Failed to import deep_ep: {e}")
     return supported
 
 
