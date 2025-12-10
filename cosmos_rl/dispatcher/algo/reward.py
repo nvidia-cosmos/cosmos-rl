@@ -402,7 +402,10 @@ class Reward:
                 tokenizer=self.tokenizer,
                 **kwargs,
             )
-            if len(val) == 2:
+            if isinstance(val, tuple) and len(val) == 2:
+                # If the reward function returns a tuple of (value, rewards_dict)
+                # The second element is expected to be a dictionary of reward components
+                # It will be used for metric logging and reporting
                 val, rewards_dict = val
                 all_rewards_dict.update(rewards_dict)
             total_reward += weight * val
@@ -418,8 +421,14 @@ class Reward:
                 tokenizer=self.tokenizer,
                 **kwargs,
             )
-            if len(val) == 2:
+            if isinstance(val, tuple) and len(val) == 2:
+                # If the reward function returns a tuple of (value, rewards_dict)
+                # The second element is expected to be a dictionary of reward components
+                # It will be used for metric logging and reporting
                 val, rewards_dict = val
+                assert isinstance(
+                    rewards_dict, dict
+                ), "The second element returned by reward function must be a dictionary containing reward components."
                 all_rewards_dict.update(rewards_dict)
             filter_reward += val * weight
 

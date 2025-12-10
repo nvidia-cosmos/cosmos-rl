@@ -627,11 +627,11 @@ class PolicyStatusManager:
                     report_data = aggregate_report_data(
                         report_data_list, report_data, prefix="val/"
                     )
-                    logger.info(
+                    logger.debug(
                         f"[Controller] Validation report data from total rollouts: {sum(len(rollouts) for rollouts in all_rollouts_lists)}"
                     )
                     for k, v in report_data.items():
-                        logger.info(f"[Controller] Validation report data: {k}: {v}")
+                        logger.debug(f"[Controller] Validation report data: {k}: {v}")
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
                             data=report_data,
@@ -892,11 +892,11 @@ class PolicyStatusManager:
                     )
                     self.report_data_list = []
 
-                    logger.info(
+                    logger.debug(
                         f"[Controller] Train report data from total rollouts: {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())}"
                     )
                     for k, v in self.train_report_data[train_step].items():
-                        logger.info(f"[Controller] Train report data: {k}: {v}")
+                        logger.debug(f"[Controller] Train report data: {k}: {v}")
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(

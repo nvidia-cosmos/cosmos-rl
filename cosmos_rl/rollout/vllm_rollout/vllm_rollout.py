@@ -488,6 +488,14 @@ class vLLMRollout(RolloutBase):
                         ],
                         completion_logprobs=logprobs,
                         completion_token_ids=token_ids,
+                        # Collect the cumulative logprob of the generated completions
+                        # Used for reward calculation to find the most likely mode reward.
+                        # This can indicate the most likelyhood of a generated completion.
+                        cumulative_logprob=[
+                            output.outputs[j].cumulative_logprob
+                            for output in outputs
+                            for j in range(len(output.outputs))
+                        ],
                     )
                 )
         except Exception as e:
@@ -534,6 +542,9 @@ class vLLMRollout(RolloutBase):
                         use_tqdm=False,
                     )
 
+                assert (
+                    len(results) == 1
+                ), "[Rollout] Expected single result for multi-turn rollout generation"
                 # TODO(zjx): support multi-path conversations search for multi-turn rollout generation
                 # extend the conversation with the rollout result
                 responses = [output.text for output in results[0].outputs]
@@ -550,6 +561,13 @@ class vLLMRollout(RolloutBase):
                         logprob, token_ids = self.parse_logprobs(output.logprobs)
                         if self.config.train.train_policy.use_decoupled_loss:
                             logprobs = logprob
+
+                # Collect the cumulative logprob of the generated completions
+                # Used for reward calculation to find the most likely mode reward.
+                # This can indicate the most likelyhood of a generated completion.
+                cumulative_logprob = [
+                    output.cumulative_logprob for output in results[0].outputs
+                ]
 
                 current_conversation = data_packer.extend_conversation(
                     current_conversation,
@@ -572,7 +590,13 @@ class vLLMRollout(RolloutBase):
 
             # return the last assistant message as the completion to compute the reward in controller
             completion = current_conversation[-1].content
-            return current_conversation, completion, logprobs, token_ids
+            return (
+                current_conversation,
+                completion,
+                logprobs,
+                token_ids,
+                cumulative_logprob,
+            )
 
         n_generation = sampling_params.n
         sampling_params = copy.deepcopy(sampling_params)
@@ -583,16 +607,22 @@ class vLLMRollout(RolloutBase):
             completions = []
             logprobs_list = []
             token_ids_list = []
+            cumulative_logprob_list = []
             for _ in range(n_generation):
-                new_conversation, completion, logprobs, token_ids = (
-                    generation_multi_turn_for_one_payload(
-                        copy.deepcopy(payload.conversation)
-                    )
+                (
+                    new_conversation,
+                    completion,
+                    logprobs,
+                    token_ids,
+                    cumulative_logprob,
+                ) = generation_multi_turn_for_one_payload(
+                    copy.deepcopy(payload.conversation)
                 )
                 conversations.append(new_conversation)
                 completions.append(completion)
                 logprobs_list.append(logprobs)
                 token_ids_list.append(token_ids)
+                cumulative_logprob_list.extend(cumulative_logprob)
             response.append(
                 RolloutResult(
                     conversation=payload.conversation,
@@ -600,6 +630,7 @@ class vLLMRollout(RolloutBase):
                     completed_conversations=conversations,
                     completion_logprobs=logprobs_list,
                     completion_token_ids=token_ids_list,
+                    cumulative_logprob=cumulative_logprob_list,
                 )
             )
 

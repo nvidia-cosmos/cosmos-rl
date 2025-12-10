@@ -75,6 +75,8 @@ class RolloutGroup:
 
         if self.payload.cumulative_logprob is not None:
             # Find the best reward and cumulative logprob from the group by the cumulative logprob
+            # We need calculate the most likely mode reward which is the reward of the completion
+            # with the highest cumulative logprob and highest probability
             assert (
                 len(self.payload.cumulative_logprob) == len(rewards)
             ), "[RolloutGroup] The length of cumulative_logprob should be the same as the length of completions"

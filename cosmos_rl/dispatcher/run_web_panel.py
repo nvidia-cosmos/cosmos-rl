@@ -395,7 +395,6 @@ async def validation_report(request: ValidationReportRequest):
     controller.policy_status_manager.validation_report_validation_results(
         request.validation_step, rollouts_list, controller.rollout_status_manager
     )
-    logger.info("[Controller] Validation report done")
     return {"message": "Validation rollout put"}
 
 
