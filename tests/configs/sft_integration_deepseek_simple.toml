@@ -23,7 +23,7 @@ train_batch_per_replica = 1
 sync_weight_interval = 1
 
 [policy]
-model_name_or_path = "heslami/DeepSeek-V3-4Layer"
+model_name_or_path = "yufanhuangNV/deepseek-v3-4layer"
 model_max_length = 1024
 model_gradient_checkpointing = true
 
