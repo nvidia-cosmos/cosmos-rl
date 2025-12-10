@@ -35,6 +35,7 @@ from cosmos_rl.rollout.rollout_task_scheduler import (
     RolloutTask,
     CompletedRollout,
 )
+from cosmos_rl.rollout.utils import update_payload_from_rollout_result
 from cosmos_rl.dispatcher.protocol import ValidationReportRequest
 from cosmos_rl.dispatcher.command import (
     Command,
@@ -282,6 +283,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
 
         # TODO(zjx): below variables need remove after refactor.
         self.temp_recv_tensor_queue = Queue()
+        self.current_step = 0
 
         self.setup(
             dataset=kwargs.get("dataset"),
@@ -534,39 +536,47 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             # Timeout reached, return normally
             pass
 
-    @torch.no_grad()
     async def do_validation(self):
         # submit payloads to scheduler
-        prompt_idxs: List[int] = []
-        validation_payloads: List[RLPayload] = []
+        total_prompts_count = 0
+        total_validation_payload_count = 0
         # Do validation here
         is_end = False
         while True:
             if not is_end:
-                prompts, is_end = self.request_new_prompts(
-                    self.val_batch_size,
-                    validation_step=self.current_step,
+                (
+                    fetched_prompts,
+                    no_more_prompts,
+                ) = await self._feed_prompts_to_scheduler(
+                    self.val_batch_size, validation_step=self.current_step
                 )
-                if prompts is not None:
-                    tasks = [
-                        RolloutTask(
-                            idx=prompt.prompt_idx,
-                            payload=prompt,
-                            sampling_params=self.val_sampling_params,
-                        )
-                        for prompt in prompts
-                    ]
-                    self.scheduler.put_rollout_batch(tasks)
+                total_prompts_count += fetched_prompts
+                is_end |= no_more_prompts
 
-            # wait all tasks are completed
-            while self.scheduler.completed_results() != self.val_batch_size:
-                await asyncio.sleep(0.1)
+            await asyncio.sleep(0)
 
+            # get processed results
             rollout_results = self.scheduler.get_all()
-            prompt_idxs.extend([p.idx for p in rollout_results])
-            validation_payloads.extend([p.payload for p in rollout_results])
+            if rollout_results:
+                validation_payloads: List[RLPayload] = []
+                for rr in rollout_results:
+                    pl = update_payload_from_rollout_result(
+                        rr.payload,
+                        rr.result,
+                        self.rollout.rollout_config.multi_turn_config.enable,
+                    )
+                    validation_payloads.append(pl)
+                total_validation_payload_count += len(validation_payloads)
 
-            if is_end and self.scheduler.is_idle():
+                self.reward_dispatcher.enqueue_rewards_cal(
+                    validation_payloads, True, self.current_step
+                )
+
+            if (
+                is_end
+                and self.scheduler.is_idle()
+                and total_prompts_count == total_validation_payload_count
+            ):
                 break
 
         # Clear the flag to indicate validation is done.
@@ -576,25 +586,39 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         )
 
         if should_report:
-            self.reward_dispatcher.enqueue_rewards_cal(
-                validation_payloads, True, self.current_step, prompt_idxs
-            )
             payloads, is_validation, current_step, empty = self.report_rollouts(
                 block=True
             )
             assert (
                 (is_validation and payloads is not None or payloads is None)
-                and (not empty or len(validation_payloads) == 0)
+                and (not empty or total_validation_payload_count == 0)
             ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
             while not empty:
                 assert (
                     is_validation or payloads is None
                 ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
                 if payloads is not None:
+                    for i in range(len(payloads)):
+                        (
+                            payloads[i].completions,
+                            payloads[i].completed_conversations,
+                            payloads[i].completion_logprobs,
+                            payloads[i].completion_token_ids,
+                            _,
+                        ) = self.val_data_packer.get_rollout_output(
+                            payloads[i].completions,
+                            payloads[i].completed_conversations,
+                            payloads[i].completion_logprobs,
+                            payloads[i].completion_token_ids,
+                        )
+                        if self.config.train.train_policy.rollout_as_token_ids:
+                            payloads[i].completions = [""] * len(
+                                payloads[i].completions
+                            )
+
                     response = ValidationReportRequest(
                         src_replica_name=self.replica_name,
                         validation_step=current_step,
-                        prompt_idxs=[],
                         payloads=payloads,
                         is_end=True,
                     )
@@ -603,33 +627,40 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                     self.reward_dispatcher.dequeue_rewards_cal()
                 )
 
-    async def try_fetch_new_prompts(self):
-        if self.state.prompt_fetch_end():
-            return
-
+    async def _feed_prompts_to_scheduler(
+        self, batch_size: int, validation_step: Optional[int] = None
+    ) -> Tuple[int, bool]:
+        """
+        Try to fetch new prompts from the controller.
+        Returns:
+            fetched_prompts (int): the number of prompts fetched
+            is_end (bool): whether the prompts are the end of the dataset
+        """
+        fetched_prompts = 0
         # try fetching new prompts
-        if (
-            self.scheduler.pending_tasks()
-            > self.config.rollout.async_config.max_concurrent_requests
-        ):
-            return
+        if self.scheduler.pending_tasks() > self.scheduler.max_concurrent_requests:
+            # skip fetching new prompts if the scheduler is busy
+            return fetched_prompts, False
 
         prompts, no_more_prompts = await asyncio.to_thread(
-            self.request_new_prompts, self.batch_size
+            self.request_new_prompts,
+            batch_size=batch_size,
+            validation_step=validation_step,
         )
-        if no_more_prompts:
-            logger.info(
-                f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
-            )
-            self.state.set_prompt_fetch_end()
 
         # packing the prompts into tasks and put into the scheduler
+        sp = (
+            self.sampling_params
+            if validation_step is None
+            else self.val_sampling_params
+        )
         if prompts is not None:
+            fetched_prompts = len(prompts)
             tasks = [
                 RolloutTask(
                     idx=prompt.prompt_idx,
                     payload=prompt,
-                    sampling_params=self.sampling_params,
+                    sampling_params=sp,
                 )
                 for prompt in prompts
                 # filter the prompts with valid weight version for fully synchronized mode
@@ -637,7 +668,9 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
             ]
             self.scheduler.put_rollout_batch(tasks)
 
-    async def check_generate_results(self) -> bool:
+        return fetched_prompts, no_more_prompts
+
+    async def _check_generate_results(self) -> bool:
         """
         Check if there are enough rollout results to report.
 
@@ -685,6 +718,24 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
         _, is_validation, _, _ = await asyncio.to_thread(self.report_rollouts)
         assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
 
+    async def do_generate(self):
+        """
+        Do the generation process.
+        """
+        if not self.state.prompt_fetch_end():
+            _, is_end = await self._feed_prompts_to_scheduler(
+                self.batch_size, validation_step=None
+            )
+            if is_end:
+                logger.info(
+                    f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
+                )
+                self.state.set_prompt_fetch_end()
+
+        # alway check the generate results to report to the controller.
+        await self._check_generate_results()
+        await asyncio.sleep(0)
+
     async def main_loop_async(self):
         """Main loop with async scheduler integration (coroutine version)."""
 
@@ -698,14 +749,17 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                 # All operations run in the same event loop, enabling true async concurrency
                 await self.consume_command(cmd_pred=None)
 
-                if self.validation_flag.is_set():
-                    # If encounter validation flag during last rollout generation or this command fetch, do validation first.
-                    await self.do_validation()
-
                 # If weight is not ready, nothing else to do.
                 if not self.state.weight_synced():
                     await asyncio.sleep(0)
                     continue
+
+                # TODO(zjx):
+                # 1. 在 update weight 之前，应当等待正在执行的 rollout 任务完成。
+                # 2. 在 validation 时，应当确保 weight update 任务不要运行
+                if self.validation_flag.is_set():
+                    # If encounter validation flag during last rollout generation or this command fetch, do validation first.
+                    await self.do_validation()
 
                 # check if we should finish the rollout generation worker
                 if (
@@ -726,8 +780,7 @@ class vLLMRolloutWorkerAsync(RolloutWorkerBase):
                     continue
 
                 # execute the fetch and generate process (async version)
-                await self.try_fetch_new_prompts()
-                await self.check_generate_results()
+                await self.do_generate()
 
                 # This allows other coroutines to process
                 await asyncio.sleep(0)
