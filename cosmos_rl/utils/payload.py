@@ -39,6 +39,8 @@ def extract_rollouts(
             payload.completion_logprobs = [[]] * len(payload.rewards)
         if payload.completion_token_ids is None:
             payload.completion_token_ids = [[]] * len(payload.rewards)
+        if payload.report_metrics is None:
+            payload.report_metrics = [{} for _ in range(len(payload.rewards))]
 
         rollouts = [
             Rollout(

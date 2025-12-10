@@ -627,11 +627,12 @@ class PolicyStatusManager:
                     report_data = aggregate_report_data(
                         report_data_list, report_data, prefix="val/"
                     )
-                    logger.debug(
-                        f"[Controller] Validation report data from total rollouts: {sum(len(rollouts) for rollouts in all_rollouts_lists)}"
+                    report_data_str = ", ".join(
+                        [f"{k}: {v}" for k, v in report_data.items()]
                     )
-                    for k, v in report_data.items():
-                        logger.debug(f"[Controller] Validation report data: {k}: {v}")
+                    logger.info(
+                        f"[Controller] Validation report data from total {sum(len(rollouts) for rollouts in all_rollouts_lists)} rollouts: {report_data_str}"
+                    )
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
                             data=report_data,
@@ -892,11 +893,15 @@ class PolicyStatusManager:
                     )
                     self.report_data_list = []
 
-                    logger.debug(
-                        f"[Controller] Train report data from total rollouts: {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())}"
+                    report_data_str = ", ".join(
+                        [
+                            f"{k}: {v}"
+                            for k, v in self.train_report_data[train_step].items()
+                        ]
                     )
-                    for k, v in self.train_report_data[train_step].items():
-                        logger.debug(f"[Controller] Train report data: {k}: {v}")
+                    logger.info(
+                        f"[Controller] Train report data from total {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())} rollouts: {report_data_str}"
+                    )
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(

@@ -303,7 +303,10 @@ class RewardCalculator:
                     valid=True,
                     weight_version=payloads[idx].weight_version,
                     report_metrics=[
-                        rollout.report_metrics for rollout in rollouts_group
+                        rollout.report_metrics
+                        if rollout.report_metrics is not None
+                        else {}
+                        for rollout in rollouts_group
                     ],
                     cumulative_logprob=payloads[idx].cumulative_logprob,
                 )
@@ -428,7 +431,10 @@ class RewardCalculator:
                         ],
                         weight_version=payloads[idx].weight_version,
                         report_metrics=[
-                            rollout.report_metrics for rollout in rollouts_group
+                            rollout.report_metrics
+                            if rollout.report_metrics is not None
+                            else {}
+                            for rollout in rollouts_group
                         ],
                         cumulative_logprob=payloads[idx].cumulative_logprob,
                     )
@@ -468,7 +474,10 @@ class RewardCalculator:
                         ],
                         weight_version=payloads[idx].weight_version,
                         report_metrics=[
-                            rollout.report_metrics for rollout in rollouts_group
+                            rollout.report_metrics
+                            if rollout.report_metrics is not None
+                            else {}
+                            for rollout in rollouts_group
                         ],
                         cumulative_logprob=payloads[idx].cumulative_logprob,
                     )
