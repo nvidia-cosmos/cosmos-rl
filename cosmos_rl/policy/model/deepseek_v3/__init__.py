@@ -19,8 +19,6 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.distributed as dist
-from safetensors import safe_open
 from torch.nn.modules.module import _IncompatibleKeys
 from transformers import AutoConfig
 
@@ -38,9 +36,9 @@ from cosmos_rl.policy.model.deepseek_v3 import deepseekv3_mapped
 from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
     DeepseekV3MoEWeightMapper,
     convert_weight_from_hf,
-    weight_dequant,
 )
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import clear_weight_name, resolve_model_path, retry
 
@@ -223,35 +221,14 @@ class DeepseekV3MoEModel(BaseModel):
         device: torch.device,
         revision: Optional[str] = None,
     ):
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        # If the model path is a local path, do not dequant the weights
-        dequant_weights = False if len(model_name_or_path.split("/")) > 2 else True
+        # Initialize multi-rank weight loader
+        loader = MultiRankWeightLoader(parallel_dims)
 
-        def _broadcast_data(data, src_rank):
-            container = [data]
-            dist.broadcast_object_list(container, src=src_rank)
-            return container[0]
-
-        # 1. Setup Phase (Rank 0 resolves structure)
-        model_type = None
-        safetensors_files = []
-        model_path = ""
-
-        if rank == 0:
-            model_type = retry(AutoConfig.from_pretrained)(
-                model_name_or_path, trust_remote_code=True
-            ).model_type
-            model_path = resolve_model_path(model_name_or_path, revision)
-            safetensors_files = [
-                f for f in os.listdir(model_path) if f.endswith(".safetensors")
-            ]
-            safetensors_files.sort()  # Ensure deterministic order
-
-        # Broadcast metadata
-        setup_info = (model_type, safetensors_files, model_path) if rank == 0 else None
-        model_type, safetensors_files, model_path = _broadcast_data(
-            setup_info, src_rank=0
+        # Load all safetensors from `model_path`
+        model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
+        model_path = resolve_model_path(model_name_or_path, revision=revision)
+        safetensors_files = sorted(
+            [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
         )
 
         self_state_dict = self.state_dict()
@@ -260,194 +237,79 @@ class DeepseekV3MoEModel(BaseModel):
         lm_head_weight_key = "model.lm_head.weight"
         embed_tokens_weight_key = "model.model.embed_tokens.weight"
 
-        weights_of_ckpt_names = set()
-        reserved = {}
-        scale_inv_paths = {}
+        # Step 1: Load files in parallel
+        reserved_keys = {embed_tokens_weight_key}
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names, reserved = (
+            loader.load_files_parallel(
+                model_path, device, safetensors_files, reserved_keys=reserved_keys
+            )
+        )
 
-        # 2. Build Scale Map (Rank 0 scans headers quickly)
-        if rank == 0:
-            for f in safetensors_files:
-                # CPU load for headers is fast/cheap
-                ckpt = retry(safe_open)(
-                    os.path.join(model_path, f), framework="pt", device="cpu"
+        # Step 2: Gather tensor names and build mapping
+        all_tensor_names, tensor_to_rank_map = (
+            loader.gather_tensor_names_and_build_mapping(
+                weights_of_ckpt_names, rank_tensors
+            )
+        )
+
+        # Step 3: Process each tensor
+        for name, tensor in loader.iterate_tensors(
+            all_tensor_names,
+            tensor_to_rank_map,
+            rank_tensors,
+            rank_tensor_metadata,
+            device,
+        ):
+            if name == embed_tokens_weight_key:
+                reserved[name] = tensor.clone()
+
+            dest_name, shared_weight, expert_id = convert_weight_from_hf(
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                n_experts=self.config.n_routed_experts,
+            )
+
+            if dest_name is None:
+                continue
+
+            if dest_name not in self_state_dict and parallel_dims.pp_enabled:
+                continue
+
+            slice_range = None
+            if ".experts.gate_proj" in dest_name:
+                dest_name = dest_name.replace("gate_projs", "gate_and_up_projs")
+                slice_range = slice(0, self.config.moe_inter_dim)
+            elif ".experts.up_proj" in dest_name:
+                dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
+                slice_range = slice(self.config.moe_inter_dim, None)
+
+            target_tensor = self_state_dict[dest_name]
+            if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                target_tensor = target_tensor.to_local()
+
+            if expert_id is not None:
+                n_local_experts = (
+                    self.config.n_routed_experts
+                    // parallel_dims.tp
+                    // parallel_dims.dp_shard
                 )
-                keys = ckpt.keys()
-                for name in keys:
-                    if name.endswith("weight_scale_inv"):
-                        scale_inv_paths[name] = os.path.join(model_path, f)
+                expert_id = expert_id % n_local_experts
+                target_tensor = target_tensor[expert_id]
 
-        scale_inv_paths = _broadcast_data(scale_inv_paths, src_rank=0)
+            if slice_range is not None:
+                assert (
+                    target_tensor.shape[0] == 2 * self.config.moe_inter_dim
+                ), f"Shape mismatch for {dest_name}"
+                target_tensor = target_tensor[slice_range]
 
-        # 3. Parallel Batch Loading
-        # Process files in chunks of size 'world_size'
-        total_files = len(safetensors_files)
-        for batch_start in range(0, total_files, world_size):
-            batch_end = min(batch_start + world_size, total_files)
-            batch_files = safetensors_files[batch_start:batch_end]
+            assert (
+                target_tensor.shape == shared_weight.shape
+            ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
 
-            # --- A. PARALLEL READ PHASE ---
-            # Determine which file in this batch belongs to the current rank
-            # rank 0 gets batch_files[0], rank 1 gets batch_files[1], etc.
-            local_file_index = rank
-            local_file_name = None
-            local_file_data = {}  # Buffer to hold the full file in RAM
-
-            if local_file_index < len(batch_files):
-                local_file_name = batch_files[local_file_index]
-                logger.info(f"Rank {rank} parallely reading: {local_file_name}")
-
-                # Load the ENTIRE file into CPU RAM
-                f_path = os.path.join(model_path, local_file_name)
-                ckpt = retry(safe_open)(f_path, framework="pt", device=str(device))
-                for k in ckpt.keys():
-                    local_file_data[k] = ckpt.get_tensor(k)
-
-            # Barrier ensures all ranks have finished reading their assigned file
-            # before we start the network-heavy broadcast phase.
-            torch.distributed.barrier()
-
-            # --- B. BROADCAST & PROCESS PHASE ---
-            # Iterate through the batch. Each rank takes a turn being the 'sender'
-            for i, _ in enumerate(batch_files):
-                owner_rank = (batch_start + i) % world_size
-                is_owner = rank == owner_rank
-
-                # Owner knows the keys (from their local_file_data buffer)
-                current_file_keys = list(local_file_data.keys()) if is_owner else None
-                file_keys = _broadcast_data(current_file_keys, src_rank=owner_rank)
-
-                for name in file_keys:
-                    tensor = None
-                    skip_weight = False
-
-                    # -- Owner Dequantizes locally --
-                    if is_owner:
-                        tensor = local_file_data[name]
-
-                        if name.endswith("weight_scale_inv") or "layers.61" in name:
-                            skip_weight = True
-                        else:
-                            if (
-                                (
-                                    "down_proj" in name
-                                    or "up_proj" in name
-                                    or "gate_proj" in name
-                                    or "self_attn.kv_a_proj_with_mqa" in name
-                                    or "self_attn.kv_b_proj" in name
-                                    or "self_attn.o_proj" in name
-                                    or "self_attn.q_a_proj" in name
-                                    or "self_attn.q_b_proj" in name
-                                )
-                                and "weight" in name
-                                and dequant_weights
-                            ):
-                                inv_name = name + "_scale_inv"
-
-                                # Try to find scale in local buffer first (fastest)
-                                if inv_name in local_file_data:
-                                    inv_tensor = local_file_data[inv_name]
-                                    tensor = weight_dequant(tensor, inv_tensor)
-                                # Fallback: scale is in a different file (rare, but possible)
-                                elif inv_name in scale_inv_paths:
-                                    inv_path = scale_inv_paths[inv_name]
-                                    inv_tensor = retry(safe_open)(
-                                        inv_path, framework="pt", device=str(device)
-                                    ).get_tensor(inv_name)
-                                    tensor = weight_dequant(tensor, inv_tensor)
-
-                    # -- Sync Skip --
-                    skip_val = 1 if skip_weight else 0
-                    skip_tensor = torch.tensor(
-                        [skip_val], device=device, dtype=torch.int8
-                    )
-                    dist.broadcast(skip_tensor, src=owner_rank)
-                    if skip_tensor.item() == 1:
-                        continue
-
-                    weights_of_ckpt_names.add(name)
-
-                    # -- Broadcast Metadata --
-                    if is_owner:
-                        meta = (tensor.shape, tensor.dtype)
-                    else:
-                        meta = None
-                    tensor_shape, tensor_dtype = _broadcast_data(
-                        meta, src_rank=owner_rank
-                    )
-
-                    # -- Broadcast Data --
-                    if not is_owner:
-                        tensor = torch.empty(
-                            tensor_shape, dtype=tensor_dtype, device=device
-                        )
-
-                    if is_owner:
-                        tensor = tensor.to(device).contiguous()
-
-                    dist.broadcast(tensor, src=owner_rank)
-
-                    # -- Local Slicing/Sharding (All Ranks) --
-                    if name == embed_tokens_weight_key:
-                        reserved[name] = tensor.clone()
-
-                    dest_name, shared_weight, expert_id = convert_weight_from_hf(
-                        tensor,
-                        name,
-                        model_type,
-                        parallel_dims,
-                        n_experts=self.config.n_routed_experts,
-                    )
-
-                    if dest_name is None:
-                        continue
-
-                    if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                        continue
-
-                    slice_range = None
-                    if ".experts.gate_proj" in dest_name:
-                        dest_name = dest_name.replace("gate_projs", "gate_and_up_projs")
-                        slice_range = slice(0, self.config.moe_inter_dim)
-                    elif ".experts.up_proj" in dest_name:
-                        dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
-                        slice_range = slice(self.config.moe_inter_dim, None)
-
-                    target_tensor = self_state_dict[dest_name]
-                    if isinstance(target_tensor, torch.distributed.tensor.DTensor):
-                        target_tensor = target_tensor.to_local()
-
-                    if expert_id is not None:
-                        n_local_experts = (
-                            self.config.n_routed_experts
-                            // parallel_dims.tp
-                            // parallel_dims.dp_shard
-                        )
-                        expert_id = expert_id % n_local_experts
-                        target_tensor = target_tensor[expert_id]
-
-                    if slice_range is not None:
-                        assert (
-                            target_tensor.shape[0] == 2 * self.config.moe_inter_dim
-                        ), f"Shape mismatch for {dest_name}"
-                        target_tensor = target_tensor[slice_range]
-
-                    assert (
-                        target_tensor.shape == shared_weight.shape
-                    ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
-
-                    with torch.no_grad():
-                        target_tensor.data.copy_(shared_weight)
-
-                    del tensor
-                    del shared_weight
-
-            # Cleanup buffer to free RAM for next batch
-            del local_file_data
-            torch.cuda.empty_cache()
-            if rank == 0:
-                logger.info(
-                    f"Finished processing batch starting at index {batch_start}"
-                )
+            with torch.no_grad():
+                target_tensor.data.copy_(shared_weight)
 
         if (
             lm_head_weight_key not in weights_of_ckpt_names
