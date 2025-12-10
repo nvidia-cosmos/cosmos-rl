@@ -652,7 +652,7 @@ class Qwen3MoE(BaseModel):
                     n_local_experts = (
                         self.model_args.n_experts
                         // parallel_dims.tp
-                        // parallel_dims.dp_shard
+                        // (parallel_dims.dp_shard * parallel_dims.cp)
                     )
 
                     expert_id = expert_id % n_local_experts
