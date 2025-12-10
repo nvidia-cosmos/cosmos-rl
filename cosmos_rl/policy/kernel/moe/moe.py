@@ -50,7 +50,7 @@ def is_deepep_supported():
     supported = False
     # DeepEP is built for TORCH_CUDA_ARCH_LIST=9.0 by default
     # which causes issues for older GPUs like L20
-    # Judging from https://github.com/deepseek-ai/DeepEP/issues/481 
+    # Judging from https://github.com/deepseek-ai/DeepEP/issues/481
     # in order to install DeepEP for older architectures we would need to
     # disable some features available for newer ones
     if torch.cuda.get_device_properties().major >= 9:
