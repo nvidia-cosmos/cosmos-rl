@@ -245,7 +245,7 @@ class MultiRankWeightLoader:
                 dtype_int_tensor = torch.zeros(1, dtype=torch.long, device=device)
 
             # Broadcast shape length first
-            dist.broadcast(shape_len_tensor, src=tensor_rank, group=self.group)
+            dist.broadcast(shape_len_tensor, group=self.group, group_src=tensor_rank)
             shape_len = shape_len_tensor.item()
 
             # Create shape_tensor with correct size for all ranks
@@ -253,10 +253,10 @@ class MultiRankWeightLoader:
                 shape_tensor = torch.zeros(shape_len, dtype=torch.long, device=device)
 
             # Broadcast shape values
-            dist.broadcast(shape_tensor, src=tensor_rank, group=self.group)
+            dist.broadcast(shape_tensor, group=self.group, group_src=tensor_rank)
 
             # Broadcast dtype
-            dist.broadcast(dtype_int_tensor, src=tensor_rank, group=self.group)
+            dist.broadcast(dtype_int_tensor, group=self.group, group_src=tensor_rank)
 
             if self.rank != tensor_rank:
                 tensor_shape = shape_tensor.cpu().tolist()
@@ -268,7 +268,7 @@ class MultiRankWeightLoader:
                 )
 
             # Broadcast the actual tensor data
-            dist.broadcast(ckpt_tensor, src=tensor_rank, group=self.group)
+            dist.broadcast(ckpt_tensor, group=self.group, group_src=tensor_rank)
 
         # Ensure ckpt_tensor is not None
         if ckpt_tensor is None:
@@ -345,7 +345,7 @@ class MultiRankWeightLoader:
             shape_len_tensor = torch.tensor(
                 [shape_len], dtype=torch.long, device=device
             )
-            dist.broadcast(shape_len_tensor, src=0, group=self.group)
+            dist.broadcast(shape_len_tensor, group=self.group, group_src=0)
             shape_len = shape_len_tensor.item()
 
             # Broadcast shape values (all ranks create tensor with same size)
@@ -355,13 +355,13 @@ class MultiRankWeightLoader:
                 )
             else:
                 shape_tensor = torch.zeros(shape_len, dtype=torch.long, device=device)
-            dist.broadcast(shape_tensor, src=0, group=self.group)
+            dist.broadcast(shape_tensor, group=self.group, group_src=0)
 
             # Broadcast dtype as integer
             dtype_int_tensor = torch.tensor(
                 [tensor_dtype_int], dtype=torch.long, device=device
             )
-            dist.broadcast(dtype_int_tensor, src=0, group=self.group)
+            dist.broadcast(dtype_int_tensor, group=self.group, group_src=0)
 
             if self.rank != 0:
                 tensor_shape = shape_tensor.cpu().tolist()
@@ -370,7 +370,7 @@ class MultiRankWeightLoader:
                 )
                 tensor = torch.empty(tensor_shape, dtype=tensor_dtype, device=device)
 
-            dist.broadcast(tensor, src=0, group=self.group)
+            dist.broadcast(tensor, group=self.group, group_src=0)
         else:
             assert tensor is not None, "tensor must not be None when world_size == 1"
 
