@@ -464,7 +464,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                                 )
                                 assert self.global_rank == p_rank
                                 logger.debug(
-                                    f"Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
+                                    f"[Policy] Sending {dest_name} from policy rank {self.global_rank} to rollout rank {r_rank}, {view.shape} with dtype: {view.dtype}."
                                 )
                                 grouped_send_ops.append((view, r_rank, dest_name))
                                 total_bytes_sent += view.numel() * view.element_size()
@@ -620,7 +620,7 @@ class RLPolicyWorker(PolicyWorkerBase):
             assert all(
                 rollout.prompt_idx >= 0 for rollout in rollouts
             ), "All rollouts from controller should have a valid prompt index"
-            if self.config.train.local_dataset and not self.config.train.non_text:
+            if self.config.train.local_dataset:
                 for i in range(len(rollouts)):
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx

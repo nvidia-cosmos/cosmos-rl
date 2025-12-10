@@ -43,10 +43,10 @@ class RLDataset(Dataset):
         return idx, RLPayload(prompt=prompt, prompt_idx=idx)
 
     def get_reference_answer(self, idx: int) -> Any:
-        assert hasattr(
-            self.dataset, "get_reference_answer"
-        ), "Dataset should have a `get_reference_answer` method"
-        return self.dataset.get_reference_answer(idx)
+        if hasattr(self.dataset, "get_reference_answer"):
+            return self.dataset.get_reference_answer(idx)
+        else:
+            return ""
 
 
 class RLInternalDataset(Dataset):

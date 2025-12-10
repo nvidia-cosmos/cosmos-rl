@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 REGISTERED_ALGOs = {}
@@ -24,8 +24,8 @@ class RuleBasedAlgo(ABC):
     @abstractmethod
     def compute_reward(
         self, to_be_evaluated: Any, reference: Any, prompt: Any = None, **kwargs
-    ) -> Tuple[float, float]:
-        return 0.0, 0.0
+    ) -> Tuple[float, float, Dict[str, Any]]:
+        return 0.0, 0.0, {}
 
     @abstractmethod
     def compute_advantage(self, rewards: List[float]) -> List[float]:

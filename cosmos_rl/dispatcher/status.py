@@ -33,6 +33,7 @@ from cosmos_rl.utils.wandb_logger import (
 from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from transformers import AutoTokenizer
 import numpy as np
+from cosmos_rl.utils.util import aggregate_report_data
 
 
 class ReplicaScalingEnum(StrEnum):
@@ -616,6 +617,22 @@ class PolicyStatusManager:
                     logger.info(
                         f"[Controller] Validation finished, average reward: {avg_reward}, total rollouts: {len(rewards)}, max reward: {max_reward}, min reward: {min_reward}, std reward: {std_reward} at step {validation_step}"
                     )
+                    report_data_list = [
+                        rollout.report_metrics
+                        if rollout.report_metrics is not None
+                        else {}
+                        for rollouts in all_rollouts_lists
+                        for rollout in rollouts
+                    ]
+                    report_data = aggregate_report_data(
+                        report_data_list, report_data, prefix="val/"
+                    )
+                    report_data_str = ", ".join(
+                        [f"{k}: {v}" for k, v in report_data.items()]
+                    )
+                    logger.info(
+                        f"[Controller] Validation report data from total {sum(len(rollouts) for rollouts in all_rollouts_lists)} rollouts: {report_data_str}"
+                    )
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
                             data=report_data,
@@ -734,7 +751,7 @@ class PolicyStatusManager:
                 idx + self.total_pending_rollouts()
             ) // (
                 self.config.train.train_batch_per_replica
-                * len(self.get_all_atoms_arrived_replicas())
+                * max(len(self.get_all_atoms_arrived_replicas()), 1)
             )
             if (
                 estimated_step - rollout.weight_version
@@ -851,39 +868,9 @@ class PolicyStatusManager:
                         "train/effective_entropy": total_effective_entropy,
                         "train/total_steps": total_steps,
                     }
-                    all_keys = set().union(*[r.keys() for r in self.report_data_list])
-                    # Handle other metrics with suffixes for update to wandb and logging
-                    for k in all_keys:
-                        if k not in policy_report_data:
-                            if k.endswith("_max"):
-                                policy_report_data[k] = np.max(
-                                    [data.get(k, 0) for data in self.report_data_list]
-                                )
-                            elif k.endswith("_min"):
-                                policy_report_data[k] = np.min(
-                                    [data.get(k, 0) for data in self.report_data_list]
-                                )
-                            elif k.endswith("_sum"):
-                                policy_report_data[k] = np.sum(
-                                    [data.get(k, 0) for data in self.report_data_list]
-                                )
-                            elif k.endswith("_std"):
-                                # Approximate stddev calculation
-                                policy_report_data[k] = math.sqrt(
-                                    sum(
-                                        s**2
-                                        for s in [
-                                            data.get(k, 0)
-                                            for data in self.report_data_list
-                                        ]
-                                    )
-                                    / len(self.report_data_list)
-                                )
-                            else:
-                                # including _mean and _avg suffixes
-                                policy_report_data[k] = np.mean(
-                                    [data.get(k, 0) for data in self.report_data_list]
-                                )
+                    policy_report_data = aggregate_report_data(
+                        self.report_data_list, policy_report_data
+                    )
                     if self.config.mode == "colocated":
                         for data in self.report_data_list:
                             # Handle dynamic sampling statistics update in colocated mode
@@ -905,6 +892,16 @@ class PolicyStatusManager:
                         policy_report_data
                     )
                     self.report_data_list = []
+
+                    report_data_str = ", ".join(
+                        [
+                            f"{k}: {v}"
+                            for k, v in self.train_report_data[train_step].items()
+                        ]
+                    )
+                    logger.info(
+                        f"[Controller] Train report data from total {self.config.train.train_batch_per_replica * len(self.get_all_atoms_arrived_replicas())} rollouts: {report_data_str}"
+                    )
 
                     if "wandb" in self.config.logging.logger and is_wandb_available():
                         log_wandb(
@@ -1144,6 +1141,14 @@ class PolicyStatusManager:
                     "rollout/filter_reward_max": np.max(filter_rewards),
                     "rollout/filter_reward_min": np.min(filter_rewards),
                 }
+
+                report_data_list = [
+                    rollout.report_metrics if rollout.report_metrics is not None else {}
+                    for rollout in rollouts_of_this_step
+                ]
+                report_data = aggregate_report_data(
+                    report_data_list, report_data, prefix="train/"
+                )
                 self.train_report_data[self.current_step] = report_data
 
 

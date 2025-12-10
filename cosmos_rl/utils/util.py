@@ -58,6 +58,7 @@ from safetensors import safe_open
 from cosmos_rl.utils.constant import CACHE_DIR
 from cosmos_rl.policy.config import Config as CosmosConfig
 import math
+import numpy as np
 
 
 def create_cached_dir_if_needed():
@@ -1296,3 +1297,46 @@ def call_setup(
             f"{dataset_or_datapacker.__class__.__name__}.setup() must accept either "
             f"(self, config) or (self, config, tokenizer), but signature was: {sig}"
         )
+
+
+def aggregate_report_data(
+    report_data_list, report_data, prefix: str = ""
+) -> Dict[str, Any]:
+    """
+    Aggregate the report data from the list of report data.
+    Args:
+        report_data_list: the list of report data
+        report_data: the report data to be aggregated
+        prefix: the prefix to be added to the keys of the report data
+    Returns:
+        the aggregated report data
+    """
+    all_keys = set().union(*[r.keys() for r in report_data_list])
+    # Handle other metrics with suffixes for update to wandb and logging
+    for k in all_keys:
+        prefixed_k = f"{prefix}{k}" if prefix else k
+        if prefixed_k not in report_data:
+            if k.endswith("_max"):
+                report_data[prefixed_k] = np.max(
+                    [data.get(k, 0) for data in report_data_list]
+                )
+            elif k.endswith("_min"):
+                report_data[prefixed_k] = np.min(
+                    [data.get(k, 0) for data in report_data_list]
+                )
+            elif k.endswith("_sum") or k.endswith("_count") or k.endswith("_cnt"):
+                report_data[prefixed_k] = np.sum(
+                    [data.get(k, 0) for data in report_data_list]
+                )
+            elif k.endswith("_std"):
+                # Approximate stddev calculation
+                report_data[prefixed_k] = math.sqrt(
+                    sum(s**2 for s in [data.get(k, 0) for data in report_data_list])
+                    / len(report_data_list)
+                )
+            else:
+                # including _mean and _avg suffixes
+                report_data[prefixed_k] = np.mean(
+                    [data.get(k, 0) for data in report_data_list]
+                )
+    return report_data
