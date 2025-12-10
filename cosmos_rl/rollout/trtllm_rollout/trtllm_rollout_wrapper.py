@@ -181,11 +181,8 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         self.reward_dispatcher.setup(
             config=self.config,
-            data_fetcher=self.data_fetcher,
-            dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
-            val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
@@ -236,7 +233,7 @@ class TRTLLMRolloutWrapper(TRTLLMRolloutWorkerBase):
 
         if prompt_queue.empty():
             payloads, is_end = self.api_client.get_next_prompt(batch_size, **kwargs)
-            if self.config.train.local_dataset and not self.config.train.non_text:
+            if self.config.train.local_dataset:
                 is_validation = kwargs.get("validation_step", None) is not None
                 for payload in payloads:
                     payload["prompt"] = self.data_fetcher.get_payload_by_index(

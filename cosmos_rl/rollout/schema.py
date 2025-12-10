@@ -20,7 +20,7 @@ from cosmos_rl.dispatcher.data.schema import ConversationType
 
 class RolloutResult(BaseModel):
     # The input prompt for the completions
-    prompt: Optional[Union[str, ConversationType]] = None
+    prompt: Optional[Union[str, ConversationType, Any]] = None
 
     # The original input prompt in conversation format
     conversation: Optional[ConversationType] = None
@@ -39,3 +39,6 @@ class RolloutResult(BaseModel):
 
     # The token ids of the generated completions
     completion_token_ids: Optional[List[List[int]]] = None
+
+    # The cumulative logprob of the generated completions which indicates the total probability of the generated completions
+    cumulative_logprob: Optional[List[float]] = None

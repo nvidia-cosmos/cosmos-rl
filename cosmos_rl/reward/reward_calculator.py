@@ -13,19 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Dict, Any, Optional, Callable, Tuple
+from typing import List, Dict, Optional, Callable, Tuple
 from cosmos_rl.dispatcher.algo.base import RuleBasedAlgo
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from torch.utils.data import Dataset
 from cosmos_rl.dispatcher.algo.base import REGISTERED_ALGOs
 from cosmos_rl.dispatcher.algo.reward import Reward
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.config import Config
 import cosmos_rl.utils.constant as constant
 import cosmos_rl.utils.util as util
-from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from queue import Queue
 
 
@@ -75,6 +73,27 @@ class RolloutGroup:
         advantages = algo.compute_advantage([r[0] for r in rewards])
         logger.debug(f"[RolloutGroup] Advantages: {advantages}")
 
+        if self.payload.cumulative_logprob is not None:
+            # Find the best reward and cumulative logprob from the group by the cumulative logprob
+            assert (
+                len(self.payload.cumulative_logprob) == len(rewards)
+            ), "[RolloutGroup] The length of cumulative_logprob should be the same as the length of completions"
+            best_reward = None
+            best_cumulative_logprob = None
+            for i, reward in enumerate(rewards):
+                if self.payload.cumulative_logprob[i] is None:
+                    continue
+                if (
+                    best_cumulative_logprob is None
+                    or self.payload.cumulative_logprob[i] > best_cumulative_logprob
+                ):
+                    best_reward = reward[0]
+                    best_cumulative_logprob = self.payload.cumulative_logprob[i]
+            if best_reward is not None:
+                # Only assign the best reward to the first rollout in the group
+                rewards[0][2]["most_likely_mode_reward_mean"] = best_reward
+                rewards[0][2]["most_likely_mode_reward_count"] = 1
+
         # If the completed_conversations is not provided, we use None for all the rollouts
         if self.payload.completed_conversations is not None:
             completed_conversations = self.payload.completed_conversations
@@ -100,6 +119,7 @@ class RolloutGroup:
                 filter_reward=reward[1],
                 completion_logprobs=logprobs,
                 completion_token_ids=token_ids,
+                report_metrics=reward[2],
             )
             for completion, completed_conversation, reward, advantage, logprobs, token_ids in zip(
                 self.payload.completions,
@@ -152,23 +172,18 @@ class RewardCalculator:
     def setup(
         self,
         config: Config,
-        dataset: Optional[Dataset] = None,
-        val_dataset: Optional[Dataset] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
         val_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[BaseDataPacker] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
-        data_fetcher: Optional[DataFetcherBase] = None,
     ) -> None:
         """
-        Setup the RewardCalculator with the given configuration and datasets.
+        Setup the RewardCalculator with the given configuration and data packers.
         Args:
             config (Config): The configuration for the reward calculator.
-            dataset (Optional[Dataset]): The training dataset.
             reward_fns (Optional[List[Callable]]): The list of reward functions for training.
             filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
-            val_dataset (Optional[Dataset]): The validation dataset.
             val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
             data_packer (Optional[BaseDataPacker]): The data packer for processing the payloads.
             val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
@@ -180,7 +195,6 @@ class RewardCalculator:
             return
         self.config = config
         self.tokenizer = util.setup_tokenizer(self.config.policy.model_name_or_path)
-        self.data_fetcher = data_fetcher
 
         self.rl_algo = REGISTERED_ALGOs[constant.Algo.GRPO](
             reward_fn=Reward(
@@ -228,11 +242,6 @@ class RewardCalculator:
             cls._instance = cls()
         return cls._instance
 
-    def query_reference_answer(
-        self, prompt_idx: int, dataset_type: str = "train"
-    ) -> Any:
-        return self.data_fetcher.query_reference_answer(prompt_idx, dataset_type)
-
     def compute_validation_rewards(
         self,
         payloads: List[RLPayload],
@@ -259,9 +268,7 @@ class RewardCalculator:
                 payload=payload,
                 # Only report once per replica, so is_end is always True
                 is_end=True,
-                reference_answer=payload.reference_answer
-                if not self.config.train.local_dataset
-                else self.query_reference_answer(payload.prompt_idx, "val"),
+                reference_answer=payload.reference_answer,
             )
             for _, payload in enumerate(payloads)
         ]
@@ -293,6 +300,10 @@ class RewardCalculator:
                     ],
                     valid=True,
                     weight_version=payloads[idx].weight_version,
+                    report_metrics=[
+                        rollout.report_metrics for rollout in rollouts_group
+                    ],
+                    cumulative_logprob=payloads[idx].cumulative_logprob,
                 )
             )
         return payload_list, True, step
@@ -330,9 +341,7 @@ class RewardCalculator:
                 prompt_idx=payload.prompt_idx,
                 payload=payload,
                 is_end=False,
-                reference_answer=payload.reference_answer
-                if not self.config.train.local_dataset
-                else self.query_reference_answer(payload.prompt_idx),
+                reference_answer=payload.reference_answer,
             )
             for _, payload in enumerate(payloads)
         ]
@@ -416,6 +425,10 @@ class RewardCalculator:
                             for rollout in rollouts_group
                         ],
                         weight_version=payloads[idx].weight_version,
+                        report_metrics=[
+                            rollout.report_metrics for rollout in rollouts_group
+                        ],
+                        cumulative_logprob=payloads[idx].cumulative_logprob,
                     )
                 )
             else:
@@ -452,6 +465,10 @@ class RewardCalculator:
                             for rollout in rollouts_group
                         ],
                         weight_version=payloads[idx].weight_version,
+                        report_metrics=[
+                            rollout.report_metrics for rollout in rollouts_group
+                        ],
+                        cumulative_logprob=payloads[idx].cumulative_logprob,
                     )
                 )
         return payload_list, False, step
@@ -472,24 +489,19 @@ class RewardDispatcher:
     def setup(
         self,
         config: Config,
-        data_fetcher: DataFetcherBase,
-        dataset: Optional[Dataset] = None,
         reward_fns: Optional[List[Callable]] = None,
         filter_reward_fns: Optional[List[Callable]] = None,
-        val_dataset: Optional[Dataset] = None,
         val_reward_fns: Optional[List[Callable]] = None,
         data_packer: Optional[BaseDataPacker] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
         num_workers: int = 2,
     ) -> None:
         """
-        Setup the RewardCalculator with the given configuration and datasets.
+        Setup the RewardCalculator with the given configuration and data packers.
         Args:
             config (Config): The configuration for the reward calculator.
-            dataset (Optional[Dataset]): The training dataset.
             reward_fns (Optional[List[Callable]]): The list of reward functions for training.
             filter_reward_fns (Optional[List[Callable]]): The list of filter reward functions for dynamic sampling.
-            val_dataset (Optional[Dataset]): The validation dataset.
             val_reward_fns (Optional[List[Callable]]): The list of reward functions for validation.
             data_packer (Optional[BaseDataPacker]): The data packer for processing the payloads.
             val_data_packer (Optional[BaseDataPacker]): The data packer for processing the validation payloads.
@@ -498,10 +510,8 @@ class RewardDispatcher:
 
         def worker_init(
             config,
-            dataset,
             reward_fns,
             filter_reward_fns,
-            val_dataset,
             val_reward_fns,
             data_packer,
             val_data_packer,
@@ -509,22 +519,17 @@ class RewardDispatcher:
             reward_calculator = RewardCalculator.get_instance()
             reward_calculator.setup(
                 config=config,
-                dataset=dataset,
                 reward_fns=reward_fns,
                 filter_reward_fns=filter_reward_fns,
-                val_dataset=val_dataset,
                 val_reward_fns=val_reward_fns,
                 data_packer=data_packer,
                 val_data_packer=val_data_packer,
-                data_fetcher=data_fetcher,
             )
 
         worker_init(
             config,
-            dataset,
             reward_fns,
             filter_reward_fns,
-            val_dataset,
             val_reward_fns,
             data_packer,
             val_data_packer,
@@ -540,10 +545,8 @@ class RewardDispatcher:
                 initializer=worker_init,
                 initargs=(
                     config,
-                    dataset,
                     reward_fns,
                     filter_reward_fns,
-                    val_dataset,
                     val_reward_fns,
                     data_packer,
                     val_data_packer,

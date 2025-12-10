@@ -55,8 +55,9 @@ def extract_rollouts(
                 completion_token_ids=completion_token_ids,
                 completion_logprobs=completion_logprobs,
                 weight_version=payload.weight_version,
+                report_metrics=report_metrics,
             )
-            for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, filter_reward, completion_token_ids, completion_logprobs in zip(
+            for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, filter_reward, completion_token_ids, completion_logprobs, report_metrics in zip(
                 payload.completions,
                 payload.completed_conversations,
                 payload.rewards,
@@ -65,6 +66,7 @@ def extract_rollouts(
                 payload.filter_rewards,
                 payload.completion_token_ids,
                 payload.completion_logprobs,
+                payload.report_metrics,
             )
         ]
         assert all(

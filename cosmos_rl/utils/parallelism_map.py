@@ -350,7 +350,7 @@ class ParallelTopoMapper:
         if self.is_policy:
             self.parallelism_info_for_dtensor_params()
         else:
-            if self.backend == "vllm":
+            if "vllm" in self.backend:
                 self.parallelism_info_for_vllm_params()
             else:
                 logger.warning(
@@ -557,7 +557,7 @@ class ParallelTopoMapper:
         packed_modules_mapping = self.weight_mapper.packed_modules_mapping
         dims_rank_info = None
         tp_dim = None
-        if self.backend == "vllm":
+        if "vllm" in self.backend:
             if isinstance(part, (QKVParallelLinear)):
                 output_dim = getattr(param, "output_dim", 0)
                 assert any(
