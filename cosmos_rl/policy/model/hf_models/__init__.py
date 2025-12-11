@@ -403,14 +403,12 @@ class HFModel(BaseModel):
             return name
 
         # Step 1: Load files in parallel
-        reserved_keys = {embed_tokens_weight_key}
-        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names, reserved = (
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
             loader.load_files_parallel(
                 model_path,
                 device,
                 safetensors_files,
                 name_converter=name_converter,
-                reserved_keys=reserved_keys,
             )
         )
 
@@ -422,6 +420,7 @@ class HFModel(BaseModel):
         )
 
         # Step 3: Process each tensor
+        reserved = {}
         for name, tensor in loader.iterate_tensors(
             all_tensor_names,
             tensor_to_rank_map,

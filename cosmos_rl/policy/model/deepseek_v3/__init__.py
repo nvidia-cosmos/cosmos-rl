@@ -238,11 +238,8 @@ class DeepseekV3MoEModel(BaseModel):
         embed_tokens_weight_key = "model.model.embed_tokens.weight"
 
         # Step 1: Load files in parallel
-        reserved_keys = {embed_tokens_weight_key}
-        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names, reserved = (
-            loader.load_files_parallel(
-                model_path, device, safetensors_files, reserved_keys=reserved_keys
-            )
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
+            loader.load_files_parallel(model_path, device, safetensors_files)
         )
 
         # Step 2: Gather tensor names and build mapping
@@ -253,6 +250,7 @@ class DeepseekV3MoEModel(BaseModel):
         )
 
         # Step 3: Process each tensor
+        reserved = {}
         for name, tensor in loader.iterate_tensors(
             all_tensor_names,
             tensor_to_rank_map,
@@ -260,6 +258,7 @@ class DeepseekV3MoEModel(BaseModel):
             rank_tensor_metadata,
             device,
         ):
+            # Save embed_tokens tensor for weight tying if needed
             if name == embed_tokens_weight_key:
                 reserved[name] = tensor.clone()
 
@@ -316,7 +315,11 @@ class DeepseekV3MoEModel(BaseModel):
             and embed_tokens_weight_key in weights_of_ckpt_names
         ):
             name = lm_head_weight_key
-            assert embed_tokens_weight_key in reserved
+            # All ranks should have embed_tokens_weight_key tensor from Step 3
+            assert embed_tokens_weight_key in reserved, (
+                f"embed_tokens_weight_key {embed_tokens_weight_key} not found in reserved. "
+                f"This should have been saved during Step 3 processing."
+            )
             tensor = reserved[embed_tokens_weight_key]
             dest_name, shared_weight = convert_weight_from_hf(
                 tensor,

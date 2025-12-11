@@ -959,7 +959,7 @@ class Qwen2_5_VLConditionalModel(BaseModel):
             visual_state_dict = {}
 
         # Step 1: Load files in parallel
-        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names, reserved = (
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
             loader.load_files_parallel(model_path, device, safetensors_files)
         )
 

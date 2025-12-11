@@ -617,11 +617,8 @@ class Qwen3MoE(BaseModel):
         embed_tokens_weight_key = "model.embed_tokens.weight"
 
         # Step 1: Load files in parallel
-        reserved_keys = {embed_tokens_weight_key}
-        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names, reserved = (
-            loader.load_files_parallel(
-                model_path, device, safetensors_files, reserved_keys=reserved_keys
-            )
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
+            loader.load_files_parallel(model_path, device, safetensors_files)
         )
 
         # Step 2: Gather tensor names and build mapping
@@ -632,6 +629,7 @@ class Qwen3MoE(BaseModel):
         )
 
         # Step 3: Process each tensor
+        reserved = {}
         for name, tensor in loader.iterate_tensors(
             all_tensor_names,
             tensor_to_rank_map,
@@ -639,6 +637,10 @@ class Qwen3MoE(BaseModel):
             rank_tensor_metadata,
             device,
         ):
+            # Save embed_tokens tensor for weight tying if needed
+            if name == embed_tokens_weight_key:
+                reserved[name] = tensor.clone()
+
             dest_name, shared_weight = convert_weight_from_hf(
                 tensor,
                 name,
@@ -705,14 +707,12 @@ class Qwen3MoE(BaseModel):
         ):
             # tied with embed_tokens.weight
             name = lm_head_weight_key
-            if loader.rank == 0:
-                assert embed_tokens_weight_key in reserved
-                tensor = reserved[embed_tokens_weight_key]
-            else:
-                tensor = None
-
-            # Broadcast tensor from rank 0 to all ranks
-            tensor = loader.broadcast_tensor_from_rank0(tensor, device)
+            # All ranks should have embed_tokens_weight_key tensor from Step 3
+            assert embed_tokens_weight_key in reserved, (
+                f"embed_tokens_weight_key {embed_tokens_weight_key} not found in reserved. "
+                f"This should have been saved during Step 3 processing."
+            )
+            tensor = reserved[embed_tokens_weight_key]
 
             dest_name, shared_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims

@@ -509,7 +509,7 @@ class InternVLChatModel(BaseModel):
         n_experts = self.config.lm_args.n_experts if lm_type == "qwen3_moe" else 0
 
         # Step 1: Load files in parallel
-        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names, reserved = (
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
             loader.load_files_parallel(model_path, device, safetensors_files)
         )
 

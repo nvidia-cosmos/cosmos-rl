@@ -84,12 +84,10 @@ class MultiRankWeightLoader:
         device: torch.device,
         safetensors_files: List[str],
         name_converter: Optional[Callable[[str], str]] = None,
-        reserved_keys: Optional[Set[str]] = None,
     ) -> Tuple[
         Dict[str, torch.Tensor],
         Dict[str, Tuple[list, int]],
         Set[str],
-        Dict[str, torch.Tensor],
     ]:
         """
         Load safetensors files in parallel across ranks.
@@ -99,19 +97,16 @@ class MultiRankWeightLoader:
             device: Device to load tensors on.
             safetensors_files: List of safetensors file names.
             name_converter: Optional function to convert tensor names (e.g., for checkpoint conversion).
-            reserved_keys: Optional set of tensor names to reserve (e.g., for weight tying).
 
         Returns:
-            Tuple of (rank_tensors, rank_tensor_metadata, weights_of_ckpt_names, reserved):
+            Tuple of (rank_tensors, rank_tensor_metadata, weights_of_ckpt_names):
             - rank_tensors: Dict mapping tensor names to tensors loaded by this rank.
             - rank_tensor_metadata: Dict mapping tensor names to (shape, dtype_int) tuples.
             - weights_of_ckpt_names: Set of all tensor names found by this rank.
-            - reserved: Dict mapping reserved tensor names to tensors.
         """
         rank_tensors = {}  # {tensor_name: tensor_data} for this rank
         rank_tensor_metadata = {}  # {tensor_name: (shape, dtype)} for this rank
         weights_of_ckpt_names = set()
-        reserved = {}
 
         # If MULTI_RANK_WEIGHT_LOADER_ON_CPU is set to 1, load tensors to CPU to avoid GPU OOM
         # Otherwise, load tensors to the specified device
@@ -143,13 +138,10 @@ class MultiRankWeightLoader:
                             list(ckpt_tensor.shape),
                             self.DTYPE_TO_INT.get(ckpt_tensor.dtype, 0),
                         )
-                        # Reserve tensor if needed
-                        if reserved_keys and name in reserved_keys:
-                            reserved[name] = ckpt_tensor
 
                     del ckpt
 
-        return rank_tensors, rank_tensor_metadata, weights_of_ckpt_names, reserved
+        return rank_tensors, rank_tensor_metadata, weights_of_ckpt_names
 
     def gather_tensor_names_and_build_mapping(
         self, weights_of_ckpt_names: Set[str], rank_tensors: Dict[str, torch.Tensor]
@@ -322,74 +314,3 @@ class MultiRankWeightLoader:
                 name, tensor_rank, rank_tensors, rank_tensor_metadata, device
             )
             yield name, tensor
-
-    def broadcast_tensor_from_rank0(
-        self,
-        tensor: Optional[torch.Tensor],
-        device: torch.device,
-    ) -> torch.Tensor:
-        """
-        Broadcast a tensor from rank 0 to all ranks.
-
-        This is useful for weight tying scenarios where rank 0 has the tensor
-        and needs to broadcast it to all other ranks.
-
-        Args:
-            tensor: Tensor to broadcast (only used on rank 0, can be None on other ranks).
-            device: Device to create tensors on.
-
-        Returns:
-            The broadcasted tensor (same on all ranks).
-        """
-        if self.world_size > 1:
-            # Get shape and dtype from rank 0
-            if self.rank == 0:
-                assert tensor is not None, "tensor must not be None on rank 0"
-                # Move tensor from CPU to GPU if needed (tensors are loaded to CPU to avoid OOM)
-                if tensor.device.type != device.type:
-                    tensor = tensor.to(device)
-                tensor_shape = list(tensor.shape)
-                shape_len = len(tensor_shape)
-                tensor_dtype_int = self.DTYPE_TO_INT.get(tensor.dtype, 0)
-            else:
-                tensor_shape = []
-                shape_len = 0
-                tensor_dtype_int = 0
-
-            # First broadcast the length of shape
-            shape_len_tensor = torch.tensor(
-                [shape_len], dtype=torch.long, device=device
-            )
-            dist.broadcast(shape_len_tensor, group=self.group, group_src=0)
-            shape_len = shape_len_tensor.item()
-
-            # Broadcast shape values (all ranks create tensor with same size)
-            if self.rank == 0:
-                shape_tensor = torch.tensor(
-                    tensor_shape, dtype=torch.long, device=device
-                )
-            else:
-                shape_tensor = torch.zeros(shape_len, dtype=torch.long, device=device)
-            dist.broadcast(shape_tensor, group=self.group, group_src=0)
-
-            # Broadcast dtype as integer
-            dtype_int_tensor = torch.tensor(
-                [tensor_dtype_int], dtype=torch.long, device=device
-            )
-            dist.broadcast(dtype_int_tensor, group=self.group, group_src=0)
-
-            if self.rank != 0:
-                tensor_shape = shape_tensor.cpu().tolist()
-                tensor_dtype = self.INT_TO_DTYPE.get(
-                    dtype_int_tensor.item(), torch.float32
-                )
-                tensor = torch.empty(tensor_shape, dtype=tensor_dtype, device=device)
-
-            dist.broadcast(tensor, group=self.group, group_src=0)
-        else:
-            assert tensor is not None, "tensor must not be None when world_size == 1"
-            # Single rank case: ensure tensor is on the correct device
-            if tensor.device.type != device.type:
-                tensor = tensor.to(device)
-
-        return tensor
