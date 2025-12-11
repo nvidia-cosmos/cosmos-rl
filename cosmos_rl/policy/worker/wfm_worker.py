@@ -20,6 +20,7 @@ from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
 from cosmos_rl.comm.base import WorkerBase
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.constant import CACHE_DIR
+from cosmos_rl.utils.s3_utils import set_s3_available
 from cosmos_rl.utils.util import create_cached_dir_if_needed
 from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig as Config
 from cosmos_rl.policy.trainer.wfm_trainer import CosmosVisionGenTrainer
@@ -77,7 +78,10 @@ def init_s3(config: Config):
                 "s3_credential_path": config.checkpoint.save_to_object_store.credentials,
             }
         )
+        set_s3_available(True)
+        logger.info("S3 backend initialized successfully.")
     except Exception as e:
+        set_s3_available(False)
         logger.error(f"Failed to initialize S3 backend: {e}")
 
 
@@ -108,7 +112,13 @@ class WFMPolicyWorker(WorkerBase):
 
         logger.info(f"Local rank: {os.environ.get('LOCAL_RANK')}")
 
-        init_s3(self.config)
+        # init s3 if needed
+        if (
+            config.checkpoint.load_from_object_store.enabled
+            or config.checkpoint.save_to_object_store.enabled
+            or config.trainer.use_s3
+        ):
+            init_s3(self.config)
 
         # build runner
         self.build_runner(**kwargs)

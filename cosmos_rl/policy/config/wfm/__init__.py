@@ -419,6 +419,7 @@ class ProfilingConfig(BaseModel):
 
 class TrainerConfig(BaseModel):
     callbacks: List[FunctionConfig] = Field(default_factory=list)
+    use_s3: bool = False
     distributed_parallelism: Literal["ddp", "fsdp"] = "fsdp"
     ddp: DDPConfig = Field(default_factory=DDPConfig)
     cudnn: CuDNNConfig = Field(default_factory=CuDNNConfig)
@@ -507,9 +508,9 @@ class ModelParallelConfig(BaseModel):
 
 
 class ObjectStoreConfig(BaseModel):
-    enabled: bool = True
-    credentials: str
-    bucket: str
+    enabled: bool = False
+    credentials: str = ""
+    bucket: str = ""
 
 
 class JITConfig(BaseModel):

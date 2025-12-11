@@ -23,7 +23,7 @@ from functools import partial
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.checkpoint import upload_folder_to_s3
+from cosmos_rl.utils.s3_utils import upload_folder_to_s3
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.dispatcher.protocol import SetTracePathRequest
 

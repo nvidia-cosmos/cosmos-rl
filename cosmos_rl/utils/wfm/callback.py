@@ -46,6 +46,7 @@ from torch.distributed import ProcessGroup
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.wandb_logger import init_wandb
+from cosmos_rl.utils.s3_utils import is_s3_available
 from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
 from cosmos_rl.utils.wfm import distributed, utils
 from cosmos_rl.utils.wfm.io.easy_io import easy_io
@@ -681,7 +682,7 @@ class WandbCallback(Callback):
                         ),
                     }
                 )
-                if self.save_s3:
+                if self.save_s3 and is_s3_available():
                     if (
                         iteration
                         % (
@@ -1046,7 +1047,7 @@ class IterSpeed(EveryN):
                 step=iteration,
             )
         self.time = cur_time
-        if self.save_s3:
+        if self.save_s3 and is_s3_available():
             if iteration % (self.save_s3_every_log_n * self.every_n) == 0:
                 easy_io.dump(
                     {
@@ -1079,7 +1080,7 @@ class ModelParamStats(Callback):
             log_str += f"{k}: {v}\n"
         logger.info(f"Model param Stats:\n{log_str}")
 
-        if self.save_s3:
+        if self.save_s3 and is_s3_available():
             easy_io.dump(model_stat, f"s3://rundir/{self.name}.yaml")
 
 
@@ -1111,7 +1112,7 @@ class HeartBeat(EveryN):
     @distributed.rank0_only
     def on_train_start(self, model, iteration: int = 0) -> None:
         self.time = time.time()
-        if self.save_s3:
+        if self.save_s3 and is_s3_available():
             current_time_pst = datetime.now(self.pst).strftime("%Y_%m_%d-%H_%M_%S")
             info = {
                 "iteration": iteration,
@@ -1149,7 +1150,7 @@ class HeartBeat(EveryN):
 
     def report(self, iteration: int = 0):
         self.time = time.time()
-        if self.save_s3:
+        if self.save_s3 and is_s3_available():
             current_time_pst = datetime.now(self.pst).strftime("%Y_%m_%d-%H_%M_%S")
             info = {
                 "iteration": iteration,
@@ -1159,7 +1160,7 @@ class HeartBeat(EveryN):
 
     @distributed.rank0_only
     def on_train_end(self, model, iteration: int = 0) -> None:
-        if self.save_s3:
+        if self.save_s3 and is_s3_available():
             current_time_pst = datetime.now(self.pst).strftime("%Y_%m_%d-%H_%M_%S")
             info = {
                 "iteration": iteration,
@@ -1306,7 +1307,7 @@ class DeviceMonitor(EveryN):
             torch.distributed.barrier()
 
         df, summary_df = log_prof_data(data_list, iteration)
-        if self.save_s3 and self.rank == 0:
+        if self.save_s3 and self.rank == 0 and is_s3_available():
             global_step = iteration // self.step_size
             should_run = global_step % self.upload_every_n == 0
             if should_run:
@@ -1335,7 +1336,7 @@ class DeviceMonitor(EveryN):
                         f"mem/{key}": memory_stats[key] for key in memory_stats.keys()
                     }
                     wandb.log(wandb_memory_info, step=iteration)
-                if self.save_s3:
+                if self.save_s3 and is_s3_available():
                     global_step = iteration // self.step_size
                     should_run = global_step % self.upload_every_n == 0
                     if should_run:
@@ -1607,7 +1608,7 @@ class FrameLossLog(Callback):
                         info[f"frame_loss_log_sq/image_edm_loss_{i}"] = m2
 
                 if info:
-                    if self.save_s3:
+                    if self.save_s3 and is_s3_available():
                         if (
                             iteration
                             % (
@@ -1800,7 +1801,11 @@ class EveryNDrawSample(EveryN):
             batch_info["reward_mean"] = output_batch["reward_mean"].item()
 
         if distributed.is_tp_cp_pp_rank0():
-            if self.save_s3 and self.data_parallel_id < self.n_sample_to_save:
+            if (
+                self.save_s3
+                and self.data_parallel_id < self.n_sample_to_save
+                and is_s3_available()
+            ):
                 easy_io.dump(
                     batch_info,
                     f"s3://rundir/{self.name}/BatchInfo_ReplicateID{self.data_parallel_id:04d}_Iter{iteration:09d}.json",
@@ -1823,7 +1828,7 @@ class EveryNDrawSample(EveryN):
                     iteration,
                 )
                 logger.debug("done, x0_pred")
-                if self.save_s3 and self.rank == 0:
+                if self.save_s3 and self.rank == 0 and is_s3_available():
                     easy_io.dump(
                         {
                             "mse_loss": mse_loss.tolist(),
@@ -1945,7 +1950,11 @@ class EveryNDrawSample(EveryN):
         n_viz_sample = min(self.n_viz_sample, batch_size)
 
         # ! we only save first n_sample_to_save video!
-        if self.save_s3 and self.data_parallel_id < self.n_sample_to_save:
+        if (
+            self.save_s3
+            and self.data_parallel_id < self.n_sample_to_save
+            and is_s3_available()
+        ):
             save_img_or_video(
                 rearrange(to_show, "n b c t h w -> c t (n h) (b w)"),
                 f"s3://rundir/{self.name}/{base_fp_wo_ext}",
@@ -2065,7 +2074,7 @@ class DetailedDataLoadingSpeedMonitor(Callback):
             if wandb.run:
                 wandb.log(wandb_info, step=iteration)
 
-            if self.save_s3 and distributed.is_rank0():
+            if self.save_s3 and distributed.is_rank0() and is_s3_available():
                 easy_io.dump(
                     wandb_info,
                     f"s3://rundir/{self.name}/iter_{iteration:09d}.yaml",

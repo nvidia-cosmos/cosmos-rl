@@ -226,48 +226,21 @@ batch_size = 1
 num_workers = 8
 pin_memory = true
 num_frames = 93
-video_size = [1280,720]
-offline_text_embedding = true
+video_size = [1280, 720]
+offline_text_embedding = false
 
 [dataloader_val]
-type = 'web'
-
-[dataloader_val.image_dataloader]
-ratio = 1
-
-  [dataloader_val.image_dataloader.dataloader]
-  use_cache = false
-  cache_size = 32
-  concat_size = 1
-  cache_replay_name = "image_dataloader"
-  batch_size = 2
-  num_workers = 8
-  pin_memory = true
-  webdataset = false
-
-    [dataloader_val.image_dataloader.dataloader.dataset]
-    resolution = "512"
-    len_t5 = 512
-    t5_dim = 1024
+type = 'local'
 
 [dataloader_val.video_dataloader]
 ratio = 1
-
-  [dataloader_val.video_dataloader.dataloader]
-  use_cache = false
-  cache_size = 32
-  concat_size = 1
-  cache_replay_name = "video_dataloader"
-  batch_size = 1
-  num_workers = 8
-  pin_memory = true
-  webdataset = false
-
-    [dataloader_val.video_dataloader.dataloader.dataset]
-    resolution = "512"
-    len_t5 = 512
-    t5_dim = 1024
-    num_video_frames = 136
+dataset_dir = 'path_to_your_local_val_dataset'
+batch_size = 1
+num_workers = 8
+pin_memory = true
+num_frames = 93
+video_size = [1280, 720]
+offline_text_embedding = false
 
 [job]
 project = "cosmos_rl_wfm"

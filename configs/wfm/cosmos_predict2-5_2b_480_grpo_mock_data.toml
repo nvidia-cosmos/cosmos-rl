@@ -262,15 +262,3 @@ project = "cosmos_rl_wfm"
 group = "official_runs_t2v"
 name = "cosmos_predict2-5_2b_480_grpo_mock_data"
 wandb_mode = "online"
-
-[checkpoint]
-
-  [checkpoint.save_to_object_store]
-  enabled = false
-  credentials = "credentials/s3_checkpoint.secret"
-  bucket = "checkpoints-us-east-1"
-
-  [checkpoint.load_from_object_store]
-  enabled = false
-  credentials = "credentials/s3_checkpoint.secret"
-  bucket = "checkpoints-us-east-1"

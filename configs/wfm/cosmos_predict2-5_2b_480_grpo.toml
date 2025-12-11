@@ -177,7 +177,7 @@ type = 'local'
 
 [dataloader_train.video_dataloader]
 ratio = 1
-dataset_dir = 'path_to_your_local_dataset'
+dataset_dir = 'path_to_your_local_train_dataset'
 batch_size = 1
 num_workers = 8
 pin_memory = true
@@ -186,44 +186,17 @@ video_size = [768, 432]
 offline_text_embedding = true
 
 [dataloader_val]
-type = 'web'
-
-[dataloader_val.image_dataloader]
-ratio = 1
-
-  [dataloader_val.image_dataloader.dataloader]
-  use_cache = false
-  cache_size = 32
-  concat_size = 1
-  cache_replay_name = "image_dataloader"
-  batch_size = 2
-  num_workers = 8
-  pin_memory = true
-  webdataset = false
-
-    [dataloader_val.image_dataloader.dataloader.dataset]
-    resolution = "512"
-    len_t5 = 512
-    t5_dim = 1024
+type = 'local'
 
 [dataloader_val.video_dataloader]
 ratio = 1
-
-  [dataloader_val.video_dataloader.dataloader]
-  use_cache = false
-  cache_size = 32
-  concat_size = 1
-  cache_replay_name = "video_dataloader"
-  batch_size = 1
-  num_workers = 8
-  pin_memory = true
-  webdataset = false
-
-    [dataloader_val.video_dataloader.dataloader.dataset]
-    resolution = "512"
-    len_t5 = 512
-    t5_dim = 1024
-    num_video_frames = 136
+dataset_dir = 'path_to_your_local_val_dataset'
+batch_size = 1
+num_workers = 8
+pin_memory = true
+num_frames = 93
+video_size = [768, 432]
+offline_text_embedding = true
 
 [job]
 project = "cosmos_rl_wfm"
@@ -235,13 +208,3 @@ wandb_mode = "online"
 type = "distributed"
 load_path = "nvidia/Cosmos-Predict2.5-2B"
 model_id = "base/pre-trained/d20b7120-df3e-4911-919d-db6e08bad31c_ema_bf16.pt"
-
-  [checkpoint.save_to_object_store]
-  enabled = false
-  credentials = "credentials/s3_checkpoint.secret"
-  bucket = "checkpoints-us-east-1"
-
-  [checkpoint.load_from_object_store]
-  enabled = false
-  credentials = "credentials/s3_checkpoint.secret"
-  bucket = "checkpoints-us-east-1"
