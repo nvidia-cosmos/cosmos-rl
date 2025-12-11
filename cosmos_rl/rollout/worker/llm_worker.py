@@ -24,6 +24,9 @@ from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
+from cosmos_rl.rollout.worker.asynchronous.rollout_control import (
+    AsyncDisaggregatedRolloutControlWorker,
+)
 
 
 class LLMRolloutWorker(WorkerBase):
@@ -78,9 +81,14 @@ class LLMRolloutWorker(WorkerBase):
             )
             init_distributed()
             parallel_dims.build_mesh(device_type="cuda")
-            self.rollout_worker = DisaggregatedRolloutControlWorker(
-                self.config, parallel_dims, **kwargs
-            )
+            if self.config.rollout.async_config.enable:
+                self.rollout_worker = AsyncDisaggregatedRolloutControlWorker(
+                    self.config, parallel_dims, **kwargs
+                )
+            else:
+                self.rollout_worker = DisaggregatedRolloutControlWorker(
+                    self.config, parallel_dims, **kwargs
+                )
         elif rollout_backend == "trtllm":
             try:
                 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (

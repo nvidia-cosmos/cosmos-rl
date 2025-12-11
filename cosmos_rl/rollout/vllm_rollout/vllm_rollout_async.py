@@ -15,26 +15,23 @@
 import asyncio
 import torch
 import copy
-import types
 from typing import List, Optional, Dict, Any
-from transformers import AutoConfig
-from transformers import GenerationConfig
 from vllm.v1.engine.async_llm import AsyncLLM as AsyncLLMEngine, AsyncEngineArgs
 from vllm.sampling_params import SamplingParams, RequestOutputKind
-from cosmos_rl.rollout.rollout_base import RolloutBase
-from cosmos_rl.policy.config import Config
 from cosmos_rl.utils.logging import logger
 import cosmos_rl.utils.util as util
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.rollout.schema import RolloutResult
-from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vllm_version_check, vLLMRollout
+from cosmos_rl.rollout.vllm_rollout.vllm_rollout import vLLMRollout
+from cosmos_rl.rollout.rollout_base import RolloutRegistry
 from cosmos_rl.utils.ipc import (
     ModuleLike,
     named_tensors_to_serialize,
     named_tensors_from_serialize,
 )
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 
 
 class VLLMColocateWorkerExtension:
@@ -73,61 +70,17 @@ class VLLMColocateWorkerExtension:
             apply_fp8_linear_patch(self._get_model())
 
 
-class vLLMRolloutAsync(RolloutBase):
-    def __init__(self, config: Config, **kwargs):
-        """Rollout with vLLM as the backend.
+@RolloutRegistry.register(rollout_type="vllm_async")
+class vLLMRolloutAsync(vLLMRollout):
+    def post_init_hook(self, **kwargs):
+        # override the post_init_hook method in vLLMRollout
+        super().post_init_hook(**kwargs)
 
-        Args:
-            config: Cosmos Config.
-            hf_config_path: huggingface config file path.
-            model_hf_config: the huggingface config to initiallize the generating model in vllm
-        """
-        super().__init__(config)
+        self.underlying_model: Optional[ModuleLike] = None
 
-        # TODO(zjx): refactor those methods to common methods in RolloutBase
-        # reuse some of the vLLMRollout methods
-        self.fp8_quantization = types.MethodType(vLLMRollout.fp8_quantization, self)
-        self.mxfp4_quantization = types.MethodType(vLLMRollout.mxfp4_quantization, self)
-        self.model_param_map = types.MethodType(vLLMRollout.model_param_map, self)
-        self.preset_vllm_env = types.MethodType(vLLMRollout.preset_vllm_env, self)
-        self.get_quantized_tensors = types.MethodType(
-            vLLMRollout.get_quantized_tensors, self
-        )
-
-        policy_config = self.config.policy
-        self.rollout_config = self.config.rollout
-        self.validation_config = self.config.validation
-
-        vllm_version_check(self.rollout_config)
-
-        model_path = policy_config.model_name_or_path
-
-        self.model_config = util.retry(AutoConfig.from_pretrained)(model_path)
-        self.underlying_model = None
-        self.underlying_model_state_dict = None
-
-        hf_config_path = self.config.policy.model_name_or_path
-        try:
-            generation_config = util.retry(GenerationConfig.from_pretrained)(
-                hf_config_path
-            )
-            self.eos_token_ids = generation_config.eos_token_id
-            if isinstance(self.eos_token_ids, int):
-                self.eos_token_ids = [self.eos_token_ids]
-        except Exception as e:
-            logger.warning(
-                f"[Rollout] Failed to load generation config from {hf_config_path}: {str(e)}, use default eos_token_id."
-            )
-            # self.eos_token_ids = [tokenizer.eos_token_id]
-            # TODO(lms): remove this
-            self.eos_token_ids = [151645, 151643]
-        self._engine_initialized = False
-        self.rollout_engine = None
-
-        self._model_param_map = None  # key: compatible name, value: param
-        self.is_vlm = getattr(self.model_config, "vision_config", None) is not None
-
-        self.preset_vllm_env()
+        # for vllm.AsyncLLMEngine, we should only process the final output.
+        self.sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
+        self.val_sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
 
     def init_engine(
         self,
@@ -136,6 +89,7 @@ class vLLMRolloutAsync(RolloutBase):
         load_format: str = "dummy",
         **kwargs,
     ):
+        # override the init_engine method in vLLMRollout
         if not self._engine_initialized:
             trust_remote_code = True  # set trust remote code default to True.
 
@@ -212,6 +166,12 @@ class vLLMRolloutAsync(RolloutBase):
                     self.rollout_engine.collective_rpc("apply_fp8_linear_patch")
                 )
 
+    def post_init_engine_hook(
+        self, consume_command_hook, report_rollouts_hook, validation_flag, **kwargs
+    ):
+        # override the post_init_engine_hook method in vLLMRollout
+        pass
+
     def shutdown(self):
         if self._engine_initialized:
             self._engine_initialized = False
@@ -231,18 +191,28 @@ class vLLMRolloutAsync(RolloutBase):
             if result.finished:
                 return result.outputs[0].text
 
-    async def rollout_generation_single_turn(
+    async def rollout_generation(
         self,
         payloads: List[RLPayload],
         stream: torch.cuda.Stream,
         data_packer: DataPacker,
-        sampling_params: SamplingParams,
+        data_fetcher: DataFetcherBase,
+        is_validation: bool = False,
     ) -> List[RolloutResult]:
         if not self._engine_initialized:
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
 
+        # TODO(zjx): refactor the multi-turn rollout generation at rollout_control.py
+        if self.rollout_config.multi_turn_config.enable:
+            raise NotImplementedError(
+                "Multi-turn rollout is not supported in vLLM async rollout."
+            )
+
+        sampling_params = (
+            self.val_sampling_params if is_validation else self.sampling_params
+        )
         # Here is a problem in vllm, when output_kind is not FINAL_ONLY, the count of result.outputs may not equal to the sampling_params.n
         # a valid solution is to set output_kind to FINAL_ONLY.
         assert (
@@ -304,37 +274,6 @@ class vLLMRolloutAsync(RolloutBase):
             )
         ]
 
-    async def rollout_generation_multi_turn(
-        self,
-        payloads: List[RLPayload],
-        stream: torch.cuda.Stream,
-        data_packer: DataPacker,
-        sampling_params: SamplingParams,
-    ) -> List[RolloutResult]:
-        if not self._engine_initialized:
-            raise RuntimeError(
-                "[Rollout] Engine is not initialized, please call init_engine first."
-            )
-        raise NotImplementedError(
-            "Multi-turn rollout is not supported in vLLM async rollout."
-        )
-
-    async def rollout_generation(
-        self,
-        payloads: List[RLPayload],
-        stream: torch.cuda.Stream,
-        data_packer: DataPacker,
-        sampling_params: SamplingParams,
-    ) -> List[RolloutResult]:
-        if self.rollout_config.multi_turn_config.enable:
-            return await self.rollout_generation_multi_turn(
-                payloads, stream, data_packer, sampling_params
-            )
-        else:
-            return await self.rollout_generation_single_turn(
-                payloads, stream, data_packer, sampling_params
-            )
-
     def get_underlying_model(self):
         """
         Get the underlying parallelized model in vLLM internal.
@@ -357,13 +296,3 @@ class vLLMRolloutAsync(RolloutBase):
         state_dict = named_tensors_from_serialize(sd_ipc_worker0)
         self.underlying_model = ModuleLike(state_dict, not_parameter_names)
         return self.underlying_model
-
-    def get_engine(self):
-        if not self._engine_initialized:
-            raise RuntimeError(
-                "[Rollout] Engine is not initialized, please call init_engine first."
-            )
-        return self.rollout_engine
-
-    def is_engine_initialized(self):
-        return self._engine_initialized
