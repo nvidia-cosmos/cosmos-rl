@@ -66,16 +66,9 @@ class MultiRankWeightLoader:
                     self.rank = dist.get_rank(self.group)
                     self.world_size = dist.get_world_size(self.group)
                 except (KeyError, AttributeError):
-                    # Fallback: use dp_shard_cp or global group
-                    try:
-                        self.group = parallel_dims.mesh.get_group("dp_shard_cp")
-                        self.rank = dist.get_rank(self.group)
-                        self.world_size = dist.get_world_size(self.group)
-                    except (KeyError, AttributeError):
-                        # Final fallback: use global rank/world_size
-                        self.rank = dist.get_rank()
-                        self.world_size = dist.get_world_size()
-                        self.group = None
+                    raise ValueError(
+                        "[MultiRankWeightLoader] dp_cp_tp group not found in parallel_dims.mesh"
+                    )
             else:
                 self.rank = dist.get_rank()
                 self.world_size = dist.get_world_size()
@@ -122,7 +115,7 @@ class MultiRankWeightLoader:
 
         # If MULTI_RANK_WEIGHT_LOADER_ON_CPU is set to 1, load tensors to CPU to avoid GPU OOM
         # Otherwise, load tensors to the specified device
-        # Note: This may cause performance degradation if the model is too large for CPU memory
+        # Note: This may cause performance degradation due to CPU-GPU transfer overhead
         MULTI_RANK_WEIGHT_LOADER_ON_CPU = (
             os.getenv("MULTI_RANK_WEIGHT_LOADER_ON_CPU", "0") == "1"
         )
