@@ -222,6 +222,7 @@ def main():
         config["policy"]["parallelism"]["tp_size"]
         * config["policy"]["parallelism"]["pp_size"]
         * config["policy"]["parallelism"]["cp_size"]
+        * config["policy"]["parallelism"]["dp_replicate_size"]
     )
     train_type = config["train"]["train_policy"]["type"]
 
