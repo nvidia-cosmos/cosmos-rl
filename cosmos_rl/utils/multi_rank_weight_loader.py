@@ -120,13 +120,23 @@ class MultiRankWeightLoader:
         weights_of_ckpt_names = set()
         reserved = {}
 
-        with torch.device(device):
+        # If MULTI_RANK_WEIGHT_LOADER_ON_CPU is set to 1, load tensors to CPU to avoid GPU OOM
+        # Otherwise, load tensors to the specified device
+        # Note: This may cause performance degradation if the model is too large for CPU memory
+        MULTI_RANK_WEIGHT_LOADER_ON_CPU = (
+            os.getenv("MULTI_RANK_WEIGHT_LOADER_ON_CPU", "0") == "1"
+        )
+        loading_device = "cpu" if MULTI_RANK_WEIGHT_LOADER_ON_CPU else device
+
+        with torch.device(loading_device):
             for file_idx, f in enumerate(safetensors_files):
                 file_rank = file_idx % self.world_size
                 if self.rank == file_rank:
                     # This rank is responsible for reading this file
                     ckpt = safe_open(
-                        os.path.join(model_path, f), framework="pt", device=str(device)
+                        os.path.join(model_path, f),
+                        framework="pt",
+                        device=str(loading_device),
                     )
                     keys = list(ckpt.keys())
                     for name in keys:
@@ -143,6 +153,8 @@ class MultiRankWeightLoader:
                         # Reserve tensor if needed
                         if reserved_keys and name in reserved_keys:
                             reserved[name] = ckpt_tensor
+
+                    del ckpt
 
         return rank_tensors, rank_tensor_metadata, weights_of_ckpt_names, reserved
 
@@ -220,6 +232,9 @@ class MultiRankWeightLoader:
         if self.rank == tensor_rank:
             ckpt_tensor = rank_tensors[name]
             tensor_shape, tensor_dtype_int = rank_tensor_metadata[name]
+            # Move tensor from CPU to GPU if needed (tensors are loaded to CPU to avoid OOM)
+            if ckpt_tensor.device.type != device.type:
+                ckpt_tensor = ckpt_tensor.to(device)
         else:
             ckpt_tensor = None
             tensor_shape = []
@@ -269,6 +284,10 @@ class MultiRankWeightLoader:
 
             # Broadcast the actual tensor data
             dist.broadcast(ckpt_tensor, group=self.group, group_src=tensor_rank)
+        else:
+            # Single rank case: ensure tensor is on the correct device
+            if ckpt_tensor is not None and ckpt_tensor.device.type != device.type:
+                ckpt_tensor = ckpt_tensor.to(device)
 
         # Ensure ckpt_tensor is not None
         if ckpt_tensor is None:
@@ -333,6 +352,9 @@ class MultiRankWeightLoader:
             # Get shape and dtype from rank 0
             if self.rank == 0:
                 assert tensor is not None, "tensor must not be None on rank 0"
+                # Move tensor from CPU to GPU if needed (tensors are loaded to CPU to avoid OOM)
+                if tensor.device.type != device.type:
+                    tensor = tensor.to(device)
                 tensor_shape = list(tensor.shape)
                 shape_len = len(tensor_shape)
                 tensor_dtype_int = self.DTYPE_TO_INT.get(tensor.dtype, 0)
@@ -373,5 +395,8 @@ class MultiRankWeightLoader:
             dist.broadcast(tensor, group=self.group, group_src=0)
         else:
             assert tensor is not None, "tensor must not be None when world_size == 1"
+            # Single rank case: ensure tensor is on the correct device
+            if tensor.device.type != device.type:
+                tensor = tensor.to(device)
 
         return tensor
