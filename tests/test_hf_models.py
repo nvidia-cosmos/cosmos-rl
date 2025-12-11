@@ -86,6 +86,7 @@ class TestHFModel(unittest.TestCase):
                 ):
                     continue
                 max_position_embeddings = 1024
+                device = torch.device("cuda:0")
                 # Load config
                 config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
                 config.max_position_embeddings = max_position_embeddings
@@ -100,15 +101,16 @@ class TestHFModel(unittest.TestCase):
                             max_position_embeddings=max_position_embeddings,
                         )
                 cosmos_hf_model._apply(
-                    lambda t: torch.empty_like(t, device="cuda")
+                    lambda t: torch.empty_like(t, device=device)
                     if t.device.type == "meta"
-                    else t.to("cuda"),
+                    else t.to(device),
                     recurse=True,
                 )
                 cosmos_hf_model.post_to_empty_hook(CosmosConfig())
                 parallel_dims = ParallelDims.from_config(ParallelismConfig(tp_size=1))
+
                 cosmos_hf_model.load_hf_weights(
-                    model_id, parallel_dims, "cuda", revision=None
+                    model_id, parallel_dims, device, revision=None
                 )
                 cosmos_named_buffers = {
                     k: v.clone() for k, v in cosmos_hf_model.model.named_buffers()
@@ -120,7 +122,7 @@ class TestHFModel(unittest.TestCase):
                 # Load hf model
                 hf_model = model_class.from_pretrained(
                     model_id, trust_remote_code=True, config=config
-                ).to("cuda", dtype=dtype)
+                ).to(device, dtype=dtype)
                 hf_named_buffers = {k: v for k, v in hf_model.named_buffers()}
                 del hf_model
                 torch.cuda.empty_cache()
@@ -162,6 +164,8 @@ class TestHFModel(unittest.TestCase):
             config.max_position_embeddings = max_position_embeddings
             config._attn_implementation = "eager"
             config.torch_dtype = dtype
+            device = torch.device("cuda:0")
+
             cosmos_hf_model = None
             with init_on_device("meta", include_buffers=False):
                 with cosmos_default_dtype(dtype):
@@ -171,15 +175,16 @@ class TestHFModel(unittest.TestCase):
                         max_position_embeddings=max_position_embeddings,
                     )
             cosmos_hf_model._apply(
-                lambda t: torch.empty_like(t, device="cuda")
+                lambda t: torch.empty_like(t, device=device)
                 if t.device.type == "meta"
-                else t.to("cuda"),
+                else t.to(device),
                 recurse=True,
             )
             cosmos_hf_model.post_to_empty_hook(CosmosConfig())
             parallel_dims = ParallelDims.from_config(ParallelismConfig(tp_size=1))
+
             cosmos_hf_model.load_hf_weights(
-                model_id, parallel_dims, "cuda", revision=None
+                model_id, parallel_dims, device, revision=None
             )
             cosmos_hf_model.eval()
 
@@ -187,7 +192,7 @@ class TestHFModel(unittest.TestCase):
                 cosmos_hf_model.model_class.from_pretrained(
                     model_id, trust_remote_code=True, config=config
                 )
-                .to("cuda", dtype=dtype)
+                .to(device, dtype=dtype)
                 .eval()
             )
 
@@ -233,7 +238,7 @@ class TestHFModel(unittest.TestCase):
 
                     inputs = processor(
                         text=text, images=image_inputs, videos=video_inputs, **kwargs
-                    ).to("cuda")
+                    ).to(device)
                 else:
                     messages = [
                         {
@@ -246,7 +251,7 @@ class TestHFModel(unittest.TestCase):
                     inputs = processor(
                         text=text,
                         return_tensors="pt",
-                    ).to("cuda")
+                    ).to(device)
 
                 if model_id == "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16":
                     from cosmos_rl.policy.model.hf_models.patch import (
