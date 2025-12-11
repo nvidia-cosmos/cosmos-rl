@@ -360,6 +360,17 @@ class GrpoConfig(BaseModel):
         ),
     )
 
+    off_policy_masking_delta: Optional[float] = Field(
+        default=None,
+        description=(
+            "Off-Policy Sequence Masking threshold δ (None disables). "
+            "Per-sequence mask:"
+            " M_i = 0 if Â_i < 0 and (1/|o_i|)∑_t log[π_old(o_{i,t}|·)/π_θ(o_{i,t}|·)] > δ; "
+            "else M_i = 1."
+            "Ref: DeepSeek-V3.2 Sec.3.1 Off-Policy Sequence Masking : https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf."
+        ),
+    )
+
     aipo_rho: Optional[float] = Field(
         default=None,
         description="Rho value for AIPO (Asynchronous Importance weighted Policy Optimization). The clipping constant of the importance sampling ratio, suggest [2,10]. "
