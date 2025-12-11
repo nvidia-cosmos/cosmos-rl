@@ -21,10 +21,8 @@ class CredentialEnvParser(EnvParser):
     APP_ENV = String(default="")
     PROD_FT_AWS_CREDS_ACCESS_KEY_ID = String(default="")
     PROD_FT_AWS_CREDS_SECRET_ACCESS_KEY = String(default="")
-    PROD_FT_AWS_CREDS_ENDPOINT_URL = String(
-        default="https://s3.us-west-2.amazonaws.com"
-    )
-    PROD_FT_AWS_CREDS_REGION_NAME = String(default="us-west-2")
+    PROD_FT_AWS_CREDS_ENDPOINT_URL = String(default="")
+    PROD_FT_AWS_CREDS_REGION_NAME = String(default="")
 
     PROD_S3_CHECKPOINT_ACCESS_KEY_ID = String(default="")
     PROD_S3_CHECKPOINT_SECRET_ACCESS_KEY = String(default="")
@@ -37,9 +35,7 @@ class CredentialEnvParser(EnvParser):
     PROD_TEAM_DIR_REGION_NAME = String(default="")
 
     PICASSO_AUTH_MODEL_REGISTRY_API_KEY = String(default="")
-    PICASSO_API_ENDPOINT_URL = String(
-        default="https://meeocvslt2.execute-api.us-west-2.amazonaws.com"
-    )
+    PICASSO_API_ENDPOINT_URL = String(default="")
 
 
 CRED_ENVS = CredentialEnvParser()
