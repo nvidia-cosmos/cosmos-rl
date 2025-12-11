@@ -21,7 +21,7 @@ import threading
 import uuid
 import functools
 from typing import Optional, Tuple, List, Any, Dict
-
+import numpy as np
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, RequestOutputKind
 
@@ -126,6 +126,20 @@ class MockAPIClient(APIClient):
         self.validation_completion_payloads.extend(report.payloads)
 
 
+class MockDeviceMesh:
+    def __init__(self, mesh: List[int], mesh_dim_names: List[str] = None):
+        self.mesh = np.array(mesh)
+        self.mesh_dim_names = mesh_dim_names
+        self._mesh_name_to_mesh = {dn: d for dn, d in zip(mesh_dim_names, mesh)}
+
+    def size(self):
+        return np.prod(self.mesh)
+
+    def __getitem__(self, mesh_dim_name: str) -> "MockDeviceMesh":
+        submesh = [self._mesh_name_to_mesh[mesh_dim_name]]
+        return MockDeviceMesh(mesh=submesh, mesh_dim_names=[mesh_dim_name])
+
+
 def getMockConfig():
     # Construct the model and trainer
     cur_dir = os.path.dirname(os.path.abspath(__file__))
@@ -134,11 +148,15 @@ def getMockConfig():
     with open(config_path, "r") as f:
         config_dict = toml.load(f)
 
-    return CosmosConfig.from_dict(config_dict)
+    config = CosmosConfig.from_dict(config_dict)
+    config.rollout.async_config.enable = True
+    config.rollout.async_config.max_concurrent_requests = 10
+    config.rollout.backend = "vllm_async"
+    return config
 
 
-class TestVLLMRolloutAsync(unittest.TestCase):
-    """Test vLLMRolloutAsync."""
+class TestAsyncVLLMRollout(unittest.TestCase):
+    """Test AsyncVLLMRollout."""
 
     def setUp(self):
         self.old_env = override_environment()
@@ -221,8 +239,8 @@ class TestVLLMRolloutAsync(unittest.TestCase):
             self.assertEqual(len(result.completions), sampling_params.n)
 
 
-class TestVLLMRolloutWorkerAsync(unittest.TestCase):
-    """Test vLLMRolloutWorkerAsync."""
+class TestAsyncRolloutWorker(unittest.TestCase):
+    """Test AsyncRolloutWorker."""
 
     def setUp(self):
         self.old_env = override_environment(port=29501)
@@ -242,9 +260,10 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         cosmos_config.rollout.batch_size = 4
 
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
+        parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
 
-        from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker_async import (
-            vLLMRolloutWorkerAsync,
+        from cosmos_rl.rollout.worker.asynchronous.rollout_control import (
+            AsyncDisaggregatedRolloutControlWorker,
         )
 
         # here dummy some functions to make the worker work
@@ -261,10 +280,10 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         def dummy(self):
             pass
 
-        vLLMRolloutWorkerAsync.init_comm = dummy_init_comm
-        vLLMRolloutWorkerAsync.init_redis = dummy
+        AsyncDisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
+        AsyncDisaggregatedRolloutControlWorker.init_redis = dummy
 
-        worker = vLLMRolloutWorkerAsync(cosmos_config, parallel_dims)
+        worker = AsyncDisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
         worker.query_command_from_controller = functools.partial(dummy, worker)
         worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()
@@ -293,8 +312,9 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         cosmos_config.validation.dataset = cosmos_config.train.train_policy.dataset
 
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
-        from cosmos_rl.rollout.vllm_rollout.vllm_rollout_worker_async import (
-            vLLMRolloutWorkerAsync,
+        parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
+        from cosmos_rl.rollout.worker.asynchronous.rollout_control import (
+            AsyncDisaggregatedRolloutControlWorker,
         )
 
         # here dummy some functions to make the worker work
@@ -311,10 +331,10 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         def dummy(self):
             pass
 
-        vLLMRolloutWorkerAsync.init_comm = dummy_init_comm
-        vLLMRolloutWorkerAsync.init_redis = dummy
+        AsyncDisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
+        AsyncDisaggregatedRolloutControlWorker.init_redis = dummy
 
-        worker = vLLMRolloutWorkerAsync(cosmos_config, parallel_dims)
+        worker = AsyncDisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
         worker.query_command_from_controller = functools.partial(dummy, worker)
         worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()
@@ -322,10 +342,10 @@ class TestVLLMRolloutWorkerAsync(unittest.TestCase):
         worker.heartbeat_thread = None
         # Skip weight sync preparation in test since we don't need it
         worker.state.set_weight_synced()
-
         worker.init_scheduler()
 
         async def test_helper():
+            worker.current_step = 1
             worker.lazy_initialize_rollout_engine(load_format="auto")
             try:
                 await worker.scheduler.start_async()

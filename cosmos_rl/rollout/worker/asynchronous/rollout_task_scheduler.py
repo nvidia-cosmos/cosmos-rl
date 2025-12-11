@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 import time
 
-from vllm import SamplingParams
 from cosmos_rl.dispatcher.data import RLPayload
 from cosmos_rl.dispatcher.data.packer import DataPacker
 from cosmos_rl.rollout.schema import RolloutResult
@@ -36,7 +35,7 @@ class RolloutTask:
 
     idx: int
     payload: RLPayload
-    sampling_params: SamplingParams
+    is_validation: bool = False
 
 
 @dataclass
@@ -87,8 +86,8 @@ class RolloutTaskScheduler:
     scheduler.start()
 
     # Create and put rollout tasks into scheduler
-    task1 = RolloutTask(idx=0, payload=payload1, sampling_params=sampling_params1)
-    task2 = RolloutTask(idx=1, payload=payload2, sampling_params=sampling_params2)
+    task1 = RolloutTask(idx=0, payload=payload1, is_validation=False)
+    task2 = RolloutTask(idx=1, payload=payload2, is_validation=False)
     scheduler.put_rollout(task1)
     scheduler.put_rollout(task2)
 
@@ -242,7 +241,7 @@ class RolloutTaskScheduler:
         Put a single rollout task into the task queue for processing.
 
         Args:
-            task: The RolloutTask containing payload index, RLPayload, and sampling parameters
+            task: The RolloutTask containing payload index, RLPayload
         """
         self.task_queue.put(task)
         self.total_submitted += 1
@@ -256,7 +255,7 @@ class RolloutTaskScheduler:
         Put multiple rollout tasks into the task queue for processing.
 
         Args:
-            tasks: List of RolloutTask objects, each containing payload index, RLPayload, and sampling parameters
+            tasks: List of RolloutTask objects, each containing payload index, RLPayload
         """
         for task in tasks:
             self.task_queue.put(task)
@@ -271,7 +270,7 @@ class RolloutTaskScheduler:
         Generate completion for a single task asynchronously.
 
         Args:
-            task: The RolloutTask containing payload and sampling parameters
+            task: The RolloutTask containing payload
 
         Returns:
             CompletedRollout object containing the payload and result
@@ -282,7 +281,8 @@ class RolloutTaskScheduler:
                 payloads=[task.payload],
                 stream=self.stream,
                 data_packer=self.data_packer,
-                sampling_params=task.sampling_params,
+                data_fetcher=None,  # data should already be loaded in the task
+                is_validation=task.is_validation,
             )
 
             if results and len(results) > 0:
