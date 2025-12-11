@@ -20,7 +20,6 @@ from typing import Any, Generator, Iterator, Optional, Tuple, Union
 from cosmos_rl.utils.wfm.io.easy_io.backends import (
     BaseStorageBackend,
     Boto3Backend,
-    HTTPBackend,
     LocalBackend,
 )
 
@@ -80,13 +79,10 @@ class FileClient:
     _backends = {
         "disk": HardDiskBackend,
         "s3": Boto3Backend,
-        "http": HTTPBackend,
     }
 
     _prefix_to_backends: dict = {
         "s3": Boto3Backend,
-        "http": HTTPBackend,
-        "https": HTTPBackend,
     }
 
     _instances: dict = {}

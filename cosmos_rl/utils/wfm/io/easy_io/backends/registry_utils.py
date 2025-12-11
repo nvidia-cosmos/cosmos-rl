@@ -21,9 +21,6 @@ from cosmos_rl.utils.wfm.io.easy_io.backends.base_backend import (
 from cosmos_rl.utils.wfm.io.easy_io.backends.boto3_backend import (
     Boto3Backend,
 )
-from cosmos_rl.utils.wfm.io.easy_io.backends.http_backend import (
-    HTTPBackend,
-)
 from cosmos_rl.utils.wfm.io.easy_io.backends.local_backend import (
     LocalBackend,
 )
@@ -136,4 +133,3 @@ register_backend("local", LocalBackend, prefixes="")
 # To avoid breaking backward Compatibility, 's3' is also used as a
 # prefix for Boto3Backend
 register_backend("s3", Boto3Backend, prefixes=["s3"])
-register_backend("http", HTTPBackend, prefixes=["http", "https"])

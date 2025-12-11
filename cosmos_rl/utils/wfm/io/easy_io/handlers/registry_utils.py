@@ -12,49 +12,27 @@
 # dir@exchange.nvidia.com.
 # -----------------------------------------------------------------------------
 
-from cosmos_rl.utils.wfm.io.easy_io.handlers.base import BaseFileHandler
-from cosmos_rl.utils.wfm.io.easy_io.handlers.byte_handler import (
+# Import all handlers and registry utilities from the consolidated handlers module
+from cosmos_rl.utils.wfm.io.easy_io.handlers.handlers import (
+    BaseFileHandler,
     ByteHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.csv_handler import CsvHandler
-from cosmos_rl.utils.wfm.io.easy_io.handlers.gzip_handler import (
+    CsvHandler,
     GzipHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.imageio_video_handler import (
     ImageioVideoHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.json_handler import (
     JsonHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.jsonl_handler import (
     JsonlHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.np_handler import (
     NumpyHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.pandas_handler import (
     PandasHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.pickle_handler import (
     PickleHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.pil_handler import PILHandler
-from cosmos_rl.utils.wfm.io.easy_io.handlers.tarfile_handler import (
+    PILHandler,
     TarHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.torch_handler import (
     TorchHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.torchjit_handler import (
     TorchJitHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.trimesh_handler import (
     TrimeshHandler,
-)
-from cosmos_rl.utils.wfm.io.easy_io.handlers.txt_handler import TxtHandler
-from cosmos_rl.utils.wfm.io.easy_io.handlers.yaml_handler import (
+    TxtHandler,
     YamlHandler,
 )
+
 
 file_handlers = {
     "json": JsonHandler(),

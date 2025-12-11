@@ -252,13 +252,3 @@ wandb_mode = "online"
 type = "distributed"
 load_path = "nvidia/Cosmos-Predict2.5-2B"
 model_id = "base/pre-trained/d20b7120-df3e-4911-919d-db6e08bad31c_ema_bf16.pt"
-
-  [checkpoint.save_to_object_store]
-  enabled = false
-  credentials = "credentials/s3_checkpoint.secret"
-  bucket = "checkpoints-us-east-1"
-
-  [checkpoint.load_from_object_store]
-  enabled = false
-  credentials = "credentials/s3_checkpoint.secret"
-  bucket = "checkpoints-us-east-1"
