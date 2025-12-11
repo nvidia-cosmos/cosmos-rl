@@ -13,16 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.dispatcher.data.schema import RLPayload
-from cosmos_rl.rollout.schema import RolloutResult
 
+from cosmos_rl.utils.ipc.adapters import ModuleLike
+from cosmos_rl.utils.ipc.tensor_util import (
+    named_tensors_to_serialize,
+    named_tensors_from_serialize,
+)
 
-def update_payload_from_rollout_result(
-    payload: RLPayload, rollout_result: RolloutResult, is_multi_turn: bool
-) -> RLPayload:
-    payload.completions = rollout_result.completions
-    payload.completion_logprobs = rollout_result.completion_logprobs
-    payload.completion_token_ids = rollout_result.completion_token_ids
-    if is_multi_turn:
-        payload.completed_conversations = rollout_result.completed_conversations
-    return payload
+__all__ = ["ModuleLike", "named_tensors_to_serialize", "named_tensors_from_serialize"]

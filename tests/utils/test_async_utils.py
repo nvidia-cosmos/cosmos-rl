@@ -13,16 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.dispatcher.data.schema import RLPayload
-from cosmos_rl.rollout.schema import RolloutResult
+import asyncio
+import unittest
+
+from cosmos_rl.utils.async_utils import is_async_callable
 
 
-def update_payload_from_rollout_result(
-    payload: RLPayload, rollout_result: RolloutResult, is_multi_turn: bool
-) -> RLPayload:
-    payload.completions = rollout_result.completions
-    payload.completion_logprobs = rollout_result.completion_logprobs
-    payload.completion_token_ids = rollout_result.completion_token_ids
-    if is_multi_turn:
-        payload.completed_conversations = rollout_result.completed_conversations
-    return payload
+class TestAsyncUtils(unittest.TestCase):
+    """Test suite for AsyncUtils class."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+
+        # warmup the event loop
+        async def async_dummy_func():
+            pass
+
+        asyncio.run(async_dummy_func())
+
+    def test_is_async_callable(self):
+        """Test is_async_callable function."""
+
+        async def async_func():
+            return 1
+
+        self.assertTrue(is_async_callable(async_func))
+        self.assertFalse(is_async_callable(lambda: 1))

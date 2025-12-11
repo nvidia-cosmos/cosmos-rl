@@ -206,7 +206,7 @@ class BaseDataPacker(ABC):
         Extend the conversation by models response.
         """
         # By default, we always add response as assistant message
-        return add_assistant_message(conversation, "" if responses else responses[0])
+        return add_assistant_message(conversation, responses[0] if responses else "")
 
     def save_state(self, dest_path: str) -> None:
         pass
