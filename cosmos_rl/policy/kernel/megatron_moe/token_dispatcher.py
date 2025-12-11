@@ -162,8 +162,8 @@ class _DeepepManager(_DispatchManager):
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        async_finish: bool = False,
-        allocate_on_comm_stream: bool = False,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> torch.Tensor:
         """
         Dispatch the hidden_states
@@ -244,8 +244,8 @@ class _DeepepManager(_DispatchManager):
     def combine(
         self,
         hidden_states: torch.Tensor,
-        async_finish: bool = False,
-        allocate_on_comm_stream: bool = False,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> torch.Tensor:
         """
         Reverse process using fused kernel to unpermute and perform all-to-all in single step
@@ -529,7 +529,7 @@ class MoEFlexTokenDispatcher:
             hidden_states=hidden_states, num_local_tokens=num_local_tokens, probs=probs
         )
         hidden_states, _ = self.dispatch_all_to_all(
-            hidden_states, async_finish=False, allocate_on_comm_stream=False
+            hidden_states, async_finish=True, allocate_on_comm_stream=True
         )
         global_input_tokens, tokens_per_expert, permuted_probs = (
             self.dispatch_postprocess(hidden_states)
@@ -559,7 +559,7 @@ class MoEFlexTokenDispatcher:
             token_indices=token_indices,
         )
         hidden_states, _ = self.dispatch_all_to_all(
-            hidden_states, async_finish=False, allocate_on_comm_stream=False
+            hidden_states, async_finish=True, allocate_on_comm_stream=True
         )
         global_input_tokens, tokens_per_expert, permuted_probs = (
             self.dispatch_postprocess(hidden_states)
@@ -610,7 +610,7 @@ class MoEFlexTokenDispatcher:
         3. Post-process the combined tokens to match the original input shape
         """
         hidden_states = self.combine_preprocess(hidden_states)
-        hidden_states = self.combine_all_to_all(hidden_states, False, False)
+        hidden_states = self.combine_all_to_all(hidden_states, True, True)
         hidden_states = self.combine_postprocess(hidden_states)
 
         return hidden_states
