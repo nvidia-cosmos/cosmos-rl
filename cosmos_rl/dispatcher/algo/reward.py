@@ -19,7 +19,7 @@ from math_verify.parser import LatexExtractionConfig, ExprExtractionConfig
 from math_verify.errors import TimeoutException
 from transformers import PreTrainedTokenizer
 from cosmos_rl.policy.config import Config
-from typing import Union, Callable, Tuple
+from typing import Any, Union, Callable, Tuple
 from cosmos_rl.utils.constant import RewardFn
 from cosmos_rl.utils.logging import logger
 from typing import Dict, Optional, List
@@ -383,9 +383,10 @@ class Reward:
         reference: Union[str, None],
         prompt: Union[str, List] = "",
         **kwargs,
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, Dict[str, Any]]:
         total_reward = 0.0
         filter_reward = 0.0
+        all_rewards_dict = {}
         for x, filter in zip(self.reward_funcs, self.is_filter):
             if isinstance(x, tuple):
                 func, weight = x
@@ -401,6 +402,12 @@ class Reward:
                 tokenizer=self.tokenizer,
                 **kwargs,
             )
+            if isinstance(val, tuple) and len(val) == 2:
+                # If the reward function returns a tuple of (value, rewards_dict)
+                # The second element is expected to be a dictionary of reward components
+                # It will be used for metric logging and reporting
+                val, rewards_dict = val
+                all_rewards_dict.update(rewards_dict)
             total_reward += weight * val
             filter_reward += filter * val
 
@@ -414,8 +421,17 @@ class Reward:
                 tokenizer=self.tokenizer,
                 **kwargs,
             )
+            if isinstance(val, tuple) and len(val) == 2:
+                # If the reward function returns a tuple of (value, rewards_dict)
+                # The second element is expected to be a dictionary of reward components
+                # It will be used for metric logging and reporting
+                val, rewards_dict = val
+                assert isinstance(
+                    rewards_dict, dict
+                ), "The second element returned by reward function must be a dictionary containing reward components."
+                all_rewards_dict.update(rewards_dict)
             filter_reward += val * weight
 
         if all([f == 0.0 for f in self.is_filter]) and len(self.filter_reward_fns) == 0:
             filter_reward = total_reward
-        return total_reward, filter_reward
+        return total_reward, filter_reward, all_rewards_dict

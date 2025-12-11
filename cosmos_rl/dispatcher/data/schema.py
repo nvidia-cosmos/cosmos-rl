@@ -51,8 +51,9 @@ class RLPayload(BaseModel):
     The payload schema of RL sample.
     """
 
-    prompt: Optional[Union[ConversationType, str]] = Field(
-        default=None, description="The input prompt for the rollout."
+    prompt: Optional[Union[ConversationType, str, Any]] = Field(
+        default=None,
+        description="The input prompt for the rollout, can be a conversation type, a string, or any other type of objects.",
     )
 
     prompt_idx: int = Field(
@@ -116,6 +117,17 @@ class RLPayload(BaseModel):
         default=None, description="The logprobs of each completion."
     )
 
+    # The cumulative logprob of the generated completions which indicates the total probability of the generated completions
+    cumulative_logprob: Optional[List[float]] = Field(
+        default=None,
+        description="The cumulative logprob of the generated completions which indicates the total probability of the generated completions.",
+    )
+
+    report_metrics: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="The report_metrics for the rollout used for metrics collection and reporting.",
+    )
+
     @staticmethod
     def collate_fn(
         batch: List["IdxAndRLPayload"],
@@ -135,8 +147,9 @@ IdxAndRLPayload = Tuple[int, RLPayload]
 
 
 class Rollout(BaseModel):
-    prompt: Optional[Union[ConversationType, str]] = Field(
-        default=None, description="The input prompt for the rollout."
+    prompt: Optional[Union[ConversationType, str, Any]] = Field(
+        default=None,
+        description="The input prompt for the rollout, can be a conversation type, a string, or any other type of objects.",
     )
 
     prompt_idx: int = Field(
@@ -147,7 +160,7 @@ class Rollout(BaseModel):
         default=None, description="The input conversation for the rollout."
     )
 
-    completion: str = Field(
+    completion: Union[str, Any] = Field(
         default="", description="The generated completion for the rollout."
     )
 
@@ -179,4 +192,9 @@ class Rollout(BaseModel):
 
     weight_version: int = Field(
         default=0, description="The weight version for the rollout."
+    )
+
+    report_metrics: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="The report_metrics for the rollout used for metrics collection and reporting.",
     )

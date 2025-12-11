@@ -293,7 +293,7 @@ class DeepseekV3MoEModel(BaseModel):
                 n_local_experts = (
                     self.config.n_routed_experts
                     // parallel_dims.tp
-                    // parallel_dims.dp_shard
+                    // (parallel_dims.dp_shard * parallel_dims.cp)
                 )
                 expert_id = expert_id % n_local_experts
                 target_tensor = target_tensor[expert_id]

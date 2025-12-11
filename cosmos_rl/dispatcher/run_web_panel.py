@@ -635,7 +635,6 @@ def main(
     except Exception as e:
         raise RuntimeError(
             f"Failed to load or parse config file {args.config}: {e}.",
-            exc_info=True,
         )
 
     config = uvicorn.Config(

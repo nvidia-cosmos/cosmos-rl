@@ -758,6 +758,10 @@ class ParallelismConfig(BaseModel):
         return int(local_world_size)
 
 
+class RolloutParallelismConfig(ParallelismConfig):
+    pass
+
+
 class LoraConfig(BaseModel):
     r: int = Field(default=8, description="LoRA rank")
     lora_alpha: float = Field(default=8.0, description="LoRA alpha")
@@ -854,25 +858,6 @@ class PolicyConfig(BaseModel):
             self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
         ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
         return self
-
-
-class RolloutParallelismConfig(ParallelismConfig):
-    n_init_replicas: int = Field(
-        default=1, description="Number of initial replicas to be created"
-    )
-    tp_size: int = Field(default=2, description="Tensor parallelism size")
-    pp_size: int = Field(default=1, description="Pipeline parallelism size")
-
-    # Fields below are that we do not want user to config it.
-    dp_replicate_size: int = Field(
-        default=1,
-        description="Data Parallelism size in replica mode, only 1 is supported for dynamic scaling purpose.",
-        choices=[1],
-    )
-    cp_size: int = Field(default=1, description="Context parallelism size")
-    dp_shard_size: int = Field(
-        default=-1, description="Data Parallelism size in sharded mode"
-    )
 
 
 class SamplingConfig(BaseModel):
@@ -1021,7 +1006,7 @@ class RolloutConfig(BaseModel):
 
     backend: str = Field(
         default="vllm",
-        description="Backend for rollout. Currently support `vllm` and `trtllm`.",
+        description="Backend for rollout. Currently support `vllm` and `trtllm`, and other custom backends.",
         choices=["vllm", "trtllm"],
     )
 
@@ -1034,6 +1019,18 @@ class RolloutConfig(BaseModel):
     def check_params_value(self):
         if isinstance(self.parallelism, dict):
             self.parallelism = RolloutParallelismConfig(**self.parallelism)
+
+        backends_to_check = ["vllm", "trtllm"]
+        if self.backend in backends_to_check:
+            _fields_no_need_to_check = ["n_init_replicas", "tp_size", "pp_size"]
+            for field_name, field_info in RolloutParallelismConfig.model_fields.items():
+                if field_name not in _fields_no_need_to_check:
+                    default_value = field_info.default
+                    actual_value = getattr(self.parallelism, field_name)
+                    if actual_value != default_value:
+                        raise ValueError(
+                            f"Only {_fields_no_need_to_check} fields can be set for rollout parallelism."
+                        )
         return self
 
 

@@ -14,6 +14,7 @@ optm_warmup_steps = 20
 optm_grad_norm_clip = 0.0
 async_tp_enabled = false
 compile = false
+master_dtype = "bfloat16"
 param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 master_dtype = "bfloat16"

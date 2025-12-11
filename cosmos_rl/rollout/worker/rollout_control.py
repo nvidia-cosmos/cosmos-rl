@@ -205,11 +205,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         self.reward_dispatcher.setup(
             config=self.config,
-            data_fetcher=self.data_fetcher,
-            dataset=dataset,
             reward_fns=reward_fns,
             filter_reward_fns=filter_reward_fns,
-            val_dataset=val_dataset,
             val_reward_fns=val_reward_fns,
             data_packer=self.data_packer,
             val_data_packer=self.val_data_packer,
@@ -637,15 +634,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                                 ) in self.get_underlying_model().named_modules():
                                     w13_weight_name = f"{module_name}.w13_weight"
                                     w2_weight_name = f"{module_name}.w2_weight"
-                                    w13_compatible_weight_name = (
-                                        self.weight_mapper._rollout_vllm_name_to_hf(
-                                            w13_weight_name
-                                        )
+                                    w13_compatible_weight_name = self.weight_mapper.rollout_map_local_key_to_hf_key(
+                                        w13_weight_name
                                     )
-                                    w2_compatible_weight_name = (
-                                        self.weight_mapper._rollout_vllm_name_to_hf(
-                                            w2_weight_name
-                                        )
+                                    w2_compatible_weight_name = self.weight_mapper.rollout_map_local_key_to_hf_key(
+                                        w2_weight_name
                                     )
 
                                     # mxfp4 weight and mxfp4 weight scale are in int8 data type.
@@ -772,8 +765,16 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         p.completion_logprobs = rr.completion_logprobs
                         p.completion_token_ids = rr.completion_token_ids
                         p.weight_version = self.current_weight_version
+                        p.cumulative_logprob = rr.cumulative_logprob
                         if self.rollout.rollout_config.multi_turn_config.enable:
                             p.completed_conversations = rr.completed_conversations
+                        if self.config.train.local_dataset:
+                            p.reference_answer = (
+                                self.data_fetcher.query_reference_answer(
+                                    p.prompt_idx,
+                                    "val",
+                                )
+                            )
                     validation_payloads.extend(payloads_list)
 
             if is_end:
@@ -1164,10 +1165,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 is_validation = kwargs.get("validation_step", None) is not None
 
                 if len(payloads) > 0:
-                    if (
-                        self.config.train.local_dataset
-                        and not self.config.train.non_text
-                    ):
+                    if self.config.train.local_dataset:
                         for payload in payloads:
                             payload["prompt"] = self.data_fetcher.get_payload_by_index(
                                 payload["prompt_idx"],
@@ -1527,8 +1525,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completion_logprobs = result.completion_logprobs
                 old_payload.completion_token_ids = result.completion_token_ids
                 old_payload.weight_version = self.current_weight_version
+                old_payload.cumulative_logprob = result.cumulative_logprob
                 if self.rollout.rollout_config.multi_turn_config.enable:
                     old_payload.completed_conversations = result.completed_conversations
+                if self.config.train.local_dataset:
+                    old_payload.reference_answer = (
+                        self.data_fetcher.query_reference_answer(
+                            old_payload.prompt_idx,
+                        )
+                    )
                 valid_payloads.append(old_payload)
 
             self.reward_dispatcher.enqueue_rewards_cal(
