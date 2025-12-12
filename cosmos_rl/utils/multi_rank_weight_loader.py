@@ -265,7 +265,9 @@ class MultiRankWeightLoader:
         for name in sorted(all_tensor_names):
             tensor_rank = tensor_to_rank_map.get(name)
             if tensor_rank is None:
-                logger.error(f"Tensor {name} not found which is unexpected.")
+                logger.error(
+                    f"Tensor {name} not found in tensor_to_rank_mapwhich is unexpected."
+                )
                 continue
 
             tensor = self.broadcast_tensor(
