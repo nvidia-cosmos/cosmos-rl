@@ -467,6 +467,9 @@ class PolicyStatusManager:
     ):
         sorted_valid_replicas = sorted(valid_replicas, key=lambda x: x.start_time)
 
+        if config.validation.enable and config.validation.val_before_train:
+            self.data_fetcher.validation_activate_dataloader(0)
+
         if (
             not self.policy_init_done
             and len(valid_replicas) >= config.policy.parallelism.n_init_replicas
@@ -708,7 +711,7 @@ class PolicyStatusManager:
         for rollout in rollouts:
             if self.config.train.train_policy.rollout_as_token_ids:
                 completion_tokens_count += len(rollout.completion_token_ids)
-            else:
+            elif not self.config.train.non_text:
                 completion_tokens_count += len(
                     self.tokenizer.encode(rollout.completion)
                 )
@@ -755,7 +758,7 @@ class PolicyStatusManager:
             )
             if (
                 estimated_step - rollout.weight_version
-                <= self.config.train.train_policy.allowed_outdated_steps
+                < self.config.train.train_policy.allowed_outdated_steps
             ):
                 filtered_rollouts.append(rollout)
             else:
@@ -1119,7 +1122,7 @@ class PolicyStatusManager:
                         len(rollout.completion_token_ids)
                         if self.config.train.train_policy.rollout_as_token_ids
                         else len(self.tokenizer.encode(rollout.completion))
-                    )
+                    ) if not self.config.train.non_text else 1
                     advantages.extend([rollout.advantage] * completion_length)
                     filter_rewards.append(rollout.filter_reward)
                     completion_lengths.append(completion_length)

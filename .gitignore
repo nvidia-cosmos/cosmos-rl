@@ -245,3 +245,5 @@ onelogger.log
 
 # Version file of cosmos-rl
 cosmos_rl/_version.py
+
+rollouts

@@ -1,0 +1,315 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import Any, Dict, List
+import torch
+import os
+
+from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.schema import RLPayload
+from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.replay_buffer import load_trajectory_from_buffer
+from cosmos_rl.dispatcher.data.schema import Rollout
+
+def _get_vla_constants():
+    """Get VLA constants lazily to avoid circular import"""
+    from cosmos_rl.policy.model.vla.openvla_oft.constants import (
+        NUM_ACTIONS_CHUNK,
+        ACTION_DIM,
+        ACTION_TOKEN_BEGIN_IDX,
+    )
+    return NUM_ACTIONS_CHUNK, ACTION_DIM, ACTION_TOKEN_BEGIN_IDX
+
+
+class VLADataPacker(DataPacker):
+    """
+    Data packer for Vision-Language-Action (VLA) models.
+
+    Converts plain dict with VLA task information into RLPayload objects
+    with metadata field populated for the rollout worker.
+
+    Expected input dict format:
+    {
+        "task_suite_name": str,  # e.g., "libero_10", "robotwin2"
+        "task_id": int,          # Task ID within the suite
+        "trial_id": int,         # Trial ID for this task
+        "trial_seed": int,       # Random seed for environment
+        ... (other optional fields)
+    }
+    """
+
+    def policy_compute_max_len(self, processed_samples: List[Any]) -> int:
+        return 512  # Default
+
+    def get_rollout_input(self, item: Any) -> RLPayload:
+        """
+        Convert VLA task dict to RLPayload with metadata
+
+        Args:
+            item: Either a dict with VLA task info, or already an RLPayload
+
+        Returns:
+            RLPayload with task info in metadata field
+        """
+        # If already an RLPayload, return as-is
+        if isinstance(item, RLPayload):
+            return item
+
+        # Extract VLA task information from dict
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"VLA data packer expects dict or RLPayload, got {type(item)}"
+            )
+
+        # Build metadata dict from task info
+        metadata = {}
+
+        # Required fields
+        metadata["task_suite_name"] = item.get("task_suite_name", "libero_10")
+        metadata["task_id"] = item.get("task_id", 0)
+        metadata["trial_id"] = item.get("trial_id", 0)
+        metadata["trial_seed"] = item.get("trial_seed", -1)
+
+        # Convert tensors to Python values if needed
+        for key in ["task_id", "trial_id", "trial_seed"]:
+            if hasattr(metadata[key], "item"):
+                metadata[key] = metadata[key].item()
+
+        # Optional fields
+        if "instruction" in item:
+            metadata["instruction"] = item["instruction"]
+        if "max_steps" in item:
+            metadata["max_steps"] = item["max_steps"]
+
+        # Copy any additional metadata
+        for key, value in item.items():
+            if key not in metadata and key not in [
+                "task_suite_name",
+                "task_id",
+                "trial_id",
+                "trial_seed",
+            ]:
+                # Skip large data like images
+                if not isinstance(value, (torch.Tensor, list, dict)):
+                    metadata[key] = value
+
+        # Create RLPayload with metadata
+        # For VLA, we don't use text prompt, so set it to empty string
+        # The actual task instruction is in metadata
+        payload = RLPayload(
+            prompt="",  # VLA uses environment interactions, not text prompts
+            metadata=metadata,
+            weight_version=0,  # Will be set by dispatcher
+        )
+
+        logger.debug(f"VLA data packer created payload with metadata: {metadata}")
+        return payload
+
+    def get_policy_input(
+        self,
+        sample: Rollout,
+        device: torch.device,
+    ) -> Any:
+        """
+        Decode the Rollout object into a RLPolicyInput object.
+        The RLPolicyInput object contains the following fields:
+            1. originally from prompt:
+                - task_id: The task ID
+                - trial_id: The trial ID
+            2. generated from rollout and stored in completion:
+                - finish_step: The finish step of the episode
+                - complete: Whether the episode is complete
+                - advantage: The advantage of the episode
+            3. generated by rollout and stored in trajectory buffer:
+                - input_ids: The input IDs of each action chunk
+                - pixel_values: The pixel values of each action chunk
+                - responses: The responses of each action chunk
+                - old_log_probs: The old log probs of each action chunk
+        Args:
+            sample: The Rollout object
+
+        Returns:
+            RLPolicyInput object
+        """
+        # light-weighted fields are extracted directly from the Rollout object
+        weight_version = sample.weight_version
+        prompt = sample.prompt
+        task_id = prompt["task_id"]
+        trial_id = prompt["trial_id"]
+        advantage = sample.advantage
+        finish_step = sample.completion["finish_step"]
+        complete = sample.completion["complete"]
+
+        # heavy-weighted fields are loaded from the trajectory buffer
+        trajectory_id = sample.completion["trajectory_id"]
+        trajectory = None
+        try:
+            trajectory = load_trajectory_from_buffer(
+                trajectory_id,
+                buffer_dir=os.path.join(self.config.train.output_dir, 'replay_buffer'),
+                remove_after_load=False,  # Don't remove yet, training uses it multiple times
+            )
+        except Exception as e:
+            logger.error(
+                f"[VLA Policy Input] Failed to load trajectory {trajectory_id}: {e}"
+            )
+            raise e
+        input_ids = trajectory["input_ids"]
+        pixel_values = trajectory["pixel_values"]
+        old_log_probs = trajectory["old_log_probs"]
+        responses = trajectory["responses"]
+
+        # Return full episode without chunking
+        # Chunking will be handled in train_vla() for gradient accumulation
+        class RLPolicyInput:
+            """Per-step structured input for VLA training"""
+
+            def __init__(
+                self,
+                weight_version,
+                task_id,
+                trial_id,
+                finish_step,
+                complete,
+                advantage,
+                input_ids,
+                responses,
+                pixel_values,
+                old_log_probs,
+            ):
+                self.weight_version = weight_version
+                self.task_id = task_id
+                self.trial_id = trial_id
+                self.finish_step = finish_step
+                self.complete = complete
+                self.advantage = advantage
+                self.input_ids = input_ids
+                self.responses = responses
+                self.pixel_values = pixel_values
+                self.old_log_probs = old_log_probs
+
+        return RLPolicyInput(
+            weight_version,
+            task_id,
+            trial_id,
+            finish_step,
+            complete,
+            advantage,
+            input_ids.to(device),
+            responses.to(device),
+            pixel_values.to(device),
+            old_log_probs.to(device),
+        )
+
+    def policy_collate_fn(
+        self,
+        policy_input: Any,
+        max_chunks: int,
+    ) -> Dict[str, Any]:
+        """
+        Pad the policy input to the maximum number of chunks.
+        Args:
+            policy_input: The policy input
+            max_chunks: The maximum number of chunks
+        Returns:
+            Dict with tensors shaped (batch, num_steps, ...) for per-step processing
+        """
+        # Get constants lazily to avoid circular import
+        NUM_ACTIONS_CHUNK, ACTION_DIM, ACTION_TOKEN_BEGIN_IDX = _get_vla_constants()
+        
+        input_ids = policy_input.input_ids
+        responses = policy_input.responses
+        pixel_values = policy_input.pixel_values
+        old_log_probs = policy_input.old_log_probs
+
+        finish_step = policy_input.finish_step
+        max_steps = max_chunks * NUM_ACTIONS_CHUNK
+        pad_steps = max_steps - finish_step
+
+        num_chunks = input_ids.shape[0]
+        pad_chunks = max_chunks - num_chunks
+        prompt_len = input_ids.shape[1]
+        pad_token_id = self.tokenizer.pad_token_id
+
+        with torch.device(input_ids.device):
+            input_ids = torch.cat(
+                (
+                    input_ids,
+                    torch.full(
+                        (pad_chunks, prompt_len),
+                        pad_token_id,
+                        dtype=torch.long,
+                    ),
+                ),
+                dim=0,
+            )
+            attention_masks = torch.cat(
+                (
+                    torch.ones((num_chunks, prompt_len), dtype=torch.long),
+                    torch.zeros((pad_chunks, prompt_len), dtype=torch.long),
+                ),
+                dim=0,
+            )
+            pixel_values = torch.cat(
+                (
+                    pixel_values,
+                    torch.full(
+                        (pad_chunks, *pixel_values.shape[1:]), 0, dtype=torch.float32
+                    ),
+                ),
+                dim=0,
+            )
+            responses = torch.cat(
+                (
+                    responses,
+                    torch.full(
+                        (pad_chunks, NUM_ACTIONS_CHUNK * ACTION_DIM),
+                        ACTION_TOKEN_BEGIN_IDX + 1,
+                        dtype=torch.long,
+                    ),
+                ),
+                dim=0,
+            )
+            old_log_probs = torch.cat(
+                (
+                    old_log_probs,
+                    torch.full(
+                        (pad_chunks, NUM_ACTIONS_CHUNK * ACTION_DIM),
+                        0,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=0,
+            )
+            logprob_masks = torch.cat(
+                (
+                    torch.ones((finish_step, ACTION_DIM), dtype=torch.long),
+                    torch.zeros((pad_steps, ACTION_DIM), dtype=torch.long),
+                ),
+                dim=0,
+            ).reshape(max_chunks, NUM_ACTIONS_CHUNK * ACTION_DIM)
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_masks,
+            "pixel_values": pixel_values,
+            "responses": responses,
+            "old_log_probs": old_log_probs,
+            "logprob_masks": logprob_masks,
+        }
+
+
+# Register VLA data packer for VLA model types
+DataPacker.register(["openvla", "openvla-oft"], VLADataPacker)

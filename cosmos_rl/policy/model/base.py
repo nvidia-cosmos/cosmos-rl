@@ -545,8 +545,14 @@ class ModelRegistry:
             ):
                 logger.info(f"Using cuda for model build of {model_name_or_path}.")
                 return torch.device("cuda")
+            elif hf_config.model_type == "openvla" and hasattr(hf_config, "timm_model_ids"):
+                # VLA models with TIMM vision backbone, use CUDA for initialization
+                return torch.device("cuda")
             else:
                 return init_on_device("meta", include_buffers=False)
+            
+        if hasattr(model_cls, "preprocess_hf_config"):
+            hf_config = model_cls.preprocess_hf_config(config)
 
         init_context = _get_init_context_for_model_build(hf_config)
         with init_context:
@@ -646,16 +652,14 @@ class WeightMapper(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     def policy_map_local_key_to_hf_key(self, name: str) -> str:
         """
         Map the local parameter name to the Huggingface parameter name at policy side.
         The name should be consistent with the final name in `rollout_prepare_recv` and `rollout_split_local_key_n_param_to_hf_key_n_param` for the same parameter.
         This is to make sure the mapped name is consistent between policy and rollout side.
         """
-        pass
+        return name
 
-    @abstractmethod
     def rollout_map_local_key_to_hf_key(self, name: str) -> str:
         """
         Map the local parameter name to the Huggingface parameter name format at rollout side.
@@ -664,7 +668,7 @@ class WeightMapper(ABC):
         The name format should be consistent with the final name in `policy_map_local_key_to_hf_key`.
         This is to make sure the mapped name format is consistent between policy and rollout side.
         """
-        pass
+        return name
 
     def get_unsplited_weight_name(self, weight_key: str) -> str:
         """

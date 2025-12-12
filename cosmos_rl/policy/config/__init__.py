@@ -921,6 +921,10 @@ class ValidationConfig(BaseModel):
         default=False,
         description="Enable validation during training.",
     )
+    val_before_train: bool = Field(
+        default=False,
+        description="Enable validation before training starts (at step 0, after weight initialization).",
+    )
     freq: int = Field(
         default=20,
         description="Validation frequency during training, in terms of training steps",
@@ -1075,6 +1079,48 @@ class LoggingConfig(BaseModel):
         return self
 
 
+class VLAConfig(BaseModel):
+    vla_type: str = Field(
+        default="openvla-oft",
+        description="VLA type, could be 'openvla-oft' or 'openvla'",
+        choices=["openvla-oft", "openvla"],
+    )
+
+    use_proprio: bool = Field(
+        default=False,
+        description="Whether to use proprioceptive information."
+    )
+
+    proprio_dim: int = Field(
+        default=7,
+        description="Dimension of proprioceptive information."
+    )
+
+    num_images_in_input: int = Field(
+        default=1,
+        description="Number of images in input."
+    )
+
+    training_chunk_size: int = Field(
+        default=16,
+        description="Number of chunks to train in one iteration."
+    )
+
+    filter_lower_bound: float = Field(
+        default=0.1,
+        description="Lower success rate bound for filtering the rollout generation groups.",
+    )
+
+    filter_upper_bound: float = Field(
+        default=0.9,
+        description="Upper success rate bound for filtering the rollout generation groups.",
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        return self
+
+
 class Config(BaseModel):
     custom: Dict[str, Any] = Field(
         default_factory=dict, description="Custom script configuration."
@@ -1085,6 +1131,7 @@ class Config(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     profiler: ProfilerConfig = Field(default_factory=ProfilerConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    vla: VLAConfig = Field(default_factory=VLAConfig)
     redis: str = Field(
         default="",
         description="Redis server address port, format: port",

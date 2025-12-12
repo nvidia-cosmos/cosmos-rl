@@ -31,6 +31,7 @@ __all__ = [
     "DeepseekV3MoEModel",
     "InternVLChatModel",
     "BaseModel",
+    "OpenVLA",
     "WeightMapper",
     "ModelRegistry",
 ]
