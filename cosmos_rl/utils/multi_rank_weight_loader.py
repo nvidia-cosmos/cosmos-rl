@@ -28,6 +28,7 @@ import torch.distributed as dist
 from safetensors import safe_open
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.distributed import broadcast_object_cpu
 
 
 class MultiRankWeightLoader:
@@ -44,21 +45,17 @@ class MultiRankWeightLoader:
         # When dp_replicate > 1, we need to use a process group that excludes dp_replicate
         # since each replica is independent and should load weights separately
         if dist.is_initialized():
-            if hasattr(parallel_dims, "mesh") and parallel_dims.dp_replicate_enabled:
-                # Use dp_cp_tp mesh which excludes dp_replicate
-                # This ensures we only communicate within the same replica
-                try:
-                    self.group = parallel_dims.mesh.get_group("dp_cp_tp")
-                    self.rank = dist.get_rank(self.group)
-                    self.world_size = dist.get_world_size(self.group)
-                except (KeyError, AttributeError):
-                    raise ValueError(
-                        "[MultiRankWeightLoader] dp_cp_tp group not found in parallel_dims.mesh"
-                    )
-            else:
-                self.rank = dist.get_rank()
-                self.world_size = dist.get_world_size()
-                self.group = None
+            assert hasattr(parallel_dims, "mesh"), "parallel_dims.mesh is not found"
+            # Use dp_cp_tp mesh which excludes dp_replicate
+            # This ensures we only communicate within the same replica
+            try:
+                self.group = parallel_dims.mesh.get_group("dp_cp_tp")
+                self.rank = dist.get_rank(self.group)
+                self.world_size = dist.get_world_size(self.group)
+            except (KeyError, AttributeError):
+                raise ValueError(
+                    "[MultiRankWeightLoader] dp_cp_tp group not found in parallel_dims.mesh"
+                )
         else:
             self.rank = 0
             self.world_size = 1
@@ -212,11 +209,10 @@ class MultiRankWeightLoader:
 
         # Broadcast tensor metadata (shape, dtype) from the rank that has it
         if self.world_size > 1:
-            container = [meta_data]
-            dist.broadcast_object_list(
-                container, group=self.group, group_src=tensor_rank
+            meta_data = broadcast_object_cpu(
+                meta_data, group=self.group, group_src=tensor_rank
             )
-            tensor_shape, tensor_dtype = container[0]
+            tensor_shape, tensor_dtype = meta_data
 
             if self.rank != tensor_rank:
                 ckpt_tensor = torch.empty(
