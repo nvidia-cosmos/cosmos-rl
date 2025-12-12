@@ -465,7 +465,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         _, event = self.temp_recv_tensor_queue.get()
                     event.synchronize()
 
-            if underlying_tensor_view.device == torch.device("cpu"):
+            if underlying_tensor_view.device != self.device:
                 recv_tensor = torch.empty_like(
                     underlying_tensor_view, device=torch.cuda.current_device()
                 ).contiguous()
@@ -1132,7 +1132,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 current_step == 0 and self.config.validation.val_before_train
             )
             is_periodic_validation = (
-                current_step > 1 and current_step % self.config.validation.freq == 0
+                current_step > 0 and current_step % self.config.validation.freq == 0
             )
             is_final_validation = current_step == broadcast_command.total_steps
 
@@ -1238,20 +1238,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                             is_end,
                         )
                     )
-                # scattered_prompts_and_is_end = [
-                #     (
-                #         prompts[
-                #             i : i
-                #             + (len(prompts) // self.parallel_dims.mesh["dp"].size())
-                #         ],
-                #         is_end,
-                #     )
-                #     for i in range(
-                #         0,
-                #         len(prompts),
-                #         len(prompts) // self.parallel_dims.mesh["dp"].size(),
-                #     )
-                # ]
             else:
                 scattered_prompts_and_is_end = [
                     (None, is_end) for _ in range(self.parallel_dims.mesh["dp"].size())

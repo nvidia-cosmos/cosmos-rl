@@ -55,7 +55,7 @@ kl_beta = 0.0
 mu_iterations = 1
 mini_batch = 2
 min_filter_prefix_tokens = 1
-allowed_outdated_steps = 1
+allowed_outdated_steps = 0
 
 [train.ckpt]
 enable_checkpoint = true

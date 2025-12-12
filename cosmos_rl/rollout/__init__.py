@@ -45,7 +45,7 @@ except ImportError as e:
 try:
     import cosmos_rl.rollout.vla_rollout.vla_rollout as vla_rollout_dummy  # noqa: F401
 except ImportError as e:
-    logger.error(f"Failed to import OpenVLA Rollout. Error: {e}")
+    logger.debug(f"Failed to import OpenVLA Rollout. Error: {e}")
     pass
 
 
