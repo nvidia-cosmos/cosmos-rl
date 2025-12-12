@@ -24,9 +24,6 @@ from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.logging import logger
 
-from cosmos_rl.policy.model.vla.openvla_oft.constants import ACTION_DIM
-
-
 @TrainerRegistry.register(trainer_type="grpo_vla")
 class OpenVLAGRPOTrainer(GRPOTrainer):
     def __init__(self, *args, **kwargs):
@@ -146,7 +143,7 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                         f"[VLA Train] Task {task_id}_{trial_id} Chunk {chunk_idx+1}/{num_training_chunks}: "
                         f"loss={loss.item()}, ratio [{ratio.min().item()},{ratio.max().item()}], "
                         f"clipfrac={pg_clipfrac.item()}, ppo_kl={ppo_kl.item()}, "
-                        f"mask_sum={chunk_valid_responses.item()/ACTION_DIM:.0f}"
+                        f"mask_sum={chunk_valid_responses.item():.0f}"
                         + (" [PADDED]" if chunk_valid_responses == 0 else "")
                     )
         self.lr_schedulers.step()
