@@ -108,13 +108,13 @@ class MultiRankWeightLoader:
         rank_tensor_metadata = {}  # {tensor_name: (shape, dtype)} for this rank
         weights_of_ckpt_names = set()
 
-        # If MULTI_RANK_WEIGHT_LOADER_ON_CPU is set to 1, load tensors to CPU to avoid GPU OOM
+        # If COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU is set to 1, load tensors to CPU to avoid GPU OOM
         # Otherwise, load tensors to the specified device
         # Note: This may cause performance degradation due to CPU-GPU transfer overhead
-        MULTI_RANK_WEIGHT_LOADER_ON_CPU = (
-            os.getenv("MULTI_RANK_WEIGHT_LOADER_ON_CPU", "0") == "1"
+        COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU = (
+            os.getenv("COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU", "0") == "1"
         )
-        loading_device = "cpu" if MULTI_RANK_WEIGHT_LOADER_ON_CPU else device
+        loading_device = "cpu" if COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU else device
 
         with torch.device(loading_device):
             for file_idx, f in enumerate(safetensors_files):
