@@ -26,26 +26,12 @@ from typing import Dict, List, Set, Tuple, Optional, Callable, Iterator
 import torch
 import torch.distributed as dist
 from safetensors import safe_open
+from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 
 
 class MultiRankWeightLoader:
     """Utility class for multi-rank loading of model weights from safetensors files."""
-
-    # Mapping from dtype to integer for broadcasting
-    DTYPE_TO_INT = {
-        torch.float32: 0,
-        torch.float16: 1,
-        torch.bfloat16: 2,
-        torch.int64: 3,
-        torch.int32: 4,
-        torch.int8: 5,
-        torch.uint8: 6,
-        torch.float8_e4m3fn: 7,
-        torch.float8_e5m2: 8,
-    }
-    # Mapping from integer to dtype for broadcasting
-    INT_TO_DTYPE = {v: k for k, v in DTYPE_TO_INT.items()}
 
     def __init__(self, parallel_dims: ParallelDims):
         """
@@ -135,10 +121,9 @@ class MultiRankWeightLoader:
                         weights_of_ckpt_names.add(name)
                         rank_tensors[name] = ckpt_tensor
                         rank_tensor_metadata[name] = (
-                            list(ckpt_tensor.shape),
-                            self.DTYPE_TO_INT.get(ckpt_tensor.dtype, 0),
+                            ckpt_tensor.shape,
+                            ckpt_tensor.dtype,
                         )
-
                     del ckpt
 
         return rank_tensors, rank_tensor_metadata, weights_of_ckpt_names
@@ -216,56 +201,28 @@ class MultiRankWeightLoader:
         # Get tensor from the rank that has it
         if self.rank == tensor_rank:
             ckpt_tensor = rank_tensors[name]
-            tensor_shape, tensor_dtype_int = rank_tensor_metadata[name]
+            meta_data = rank_tensor_metadata[name]
+
             # Move tensor from CPU to GPU if needed (tensors are loaded to CPU to avoid OOM)
             if ckpt_tensor.device.type != device.type:
                 ckpt_tensor = ckpt_tensor.to(device)
         else:
             ckpt_tensor = None
-            tensor_shape = []
-            tensor_dtype_int = 0
+            meta_data = None
 
         # Broadcast tensor metadata (shape, dtype) from the rank that has it
         if self.world_size > 1:
-            # Ensure all ranks participate in broadcast
-            if self.rank == tensor_rank:
-                shape_len = len(tensor_shape)
-                shape_len_tensor = torch.tensor(
-                    [shape_len], dtype=torch.long, device=device
-                )
-                shape_tensor = torch.tensor(
-                    tensor_shape, dtype=torch.long, device=device
-                )
-                dtype_int_tensor = torch.tensor(
-                    [tensor_dtype_int], dtype=torch.long, device=device
-                )
-            else:
-                shape_len_tensor = torch.zeros(1, dtype=torch.long, device=device)
-                shape_tensor = None  # Will be created after knowing shape_len
-                dtype_int_tensor = torch.zeros(1, dtype=torch.long, device=device)
-
-            # Broadcast shape length first
-            dist.broadcast(shape_len_tensor, group=self.group, group_src=tensor_rank)
-            shape_len = shape_len_tensor.item()
-
-            # Create shape_tensor with correct size for all ranks
-            if self.rank != tensor_rank:
-                shape_tensor = torch.zeros(shape_len, dtype=torch.long, device=device)
-
-            # Broadcast shape values
-            dist.broadcast(shape_tensor, group=self.group, group_src=tensor_rank)
-
-            # Broadcast dtype
-            dist.broadcast(dtype_int_tensor, group=self.group, group_src=tensor_rank)
+            container = [meta_data]
+            dist.broadcast_object_list(
+                container, group=self.group, group_src=tensor_rank
+            )
+            tensor_shape, tensor_dtype = container[0]
 
             if self.rank != tensor_rank:
-                tensor_shape = shape_tensor.cpu().tolist()
-                tensor_dtype = self.INT_TO_DTYPE.get(
-                    dtype_int_tensor.item(), torch.float32
-                )
                 ckpt_tensor = torch.empty(
                     tensor_shape, dtype=tensor_dtype, device=device
                 )
+                ckpt_tensor = ckpt_tensor.to(device)
 
             # Broadcast the actual tensor data
             dist.broadcast(ckpt_tensor, group=self.group, group_src=tensor_rank)
@@ -308,6 +265,7 @@ class MultiRankWeightLoader:
         for name in sorted(all_tensor_names):
             tensor_rank = tensor_to_rank_map.get(name)
             if tensor_rank is None:
+                logger.error(f"Tensor {name} not found which is unexpected.")
                 continue
 
             tensor = self.broadcast_tensor(
