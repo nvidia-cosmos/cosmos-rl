@@ -76,7 +76,7 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     parallel_dims: ParallelDims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    parallel_dims.build_mesh(device_type=device)
+    parallel_dims.build_mesh(device_type=device.type)
 
     print(f"parallel_dims: {parallel_dims}")
 
@@ -92,9 +92,9 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     assert pp_scheduler_val is None, "pp_scheduler_val should be None"
     if not config.train.fsdp_offload:
         model._apply(
-            lambda t: torch.empty_like(t, device="cuda")
+            lambda t: torch.empty_like(t, device=device)
             if t.device.type == "meta"
-            else t.to("cuda"),
+            else t.to(device),
             recurse=True,
         )
     model.post_to_empty_hook(config)
@@ -328,7 +328,9 @@ class TestCosmosHfPrecision(unittest.TestCase):
         ce_loss_hf_mean = ce_loss_hf.mean()
         logits_hf = logits_hf[:, -1, :]
 
-        cosmos_model_list, _, _, _ = init_cosmos_rl_model(config, device="cuda")
+        cosmos_model_list, _, _, _ = init_cosmos_rl_model(
+            config, device=torch.device(f"cuda:{torch.distributed.get_rank()}")
+        )
         cosmos_model = cosmos_model_list[0]
         cosmos_model.eval()
         with torch.no_grad():
@@ -369,6 +371,7 @@ class TestCosmosHfPrecision(unittest.TestCase):
             assert max_index_hf == max_index_cosmos_rl
 
 
-# torchrun --nproc_per_node=4 test_qwen3_vl_moe.py
+# torchrun --nproc_per_node=4 tests/test_qwen3_vl_moe.py
 if __name__ == "__main__":
+    os.environ["COSMOS_MULTI_RANK_WEIGHT_LOADER_ON_CPU"] = "1"
     unittest.main()

@@ -19,7 +19,6 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from safetensors import safe_open
 from torch.nn.modules.module import _IncompatibleKeys
 from transformers import AutoConfig
 
@@ -34,13 +33,12 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.kernel.moe import moe
 from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.deepseek_v3 import deepseekv3_mapped
-from cosmos_rl.policy.model.deepseek_v3.checkpoint_planner import RenameLoadPlanner
 from cosmos_rl.policy.model.deepseek_v3.weight_mapper import (
     DeepseekV3MoEWeightMapper,
     convert_weight_from_hf,
-    weight_dequant,
 )
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.utils.multi_rank_weight_loader import MultiRankWeightLoader
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import clear_weight_name, resolve_model_path, retry
 
@@ -221,213 +219,128 @@ class DeepseekV3MoEModel(BaseModel):
         model_name_or_path: str,
         parallel_dims: ParallelDims,
         device: torch.device,
-        save_dcp: bool = False,
         revision: Optional[str] = None,
     ):
-        dcp_checkpoint_path = os.path.join(
-            DCP_CHECKPOINT_PATH_PREFIX,
-            model_name_or_path.split("/")[-1].lower(),
-            DCP_CHECKPOINT_PATH_SUFFIX,
+        # Initialize multi-rank weight loader
+        loader = MultiRankWeightLoader(parallel_dims)
+
+        # Load all safetensors from `model_path`
+        model_type = retry(AutoConfig.from_pretrained)(model_name_or_path).model_type
+        model_path = resolve_model_path(model_name_or_path, revision=revision)
+        safetensors_files = sorted(
+            [f for f in os.listdir(model_path) if f.endswith(".safetensors")]
         )
-        # if it is a huggingface model and no checkpoint exists, we need to load the weights from the safetensors files
-        if len(model_name_or_path.split("/")) == 2 and (
-            not os.path.exists(dcp_checkpoint_path)
-            or len(os.listdir(dcp_checkpoint_path)) == 0
+
+        self_state_dict = self.state_dict()
+        self_state_dict = {clear_weight_name(k): v for k, v in self_state_dict.items()}
+
+        lm_head_weight_key = "model.lm_head.weight"
+        embed_tokens_weight_key = "model.model.embed_tokens.weight"
+
+        # Step 1: Load files in parallel
+        rank_tensors, rank_tensor_metadata, weights_of_ckpt_names = (
+            loader.load_files_parallel(model_path, device, safetensors_files)
+        )
+
+        # Step 2: Gather tensor names and build mapping
+        all_tensor_names, tensor_to_rank_map = (
+            loader.gather_tensor_names_and_build_mapping(
+                weights_of_ckpt_names, rank_tensors
+            )
+        )
+
+        # Step 3: Process each tensor
+        reserved = {}
+        for name, tensor in loader.iterate_tensors(
+            all_tensor_names,
+            tensor_to_rank_map,
+            rank_tensors,
+            rank_tensor_metadata,
+            device,
         ):
-            # The checkpoint loading assumes bf16 checkpoints. The default deepseekv3 checkpoint is in fp8. We needs to convert the checkpoints from fp8 to bf16 first.
-            # Can follow the instructions here: https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/deepseek.md
-            # Load all safetensors from `model_path`
-            model_type = retry(AutoConfig.from_pretrained)(
-                model_name_or_path, trust_remote_code=True
-            ).model_type
-            model_path = resolve_model_path(model_name_or_path, revision)
-            safetensors_files = [
-                f for f in os.listdir(model_path) if f.endswith(".safetensors")
-            ]
+            # Save embed_tokens tensor for weight tying if needed
+            if name == embed_tokens_weight_key:
+                reserved[name] = tensor.clone()
 
-            self_state_dict = self.state_dict()
-            self_state_dict = {
-                clear_weight_name(k): v for k, v in self_state_dict.items()
-            }
-
-            lm_head_weight_key = "model.lm_head.weight"
-            embed_tokens_weight_key = "model.model.embed_tokens.weight"
-            weights_of_ckpt_names = set()
-            reserved = {}
-            scale_inv_paths = {}
-
-            for f in safetensors_files:
-                ckpt = retry(safe_open)(
-                    os.path.join(model_path, f), framework="pt", device=str(device)
-                )
-                keys = ckpt.keys()
-                for name in keys:
-                    if name.endswith("weight_scale_inv"):
-                        scale_inv_paths[name] = os.path.join(model_path, f)
-
-            for f in safetensors_files:
-                logger.info(f"Loading safetensors: {f}")
-                weights_of_ckpt = {}
-                ckpt = retry(safe_open)(
-                    os.path.join(model_path, f), framework="pt", device=str(device)
-                )
-                keys = ckpt.keys()
-                for name in keys:
-                    ckpt_tensor = ckpt.get_tensor(name)
-                    weights_of_ckpt[name] = ckpt_tensor
-                    weights_of_ckpt_names.add(name)
-                    if name == embed_tokens_weight_key:
-                        reserved[name] = ckpt_tensor
-
-                for name in weights_of_ckpt.keys():
-                    tensor = weights_of_ckpt[name]
-                    if name.endswith("weight_scale_inv") or "layers.61" in name:
-                        # Skip since this weight is used for dequantization
-                        continue
-
-                    if (
-                        "down_proj" in name
-                        or "up_proj" in name
-                        or "gate_proj" in name
-                        or "self_attn.kv_a_proj_with_mqa" in name
-                        or "self_attn.kv_b_proj" in name
-                        or "self_attn.o_proj" in name
-                        or "self_attn.q_a_proj" in name
-                        or "self_attn.q_b_proj" in name
-                    ) and "weight" in name:
-                        inv_name = name + "_scale_inv"
-                        inv_tensor = retry(safe_open)(
-                            scale_inv_paths[inv_name],
-                            framework="pt",
-                            device=str(device),
-                        ).get_tensor(inv_name)
-                        tensor = weight_dequant(tensor, inv_tensor)
-
-                    dest_name, shared_weight, expert_id = convert_weight_from_hf(
-                        tensor,
-                        name,
-                        model_type,
-                        parallel_dims,
-                        n_experts=self.config.n_routed_experts,
-                    )
-
-                    if dest_name is None:
-                        # This is due to the expert parallelism grouping
-                        continue
-
-                    if dest_name not in self_state_dict and parallel_dims.pp_enabled:
-                        logger.info(
-                            f"Weight `{dest_name}` is discarded, maybe due to pipeline parallelism or expert parallelism grouping. Skipping this weight checking"
-                        )
-                        continue
-
-                    slice_range = None
-                    if ".experts.gate_proj" in dest_name:
-                        dest_name = dest_name.replace("gate_projs", "gate_and_up_projs")
-                        slice_range = slice(0, self.config.moe_inter_dim)
-                    elif ".experts.up_proj" in dest_name:
-                        dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
-                        slice_range = slice(self.config.moe_inter_dim, None)
-
-                    target_tensor = self_state_dict[dest_name]
-                    if isinstance(target_tensor, torch.distributed.tensor.DTensor):
-                        target_tensor = target_tensor.to_local()
-                    # Write to the correct expert of the target tensor
-                    if expert_id is not None:
-                        # Convert expert_id to local_expert_id
-                        n_local_experts = (
-                            self.config.n_routed_experts
-                            // parallel_dims.tp
-                            // (parallel_dims.dp_shard * parallel_dims.cp)
-                        )
-
-                        expert_id = expert_id % n_local_experts
-                        target_tensor = target_tensor[expert_id]
-
-                    if slice_range is not None:
-                        assert (
-                            target_tensor.shape[0] == 2 * self.config.moe_inter_dim
-                        ), f"Shape mismatch: {target_tensor.shape} != {2 * self.config.moe_inter_dim} for {dest_name}"
-                        target_tensor = target_tensor[slice_range]
-
-                    assert (
-                        target_tensor.shape == shared_weight.shape
-                    ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
-                    with torch.no_grad():
-                        target_tensor.data.copy_(shared_weight)
-                torch.distributed.barrier()
-                logger.info(f"Loaded safetensors: {f} successfully.")
-
-            if (
-                lm_head_weight_key not in weights_of_ckpt_names
-                and embed_tokens_weight_key in weights_of_ckpt_names
-            ):
-                # tied with embed_tokens.weight
-                name = lm_head_weight_key
-                assert embed_tokens_weight_key in reserved
-                tensor = reserved[embed_tokens_weight_key]
-                dest_name, shared_weight = convert_weight_from_hf(
-                    tensor,
-                    name,
-                    model_type,
-                    parallel_dims,
-                    n_experts=self.config.n_routed_experts,
-                )
-                if dest_name in self_state_dict:
-                    target_tensor = self_state_dict[dest_name]
-                    is_dist_tensor = isinstance(
-                        target_tensor, torch.distributed.tensor.DTensor
-                    )
-                    local_view = (
-                        target_tensor.to_local() if is_dist_tensor else target_tensor
-                    )
-                    assert (
-                        local_view.shape == shared_weight.shape
-                    ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
-                    with torch.no_grad():
-                        local_view.data.copy_(shared_weight)
-            if save_dcp:
-                logger.info(f"Dumping the tensors to DCP folder {dcp_checkpoint_path}")
-                os.makedirs(dcp_checkpoint_path, exist_ok=True)
-                fs_storage_writer = torch.distributed.checkpoint.FileSystemWriter(
-                    dcp_checkpoint_path
-                )
-                torch.distributed.checkpoint.save(
-                    state_dict=self_state_dict,
-                    storage_writer=fs_storage_writer,
-                )
-        else:
-            logger.info("Loading from distributed checkpoints...")
-            model_name_or_path = model_name_or_path.rstrip("/")
-            if model_name_or_path.endswith("_hf"):
-                model_name_or_path_dcp = model_name_or_path[:-3]
-                logger.info(
-                    f"Found model path with _hf prefix ({model_name_or_path}. Looking for non-hf checkpoint at: {model_name_or_path_dcp}"
-                )
-                model_name_or_path = model_name_or_path_dcp
-            elif len(model_name_or_path.split("/")) == 2:
-                model_name_or_path = dcp_checkpoint_path
-
-            # Transformer engine adds this extra state which we dont have in the saved checkpoint.
-            mapped_state_dict = {
-                k: v
-                for k, v in self.state_dict().items()
-                if not k.endswith("_extra_state")
-            }
-
-            logger.info("Creating storage reader...")
-            fs_storage_reader = torch.distributed.checkpoint.FileSystemReader(
-                model_name_or_path
+            dest_name, shared_weight, expert_id = convert_weight_from_hf(
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                n_experts=self.config.n_routed_experts,
             )
-            logger.info("Loading checkpoint ...")
-            torch.distributed.checkpoint.load(
-                state_dict=mapped_state_dict,
-                storage_reader=fs_storage_reader,
-                planner=RenameLoadPlanner(allow_partial_load=False),
+
+            if dest_name is None:
+                continue
+
+            if dest_name not in self_state_dict and parallel_dims.pp_enabled:
+                continue
+
+            slice_range = None
+            if ".experts.gate_proj" in dest_name:
+                dest_name = dest_name.replace("gate_projs", "gate_and_up_projs")
+                slice_range = slice(0, self.config.moe_inter_dim)
+            elif ".experts.up_proj" in dest_name:
+                dest_name = dest_name.replace("up_projs", "gate_and_up_projs")
+                slice_range = slice(self.config.moe_inter_dim, None)
+
+            target_tensor = self_state_dict[dest_name]
+            if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                target_tensor = target_tensor.to_local()
+
+            if expert_id is not None:
+                n_local_experts = (
+                    self.config.n_routed_experts
+                    // parallel_dims.tp
+                    // (parallel_dims.dp_shard * parallel_dims.cp)
+                )
+                expert_id = expert_id % n_local_experts
+                target_tensor = target_tensor[expert_id]
+
+            if slice_range is not None:
+                assert (
+                    target_tensor.shape[0] == 2 * self.config.moe_inter_dim
+                ), f"Shape mismatch for {dest_name}"
+                target_tensor = target_tensor[slice_range]
+
+            assert (
+                target_tensor.shape == shared_weight.shape
+            ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
+
+            with torch.no_grad():
+                target_tensor.data.copy_(shared_weight)
+
+        if (
+            lm_head_weight_key not in weights_of_ckpt_names
+            and embed_tokens_weight_key in weights_of_ckpt_names
+        ):
+            name = lm_head_weight_key
+            # All ranks should have embed_tokens_weight_key tensor from Step 3
+            assert embed_tokens_weight_key in reserved, (
+                f"embed_tokens_weight_key {embed_tokens_weight_key} not found in reserved. "
+                f"This should have been saved during Step 3 processing."
             )
-            logger.info("Refreshing model.")
-            self.load_state_dict(self.state_dict())
-            logger.info("Checkpoint loaded.")
+            tensor = reserved[embed_tokens_weight_key]
+            dest_name, shared_weight = convert_weight_from_hf(
+                tensor,
+                name,
+                model_type,
+                parallel_dims,
+                n_experts=self.config.n_routed_experts,
+            )
+            if dest_name in self_state_dict:
+                target_tensor = self_state_dict[dest_name]
+                is_dist_tensor = isinstance(
+                    target_tensor, torch.distributed.tensor.DTensor
+                )
+                local_view = (
+                    target_tensor.to_local() if is_dist_tensor else target_tensor
+                )
+                assert (
+                    local_view.shape == shared_weight.shape
+                ), f"Shape mismatch for {dest_name}"
+                with torch.no_grad():
+                    local_view.data.copy_(shared_weight)
 
     def load_state_dict(
         self, state_dict: dict[str, Any], strict: bool = True, assign: bool = False

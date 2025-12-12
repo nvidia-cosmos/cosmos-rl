@@ -82,25 +82,13 @@ def pp_loss_fn(config, parallel_dims):
 
 
 def init_cosmos_rl_model(config, is_train=True, device="cuda"):
-    if config.policy.parallelism.dp_replicate_size == -1:
-        # recompute it
-        world_size = int(os.environ.get("WORLD_SIZE", 1))
-        config.policy.parallelism.dp_replicate_size = (
-            world_size // config.policy.parallelism.dp_shard_size
-        )
-        print(
-            f"Recomputed dp_replicate_size: {config.policy.parallelism.dp_replicate_size} given world_size: {world_size} and dp_shard_size: {config.policy.parallelism.dp_shard_size}"
-        )
-
     model = ModelRegistry.build_model(config)
 
-    # if config.policy.model_gradient_checkpointing:
-    #     apply_ac(model, config.policy.model_name_or_path)
     # init parallel_dims
     parallel_dims: ParallelDims = ParallelDims.from_config(
         parallesim_config=config.policy.parallelism
     )
-    parallel_dims.build_mesh(device_type=device)
+    parallel_dims.build_mesh(device_type=device.type)
 
     print(f"parallel_dims: {parallel_dims}")
 
@@ -116,9 +104,9 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     assert pp_scheduler_val is None, "pp_scheduler_val should be None"
     if not config.train.fsdp_offload:
         model._apply(
-            lambda t: torch.empty_like(t, device="cuda")
+            lambda t: torch.empty_like(t, device=device)
             if t.device.type == "meta"
-            else t.to("cuda"),
+            else t.to(device),
             recurse=True,
         )
     model.post_to_empty_hook(config)
@@ -228,7 +216,8 @@ class TestHFModelTP(unittest.TestCase):
                 config.torch_dtype = dtype
 
                 cosmos_model_list, _, _, _ = init_cosmos_rl_model(
-                    cosmos_config, device="cuda"
+                    cosmos_config,
+                    device=torch.device(f"cuda:{torch.distributed.get_rank()}"),
                 )
                 cosmos_hf_model = cosmos_model_list[0]
                 cosmos_named_buffers = {
@@ -274,7 +263,7 @@ class TestHFModelTP(unittest.TestCase):
                     timeout=timedelta(seconds=300),  # 5 minutes timeout
                 )
                 torch.cuda.set_device(torch.distributed.get_rank())
-
+        device = torch.device(f"cuda:{torch.distributed.get_rank()}")
         max_position_embeddings = 4096
         config_dict["policy"]["model_max_length"] = max_position_embeddings
 
@@ -302,7 +291,7 @@ class TestHFModelTP(unittest.TestCase):
 
             # Load cosmos model
             cosmos_model_list, _, _, _ = init_cosmos_rl_model(
-                cosmos_config, device="cuda"
+                cosmos_config, device=device
             )
             cosmos_hf_model = cosmos_model_list[0]
 
@@ -392,7 +381,7 @@ class TestHFModelTP(unittest.TestCase):
                 print(f"Rank {torch.distributed.get_rank()} - Error: {e}")
 
             # Synchronize error state across all ranks to avoid hanging
-            error_tensor = torch.tensor([1.0 if error_occurred else 0.0], device="cuda")
+            error_tensor = torch.tensor([1.0 if error_occurred else 0.0], device=device)
             torch.distributed.all_reduce(
                 error_tensor, op=torch.distributed.ReduceOp.MAX
             )
@@ -403,7 +392,7 @@ class TestHFModelTP(unittest.TestCase):
                 exit(-1)
 
 
-# torchrun --nproc_per_node=2 test_hf_models_tp.py
+# torchrun --nproc_per_node=2 tests/test_hf_models_tp.py
 if __name__ == "__main__":
     unittest.main()
 
