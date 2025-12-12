@@ -82,6 +82,7 @@ class ParallelDims:
     pp: int
     world_size: int
     pp_dynamic_shape: bool
+    enable_loss_parallel: bool = False
     ep: int = 1
     # When ep is enabled, we can have different dp shard for the MoE module.
     # For example, suppose we have 64 GPUs, then we can have dp_shard equal
@@ -231,6 +232,8 @@ class ParallelDims:
         dp_cp_tp_mesh_dim_names = []
         # Mesh for loss all-reduce
         dp_cp_mesh_dim_names = []
+        # Mesh for model parallel
+        mp_mesh_dim_names = []
 
         if self.dp_replicate_enabled:
             dp_mesh_dim_names.append("dp_replicate")
@@ -249,6 +252,10 @@ class ParallelDims:
             dp_cp_mesh_dim_names.append("cp")
         if self.tp_enabled:
             dp_cp_tp_mesh_dim_names.append("tp")
+            mp_mesh_dim_names.append("tp")
+        if self.pp_enabled:
+            mp_mesh_dim_names.append("pp")
+        # FIXME: (lms/dinghao) From what megatron-core does, it merge tp and pp into mp. Check it.
 
         if dp_mesh_dim_names != []:
             mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
@@ -260,6 +267,9 @@ class ParallelDims:
             mesh[tuple(dp_cp_tp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp_tp")
         if dp_cp_mesh_dim_names != []:
             mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
+
+        if mp_mesh_dim_names != []:
+            mesh[tuple(mp_mesh_dim_names)]._flatten(mesh_dim_name="mp")
 
         self.mesh = mesh
         return mesh
@@ -341,6 +351,10 @@ class ParallelDims:
     def pp_dynamic_shape_enabled(self) -> bool:
         return self.pp > 1 and self.pp_dynamic_shape
 
+    @property
+    def loss_parallel_enabled(self):
+        return self.tp > 1 and self.enable_loss_parallel
+
     def non_data_parallel_size(self):
         return self.cp * self.tp * self.pp
 
@@ -363,6 +377,15 @@ class ParallelDims:
         return (self.mesh.get_local_rank(mesh_dim="pp"), self.pp)
 
     @property
+    def dp_coord(self):
+        if not self.dp_enabled:
+            return 0, 1
+        return (
+            self.mesh.get_local_rank(mesh_dim="dp"),
+            self.dp_replicate * self.dp_shard,
+        )
+
+    @property
     def dp_shard_coord(self):
         if not self.dp_shard_enabled:
             return 0, 1
@@ -381,6 +404,15 @@ class ParallelDims:
         else:
             return self.mesh[tuple(("dp_shard_cp",))].get_local_rank(), self.mesh[
                 tuple(("dp_shard_cp",))
+            ].size()
+
+    @property
+    def mp_coord(self):
+        if not self.tp_enabled and not self.pp_enabled:
+            return 0, 1
+        else:
+            return self.mesh[tuple(("mp",))].get_local_rank(), self.mesh[
+                tuple(("mp",))
             ].size()
 
     def build_mesh_info(self):

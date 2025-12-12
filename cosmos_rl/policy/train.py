@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import argparse
 from typing import Optional
 
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.policy.config.wfm import CosmosVisionGenConfig
 from cosmos_rl.dispatcher.data.packer.base import worker_entry_parser
 from cosmos_rl.policy.policy_entry import policy_entry
 
@@ -34,7 +36,26 @@ def main(args: Optional[argparse.Namespace] = None, **kwargs):
             )
             raise e
 
-    policy_entry(**kwargs)
+    # FIXME: (lms) refactor this hard-coded check, wfm and llm should be in one-compatible way.
+    is_wfm = os.environ.get("COSMOS_IS_WFM", "False").lower() == "true"
+    if is_wfm:
+        import toml
+        from cosmos_rl.policy.worker.wfm_worker import WFMPolicyWorker
+
+        # For wfm vision gen, we have to load  the config from file now.
+        config_path = args.config
+        assert config_path is not None, "config file is required for wfm vision gen"
+        try:
+            with open(config_path, "r") as f:
+                config_dict = toml.load(f)
+            loaded_config = CosmosVisionGenConfig.from_dict(config_dict)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load config file {config_path}: {e}")
+
+        training_worker = WFMPolicyWorker(loaded_config, **kwargs)
+        training_worker.execute()
+    else:
+        policy_entry(**kwargs)
 
 
 if __name__ == "__main__":

@@ -1054,6 +1054,10 @@ class LoggingConfig(BaseModel):
         default="cosmos_rl",
         description="Wandb project name for logging. If set, the training will be logged to this project.",
     )
+    group_name: Optional[str] = Field(
+        default=None,
+        description="Wandb group name for logging. If set, the training will be logged to this group.",
+    )
     experiment_name: Optional[str] = Field(
         default=None,
         description="A short display name for this run. If not set, will use the `output_dir` as the experiment name.",

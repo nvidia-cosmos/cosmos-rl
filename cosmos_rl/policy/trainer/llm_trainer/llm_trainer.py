@@ -25,7 +25,7 @@ from transformers import AutoConfig, GenerationConfig
 from safetensors.torch import save_file
 from huggingface_hub import create_repo, upload_folder, whoami
 from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
-from cosmos_rl.utils.checkpoint import upload_folder_to_s3
+from cosmos_rl.utils.s3_utils import upload_folder_to_s3
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.trainer.optm import build_optimizers

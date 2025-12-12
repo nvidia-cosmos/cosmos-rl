@@ -25,7 +25,7 @@ import threading
 
 
 from fastapi.responses import HTMLResponse, JSONResponse
-from typing import Dict, List, Optional, Callable, Union
+from typing import Dict, List, Optional, Callable, Union, Iterable
 from cosmos_rl.dispatcher.controller import Controller
 import cosmos_rl.utils.constant as constant
 from cosmos_rl.dispatcher.protocol import MESH_NAMES
@@ -513,6 +513,7 @@ def _serialize_replicas(replicas: Dict[str, Replica]) -> List[Dict]:
 
 def main(
     dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
+    dataloader: Optional[Callable[[CosmosConfig], Iterable]] = None,
     data_packer: Optional[BaseDataPacker] = None,
     reward_fns: Optional[List[Callable]] = None,
     filter_reward_fns: Optional[List[Callable]] = None,
@@ -532,6 +533,10 @@ def main(
         logger.warning(
             f"Params: {list(kwargs.keys())} are not being used in controller initialization."
         )
+    if dataloader is not None:
+        raise NotImplementedError(
+            "Customized dataloader is not supported inside controller now."
+        )
 
     # Deprecated: The following code is to ensure backward compatibility:
     # where `dispatcher` is always launched in custom script
@@ -547,6 +552,7 @@ def main(
             from cosmos_rl.policy.train import main as policy_main
 
             policy_main(
+                args=args,
                 dataset=dataset,
                 data_packer=data_packer,
                 val_dataset=val_dataset,
@@ -561,6 +567,7 @@ def main(
             from cosmos_rl.rollout.rollout_entry import run_rollout
 
             run_rollout(
+                args=args,
                 dataset=dataset,
                 reward_fns=reward_fns,
                 filter_reward_fns=filter_reward_fns,
