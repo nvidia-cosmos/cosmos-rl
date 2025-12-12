@@ -266,7 +266,7 @@ class MultiRankWeightLoader:
             tensor_rank = tensor_to_rank_map.get(name)
             if tensor_rank is None:
                 logger.error(
-                    f"Tensor {name} not found in tensor_to_rank_mapwhich is unexpected."
+                    f"Tensor {name} not found in tensor_to_rank_map which is unexpected."
                 )
                 continue
 
