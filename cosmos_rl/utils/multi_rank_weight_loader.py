@@ -222,7 +222,6 @@ class MultiRankWeightLoader:
                 ckpt_tensor = torch.empty(
                     tensor_shape, dtype=tensor_dtype, device=device
                 )
-                ckpt_tensor = ckpt_tensor.to(device)
 
             # Broadcast the actual tensor data
             dist.broadcast(ckpt_tensor, group=self.group, group_src=tensor_rank)
