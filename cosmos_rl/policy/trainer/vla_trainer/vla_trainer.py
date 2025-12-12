@@ -24,6 +24,7 @@ from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.logging import logger
 
+
 @TrainerRegistry.register(trainer_type="grpo_vla")
 class OpenVLAGRPOTrainer(GRPOTrainer):
     def __init__(self, *args, **kwargs):
