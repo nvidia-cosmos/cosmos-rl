@@ -41,9 +41,7 @@ from cosmos_rl.rollout.vla_rollout.env_worker import (
     libero_env_worker,
     robotwin_env_worker,
 )
-from cosmos_rl.policy.model.vla.openvla_oft.constants import (
-    NUM_ACTIONS_CHUNK,
-)
+
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
 
 MAX_STEPS_MAP = {
@@ -816,6 +814,8 @@ class OpenVLARollout(RolloutBase):
         # Episode execution loop
         step = 0
         vla_history = []
+
+        from cosmos_rl.policy.model.vla.openvla_oft.constants import NUM_ACTIONS_CHUNK
 
         while step < max_steps:
             # Find active environments

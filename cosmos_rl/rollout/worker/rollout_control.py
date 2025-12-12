@@ -429,9 +429,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         all_tensor_views_to_copy = []
         tensors_to_check = []
 
-        for m in self.rollout.model.modules():
-            if isinstance(m, torch.distributed.fsdp.FSDPModule):
-                m.reshard()
+        if self.get_underlying_model() is not None:
+            for m in self.get_underlying_model().modules():
+                if isinstance(m, torch.distributed.fsdp.FSDPModule):
+                    m.reshard()
 
         def recv_tensor_creator(underlying_tensor_view: torch.Tensor):
             recv_tensor = None
