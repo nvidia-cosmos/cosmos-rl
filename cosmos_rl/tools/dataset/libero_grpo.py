@@ -16,10 +16,8 @@
 from torch.utils.data import Dataset
 from typing import Optional, Any, Dict
 from cosmos_rl.launcher.worker_entry import main as launch_worker
-from cosmos_rl.utils.logging import logger
 from cosmos_rl.policy.config import Config as CosmosConfig
 
-import torch
 from libero.libero import benchmark as libero_bench
 
 
@@ -29,7 +27,6 @@ class LIBERODataset(Dataset):
         self.num_trials_per_task = num_trials_per_task
 
     def setup(self, config: CosmosConfig, *args, **kwargs):
-
         self.config = config
         if self.train_val == "train":
             self.task_suite_name = config.train.train_policy.dataset.subset
@@ -76,7 +73,10 @@ class LIBERODataset(Dataset):
 
 
 def vla_reward_fn(
-    to_be_evaluated: Dict[str, Any], reference: Optional[Any] = None, prompt=None, **kwargs
+    to_be_evaluated: Dict[str, Any],
+    reference: Optional[Any] = None,
+    prompt=None,
+    **kwargs,
 ) -> float:
     """
     Custom reward function for VLA tasks.

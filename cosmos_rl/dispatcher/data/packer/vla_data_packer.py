@@ -23,6 +23,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.replay_buffer import load_trajectory_from_buffer
 from cosmos_rl.dispatcher.data.schema import Rollout
 
+
 def _get_vla_constants():
     """Get VLA constants lazily to avoid circular import"""
     from cosmos_rl.policy.model.vla.openvla_oft.constants import (
@@ -30,6 +31,7 @@ def _get_vla_constants():
         ACTION_DIM,
         ACTION_TOKEN_BEGIN_IDX,
     )
+
     return NUM_ACTIONS_CHUNK, ACTION_DIM, ACTION_TOKEN_BEGIN_IDX
 
 
@@ -158,7 +160,7 @@ class VLADataPacker(DataPacker):
         try:
             trajectory = load_trajectory_from_buffer(
                 trajectory_id,
-                buffer_dir=os.path.join(self.config.train.output_dir, 'replay_buffer'),
+                buffer_dir=os.path.join(self.config.train.output_dir, "replay_buffer"),
                 remove_after_load=False,  # Don't remove yet, training uses it multiple times
             )
         except Exception as e:
@@ -228,7 +230,7 @@ class VLADataPacker(DataPacker):
         """
         # Get constants lazily to avoid circular import
         NUM_ACTIONS_CHUNK, ACTION_DIM, ACTION_TOKEN_BEGIN_IDX = _get_vla_constants()
-        
+
         input_ids = policy_input.input_ids
         responses = policy_input.responses
         pixel_values = policy_input.pixel_values

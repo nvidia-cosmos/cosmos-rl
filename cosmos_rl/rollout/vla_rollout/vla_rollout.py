@@ -43,7 +43,6 @@ from cosmos_rl.rollout.vla_rollout.env_worker import (
 )
 from cosmos_rl.policy.model.vla.openvla_oft.constants import (
     NUM_ACTIONS_CHUNK,
-    ACTION_DIM,
 )
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
 
@@ -241,7 +240,7 @@ class OpenVLARollout(RolloutBase):
         return self._rollout_collection(
             payloads, stream, data_packer, data_fetcher, **kwargs
         )
-    
+
     def _rollout_collection(
         self,
         payloads: List[RLPayload],
@@ -261,11 +260,12 @@ class OpenVLARollout(RolloutBase):
                 )
                 collected_results.extend(group_results)
             except Exception as e:
-                logger.warning( f"[Rollout Collection] Prompt failed likely due to sim timeout, prompt dropped...: {e}")
+                logger.warning(
+                    f"[Rollout Collection] Prompt failed likely due to sim timeout, prompt dropped...: {e}"
+                )
                 self._destroy_parallel_envs()
                 collected_results.append(RolloutResult(completions=[]))
         return collected_results
-            
 
     def _rollout_validation(
         self,
@@ -290,7 +290,9 @@ class OpenVLARollout(RolloutBase):
                     )
                     break
                 except Exception as e:
-                    logger.warning( f"[Rollout Validation] Batch failed likely due to sim timeout, retrying...: {e}")
+                    logger.warning(
+                        f"[Rollout Validation] Batch failed likely due to sim timeout, retrying...: {e}"
+                    )
                     self._destroy_parallel_envs()
                     continue
             valid_results.extend(group_results)
@@ -325,7 +327,9 @@ class OpenVLARollout(RolloutBase):
             task_suite_names.append(payload.prompt.get("task_suite_name"))
             task_ids.append(payload.prompt.get("task_id", 0))
             trial_ids.append(payload.prompt.get("trial_id", 0))
-            max_steps_list.append(MAX_STEPS_MAP.get(payload.prompt.get("task_suite_name"), 512))
+            max_steps_list.append(
+                MAX_STEPS_MAP.get(payload.prompt.get("task_suite_name"), 512)
+            )
 
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
         if len(cuda_visible_devices.split(",")) >= 8:
@@ -369,9 +373,9 @@ class OpenVLARollout(RolloutBase):
 
         for idx in range(batch_size):
             init_data = self.sim_output_queues[idx].get(timeout=120)
-            assert init_data["type"] == "init", (
-                f"Expected 'init', got '{init_data['type']}'"
-            )
+            assert (
+                init_data["type"] == "init"
+            ), f"Expected 'init', got '{init_data['type']}'"
 
             task_descriptions.append(init_data["task_description"])
             inputs.append(
@@ -515,7 +519,7 @@ class OpenVLARollout(RolloutBase):
                             "", wrist_image
                         )  # Empty prompt for additional views
                         pixel_values_list.append(wrist_feature["pixel_values"])
-                    except:
+                    except Exception:
                         pass  # Skip if processing fails
 
             # Concatenate pixel values
@@ -757,15 +761,19 @@ class OpenVLARollout(RolloutBase):
                 ).logprobs
 
                 trajectory_id = save_trajectory_to_buffer(
-                    traj, 
-                    buffer_dir=os.path.join(self.config.train.output_dir, 'replay_buffer')
+                    traj,
+                    buffer_dir=os.path.join(
+                        self.config.train.output_dir, "replay_buffer"
+                    ),
                 )
-                #{'active': False, 'complete': True, 'finish_step': 164, 'task_file_name': 'libero_10_task_5_trial_13', 'task_id': 5, 'trial_id': 13, 'gen_idx': 0, 'task_suite_name': 'libero_10'}
-                completions.append({
-                    "complete": bool(task_records[episode_idx]["complete"]),
-                    "finish_step": int(task_records[episode_idx]["finish_step"]),
-                    "trajectory_id": trajectory_id,
-                })
+                # {'active': False, 'complete': True, 'finish_step': 164, 'task_file_name': 'libero_10_task_5_trial_13', 'task_id': 5, 'trial_id': 13, 'gen_idx': 0, 'task_suite_name': 'libero_10'}
+                completions.append(
+                    {
+                        "complete": bool(task_records[episode_idx]["complete"]),
+                        "finish_step": int(task_records[episode_idx]["finish_step"]),
+                        "trajectory_id": trajectory_id,
+                    }
+                )
         if is_validation:
             return [RolloutResult(completions=[c]) for c in completions]
         else:
@@ -796,7 +804,9 @@ class OpenVLARollout(RolloutBase):
             task_suite_names.append(payload.prompt.get("task_suite_name"))
             task_ids.append(payload.prompt.get("task_id", 0))
             trial_ids.append(payload.prompt.get("trial_id", 0))
-            max_steps = max(max_steps, MAX_STEPS_MAP.get(payload.prompt.get("task_suite_name"), 512))
+            max_steps = max(
+                max_steps, MAX_STEPS_MAP.get(payload.prompt.get("task_suite_name"), 512)
+            )
         gen_indices = (
             [0] * len(payloads) if is_validation else [i for i in range(len(payloads))]
         )
@@ -869,9 +879,9 @@ class OpenVLARollout(RolloutBase):
             new_inputs = inputs.copy()
             for idx in active_indices:
                 result = self.sim_output_queues[idx].get(timeout=30)
-                assert result["type"] == "step", (
-                    f"Expected 'step', got '{result['type']}'"
-                )
+                assert (
+                    result["type"] == "step"
+                ), f"Expected 'step', got '{result['type']}'"
 
                 new_inputs[idx] = obs_to_vla_input(
                     result["obs"],
@@ -919,8 +929,5 @@ class OpenVLARollout(RolloutBase):
         self._destroy_parallel_envs()
 
         return self._pack_grpo_results(
-            vla_history,
-            task_records,
-            batch_size,
-            is_validation
+            vla_history, task_records, batch_size, is_validation
         )

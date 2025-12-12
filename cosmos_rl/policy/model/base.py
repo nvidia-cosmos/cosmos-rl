@@ -545,12 +545,14 @@ class ModelRegistry:
             ):
                 logger.info(f"Using cuda for model build of {model_name_or_path}.")
                 return torch.device("cuda")
-            elif hf_config.model_type == "openvla" and hasattr(hf_config, "timm_model_ids"):
+            elif hf_config.model_type == "openvla" and hasattr(
+                hf_config, "timm_model_ids"
+            ):
                 # VLA models with TIMM vision backbone, use CUDA for initialization
                 return torch.device("cuda")
             else:
                 return init_on_device("meta", include_buffers=False)
-            
+
         if hasattr(model_cls, "preprocess_hf_config"):
             hf_config = model_cls.preprocess_hf_config(config)
 

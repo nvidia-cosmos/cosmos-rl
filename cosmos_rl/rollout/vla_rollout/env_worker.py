@@ -23,7 +23,7 @@ Includes EnvConfig dataclass for configuration.
 import gc
 import torch
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.rollout.vla_rollout.libero_utils import get_libero_env
 
@@ -114,12 +114,11 @@ def libero_env_worker(
     # if task_id == 0 and trial_id == 0:
     #     logger.info(f"init obs {obs['agentview_image'].shape}, {obs['agentview_image']}")
 
-
     # Warmup steps (CRITICAL for LIBERO camera initialization)
     num_wait_steps = 20
     for _ in range(num_wait_steps):
         obs, _, _, _ = env.step(get_libero_dummy_action("openvla"))
-    
+
     # if task_id == 0 and trial_id == 0:
     #     logger.info(f"static obs {obs['agentview_image'].shape}, {obs['agentview_image']}")
 

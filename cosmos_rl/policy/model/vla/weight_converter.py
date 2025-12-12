@@ -25,16 +25,16 @@ def convert_weight_from_hf(
 ) -> Tuple[str, torch.Tensor]:
     """
     Convert a weight tensor from HuggingFace checkpoint format to cosmos-rl format.
-    
+
     For VLA models, we apply FSDP sharding along dimension 0 to all parameters.
     This function shards the full checkpoint tensor to match the local shard size
     on this GPU rank.
-    
+
     Args:
         tensor: Full weight tensor from checkpoint
         name: Parameter name
         parallel_dims: Parallelism configuration
-        
+
     Returns:
         Tuple of (parameter_name, sharded_tensor)
     """
@@ -48,11 +48,11 @@ def convert_weight_from_hf(
 
     dest_name = name
     shard = tensor.contiguous()
-    
+
     # Apply FSDP sharding along dimension 0
     if dp_shard_size > 1:
         row_size = shard.shape[0]
-        
+
         if row_size % dp_shard_size == 0:
             # Even split: each rank gets equal share
             shard = shard.tensor_split(dp_shard_size, dim=0)[dp_shard_rank]
@@ -62,5 +62,5 @@ def convert_weight_from_hf(
             start_idx = dp_shard_rank * average_row_size
             end_idx = min(start_idx + average_row_size, row_size)
             shard = shard[start_idx:end_idx]
-    
+
     return dest_name, shard.contiguous()

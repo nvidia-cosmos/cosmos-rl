@@ -8,9 +8,8 @@ from .modeling_prismatic import OpenVLAForActionPrediction
 from .processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 
 __all__ = [
-    "OpenVLAConfig", 
+    "OpenVLAConfig",
     "OpenVLAForActionPrediction",
     "PrismaticImageProcessor",
-    "PrismaticProcessor"
+    "PrismaticProcessor",
 ]
-

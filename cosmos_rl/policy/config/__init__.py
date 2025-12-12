@@ -1087,23 +1087,19 @@ class VLAConfig(BaseModel):
     )
 
     use_proprio: bool = Field(
-        default=False,
-        description="Whether to use proprioceptive information."
+        default=False, description="Whether to use proprioceptive information."
     )
 
     proprio_dim: int = Field(
-        default=7,
-        description="Dimension of proprioceptive information."
+        default=7, description="Dimension of proprioceptive information."
     )
 
     num_images_in_input: int = Field(
-        default=1,
-        description="Number of images in input."
+        default=1, description="Number of images in input."
     )
 
     training_chunk_size: int = Field(
-        default=16,
-        description="Number of chunks to train in one iteration."
+        default=16, description="Number of chunks to train in one iteration."
     )
 
     filter_lower_bound: float = Field(

@@ -466,7 +466,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
             if underlying_tensor_view.device == torch.device("cpu"):
                 recv_tensor = torch.empty_like(
-                    underlying_tensor_view, device=torch.cuda.current_device()).contiguous()
+                    underlying_tensor_view, device=torch.cuda.current_device()
+                ).contiguous()
                 inplace = False
             elif underlying_tensor_view.is_contiguous():
                 recv_tensor = underlying_tensor_view
@@ -1126,14 +1127,16 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             current_step = self.current_weight_version
 
         if current_step is not None and current_step >= 0:
-            is_initial_validation = current_step == 0 and self.config.validation.val_before_train
-            is_periodic_validation = current_step > 1 and current_step % self.config.validation.freq == 0
+            is_initial_validation = (
+                current_step == 0 and self.config.validation.val_before_train
+            )
+            is_periodic_validation = (
+                current_step > 1 and current_step % self.config.validation.freq == 0
+            )
             is_final_validation = current_step == broadcast_command.total_steps
 
             should_do_validation = self.config.validation.enable and (
-                is_initial_validation
-                or is_periodic_validation
-                or is_final_validation
+                is_initial_validation or is_periodic_validation or is_final_validation
             )
 
             if should_do_validation:
@@ -1221,7 +1224,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 #     len(prompts) % self.parallel_dims.mesh["dp"].size() == 0
                 # ), f"Number of prompts {len(prompts)} must be divisible by data parallel size {self.parallel_dims.mesh['dp'].size()}"
                 ranks_to_scatter = self.parallel_dims.mesh["dp"].size()
-                prompts_per_rank = (len(prompts) + ranks_to_scatter - 1) // ranks_to_scatter
+                prompts_per_rank = (
+                    len(prompts) + ranks_to_scatter - 1
+                ) // ranks_to_scatter
                 scattered_prompts_and_is_end = []
                 for rank in range(ranks_to_scatter):
                     start_idx = rank * prompts_per_rank

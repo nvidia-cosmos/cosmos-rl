@@ -1119,10 +1119,14 @@ class PolicyStatusManager:
                 for rollout in rollouts_of_this_step:
                     rewards.append(rollout.reward)
                     completion_length = (
-                        len(rollout.completion_token_ids)
-                        if self.config.train.train_policy.rollout_as_token_ids
-                        else len(self.tokenizer.encode(rollout.completion))
-                    ) if not self.config.train.non_text else 1
+                        (
+                            len(rollout.completion_token_ids)
+                            if self.config.train.train_policy.rollout_as_token_ids
+                            else len(self.tokenizer.encode(rollout.completion))
+                        )
+                        if not self.config.train.non_text
+                        else 1
+                    )
                     advantages.extend([rollout.advantage] * completion_length)
                     filter_rewards.append(rollout.filter_reward)
                     completion_lengths.append(completion_length)

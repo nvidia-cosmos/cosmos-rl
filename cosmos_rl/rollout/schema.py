@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Union, Any, Dict
+from typing import List, Optional, Union, Any
 from pydantic import BaseModel
 from cosmos_rl.dispatcher.data.schema import ConversationType
 

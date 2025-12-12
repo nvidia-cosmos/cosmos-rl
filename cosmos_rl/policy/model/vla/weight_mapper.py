@@ -45,7 +45,6 @@ class VLAWeightMapper(WeightMapper):
     def __init__(self, hf_config: AutoConfig):
         super().__init__(hf_config)
 
-
     def rollout_prepare_recv(
         self,
         model: Any,

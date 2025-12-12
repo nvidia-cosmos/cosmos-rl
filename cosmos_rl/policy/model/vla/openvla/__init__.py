@@ -4,13 +4,12 @@
 """OpenVLA model implementation for cosmos-rl"""
 
 from .configuration_prismatic import OpenVLAConfig
-from .modeling_prismatic import OpenVLAForActionPrediction  
+from .modeling_prismatic import OpenVLAForActionPrediction
 from .processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 
 __all__ = [
     "OpenVLAConfig",
-    "OpenVLAForActionPrediction", 
+    "OpenVLAForActionPrediction",
     "PrismaticImageProcessor",
-    "PrismaticProcessor"
+    "PrismaticProcessor",
 ]
-

@@ -88,10 +88,14 @@ class PrismaticConfig(PretrainedConfig):
         **kwargs: str,
     ) -> None:
         if vision_backbone_id not in VALID_VISION_BACKBONES:
-            raise ValueError(f"Vision backbone `{vision_backbone_id}` not in {VALID_VISION_BACKBONES = }")
+            raise ValueError(
+                f"Vision backbone `{vision_backbone_id}` not in {VALID_VISION_BACKBONES = }"
+            )
 
         if llm_backbone_id not in VALID_LLM_BACKBONES:
-            raise ValueError(f"LLM backbone `{llm_backbone_id}` not in {VALID_LLM_BACKBONES = }")
+            raise ValueError(
+                f"LLM backbone `{llm_backbone_id}` not in {VALID_LLM_BACKBONES = }"
+            )
 
         # Set Prismatic Configuration Fields
         self.vision_backbone_id = vision_backbone_id
@@ -103,7 +107,10 @@ class PrismaticConfig(PretrainedConfig):
         self.use_fused_vision_backbone = (
             use_fused_vision_backbone
             if use_fused_vision_backbone is not None
-            else any(self.vision_backbone_id.startswith(v) for v in ["dinoclip", "dinosiglip"])
+            else any(
+                self.vision_backbone_id.startswith(v)
+                for v in ["dinoclip", "dinosiglip"]
+            )
         )
 
         self.timm_model_ids = VISION_BACKBONE_TO_TIMM_ID[self.vision_backbone_id]
@@ -117,7 +124,9 @@ class PrismaticConfig(PretrainedConfig):
 
         # [IMPORTANT] HF Utilities actually look for a `text_config` field... we need to use that specific naming!
         self.text_config = (
-            CONFIG_MAPPING[LLM_BACKBONE_TO_HF_METACLASS[self.llm_backbone_id]](**text_config)
+            CONFIG_MAPPING[LLM_BACKBONE_TO_HF_METACLASS[self.llm_backbone_id]](
+                **text_config
+            )
             if text_config is not None
             else CONFIG_MAPPING[LLM_BACKBONE_TO_HF_METACLASS[self.llm_backbone_id]]()
         )
@@ -131,7 +140,9 @@ class OpenVLAConfig(PrismaticConfig):
 
     def __init__(
         self,
-        norm_stats: Optional[Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]]] = None,
+        norm_stats: Optional[
+            Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]]
+        ] = None,
         n_action_bins: int = 256,
         **kwargs: str,
     ) -> None:

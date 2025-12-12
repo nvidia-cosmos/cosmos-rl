@@ -45,17 +45,26 @@ def compute_token_accuracy(predicted_token_ids, ground_truth_token_ids, mask):
     return accuracy
 
 
-def compute_actions_l1_loss(action_tokenizer, predicted_token_ids, ground_truth_token_ids, mask):
+def compute_actions_l1_loss(
+    action_tokenizer, predicted_token_ids, ground_truth_token_ids, mask
+):
     pred_continuous_actions = torch.tensor(
-        action_tokenizer.decode_token_ids_to_actions(predicted_token_ids[mask].cpu().numpy())
+        action_tokenizer.decode_token_ids_to_actions(
+            predicted_token_ids[mask].cpu().numpy()
+        )
     )
     true_continuous_actions = torch.tensor(
-        action_tokenizer.decode_token_ids_to_actions(ground_truth_token_ids[mask].cpu().numpy())
+        action_tokenizer.decode_token_ids_to_actions(
+            ground_truth_token_ids[mask].cpu().numpy()
+        )
     )
-    l1_loss = torch.nn.functional.l1_loss(pred_continuous_actions, true_continuous_actions)
+    l1_loss = torch.nn.functional.l1_loss(
+        pred_continuous_actions, true_continuous_actions
+    )
     return l1_loss
 
-def find_checkpoint_file(pretrained_checkpoint, file_pattern) :
+
+def find_checkpoint_file(pretrained_checkpoint, file_pattern):
     """
     Find a specific checkpoint file matching a pattern.
 
@@ -69,7 +78,9 @@ def find_checkpoint_file(pretrained_checkpoint, file_pattern) :
     Raises:
         AssertionError: If no files or multiple files match the pattern
     """
-    assert os.path.isdir(pretrained_checkpoint), f"Checkpoint path must be a directory: {pretrained_checkpoint}"
+    assert os.path.isdir(
+        pretrained_checkpoint
+    ), f"Checkpoint path must be a directory: {pretrained_checkpoint}"
 
     checkpoint_files = []
     for filename in os.listdir(pretrained_checkpoint):
@@ -77,14 +88,14 @@ def find_checkpoint_file(pretrained_checkpoint, file_pattern) :
             full_path = os.path.join(pretrained_checkpoint, filename)
             checkpoint_files.append(full_path)
 
-    assert len(checkpoint_files) == 1, (
-        f"Expected exactly 1 {file_pattern} checkpoint but found {len(checkpoint_files)} in directory: {pretrained_checkpoint}"
-    )
+    assert (
+        len(checkpoint_files) == 1
+    ), f"Expected exactly 1 {file_pattern} checkpoint but found {len(checkpoint_files)} in directory: {pretrained_checkpoint}"
 
     return checkpoint_files[0]
 
 
-def load_component_state_dict(checkpoint_path) :
+def load_component_state_dict(checkpoint_path):
     """
     Load a component's state dict from checkpoint and handle DDP prefix if present.
 

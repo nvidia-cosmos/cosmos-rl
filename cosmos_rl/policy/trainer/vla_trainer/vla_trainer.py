@@ -64,17 +64,21 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
         Returns:
             A dictionary of training metrics used for logging and reporting.
         """
-        logger.info(f"[VLA Train] Starting VLA training for step {current_step}/{total_steps}")
+        logger.info(
+            f"[VLA Train] Starting VLA training for step {current_step}/{total_steps}"
+        )
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
 
         self.optimizers.zero_grad()
         total_loss = 0.0
-        max_loss = -float('inf')
+        max_loss = -float("inf")
         TRAINING_CHUNK_SIZE = self.config.vla.training_chunk_size
 
-        policy_inputs = [self.data_packer.get_policy_input(r, self.device) for r in rollouts]
+        policy_inputs = [
+            self.data_packer.get_policy_input(r, self.device) for r in rollouts
+        ]
         max_chunks = max(p.input_ids.shape[0] for p in policy_inputs)
         for policy_input in policy_inputs:
             episode_data = self.data_packer.policy_collate_fn(policy_input, max_chunks)
@@ -85,14 +89,21 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
             # complete = policy_input.complete
             advantage = policy_input.advantage
             episode_valid_responses = episode_data["logprob_masks"].sum()
-            num_training_chunks = (max_chunks + TRAINING_CHUNK_SIZE - 1) // TRAINING_CHUNK_SIZE
+            num_training_chunks = (
+                max_chunks + TRAINING_CHUNK_SIZE - 1
+            ) // TRAINING_CHUNK_SIZE
 
-            logger.info(f"[VLA Train] Task {task_id}_{trial_id} finished @ {policy_input.finish_step}, weight version: {weight_version}")
+            logger.info(
+                f"[VLA Train] Task {task_id}_{trial_id} finished @ {policy_input.finish_step}, weight version: {weight_version}"
+            )
             with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                 for chunk_idx in range(num_training_chunks):
                     start_idx = chunk_idx * TRAINING_CHUNK_SIZE
                     end_idx = min((chunk_idx + 1) * TRAINING_CHUNK_SIZE, max_chunks)
-                    chunk_data = {k : v[start_idx:end_idx].to(self.device) for k, v in episode_data.items()}
+                    chunk_data = {
+                        k: v[start_idx:end_idx].to(self.device)
+                        for k, v in episode_data.items()
+                    }
                     log_probs = self.model.forward_with_trajectory_structure(
                         chunk_data["input_ids"],
                         chunk_data["pixel_values"],
@@ -110,9 +121,15 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                     ratio = torch.exp(negative_approx_kl)
 
                     pg_losses = -advantage * ratio
-                    pg_losses2 = -advantage * torch.clamp(ratio, 1.0 - epsilon_low, 1.0 + epsilon_high)
-                    pg_loss = (torch.max(pg_losses, pg_losses2) * chunk_response_mask).sum()
-                    pg_clipfrac = (torch.gt(pg_losses2, pg_losses).float() * chunk_response_mask).sum()
+                    pg_losses2 = -advantage * torch.clamp(
+                        ratio, 1.0 - epsilon_low, 1.0 + epsilon_high
+                    )
+                    pg_loss = (
+                        torch.max(pg_losses, pg_losses2) * chunk_response_mask
+                    ).sum()
+                    pg_clipfrac = (
+                        torch.gt(pg_losses2, pg_losses).float() * chunk_response_mask
+                    ).sum()
                     ppo_kl = (-negative_approx_kl * chunk_response_mask).sum()
 
                     policy_loss = pg_loss / episode_valid_responses
@@ -137,12 +154,20 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
         grad_norm = self.all_reduce_states(inter_policy_nccl)
 
         end_event.record()
-        logger.info(f"[VLA Train] Step {current_step} training time: {start_event.elapsed_time(end_event)/1000.0:.2f}s")
-        logger.info(f"[VLA Train] {len(policy_inputs)} episodes, current lr: {current_lr:.6f}, grad norm: {grad_norm:.6f}")
+        logger.info(
+            f"[VLA Train] Step {current_step} training time: {start_event.elapsed_time(end_event)/1000.0:.2f}s"
+        )
+        logger.info(
+            f"[VLA Train] {len(policy_inputs)} episodes, current lr: {current_lr:.6f}, grad norm: {grad_norm:.6f}"
+        )
 
         report_data = {}
-        if self.config.logging.logger and is_master_rank(self.parallel_dims, self.global_rank):
-            report_data["train/iteration_time"] = float(start_event.elapsed_time(end_event))
+        if self.config.logging.logger and is_master_rank(
+            self.parallel_dims, self.global_rank
+        ):
+            report_data["train/iteration_time"] = float(
+                start_event.elapsed_time(end_event)
+            )
             report_data["train/learning_rate"] = float(current_lr)
             report_data["train/grad_norm"] = float(grad_norm)
             report_data["train/loss_avg"] = float(total_loss / len(policy_inputs))

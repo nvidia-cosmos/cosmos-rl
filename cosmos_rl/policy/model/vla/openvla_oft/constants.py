@@ -4,6 +4,7 @@ Important constants for VLA training and evaluation.
 Attempts to automatically identify the correct constants to set based on the Python command used to launch
 training or evaluation. If it is unclear, defaults to using the LIBERO simulation benchmark constants.
 """
+
 import os
 import sys
 from enum import Enum
@@ -69,22 +70,21 @@ BRIDGE_CONSTANTS = {
 
 # Function to detect robot platform from command line arguments
 def detect_robot_platform():
-    
-    robot_env = os.environ.get('ROBOT_PLATFORM', '').upper()
+    robot_env = os.environ.get("ROBOT_PLATFORM", "").upper()
     if robot_env:
         # 环境变量映射到平台
         env_mapping = {
-            'LIBERO': 'LIBERO',
-            'ALOHA': 'ALOHA',
-            'ALOHA_12': 'ALOHA_12',
-            'ALOHA_8': 'ALOHA_8',
-            'ALOHA_6': 'ALOHA_6',
-            'BRIDGE': 'BRIDGE',
+            "LIBERO": "LIBERO",
+            "ALOHA": "ALOHA",
+            "ALOHA_12": "ALOHA_12",
+            "ALOHA_8": "ALOHA_8",
+            "ALOHA_6": "ALOHA_6",
+            "BRIDGE": "BRIDGE",
         }
         if robot_env in env_mapping:
             print(f"Detected robot platform from environment: {env_mapping[robot_env]}")
             return env_mapping[robot_env]
-    
+
     cmd_args = " ".join(sys.argv).lower()
 
     if "aloha_12chunk" in cmd_args:
@@ -107,7 +107,7 @@ def detect_robot_platform():
 
 # Determine which robot platform to use
 ROBOT_PLATFORM = detect_robot_platform()
-#ROBOT_PLATFORM = "ALOHA_12"
+# ROBOT_PLATFORM = "ALOHA_12"
 
 # Set the appropriate constants based on the detected platform
 if ROBOT_PLATFORM == "LIBERO":
@@ -119,7 +119,7 @@ elif ROBOT_PLATFORM == "ALOHA_12":
 elif ROBOT_PLATFORM == "ALOHA_8":
     constants = ALOHA_CONSTANTS_8chunk
 elif ROBOT_PLATFORM == "ALOHA_6":
-    constants = ALOHA_CONSTANTS_6chunk   
+    constants = ALOHA_CONSTANTS_6chunk
 elif ROBOT_PLATFORM == "BRIDGE":
     constants = BRIDGE_CONSTANTS
 
@@ -130,8 +130,8 @@ PROPRIO_DIM = constants["PROPRIO_DIM"]
 ACTION_PROPRIO_NORMALIZATION_TYPE = constants["ACTION_PROPRIO_NORMALIZATION_TYPE"]
 
 # Print which robot platform constants are being used (for debugging)
-print(f"Using {ROBOT_PLATFORM} constants:",flush=True)
-print(f"  NUM_ACTIONS_CHUNK = {NUM_ACTIONS_CHUNK}",flush=True)
+print(f"Using {ROBOT_PLATFORM} constants:", flush=True)
+print(f"  NUM_ACTIONS_CHUNK = {NUM_ACTIONS_CHUNK}", flush=True)
 # print(f"  ACTION_DIM = {ACTION_DIM}")
 # print(f"  PROPRIO_DIM = {PROPRIO_DIM}")
 # print(f"  ACTION_PROPRIO_NORMALIZATION_TYPE = {ACTION_PROPRIO_NORMALIZATION_TYPE}")
