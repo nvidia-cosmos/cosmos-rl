@@ -192,19 +192,28 @@ def obs_to_vla_input(obs: Dict, is_robotwin: bool = False) -> Dict:
         # IMPORTANT: Resize to 224x224 to match SimpleVLA-RL's get_libero_image()
         img = obs.get("agentview_image", np.zeros((256, 256, 3)))
 
-        # Resize using TensorFlow (EXACT match to SimpleVLA-RL's resize_image function)
+        # Resize using PIL (matches SimpleVLA-RL's resize_image function behavior)
         if img.shape[0] != 224 or img.shape[1] != 224:
-            import tensorflow as tf
+            from PIL import Image
+            import io
 
-            # Exactly match SimpleVLA-RL's resize_image implementation:
+            # Match SimpleVLA-RL's resize_image implementation:
             # - Encode as JPEG (as done in RLDS dataset builder)
             # - Decode back
-            # - Resize with lanczos3 and antialias
-            # - Clip and round
-            img = tf.image.encode_jpeg(img)
-            img = tf.io.decode_image(img, expand_animations=False, dtype=tf.uint8)
-            img = tf.image.resize(img, (224, 224), method="lanczos3", antialias=True)
-            img = tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8)
-            img = img.numpy()
+            # - Resize with Lanczos (high-quality resampling)
+            # - Clip to valid range
+            pil_img = Image.fromarray(img.astype(np.uint8))
+
+            # Encode/decode as JPEG to match TF behavior
+            buffer = io.BytesIO()
+            pil_img.save(buffer, format="JPEG", quality=95)
+            buffer.seek(0)
+            pil_img = Image.open(buffer)
+
+            # Resize with Lanczos (equivalent to lanczos3)
+            pil_img = pil_img.resize((224, 224), Image.Resampling.LANCZOS)
+
+            # Convert back to numpy array
+            img = np.array(pil_img, dtype=np.uint8)
 
         return {"full_image": img}

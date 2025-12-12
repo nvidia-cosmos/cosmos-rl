@@ -97,7 +97,7 @@ top_k = 0
 [validation]
 enable = true
 freq = 16
-val_before_train = false
+val_before_train = true
 batch_size = 8
 dataset.name = "libero"
 dataset.subset = "libero_10"

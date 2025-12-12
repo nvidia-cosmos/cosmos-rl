@@ -92,56 +92,34 @@ def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
     This function mimics SimpleVLA-RL's TensorFlow-based center crop:
     - Crops to 90% of the center (zoom in effect)
     - Resizes back to 224x224
-    """
-    import tensorflow as tf
 
-    batch_size = 1
+    Replaced TensorFlow with torchvision for better compatibility.
+    """
+    import torchvision.transforms.functional as TF
+
     crop_scale = 0.9  # Match SimpleVLA-RL
 
-    # Convert PIL to tensor
-    img_array = np.array(image)
-    img_tensor = tf.convert_to_tensor(img_array)
-    orig_dtype = img_tensor.dtype
+    # Get original image dimensions
+    width, height = image.size
 
-    # Convert to float for processing
-    img_tensor = tf.image.convert_image_dtype(img_tensor, tf.float32)
+    # Calculate crop dimensions (sqrt of scale to match TF implementation)
+    crop_ratio = np.sqrt(crop_scale)  # ~0.9487
+    crop_height = int(height * crop_ratio)
+    crop_width = int(width * crop_ratio)
 
-    # Expand to batch dimension
-    if len(img_tensor.shape) == 3:
-        img_tensor = tf.expand_dims(img_tensor, axis=0)
+    # Calculate offsets for center crop
+    top = (height - crop_height) // 2
+    left = (width - crop_width) // 2
 
-    # Crop and resize (matching SimpleVLA-RL's crop_and_resize function)
-    new_height = tf.reshape(
-        tf.clip_by_value(tf.sqrt(crop_scale), 0, 1), shape=(batch_size,)
-    )
-    new_width = tf.reshape(
-        tf.clip_by_value(tf.sqrt(crop_scale), 0, 1), shape=(batch_size,)
-    )
+    # Perform center crop
+    cropped_image = TF.crop(image, top, left, crop_height, crop_width)
 
-    height_offset = (1 - new_height) / 2
-    width_offset = (1 - new_width) / 2
-    bounding_box = tf.stack(
-        [
-            height_offset,
-            width_offset,
-            height_offset + new_height,
-            width_offset + new_width,
-        ],
-        axis=1,
+    # Resize to 224x224 (matching SimpleVLA-RL)
+    result_image = TF.resize(
+        cropped_image, [224, 224], interpolation=TF.InterpolationMode.BILINEAR
     )
 
-    # Crop and resize to 224x224 (matching SimpleVLA-RL)
-    img_tensor = tf.image.crop_and_resize(
-        img_tensor, bounding_box, tf.range(batch_size), (224, 224)
-    )
-
-    # Convert back to uint8
-    img_tensor = tf.clip_by_value(img_tensor, 0, 1)
-    img_tensor = tf.image.convert_image_dtype(img_tensor, orig_dtype, saturate=True)
-
-    # Remove batch dimension and convert back to PIL
-    img_array = img_tensor[0].numpy()
-    result_image = Image.fromarray(img_array)
+    # Ensure RGB format
     result_image = result_image.convert("RGB")
 
     return result_image
