@@ -358,14 +358,17 @@ class RewardCalculator:
         payload_list: List[RLPayload] = []
         # Dynamic Sampling: Filter out the rollouts that the rewards are all the same
         for idx, rollouts_group in enumerate(rollouts_list):
-            rollout_tokens = [
-                rollout.completion_token_ids
-                if self.config.train.train_policy.rollout_as_token_ids
-                else self.tokenizer(
-                    rollout.completion, add_special_tokens=False
-                ).input_ids
-                for rollout in rollouts_group
-            ]
+            if self.config.train.non_text:
+                rollout_tokens = []
+            else:
+                rollout_tokens = [
+                    rollout.completion_token_ids
+                    if self.config.train.train_policy.rollout_as_token_ids
+                    else self.tokenizer(
+                        rollout.completion, add_special_tokens=False
+                    ).input_ids
+                    for rollout in rollouts_group
+                ]
             # Only filter_reward is considered for dynamic sampling
             if len(set([rollout.filter_reward for rollout in rollouts_group])) > 1:
                 # Preprocess the valid rollouts to find if shared prefix exists
