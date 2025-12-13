@@ -758,7 +758,7 @@ class PolicyStatusManager:
             )
             if (
                 estimated_step - rollout.weight_version
-                < self.config.train.train_policy.allowed_outdated_steps
+                <= self.config.train.train_policy.allowed_outdated_steps
             ):
                 filtered_rollouts.append(rollout)
             else:
