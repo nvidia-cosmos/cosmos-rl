@@ -18,7 +18,7 @@ from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
     apply_fp8_linear_patch,
-    simplify_process_weights_after_loading,
+    simplify_process_weights_after_loading_for_fp8,
 )
 
 import vllm
@@ -307,7 +307,7 @@ class vLLMRollout(RolloutBase):
                 vllm_config = self.rollout_engine.llm_engine.vllm_config
                 with set_current_vllm_config(vllm_config):
                     apply_fp8_linear_patch(self.get_underlying_model())
-                simplify_process_weights_after_loading()
+                simplify_process_weights_after_loading_for_fp8()
 
     def post_init_engine_hook(
         self, consume_command_hook, report_rollouts_hook, validation_flag, **kwargs
@@ -732,16 +732,48 @@ class vLLMRollout(RolloutBase):
         return self.rollout_engine
 
     def fp8_quantization(self, weight: torch.Tensor):
-        # convert to fp8
+        """
+        Quantize the weight to fp8.
+        Args:
+            weight: The weight to quantize, in high-precision dtype. If with shape [out_dim, in_dim], it's Linear case, if with shape [num_experts, out_dim, in_dim], it's MoE case.
+        Returns:
+            qweight: The quantized weight.
+            weight_scale: The scale of the quantized weight.
+        """
         from vllm import _custom_ops as ops
 
         # quantization of rowwise torch scaled_mm.
         # weight has shape [out_dim, in_dim]
-        qweight, weight_scale = ops.scaled_fp8_quant(
-            weight, scale=None, use_per_token_if_dynamic=True
-        )
 
-        return qweight.t(), weight_scale
+        ndim = weight.dim()
+        if ndim == 2:
+            # Fp8LinearMethod
+            # quantization of rowwise torch scaled_mm.
+            # weight has shape [out_dim, in_dim]
+            qweight, weight_scale = ops.scaled_fp8_quant(
+                weight, scale=None, use_per_token_if_dynamic=True
+            )
+
+            return qweight.t(), weight_scale
+        elif ndim == 3:
+            # Fp8MoEMethod
+            # per-tensor quantization for each expert.
+            # weight has shape [num_experts, out_dim, in_dim]
+            n_experts = weight.shape[0]
+            qweight = torch.empty_like(weight, dtype=torch.float8_e4m3fn)
+            weight_scale = torch.ones(
+                n_experts, dtype=torch.float32, device=weight.device
+            )
+            for expert in range(n_experts):
+                qweight[expert, :, :], weight_scale[expert] = ops.scaled_fp8_quant(
+                    weight[expert, :, :], scale=None
+                )
+
+            qweight, weight_scale = ops.scaled_fp8_quant(
+                weight, scale=None, use_per_token_if_dynamic=True
+            )
+
+            return qweight, weight_scale
 
     def mxfp4_quantization(self, weight: torch.Tensor):
         """
