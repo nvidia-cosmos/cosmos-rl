@@ -21,7 +21,9 @@ def apply_ddp(
     """Apply DDP to the model."""
     if enable_compile:
         if enable_compiled_autograd:
-            torch._dynamo.config.optimize_ddp = "python_reducer_without_compiled_forward"
+            torch._dynamo.config.optimize_ddp = (
+                "python_reducer_without_compiled_forward"
+            )
         else:
             torch._dynamo.config.optimize_ddp = "ddp_optimizer"
 
@@ -37,7 +39,7 @@ def parallelize(
 ):
     """
     Apply DDP parallelism to PI05 model.
-    
+
     Note: PI05 only supports DDP, not TP/PP/FSDP.
     """
     world_mesh = parallel_dims.mesh

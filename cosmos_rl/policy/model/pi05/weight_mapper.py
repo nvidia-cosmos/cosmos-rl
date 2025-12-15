@@ -11,7 +11,7 @@ from cosmos_rl.policy.model.base import WeightMapper
 class Pi05WeightMapper(WeightMapper):
     """
     Minimal weight mapper for PI05 models.
-    
+
     PI05 only supports DDP and loads weights directly from HuggingFace,
     so this is a simple pass-through implementation with no weight splitting.
     """
@@ -28,4 +28,3 @@ class Pi05WeightMapper(WeightMapper):
     def policy_decompose_param_1_to_n_for_sync(self, name):
         """No decomposition needed for DDP-only setup."""
         return []
-
