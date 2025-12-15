@@ -823,9 +823,14 @@ cosmos-rl --config config.toml"""
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
+        latest_dir = os.path.join(output_dir, "logs_latest")
         output_dir = os.path.join(output_dir, f"logs_{timestamp}")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
+        # create a symlink to the output_dir in the latest_dir
+        if os.path.exists(latest_dir):
+            os.remove(latest_dir)
+        os.symlink(os.path.basename(output_dir), latest_dir)
     else:
         output_dir = None
 

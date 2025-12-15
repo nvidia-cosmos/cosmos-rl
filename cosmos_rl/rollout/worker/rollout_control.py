@@ -148,6 +148,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             model_type = constant.COSMOS_HF_MODEL_TYPES
         self.weight_mapper = WeightMapper.get_weight_mapper(model_type)(hf_config)
 
+        model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
+        if hasattr(model_cls, "preprocess_hf_config"):
+            hf_config = model_cls.preprocess_hf_config(self.config)
+
         self.model_config = hf_config
 
         atexit.register(self.handle_shutdown)
@@ -425,6 +429,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         all_tensor_views_to_copy = []
         tensors_to_check = []
 
+        if self.get_underlying_model() is not None:
+            for m in self.get_underlying_model().modules():
+                if isinstance(m, torch.distributed.fsdp.FSDPModule):
+                    m.reshard()
+
         def recv_tensor_creator(underlying_tensor_view: torch.Tensor):
             recv_tensor = None
             inplace = True
@@ -456,7 +465,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         _, event = self.temp_recv_tensor_queue.get()
                     event.synchronize()
 
-            if underlying_tensor_view.is_contiguous():
+            if underlying_tensor_view.device != self.device:
+                recv_tensor = torch.empty_like(
+                    underlying_tensor_view, device=torch.cuda.current_device()
+                ).contiguous()
+                inplace = False
+            elif underlying_tensor_view.is_contiguous():
                 recv_tensor = underlying_tensor_view
             else:
                 # new a temp tensor
@@ -491,6 +505,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 continue
 
             target_tensor = self.weight_inplace_view_map[inst_dest_name]
+            if isinstance(target_tensor, torch.distributed.tensor.DTensor):
+                target_tensor = target_tensor.to_local()
 
             if check_inside_group:
                 cloned_target_tensor = target_tensor.clone().cpu()
@@ -503,6 +519,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 r_rank = inst.rollout_rank
                 tensor_split_strategys = inst.slice_strategy
                 assert r_rank == global_rank_of_rollout
+
                 underlying_tensor_view = target_tensor.cosmos_slice(
                     tensor_split_strategys
                 )
@@ -766,7 +783,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         p.completion_token_ids = rr.completion_token_ids
                         p.weight_version = self.current_weight_version
                         p.cumulative_logprob = rr.cumulative_logprob
-                        if self.rollout.rollout_config.multi_turn_config.enable:
+                        if self.config.rollout.multi_turn_config.enable:
                             p.completed_conversations = rr.completed_conversations
                         if self.config.train.local_dataset:
                             p.reference_answer = (
@@ -1107,11 +1124,20 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 current_step >= self.current_weight_version
             ), f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
             self.current_weight_version = current_step
+        else:
+            current_step = self.current_weight_version
 
-        if current_step is not None and current_step > 0:
+        if current_step is not None and current_step >= 0:
+            is_initial_validation = (
+                current_step == 0 and self.config.validation.val_before_train
+            )
+            is_periodic_validation = (
+                current_step > 0 and current_step % self.config.validation.freq == 0
+            )
+            is_final_validation = current_step == broadcast_command.total_steps
+
             should_do_validation = self.config.validation.enable and (
-                current_step % self.config.validation.freq == 0
-                or current_step == broadcast_command.total_steps
+                is_initial_validation or is_periodic_validation or is_final_validation
             )
 
             if should_do_validation:
@@ -1195,23 +1221,23 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 prompts is not None
                 and self.parallel_dims.mesh["dp"].get_local_rank() == 0
             ):
-                assert (
-                    len(prompts) % self.parallel_dims.mesh["dp"].size() == 0
-                ), f"Number of prompts {len(prompts)} must be divisible by data parallel size {self.parallel_dims.mesh['dp'].size()}"
-                scattered_prompts_and_is_end = [
-                    (
-                        prompts[
-                            i : i
-                            + (len(prompts) // self.parallel_dims.mesh["dp"].size())
-                        ],
-                        is_end,
+                # assert (
+                #     len(prompts) % self.parallel_dims.mesh["dp"].size() == 0
+                # ), f"Number of prompts {len(prompts)} must be divisible by data parallel size {self.parallel_dims.mesh['dp'].size()}"
+                ranks_to_scatter = self.parallel_dims.mesh["dp"].size()
+                prompts_per_rank = (
+                    len(prompts) + ranks_to_scatter - 1
+                ) // ranks_to_scatter
+                scattered_prompts_and_is_end = []
+                for rank in range(ranks_to_scatter):
+                    start_idx = rank * prompts_per_rank
+                    end_idx = min(start_idx + prompts_per_rank, len(prompts))
+                    scattered_prompts_and_is_end.append(
+                        (
+                            prompts[start_idx:end_idx],
+                            is_end,
+                        )
                     )
-                    for i in range(
-                        0,
-                        len(prompts),
-                        len(prompts) // self.parallel_dims.mesh["dp"].size(),
-                    )
-                ]
             else:
                 scattered_prompts_and_is_end = [
                     (None, is_end) for _ in range(self.parallel_dims.mesh["dp"].size())
@@ -1465,7 +1491,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 if rr.completions is not None and len(rr.completions) > 0:
                     valid_result.append(rr)
                     valid_payloads_list.append(payload)
-        elif self.rollout.rollout_config.multi_turn_config.enable:
+        elif self.config.rollout.multi_turn_config.enable:
             for payload, rr in zip(payloads_list, rollout_results):
                 valid_conversations: List[ConversationType] = []
                 # remove those result without valid assistant message
@@ -1526,7 +1552,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completion_token_ids = result.completion_token_ids
                 old_payload.weight_version = self.current_weight_version
                 old_payload.cumulative_logprob = result.cumulative_logprob
-                if self.rollout.rollout_config.multi_turn_config.enable:
+                if self.config.rollout.multi_turn_config.enable:
                     old_payload.completed_conversations = result.completed_conversations
                 if self.config.train.local_dataset:
                     old_payload.reference_answer = (
