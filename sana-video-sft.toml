@@ -1,0 +1,70 @@
+redis = "12800"
+
+[train]
+resume = false
+epoch = 1
+output_dir = "./outputs/qwen3-32b-tp8-sft"
+epsilon = 1e-6
+optm_name = "AdamW"
+optm_lr = 1e-6
+optm_impl = "fused"
+optm_weight_decay = 0.01
+optm_betas = [ 0.9, 0.999,]
+optm_warmup_steps = 20
+optm_grad_norm_clip = 1.0
+async_tp_enabled = false
+compile = false
+param_dtype = "bfloat16"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
+train_batch_per_replica = 32
+sync_weight_interval = 1
+
+[policy]
+model_name_or_path = "Efficient-Large-Model/SANA-Video_2B_480p_diffusers"
+is_diffusers = true
+model_gradient_checkpointig = true
+
+[policy.diffusers_config]
+complex_human_instruction = [
+    "Given a user prompt, generate an 'Enhanced prompt' that provides detailed visual descriptions suitable for video generation. Evaluate the level of detail in the user prompt:",
+    "- If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, motion, and temporal relationships to create vivid and dynamic scenes.",
+    "- If the prompt is already detailed, refine and enhance the existing details slightly without overcomplicating.",
+    "Here are examples of how to transform or refine prompts:",
+    "- User Prompt: A cat sleeping -> Enhanced: A small, fluffy white cat slowly settling into a curled position, peacefully falling asleep on a warm sunny windowsill, with gentle sunlight filtering through surrounding pots of blooming red flowers.",
+    "- User Prompt: A busy city street -> Enhanced: A bustling city street scene at dusk, featuring glowing street lamps gradually lighting up, a diverse crowd of people in colorful clothing walking past, and a double-decker bus smoothly passing by towering glass skyscrapers.",
+    "Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:",
+    "User Prompt: ",
+]
+is_video = true
+ratio_bin = "ASPECT_RATIO_480_BIN"
+max_prompt_length = 300
+weighting_scheme = "logit_normal"
+
+[logging]
+logger = ['console', 'wandb']
+project_name = "cosmos_rl"
+experiment_name = "None"
+
+[train.train_policy]
+type = "sft"
+dataset.name = "LNTANOooo/sharegpt52k"
+dataset.subset = ""
+dataset.split = "train"
+conversation_column_name = "conversation"
+mini_batch = 8
+
+
+[train.ckpt]
+enable_checkpoint = true
+save_freq = 30
+save_mode = "async"
+
+[policy.parallelism]
+n_init_replicas = 1
+tp_size = 8
+cp_size = 1
+dp_shard_size = -1
+pp_size = 1
+dp_replicate_size = 1

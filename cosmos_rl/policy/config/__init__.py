@@ -827,9 +827,43 @@ class LoraConfig(BaseModel):
             ), "target_modules must be a list of strings or 'all-linear'"
         return self
 
+class DiffusersConfig(BaseModel):
+    complex_human_instruction: List[str] = Field(
+        default = [""],
+        description = "Complex human instruction to be used for generation"
+    )
+    is_video: bool = Field(
+        default = False,
+        description= "True if this model is video generate model"
+    )
+    ratio_bin: str = Field(
+        default = "ASPECT_RATIO_480_BIN",
+        description = "Which ratio bin in diffusers to be used" 
+    )
+    max_prompt_length: int = Field(
+        default=300,
+        description = "Maximum sequence length to use for the prompt"
+    )
+    weighting_scheme: str = Field(
+        default = 'logit_normal',
+        description = "Method used to sample timestep"
+    )
+    train_flow_shift: float = Field(
+        default=3.0,
+        description = 'flow shift used for training'
+    )
+
+
 
 class PolicyConfig(BaseModel):
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
+
+    diffusers_config: Optional[DiffusersConfig] = Field(default_factory=DiffusersConfig)
+
+    is_diffusers: bool = Field(
+        default=False,
+        description="Whether this model is diffusers or not"
+    )
 
     model_name_or_path: str = Field(
         # default="Qwen/Qwen2.5-3B-Instruct",  #'Qwen/Qwen2.5-VL-7B-Instruct'

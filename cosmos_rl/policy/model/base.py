@@ -39,11 +39,12 @@ from cosmos_rl.utils.dim_slice_info import (
 class BaseModel(torch.nn.Module, ABC):
     _gradient_checkpointing_enabled = False
 
-    def __init__(self, hf_config: AutoConfig):
+    def __init__(self, hf_config: Optional[AutoConfig]=None):
         super().__init__()
-        self.weight_mapper = WeightMapper.get_weight_mapper(
-            self.supported_model_types()[0]
-        )(hf_config)
+        if hf_config is not None:
+            self.weight_mapper = WeightMapper.get_weight_mapper(
+                self.supported_model_types()[0]
+            )(hf_config)
 
     def current_device(self):
         """
@@ -516,8 +517,7 @@ class ModelRegistry:
     def check_model_type_supported(cls, model_type: str) -> bool:
         return model_type in ModelRegistry._MODEL_REGISTRY
 
-    @classmethod
-    def build_model(cls, config: CosmosConfig, hf_config_args={}):
+    def build_hf_model(self, config, hf_config_args={}):
         model_name_or_path = config.policy.model_name_or_path
         model = None
         hf_config = util.retry(AutoConfig.from_pretrained)(
@@ -638,6 +638,55 @@ class ModelRegistry:
             raise ValueError(f"Model {model_name_or_path} not supported.")
         return model
 
+    def build_diffusers_model(self, config, diffusers_config_args={}):
+        # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
+        model_name_or_path = config.policy.model_name_or_path
+        model = None
+        model_type = 'diffusers'
+
+        model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
+
+        cosmos_default_dtype = util.str2torch_dtype(
+            config.train.master_dtype
+            if config.train.master_dtype is not None
+            else config.train.param_dtype
+        )
+
+        def _load_model_with_config(model_cls, config, model_name_or_path):
+            """Load model and apply post-processing configurations."""
+            model = model_cls.from_pretrained(
+                config,
+                model_name_or_path
+            )
+            return model
+
+        def _get_init_context_for_model_build(device):
+            # Workaround for OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview
+            # TODO(yy): support meta init for diffusers model
+            return torch.device(device)
+
+        init_context = _get_init_context_for_model_build('cuda')
+        with init_context:
+            with util.cosmos_default_dtype(cosmos_default_dtype):
+                try:
+                    model = _load_model_with_config(
+                        model_cls, config, model_name_or_path
+                    )
+
+                except Exception as e:
+                    # TODO (yy): Add exception handle
+                    raise e
+
+        if model is None:
+            raise ValueError(f"Model {model_name_or_path} not supported.")
+        return model
+
+    @classmethod
+    def build_model(cls, config: CosmosConfig, hf_config_args={}):
+        if not config.policy.is_diffusers:
+            return cls.build_hf_model(cls, config, hf_config_args)
+        else:
+            return cls.build_diffusers_model(cls, config, hf_config_args)
 
 class WeightMapper(ABC):
     _WEIGHT_MAPPER_BACKEND_SUPPORTED = ["vllm", "trtllm"]
