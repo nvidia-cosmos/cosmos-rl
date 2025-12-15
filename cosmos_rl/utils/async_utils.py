@@ -88,6 +88,14 @@ def unsafe_enable_nest_asyncio():
         "you can set the environment variable DISABLE_NEST_ASYNCIO to 1 or True to disable it.",
     )
 
+    # skip if already enabled
+    if hasattr(unsafe_enable_nest_asyncio, "done") and unsafe_enable_nest_asyncio.done:
+        return
+
     import nest_asyncio
 
     nest_asyncio.apply()
+    unsafe_enable_nest_asyncio.done = True
+
+
+unsafe_enable_nest_asyncio.done = False

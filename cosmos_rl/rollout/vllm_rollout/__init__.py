@@ -14,5 +14,6 @@
 # limitations under the License.
 
 from .vllm_rollout import vLLMRollout
+from .vllm_rollout_async import vLLMRolloutAsync
 
-__all__ = ["vLLMRollout"]
+__all__ = ["vLLMRollout", "vLLMRolloutAsync"]
