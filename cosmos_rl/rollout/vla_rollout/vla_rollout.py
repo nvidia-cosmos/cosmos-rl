@@ -21,7 +21,7 @@ from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 from typing import Optional, List, Dict, Any
 from PIL import Image
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
@@ -43,6 +43,59 @@ from cosmos_rl.simulators.env_manager import EnvManager
 from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
 from cosmos_rl.rollout.vla_rollout.trace_utils import create_tracing_manager
+
+def convert_to_uint8(img: np.ndarray) -> np.ndarray:
+    """Converts an image to uint8 if it is a float image.
+
+    This is important for reducing the size of the image when sending it over the network.
+    """
+    if np.issubdtype(img.dtype, np.floating):
+        img = (255 * img).astype(np.uint8)
+    return img
+
+def resize_with_pad(images: np.ndarray, height: int, width: int, method=Image.BILINEAR) -> np.ndarray:
+    """Replicates tf.image.resize_with_pad for multiple images using PIL. Resizes a batch of images to a target height.
+
+    Args:
+        images: A batch of images in [..., height, width, channel] format.
+        height: The target height of the image.
+        width: The target width of the image.
+        method: The interpolation method to use. Default is bilinear.
+
+    Returns:
+        The resized images in [..., height, width, channel].
+    """
+    # If the images are already the correct size, return them as is.
+    if images.shape[-3:-1] == (height, width):
+        return images
+
+    original_shape = images.shape
+
+    images = images.reshape(-1, *original_shape[-3:])
+    resized = np.stack([_resize_with_pad_pil(Image.fromarray(im), height, width, method=method) for im in images])
+    return resized.reshape(*original_shape[:-3], *resized.shape[-3:])
+
+def _resize_with_pad_pil(image: Image.Image, height: int, width: int, method: int) -> Image.Image:
+    """Replicates tf.image.resize_with_pad for one image using PIL. Resizes an image to a target height and
+    width without distortion by padding with zeros.
+
+    Unlike the jax version, note that PIL uses [width, height, channel] ordering instead of [batch, h, w, c].
+    """
+    cur_width, cur_height = image.size
+    if cur_width == width and cur_height == height:
+        return image  # No need to resize if the image is already the correct size.
+
+    ratio = max(cur_width / width, cur_height / height)
+    resized_height = int(cur_height / ratio)
+    resized_width = int(cur_width / ratio)
+    resized_image = image.resize((resized_width, resized_height), resample=method)
+
+    zero_image = Image.new(resized_image.mode, (width, height), 0)
+    pad_height = max(0, int((height - resized_height) / 2))
+    pad_width = max(0, int((width - resized_width) / 2))
+    zero_image.paste(resized_image, (pad_width, pad_height))
+    assert zero_image.size == (width, height)
+    return zero_image
 
 
 def normalize_proprio(proprio: np.ndarray, norm_stats: Dict) -> np.ndarray:
@@ -118,6 +171,7 @@ class OpenVLARollout(RolloutBase):
         self.vla_train_keys = self.vla_input_keys + self.vla_output_keys
 
     def post_init_hook(self, **kwargs):
+        self._model_param_map = None  # Required by RolloutBase.model_param_map()
         self.model_type = self.config.vla.vla_type
 
         model_cls = ModelRegistry._MODEL_REGISTRY[self.model_type]
@@ -416,6 +470,136 @@ class OpenVLARollout(RolloutBase):
             actions = vla_output["action"]
             rollout_step += 1
         return task_records
+
+    def _load_pi05_norm_stats(self, model_path: str) -> Optional[Dict[str, Any]]:
+        """Load PI05 norm_stats from canonical OpenPI path."""
+        import json
+
+        resolved = util.resolve_model_path(model_path)
+        p = os.path.join(resolved, "assets", "physical-intelligence", "libero", "norm_stats.json")
+        if not os.path.isfile(p):
+            return None
+        with open(p, "r") as f:
+            raw = json.load(f)
+        return raw['norm_stats']
+
+    def _normalize_pi05_state(self, state: np.ndarray) -> np.ndarray:
+        """official_openpi Normalize(use_quantiles=True): map state into [-1, 1] using q01/q99."""
+        s_stats = self.norm_stats.get("state") or self.norm_stats.get("proprio")
+        if not isinstance(s_stats, dict) or ("q01" not in s_stats) or ("q99" not in s_stats):
+            raise ValueError("PI05 norm_stats must contain state.q01 and state.q99 (quantiles).")
+        x = np.asarray(state, dtype=np.float32).reshape(-1)
+        q01 = np.asarray(s_stats["q01"], dtype=np.float32).reshape(-1)[: x.shape[0]]
+        q99 = np.asarray(s_stats["q99"], dtype=np.float32).reshape(-1)[: x.shape[0]]
+        return (x - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
+
+    def _unnormalize_pi05_actions(self, actions: np.ndarray) -> np.ndarray:
+        """official_openpi Unnormalize(use_quantiles=True): map actions from [-1, 1] back using q01/q99."""
+        a_stats = self.norm_stats.get("actions") or  self.norm_stats.get("action")
+        x = np.asarray(actions, dtype=np.float32)
+        dim = x.shape[-1]
+        q01 = np.asarray(a_stats["q01"], dtype=np.float32).reshape(-1)
+        q99 = np.asarray(a_stats["q99"], dtype=np.float32).reshape(-1)
+        if q01.size < dim:
+            # official_openpi: apply to first dim(q01), keep the rest unchanged
+            y0 = (x[..., : q01.size] + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+            return np.concatenate([y0, x[..., q01.size :]], axis=-1)
+        q01 = q01[:dim]
+        q99 = q99[:dim]
+        return (x + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+
+
+    def _process_input_pi05(
+        self, inputs: List[Dict], task_descriptions: List[str]
+    ) -> Any:
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        batch_size = len(inputs)
+
+        def _to_pi05_img(arr: np.ndarray) -> torch.Tensor:
+            # 1. Convert to PIL Image
+            pil_img = np.ascontiguousarray(arr)
+            # 2. Resize with padding (matching official_openpi)
+            pil_img = convert_to_uint8(resize_with_pad(pil_img, 224, 224))
+            # 3. Convert to torch.Tensor
+            return torch.from_numpy(pil_img)  # [H, W, C], values in [0, 255]
+
+        base_imgs = []
+        wrist_imgs = []
+        for inp in inputs:
+            if "full_image" in inp:
+                base_imgs.append(_to_pi05_img(inp["full_image"]))
+            elif "agentview_image" in inp:
+                base_imgs.append(_to_pi05_img(inp["agentview_image"]))
+            else:
+                raise RuntimeError(
+                    f"No image found in input_data, expected full_image or agentview_image, got {inp.keys()}"
+                )
+
+            wrist_imgs.append(_to_pi05_img(inp["wrist_image"]))
+
+        base_imgs_t = torch.stack(base_imgs, 0).to(device)  # [B, H, W, C]
+        wrist_imgs_t = torch.stack(wrist_imgs, 0).to(device)
+
+        images = {
+            "base_0_rgb": base_imgs_t,
+            "left_wrist_0_rgb": wrist_imgs_t,
+            "right_wrist_0_rgb": torch.zeros_like(base_imgs_t),
+        }
+        image_masks = {
+            "base_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
+            "left_wrist_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
+            "right_wrist_0_rgb": torch.zeros(batch_size, dtype=torch.bool, device=device),
+        }
+
+
+        state = torch.stack([
+            torch.as_tensor(self._normalize_pi05_state(inp["state"]), dtype=torch.float32, device=device)
+            for inp in inputs
+        ], dim=0)
+        
+        tokenized_prompt = []
+        tokenized_prompt_mask = []
+        for i in range(batch_size):
+            prompt = task_descriptions[i]
+            # If discrete_state_input=False, pass None to tokenizer (state is used as continuous input)
+            # If discrete_state_input=True, pass state to tokenizer (state is discretized into tokens)
+            if self.hf_config.discrete_state_input:
+                state_np = state[i].detach().float().cpu().numpy().astype(np.float32)
+                tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=state_np)
+            else:
+                tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=None)
+            
+            tokenized_prompt.append(torch.from_numpy(tokens).to(torch.long))
+            tokenized_prompt_mask.append(torch.from_numpy(mask).to(torch.bool))
+        tokenized_prompt = torch.stack(tokenized_prompt, dim=0).to(device)
+        tokenized_prompt_mask = torch.stack(tokenized_prompt_mask, dim=0).to(device)
+        return SimpleNamespace(
+            images=images,
+            image_masks=image_masks,
+            state=state,
+            tokenized_prompt=tokenized_prompt,
+            tokenized_prompt_mask=tokenized_prompt_mask,
+        )
+
+    def _generate_one_step_pi05(self, observation: Any, mode: str = "train"):
+        """Generate one PI05 action chunk and adapt it to the LIBERO env_worker format.
+        
+        Args:
+            observation: PI05 observation object
+            mode: "train" or "eval"
+        """
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = self.model.sample_actions(self.device, observation, mode=mode)
+            actions = outputs["actions"]
+
+        actions = actions[:, :self.hf_config.action_horizon, :self.hf_config.action_env_dim].to(torch.float32)
+        actions_np = actions.detach().cpu().numpy()
+        outputs["action"] = self._unnormalize_pi05_actions(actions_np)
+        # Clip actions to valid range (important for gripper which can slightly exceed [-1, 1])
+        # outputs["action"] = np.clip(outputs["action"], -1.0, 1.0)
+
+        return outputs
 
     def rollout_generation(
         self,
@@ -731,3 +915,236 @@ class OpenVLARollout(RolloutBase):
 
         results = [pack_trajectory(i) for i in range(n_payloads)]
         return results
+
+
+    @torch.no_grad()
+    def _generate_minibatch(
+        self, payloads: List[RLPayload], is_validation: bool = False
+    ):
+        """
+        Run parallel VLA inference and simulation for a minibatch
+
+        Uses separate processes for each environment to avoid shared OpenGL/MuJoCo state.
+
+        Args:
+            payloads: List of RLPayload objects containing task information
+            is_validation: Whether to save validation videos
+
+        Returns:
+            Tuple of (vla_history, task_records)
+        """
+        # Extract task info from payloads (already available, no need to pass through initial_data)
+        task_suite_names = []
+        task_ids = []
+        max_steps = -1
+        for payload in payloads:
+            task_ids.append(payload.prompt.get("task_id", 0))
+            trial_ids.append(payload.prompt.get("trial_id", 0))
+            max_steps = max(
+                max_steps, MAX_STEPS_MAP.get(payload.prompt.get("task_suite_name"), 512)
+            )
+        gen_indices = (
+            [0] * len(payloads) if is_validation else [i for i in range(len(payloads))]
+        )
+
+        # CRITICAL: Release GPU resources before spawning sim workers
+        # After NCCL broadcast, GPU SM resources may still be occupied by:
+        # - Lingering CUDA kernels from weight sync
+        # - VLA model occupying GPU memory
+        # - CUDA context fragmentation
+        # Without this, sim workers timeout trying to initialize rendering contexts
+        torch.cuda.synchronize()  # Wait for all CUDA operations to complete
+        torch.cuda.empty_cache()  # Free up cached GPU memory
+        logger.debug(
+            f"Released GPU resources before spawning {len(payloads)} sim workers"
+        )
+
+        # Setup parallel environments (populates self.sim_processes, self.sim_input_queues, self.sim_output_queues)
+        initial_data = self._setup_parallel_envs(payloads, gen_indices, is_validation)
+
+        # Unpack initial data
+        task_descriptions = initial_data["task_descriptions"]
+        inputs = initial_data["inputs"]
+        task_records = initial_data["task_records"]
+        valid_video = initial_data["valid_video"]
+
+        # Use member variables for process/queue management
+        batch_size = len(self.sim_processes)
+
+        # Episode execution loop
+        step = 0
+        vla_history = []
+
+        from cosmos_rl.policy.model.vla.openvla_oft.constants import NUM_ACTIONS_CHUNK
+
+        while step < max_steps:
+            # Find active environments
+            active_indices = [i for i, r in enumerate(task_records) if r["active"]]
+            if not active_indices:
+                break
+
+            # VLA model inference on all inputs
+            current_inputs = inputs
+            current_task_descriptions = task_descriptions
+
+            if self.model_type in ("pi05", "pi0"):
+                pi05_obs = self._process_input_pi05(current_inputs, current_task_descriptions)
+                vla_output = self._generate_one_step_pi05(
+                    pi05_obs, mode="eval" if is_validation else "train"
+                )
+
+                image_keys = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
+                step_data = {
+                    "action": vla_output["action"],
+                    "chains": vla_output["chains"],
+                    "denoise_inds": vla_output["denoise_inds"],
+                    "old_log_probs": vla_output["old_log_probs"],
+                    "images": torch.stack([pi05_obs.images[k] for k in image_keys], dim=1),
+                    "image_masks": torch.stack([pi05_obs.image_masks[k] for k in image_keys], dim=1),
+                    "state": pi05_obs.state,
+                    "tokenized_prompt": pi05_obs.tokenized_prompt,
+                    "tokenized_prompt_mask": pi05_obs.tokenized_prompt_mask,
+                }
+            else:
+                vla_input = self._process_input(current_inputs, current_task_descriptions)
+                vla_output = self._generate_one_step_oft(vla_input, is_validation)
+                step_data = {
+                    "input_ids": vla_input["input_ids"],
+                    "attention_mask": vla_input["attention_mask"],
+                    "pixel_values": vla_input["pixel_values"],
+                    "responses": vla_output["responses"],
+                    "action": vla_output["action"],
+                }
+
+            # if task_ids[0] == 0 and trial_ids[0] == 0 and gen_indices[0] == 0:
+            #     # logger.info(f"task_suite_name: {task_suite_names[0]}, task_id: {task_ids[0]}, trial_id: {trial_ids[0]}, gen_idx: {gen_indices[0]}")
+            #     # logger.info(f"current_inputs.full_image {current_inputs[0]['full_image'].shape}, {current_inputs[0]['full_image']}")
+            #     # logger.info(f"current_task_descriptions {current_task_descriptions}")
+            #     for k, v in vla_input.items():
+            #         logger.info(f"vla_input {k} {v.shape}")
+            #     for k, v in vla_output.items():
+            #         logger.info(f"vla_output {k} {v.shape}")
+
+            vla_history.append(step_data)
+
+            if self.model_type in ("pi05", "pi0"):
+                replan_steps = self.config.custom["pi05"]["replan_steps"]
+                assert replan_steps > 0 and replan_steps <= self.hf_config.action_horizon
+
+            # Send actions to active workers
+            for idx in active_indices:
+                if self.model_type in ("pi05", "pi0"):
+                    self.sim_input_queues[idx].put(step_data["action"][idx][:replan_steps])
+                else:
+                    self.sim_input_queues[idx].put(step_data["action"][idx])
+
+            # Collect results from active workers
+            new_inputs = inputs.copy()
+            for idx in active_indices:
+                result = self.sim_output_queues[idx].get(timeout=30)
+                assert (
+                    result["type"] == "step"
+                ), f"Expected 'step', got '{result['type']}'"
+
+                new_inputs[idx] = obs_to_vla_input(
+                    result["obs"],
+                    is_robotwin="robotwin" in task_suite_names[idx].lower(),
+                )
+                task_records[idx]["active"] = result["active"]
+                task_records[idx]["complete"] = result["complete"]
+                task_records[idx]["finish_step"] = result["finish_step"]
+
+                # Collect video frames
+                if is_validation and len(result["valid_images"]) > 0:
+                    valid_video[task_records[idx]["task_file_name"]].extend(
+                        result["valid_images"]
+                    )
+
+                if not result["active"]:
+                    status = "✅ SUCCESS" if result["complete"] else "❌ FAILED"
+                    logger.debug(
+                        f"Task {idx} [task_id={task_ids[idx]}, trial_id={trial_ids[idx]}, gen={gen_indices[idx]}]: {status} (steps={result['finish_step']})"
+                    )
+
+            inputs = new_inputs
+            if self.model_type in ("pi05", "pi0"):
+                step += replan_steps
+            else:
+                step += NUM_ACTIONS_CHUNK
+
+        # Save rollout videos
+        if valid_video:
+            rollout_dir = os.path.join(self.config.train.output_dir, "vla_rollouts")
+
+            for task_file, images in valid_video.items():
+                if len(images) > 0:
+                    complete = any(
+                        r["complete"]
+                        for r in task_records
+                        if r["task_file_name"] == task_file
+                    )
+
+                    try:
+                        save_rollout_video(images, rollout_dir, task_file, 0, complete)
+                    except Exception as e:
+                        logger.warning(f"  ⚠️  Failed to save {task_file}: {e}")
+                        import traceback
+
+                        traceback.print_exc()
+
+        self._destroy_parallel_envs()
+
+        # PI05/PI0 path in grpo packing
+        if self.model_type in ("pi05", "pi0"):
+            if is_validation:
+                # Eval mode: no training data needed
+                completions = [
+                    {
+                        "complete": bool(task_records[i]["complete"]),
+                        "finish_step": int(task_records[i]["finish_step"]),
+                    }
+                    for i in range(group_size)
+                ]
+                return [RolloutResult(completions=[c]) for c in completions]
+            
+            # Training mode: build trajectories for GRPO (RLinf-style chain replay)
+            keys = (
+                "chains",
+                "denoise_inds",
+                "old_log_probs",
+                "images",
+                "image_masks",
+                "state",
+                "tokenized_prompt",
+                "tokenized_prompt_mask",
+            )
+            if not vla_history:
+                raise RuntimeError("PI05 rollout produced empty vla_history in training mode.")
+            missing = [k for k in keys if k not in vla_history[0]]
+            if missing:
+                raise KeyError(
+                    f"PI05 rollout missing keys={missing} in step_data. Keys={list(vla_history[0].keys())}"
+                )
+
+            stacked = {k: torch.stack([s[k] for s in vla_history], 0) for k in keys}  # [T, B, ...]
+            trajectories = [
+                {k: stacked[k][:, i].detach().cpu() for k in keys}
+                for i in range(group_size)
+            ]
+
+            buffer_dir = os.path.join(self.config.train.output_dir, "replay_buffer")
+            completions = [
+                {
+                    "complete": bool(task_records[i]["complete"]),
+                    "finish_step": int(task_records[i]["finish_step"]),
+                    "trajectory_id": save_trajectory_to_buffer(
+                        trajectories[i], buffer_dir=buffer_dir
+                    ),
+                }
+                for i in range(group_size)
+            ]
+            return [RolloutResult(completions=completions)]
+
+        return self._pack_grpo_results(
+            vla_history, task_records, batch_size, is_validation
+        )

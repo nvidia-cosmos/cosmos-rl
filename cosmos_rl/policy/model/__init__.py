@@ -21,6 +21,7 @@ from cosmos_rl.policy.model.hf_models import HFModel
 from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
 from cosmos_rl.policy.model.internvl import InternVLChatModel
 from cosmos_rl.policy.model.vla import OpenVLA
+from cosmos_rl.policy.model.pi05 import PI05
 from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, WeightMapper
 from cosmos_rl.policy.model.diffusers.sana_model import SanaModel
 from cosmos_rl.policy.model.diffusers.sd3_model import SD3Model
@@ -34,6 +35,7 @@ __all__ = [
     "DeepseekV3MoEModel",
     "InternVLChatModel",
     "OpenVLA",
+    "PI05",
     "BaseModel",
     "WeightMapper",
     "ModelRegistry",
