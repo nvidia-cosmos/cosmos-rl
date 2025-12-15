@@ -80,6 +80,10 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Diffusion Models</a></li>
+</ul>
 
         </div>
       </div>
@@ -111,6 +115,44 @@
 <section id="main-features">
 <h2>Main Features<a class="headerlink" href="#main-features" title="Link to this heading"></a></h2>
 <ul class="simple">
+<li><dl class="simple">
+<dt><strong>Natively Designed for Physical AI</strong></dt><dd><ul>
+<li><p>Cosmos-RL supports training serveral physical AI paradigms, e.g., LLM/VLM, world foundational models, VLA (coming soon), etc.</p></li>
+<li><dl class="simple">
+<dt><strong>Multi-training Algorithms</strong></dt><dd><ul>
+<li><p>Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, etc.), and RL algorithms for world foundational models (e.g., FlowGRPO, DDRL, etc.).</p></li>
+<li><p>Well-architected design ensures high extensibility, requiring only minimal configuration to implement custom training algorithms.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt><strong>Diversified Model Support</strong></dt><dd><ul>
+<li><dl class="simple">
+<dt>For LLM/VLM:</dt><dd><ul>
+<li><p>Natively supports LLaMA/Qwen/Qwen-VL/Qwen3-MoE series models.</p></li>
+<li><p>Compatible with all Huggingface LLMs.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>For world foundational models:</dt><dd><ul>
+<li><p>Natively supports Cosmos-Predict2.5, and Wan2.1 (coming soon).</p></li>
+<li><p>Compatible with mainstream Huggingface world foundational models (coming soon).</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><p>Easily extensible to other model architectures by customizing interface.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+</li>
 <li><p><strong>6D Parallelism</strong>: Sequence, Tensor, Context, Pipeline, FSDP, DDP.</p></li>
 <li><p><strong>Elastic &amp; Fault Tolerance</strong>: A set of techniques to improve the robustness of distributed training.</p></li>
 <li><dl class="simple">
@@ -140,23 +182,6 @@
 </dd>
 </dl>
 </li>
-</ul>
-</dd>
-</dl>
-</li>
-<li><dl class="simple">
-<dt><strong>Multi-training Algorithms</strong></dt><dd><ul>
-<li><p>Supports state-of-the-art LLM RL algorithms (e.g., GRPO, DAPO, etc.).</p></li>
-<li><p>Well-architected design ensures high extensibility, requiring only minimal configuration to implement custom training algorithms.</p></li>
-</ul>
-</dd>
-</dl>
-</li>
-<li><dl class="simple">
-<dt><strong>Diversified Model Support</strong></dt><dd><ul>
-<li><p>Natively supports LLaMA/Qwen/Qwen-VL/Qwen3-MoE series models.</p></li>
-<li><p>Compatible with all Huggingface LLMs.</p></li>
-<li><p>Easily extensible to other model architectures by customizing interface.</p></li>
 </ul>
 </dd>
 </dl>
@@ -291,6 +316,16 @@ For Rollout Model, only Tensor Parallelism and Pipeline Parallelism are supporte
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="quantization/fp8.html">FP8 Quantization</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="quantization/fp8.html#enable-fp8-quantization">Enable FP8 Quantization</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<div class="toctree-wrapper compound">
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="wfm/overview.html">Diffusion Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="wfm/overview.html#sft">SFT</a></li>
+<li class="toctree-l2"><a class="reference internal" href="wfm/overview.html#rl">RL</a></li>
 </ul>
 </li>
 </ul>

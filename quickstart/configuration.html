@@ -81,6 +81,10 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../wfm/overview.html">Diffusion Models</a></li>
+</ul>
 
         </div>
       </div>
@@ -167,234 +171,179 @@
 </td>
 <td colspan="5"><p><span class="xref std std-ref">#/$defs/ValidationConfig</span></p></td>
 </tr>
-<tr class="row-even"><td colspan="6"><p>$defs</p></td>
+<tr class="row-even"><td><ul class="simple">
+<li><p>vla</p></li>
+</ul>
+</td>
+<td colspan="5"><p><span class="xref std std-ref">#/$defs/VLAConfig</span></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="49"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>mode</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>Mode</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>Running mode, could be ‘disaggregated’ or ‘colocated’</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="4"><p>disaggregated</p></td>
+</tr>
+<tr class="row-odd"><td colspan="6"><p>$defs</p></td>
+</tr>
+<tr class="row-even"><td rowspan="49"><ul class="simple">
 <li><p>CheckpointConfig</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>CheckpointConfig</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>properties</p></td>
+<tr class="row-even"><td colspan="5"><p>properties</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>enable_checkpoint</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Enable Checkpoint</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Enable checkpointing for training. If set to False, no checkpoint will be saved.</p></td>
+<tr class="row-even"><td colspan="4"><p>Enable checkpointing for training. If set to False, no checkpoint will be saved.</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>save_freq</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Save Freq</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Checkpoint save frequency for training steps</p></td>
+<tr class="row-even"><td colspan="4"><p>Checkpoint save frequency for training steps</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>20</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>save_freq_in_epoch</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Save Freq In Epoch</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Checkpoint save frequency for training epochs. Default to 0 (disabled).</p></td>
+<tr class="row-even"><td colspan="4"><p>Checkpoint save frequency for training epochs. Default to 0 (disabled).</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>0</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>save_mode</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Save Mode</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Checkpoint save mode for training steps</p></td>
+<tr class="row-even"><td colspan="4"><p>Checkpoint save mode for training steps</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>async</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>max_keep</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Max Keep</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Maximum number of checkpoints to keep. If set to -1, all checkpoints will be kept.</p></td>
+<tr class="row-even"><td colspan="4"><p>Maximum number of checkpoints to keep. If set to -1, all checkpoints will be kept.</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>5</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>export_safetensors</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Export Safetensors</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to export a safetensors weight for huggingface usage, include related config files.</p></td>
+<tr class="row-even"><td colspan="4"><p>Whether to export a safetensors weight for huggingface usage, include related config files.</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>True</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>upload_hf</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Upload Hf</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to upload the safetensors weight to huggingface.</p></td>
+<tr class="row-even"><td colspan="4"><p>Whether to upload the safetensors weight to huggingface.</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>hf_repo_name</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Hf Repo Name</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>The huggingface repo name to upload the safetensors weight.</p></td>
+<tr class="row-even"><td colspan="4"><p>The huggingface repo name to upload the safetensors weight.</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>Comos-Reason1</p></td>
 </tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
 <li><p>upload_s3</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Upload S3</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to upload the checkpoint and safetensors to S3. Default to False, set <cite>final</cite> will upload the final checkpoint, <cite>all</cite> will upload all checkpoints.</p></td>
+<tr class="row-even"><td colspan="4"><p>Whether to upload the checkpoint and safetensors to S3. Default to False, set <cite>final</cite> will upload the final checkpoint, <cite>all</cite> will upload all checkpoints.</p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="2"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="2"><p><em>string</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<tr class="row-even"><td rowspan="5"><ul class="simple">
 <li><p>s3_bucket</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>S3 Bucket</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>The S3 bucket name to upload the checkpoint and safetensors weight.</p></td>
+<tr class="row-odd"><td colspan="4"><p>The S3 bucket name to upload the checkpoint and safetensors weight.</p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>s3_prefix</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>S3 Prefix</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>The S3 prefix to upload the checkpoint and safetensors weight.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>outputs</p></td>
-</tr>
-<tr class="row-even"><td rowspan="29"><ul class="simple">
-<li><p>DatasetConfig</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>DatasetConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>name</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Name</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Huggingface dataset name or local path to parquet file</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"></td>
-</tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>subset</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Subset</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Dataset subset if exists</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>revision</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Revision</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>OrderedDict({‘help’: ‘Dataset git revision if exist, can be a branch name, a tag, or a commit hash.’})</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"></td>
 </tr>
 <tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
@@ -403,54 +352,25 @@
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>split</p></li>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>s3_prefix</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Split</em></p></td>
+<td colspan="4"><p><em>S3 Prefix</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>A list of dataset splits to train</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
+<tr class="row-even"><td colspan="4"><p>The S3 prefix to upload the checkpoint and safetensors weight.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>array</em></p></td>
+<td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>items</p></td>
-<td><p>type</p></td>
-<td><p><em>string</em></p></td>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>outputs</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>test_size</p></li>
+<tr class="row-odd"><td rowspan="29"><ul class="simple">
+<li><p>DatasetConfig</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Test Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="15"><ul class="simple">
-<li><p>FP4Config</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>FP4Config</em></p></td>
+<td colspan="5"><p><em>DatasetConfig</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
@@ -458,52 +378,103 @@
 <tr class="row-odd"><td colspan="5"><p>properties</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_fp4</p></li>
+<li><p>name</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Enable Fp4</em></p></td>
+<td colspan="4"><p><em>Name</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to enable fp4.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>fp4_recipe</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Fp4 Recipe</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Recipe for weight scale calculation.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Huggingface dataset name or local path to parquet file</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>dynamic_scaling</p></td>
+<td colspan="3"></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>quant_recipe</p></li>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>subset</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Quant Recipe</em></p></td>
+<td colspan="4"><p><em>Subset</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Quantization strategy for weight.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Dataset subset if exists</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>revision</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Revision</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>OrderedDict({‘help’: ‘Dataset git revision if exist, can be a branch name, a tag, or a commit hash.’})</p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>rowwise</p></td>
+<td colspan="3"></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>split</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Split</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>A list of dataset splits to train</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>array</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
+<td><p>type</p></td>
+<td><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>test_size</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Test Size</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
 </tr>
 <tr class="row-even"><td rowspan="15"><ul class="simple">
-<li><p>FP8Config</p></li>
+<li><p>FP4Config</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>FP8Config</em></p></td>
+<td colspan="5"><p><em>FP4Config</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
@@ -511,12 +482,12 @@
 <tr class="row-even"><td colspan="5"><p>properties</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enable_fp8</p></li>
+<li><p>enable_fp4</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Enable Fp8</em></p></td>
+<td colspan="4"><p><em>Enable Fp4</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Whether to enable fp8.</p></td>
+<tr class="row-even"><td colspan="4"><p>Whether to enable fp4.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
@@ -525,10 +496,10 @@
 <td colspan="3"><p>False</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>fp8_recipe</p></li>
+<li><p>fp4_recipe</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Fp8 Recipe</em></p></td>
+<td colspan="4"><p><em>Fp4 Recipe</em></p></td>
 </tr>
 <tr class="row-even"><td colspan="4"><p>Recipe for weight scale calculation.</p></td>
 </tr>
@@ -552,121 +523,170 @@
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>rowwise</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="168"><ul class="simple">
-<li><p>GrpoConfig</p></li>
+<tr class="row-odd"><td rowspan="15"><ul class="simple">
+<li><p>FP8Config</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>GrpoConfig</em></p></td>
+<td colspan="5"><p><em>FP8Config</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
 </tr>
 <tr class="row-odd"><td colspan="5"><p>properties</p></td>
 </tr>
-<tr class="row-even"><td rowspan="3"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enable_fp8</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Enable Fp8</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Whether to enable fp8.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>fp8_recipe</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Fp8 Recipe</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Recipe for weight scale calculation.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>dynamic_scaling</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>quant_recipe</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Quant Recipe</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Quantization strategy for weight.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>rowwise</p></td>
+</tr>
+<tr class="row-even"><td rowspan="181"><ul class="simple">
+<li><p>GrpoConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>GrpoConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><ul class="simple">
 <li><p><strong>type</strong></p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Type</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>const</p></td>
+<tr class="row-odd"><td><p>const</p></td>
 <td colspan="3"><p>grpo</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>trainer_type</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Trainer Type</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Type of the trainer for GRPO.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>grpo</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>variant</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Variant</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Variant of the GRPO, currently support <cite>grpo</cite>, <cite>gspo</cite>, <cite>dapo</cite></p></td>
+<tr class="row-odd"><td colspan="4"><p>Variant of the GRPO, currently support <cite>grpo</cite>, <cite>gspo</cite>, <cite>dapo</cite></p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>grpo</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="2"><ul class="simple">
+<tr class="row-even"><td rowspan="2"><ul class="simple">
 <li><p>dataset</p></li>
 </ul>
 </td>
 <td colspan="4"><p>Dataset configuration for GRPO training. It includes dataset name, subset, revision, train split, test split and test size.</p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p><span class="xref std std-ref">#/$defs/DatasetConfig</span></p></td>
+<tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/DatasetConfig</span></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>dataloader_shuffle</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Dataloader Shuffle</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>True</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>enable_dataset_cache</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Enable Dataset Cache</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Enable dataset cache process results, maybe accelerate the dataset loading</p></td>
+<tr class="row-odd"><td colspan="4"><p>Enable dataset cache process results, maybe accelerate the dataset loading</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>dataloader_num_workers</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Dataloader Num Workers</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Number of subprocess to use for data loading</p></td>
+<tr class="row-odd"><td colspan="4"><p>Number of subprocess to use for data loading</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>0</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<tr class="row-even"><td rowspan="5"><ul class="simple">
 <li><p>dataloader_prefetch_factor</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Dataloader Prefetch Factor</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Number of batches loaded in advance by each worker.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>dataloader_batch_size</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Dataloader Batch Size</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Batch size for each iteration of the dataloader for when fetch prompts from controller. This is only the setting of the dataloader iterator on the controller side.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Number of batches loaded in advance by each worker.</p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
+<td colspan="3"><p>None</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
@@ -675,69 +695,61 @@
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>dataloader_batch_size</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Dataloader Batch Size</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Batch size for each iteration of the dataloader for when fetch prompts from controller. This is only the setting of the dataloader iterator on the controller side.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>prompt_column_name</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Prompt Column Name</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Column name for prompt</p></td>
+<tr class="row-odd"><td colspan="4"><p>Column name for prompt</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>response_column_name</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Response Column Name</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Column name for response/reference answer</p></td>
+<tr class="row-odd"><td colspan="4"><p>Column name for response/reference answer</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"></td>
 </tr>
-<tr class="row-odd"><td rowspan="7"><ul class="simple">
+<tr class="row-even"><td rowspan="7"><ul class="simple">
 <li><p>reward_function</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Reward Function</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Reward functions for the model. Currently support <cite>single_choice</cite>, <cite>boxed_math</cite>, and <cite>format</cite>. You can add weight to each reward function by passing a dict, e.g., {‘single_choice’: 0.9, ‘format’: 0.1}</p></td>
+<tr class="row-odd"><td colspan="4"><p>Reward functions for the model. Currently support <cite>single_choice</cite>, <cite>boxed_math</cite>, and <cite>format</cite>. You can add weight to each reward function by passing a dict, e.g., {‘single_choice’: 0.9, ‘format’: 0.1}</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="2"><p><em>array</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>items</p></td>
-<td><p>type</p></td>
-<td><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="2"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>additionalProperties</p></td>
-<td><p>type</p></td>
-<td><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>filter_reward_metric</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Filter Reward Metric</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Reward function to filter in dynamic sampling for DAPO. If specified, only samples with different this rewards will be used for training. If None, no filtering will be applied.</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<tr class="row-even"><td rowspan="5"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="2"><p><em>string</em></p></td>
 </tr>
@@ -748,147 +760,205 @@
 <td><p>type</p></td>
 <td><p><em>string</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td><p>additionalProperties</p></td>
+<td><p>type</p></td>
+<td><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>filter_reward_metric</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Filter Reward Metric</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Reward function to filter in dynamic sampling for DAPO. If specified, only samples with different this rewards will be used for training. If None, no filtering will be applied.</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>array</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
+<td><p>type</p></td>
+<td><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>temperature</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Temperature</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Temperature for sampling. The higher the temperature, the more random the completions.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Temperature for sampling. The higher the temperature, the more random the completions.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>number</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>1.0</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>epsilon_low</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Epsilon Low</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Epsilon value for clipping.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Epsilon value for clipping.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>number</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>0.2</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>epsilon_high</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Epsilon High</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Upper-bound epsilon value for clipping. If not specified, it defaults to the same value as the lower-bound specified in argument <cite>epsilon</cite>. Paper DAPO recommends <cite>0.28</cite>.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Upper-bound epsilon value for clipping. If not specified, it defaults to the same value as the lower-bound specified in argument <cite>epsilon</cite>. Paper DAPO recommends <cite>0.28</cite>.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>number</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>0.2</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<tr class="row-even"><td rowspan="5"><ul class="simple">
 <li><p>positive_nll_coef</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Positive Nll Coef</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Coefficient for Positive Example LM Loss. Set a positive value to enable; None disables the feature.</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>lower_bound_ratio</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Lower Bound Ratio</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Lower-bound ratio for dual-clip.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>3.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>loss_type</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Loss Type</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>The type of loss to use for GRPO training.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>token-mean</p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>unbiased_loss_max_tokens</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Unbiased Loss Max Tokens</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Maximum number of tokens to use for unbiased loss introduced in Dr.GRPO. If set to None, will not use unbiased loss.Only available when <cite>loss_type</cite> is <cite>seq-mean-token-mean</cite></p></td>
+<tr class="row-odd"><td colspan="4"><p>[Optional] Coefficient for Positive Example LM Loss. Set a positive value to enable; None disables.nRef: VAPO Sec. 4.3 (Positive Example LM Loss): <a class="reference external" href="https://arxiv.org/pdf/2504.05118">https://arxiv.org/pdf/2504.05118</a></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
-<td colspan="2"><p><em>integer</em></p></td>
+<td colspan="2"><p><em>number</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>unbiased_advantage</p></li>
+<li><p>lower_bound_ratio</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Unbiased Advantage</em></p></td>
+<td colspan="4"><p><em>Lower Bound Ratio</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Whether to divide the advantage by the standard deviation of rewards.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><ul class="simple">
-<li><p>overlong_reward</p></li>
-</ul>
-</td>
-<td colspan="4"><p>Configuration for overlong reward penalty. If enabled, the output will be penalized for responses that are too long.</p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p><span class="xref std std-ref">#/$defs/OverlongRewardConfig</span></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>kl_beta</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Kl Beta</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>KL coefficient. If <cite>0.0</cite>, the reference model is not loaded, reducing memory usage and improving training speed, but may be numerically unstable for long training runs.</p></td>
+<tr class="row-even"><td colspan="4"><p>Lower-bound ratio for dual-clip.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>number</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>3.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>loss_type</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Loss Type</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>The type of loss to use for GRPO training.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>token-mean</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>unbiased_loss_max_tokens</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Unbiased Loss Max Tokens</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Maximum number of tokens to use for unbiased loss introduced in Dr.GRPO. If set to None, will not use unbiased loss.Only available when <cite>loss_type</cite> is <cite>seq-mean-token-mean</cite></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>unbiased_advantage</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Unbiased Advantage</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Whether to divide the advantage by the standard deviation of rewards.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><ul class="simple">
+<li><p>overlong_reward</p></li>
+</ul>
+</td>
+<td colspan="4"><p>Configuration for overlong reward penalty. If enabled, the output will be penalized for responses that are too long.</p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/OverlongRewardConfig</span></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>kl_beta</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Kl Beta</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>KL coefficient. If <cite>0.0</cite>, the reference model is not loaded, reducing memory usage and improving training speed, but may be numerically unstable for long training runs.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>0.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>unbiased_kl_estimate</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Unbiased Kl Estimate</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>[Optional] Unbiased K3 with IS: D_KL ≈ E_{π_old}[ w · ( r − log r − 1 ) ], w=π_θ/π_old, r=π_ref/π_θ.nNote: This option is ignored when <cite>kl_beta</cite> is 0.0.nRef: DeepSeek-V3.2 Sec.3.1 (Unbiased KL Estimate): <a class="reference external" href="https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf">https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf</a></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>off_policy_masking_delta</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Off Policy Masking Delta</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Off-Policy Sequence Masking threshold δ (None disables). Per-sequence mask: M_i = 0 if Â_i &lt; 0 and (1/<a href="#id1"><span class="problematic" id="id2">|o_i|</span></a>)∑_t log[π_old(o_{i,t}|·)/π_θ(o_{i,t}|·)] &gt; δ; else M_i = 1.Ref: DeepSeek-V3.2 Sec.3.1 Off-Policy Sequence Masking : <a class="reference external" href="https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf">https://huggingface.co/deepseek-ai/DeepSeek-V3.2/resolve/main/assets/paper.pdf</a>.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
 </tr>
 <tr class="row-odd"><td rowspan="5"><ul class="simple">
 <li><p>aipo_rho</p></li>
@@ -1152,7 +1222,7 @@
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="16"><ul class="simple">
+<tr class="row-odd"><td rowspan="21"><ul class="simple">
 <li><p>LoggingConfig</p></li>
 </ul>
 </td>
@@ -1193,12 +1263,12 @@
 <td colspan="3"><p>cosmos_rl</p></td>
 </tr>
 <tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>experiment_name</p></li>
+<li><p>group_name</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Experiment Name</em></p></td>
+<td colspan="4"><p><em>Group Name</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>A short display name for this run. If not set, will use the <cite>output_dir</cite> as the experiment name.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Wandb group name for logging. If set, the training will be logged to this group.</p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>None</p></td>
@@ -1210,187 +1280,29 @@
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="49"><ul class="simple">
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>experiment_name</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Experiment Name</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>A short display name for this run. If not set, will use the <cite>output_dir</cite> as the experiment name.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="49"><ul class="simple">
 <li><p>LoraConfig</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>LoraConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>r</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>R</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>LoRA rank</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>8</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>lora_alpha</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Lora Alpha</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>LoRA alpha</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>8.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>lora_dropout</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Lora Dropout</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>LoRA dropout</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>0.0</p></td>
-</tr>
-<tr class="row-even"><td rowspan="6"><ul class="simple">
-<li><p>target_modules</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Target Modules</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>LoRA target modules, can be a list of strings or ‘all-linear’</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>array</em></p></td>
-</tr>
-<tr class="row-even"><td><p>items</p></td>
-<td><p>type</p></td>
-<td><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>use_rslora</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Use Rslora</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>When set to True, uses [Rank-Stabilized LoRA](<a class="reference external" href="https://huggingface.co/papers/2312.03732">https://huggingface.co/papers/2312.03732</a>) which sets the adapter scaling factor to <cite>lora_alpha/math.sqrt(r)</cite>, since it was proven to work better. Otherwise, it will use the original default value of <cite>lora_alpha/r</cite>.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="6"><ul class="simple">
-<li><p>modules_to_save</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Modules To Save</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>array</em></p></td>
-</tr>
-<tr class="row-even"><td><p>items</p></td>
-<td><p>type</p></td>
-<td><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="6"><ul class="simple">
-<li><p>alpha_pattern</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Alpha Pattern</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Per-module overrides for lora_alpha. Keys are regex patterns; evaluated in insertion order, first match wins.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td><p>additionalProperties</p></td>
-<td><p>type</p></td>
-<td><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="6"><ul class="simple">
-<li><p>r_pattern</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>R Pattern</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Per-module overrides for LoRA rank r. Keys are regex patterns; evaluated in insertion order, first match wins.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td><p>additionalProperties</p></td>
-<td><p>type</p></td>
-<td><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="6"><ul class="simple">
-<li><p>init_lora_weights</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Init Lora Weights</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>How to initialize the weights of the adapter layers.Passing True (default) results in the default initialization from the reference implementation from Microsoft, with the LoRA B weight being set to 0. This means that without further training, the LoRA adapter will be a no-op.Setting the initialization to False leads to random initialization of LoRA A and B, meaning that LoRA is not a no-op before training; this setting is intended for debugging purposes.Passing ‘gaussian’ results in Gaussian initialization scaled by the LoRA rank for linear and layers. Pass ‘loftq’ to use LoftQ initialization. Passing ‘eva’ results in a data-driven initialization of Explained Variance Adaptation.EVA initializes LoRA based on the SVD of layer input activations and achieves SOTA performance due to its ability to adapt to the finetuning data. Pass ‘olora’ to use OLoRA initialization. Passing ‘pissa’ results in the initialization of <a class="reference external" href="https://huggingface.co/papers/2404.02948">https://huggingface.co/papers/2404.02948</a></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>True</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>enum</p></td>
-<td colspan="2"><p>gaussian, eva, olora, pissa, pissa_niter_[number of iters]</p></td>
-</tr>
-<tr class="row-even"><td rowspan="32"><ul class="simple">
-<li><p>MultiTurnRolloutConfig</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>MultiTurnRolloutConfig</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
@@ -1398,26 +1310,438 @@
 <tr class="row-even"><td colspan="5"><p>properties</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>r</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>R</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>LoRA rank</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>8</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>lora_alpha</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Lora Alpha</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>LoRA alpha</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>8.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>lora_dropout</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Lora Dropout</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>LoRA dropout</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>0.0</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>target_modules</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Target Modules</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>LoRA target modules, can be a list of strings or ‘all-linear’</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>array</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
+<td><p>type</p></td>
+<td><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>use_rslora</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Use Rslora</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>When set to True, uses [Rank-Stabilized LoRA](<a class="reference external" href="https://huggingface.co/papers/2312.03732">https://huggingface.co/papers/2312.03732</a>) which sets the adapter scaling factor to <cite>lora_alpha/math.sqrt(r)</cite>, since it was proven to work better. Otherwise, it will use the original default value of <cite>lora_alpha/r</cite>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>modules_to_save</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Modules To Save</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>array</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
+<td><p>type</p></td>
+<td><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>alpha_pattern</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Alpha Pattern</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Per-module overrides for lora_alpha. Keys are regex patterns; evaluated in insertion order, first match wins.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>additionalProperties</p></td>
+<td><p>type</p></td>
+<td><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>r_pattern</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>R Pattern</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Per-module overrides for LoRA rank r. Keys are regex patterns; evaluated in insertion order, first match wins.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>additionalProperties</p></td>
+<td><p>type</p></td>
+<td><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>init_lora_weights</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Init Lora Weights</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>How to initialize the weights of the adapter layers.Passing True (default) results in the default initialization from the reference implementation from Microsoft, with the LoRA B weight being set to 0. This means that without further training, the LoRA adapter will be a no-op.Setting the initialization to False leads to random initialization of LoRA A and B, meaning that LoRA is not a no-op before training; this setting is intended for debugging purposes.Passing ‘gaussian’ results in Gaussian initialization scaled by the LoRA rank for linear and layers. Pass ‘loftq’ to use LoftQ initialization. Passing ‘eva’ results in a data-driven initialization of Explained Variance Adaptation.EVA initializes LoRA based on the SVD of layer input activations and achieves SOTA performance due to its ability to adapt to the finetuning data. Pass ‘olora’ to use OLoRA initialization. Passing ‘pissa’ results in the initialization of <a class="reference external" href="https://huggingface.co/papers/2404.02948">https://huggingface.co/papers/2404.02948</a></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>True</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>enum</p></td>
+<td colspan="2"><p>gaussian, eva, olora, pissa, pissa_niter_[number of iters]</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="32"><ul class="simple">
+<li><p>MultiTurnRolloutConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>MultiTurnRolloutConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>enable</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Enable</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Whether to enable multi-turn rollout.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Whether to enable multi-turn rollout.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>enable_tools</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Enable Tools</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Whether to enable tools in multi-turn rollout.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Whether to enable tools in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enable_thinking</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Enable Thinking</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Whether to enable thinking in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="5"><ul class="simple">
+<li><p>custom_chat_template_path</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Custom Chat Template Path</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>The path to the custom chat template in chat.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>max_assistant_turns</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Max Assistant Turns</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Max assistant turn count for multi-turn rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>5</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>add_generation_prompt</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Add Generation Prompt</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to add generation prompt in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>True</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>continue_final_message</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Continue Final Message</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to continue the final message in multi-turn rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="15"><ul class="simple">
+<li><p>OverlongRewardConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>OverlongRewardConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enable_overlong_penalty</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Enable Overlong Penalty</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Enable overlong penalty for the model. If set to True, the output will be penalized for responses that are too long.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>buffer_length</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Buffer Length</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Length of the buffer for overlong penalty. If the response length exceeds this value, the output will be penalized.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>4096</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>penalty_factor</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Penalty Factor</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Penalty factor for overlong penalty. The penalty increases linearly with the length of the response exceeding the buffer length from 0 to the penalty_factor.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>1.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="39"><ul class="simple">
+<li><p>ParallelismConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>ParallelismConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>n_init_replicas</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>N Init Replicas</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Number of initial replicas to be created</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>tp_size</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Tp Size</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Tensor parallelism size</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>2</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>cp_size</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Cp Size</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Context parallelism size</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>ep_size</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Ep Size</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Expert parallelism size</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>dp_shard_size</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Dp Shard Size</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Data Parallelism size in sharded mode</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>pp_size</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Pp Size</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Pipeline parallelism size</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>pp_dynamic_shape</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Pp Dynamic Shape</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Pipeline parallelism dynamic shape</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
@@ -1426,26 +1750,71 @@
 <td colspan="3"><p>False</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enable_thinking</p></li>
+<li><p>pp_micro_batch_size</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Enable Thinking</em></p></td>
+<td colspan="4"><p><em>Pp Micro Batch Size</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Whether to enable thinking in multi-turn rollout.</p></td>
+<tr class="row-even"><td colspan="4"><p>Pipeline parallelism micro batch size, <cite>n_micro_batch = batch_size / pp_micro_batch_size</cite>, which must be divisible by <cite>pp</cite> stages</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
+<td colspan="3"><p><em>integer</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
+<td colspan="3"><p>1</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
-<li><p>custom_chat_template_path</p></li>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>dp_replicate_size</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Custom Chat Template Path</em></p></td>
+<td colspan="4"><p><em>Dp Replicate Size</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>The path to the custom chat template in chat.</p></td>
+<tr class="row-even"><td colspan="4"><p>Data Parallelism size in replica mode. Only configurable in SFT type job, must be 1 in GRPO type job for dynamic scaling support purpose.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="35"><ul class="simple">
+<li><p>PolicyConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>PolicyConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td><ul class="simple">
+<li><p>parallelism</p></li>
+</ul>
+</td>
+<td colspan="4"><p><span class="xref std std-ref">#/$defs/ParallelismConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>model_name_or_path</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Model Name Or Path</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>The model name or path, compatible with huggingface model name or local path</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>Qwen/Qwen2.5-VL-7B-Instruct</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>model_revision</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Model Revision</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>The revision of the model to use</p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>None</p></td>
@@ -1458,26 +1827,26 @@
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>max_assistant_turns</p></li>
+<li><p>model_max_length</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Max Assistant Turns</em></p></td>
+<td colspan="4"><p><em>Model Max Length</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Max assistant turn count for multi-turn rollout.</p></td>
+<tr class="row-odd"><td colspan="4"><p>The maximum length for training, longer than this will be ignored for training stability</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>5</p></td>
+<td colspan="3"><p>4096</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>add_generation_prompt</p></li>
+<li><p>model_gradient_checkpointing</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Add Generation Prompt</em></p></td>
+<td colspan="4"><p><em>Model Gradient Checkpointing</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to add generation prompt in multi-turn rollout.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Whether to use gradient checkpointing</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
@@ -1486,12 +1855,49 @@
 <td colspan="3"><p>True</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>continue_final_message</p></li>
+<li><p>lora</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Continue Final Message</em></p></td>
+<td colspan="4"><p>LoRA configuration</p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to continue the final message in multi-turn rollout.</p></td>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td colspan="3"><p><span class="xref std std-ref">#/$defs/LoraConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="6"><ul class="simple">
+<li><p>trainable_map</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Trainable Map</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Mapping of name -&gt; bool. Keys can either be: - exact parameter names (from model.named_parameters()) - exact module paths (from model.named_modules())</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td><p>additionalProperties</p></td>
+<td><p>type</p></td>
+<td><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>enable_liger_kernel</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Enable Liger Kernel</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Whether to use liger kernel.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
@@ -1499,11 +1905,11 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="15"><ul class="simple">
-<li><p>OverlongRewardConfig</p></li>
+<tr class="row-even"><td rowspan="13"><ul class="simple">
+<li><p>ProfilerConfig</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>OverlongRewardConfig</em></p></td>
+<td colspan="5"><p><em>ProfilerConfig</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
@@ -1511,12 +1917,12 @@
 <tr class="row-even"><td colspan="5"><p>properties</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enable_overlong_penalty</p></li>
+<li><p>enable_profiler</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Enable Overlong Penalty</em></p></td>
+<td colspan="4"><p><em>Enable Profiler</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Enable overlong penalty for the model. If set to True, the output will be penalized for responses that are too long.</p></td>
+<tr class="row-even"><td colspan="4"><p>Enable profiler for training</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
@@ -1525,38 +1931,235 @@
 <td colspan="3"><p>False</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>buffer_length</p></li>
+<li><p>enable_nsys</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Buffer Length</em></p></td>
+<td colspan="4"><p><em>Enable Nsys</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Length of the buffer for overlong penalty. If the response length exceeds this value, the output will be penalized.</p></td>
+<tr class="row-even"><td colspan="4"><p>Enable nsys for training</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>4096</p></td>
+<td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>penalty_factor</p></li>
+<tr class="row-odd"><td rowspan="2"><ul class="simple">
+<li><p>sub_profiler_config</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Penalty Factor</em></p></td>
+<td colspan="4"><p>Sub profiler config</p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Penalty factor for overlong penalty. The penalty increases linearly with the length of the response exceeding the buffer length from 0 to the penalty_factor.</p></td>
+<tr class="row-even"><td colspan="4"><p><span class="xref std std-ref">#/$defs/SubProfilerConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="56"><ul class="simple">
+<li><p>RolloutConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>RolloutConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td><ul class="simple">
+<li><p>parallelism</p></li>
+</ul>
+</td>
+<td colspan="4"><p><span class="xref std std-ref">#/$defs/RolloutParallelismConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enforce_eager</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Enforce Eager</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to enable eager execution for vLLM.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>True</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>include_stop_str_in_output</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Include Stop Str In Output</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to include stop string in output.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>gpu_memory_utilization</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Gpu Memory Utilization</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>GPU memory utilization factor for rollout backend.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>number</em></p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1.0</p></td>
+<td colspan="3"><p>0.8</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="39"><ul class="simple">
-<li><p>ParallelismConfig</p></li>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>enable_chunked_prefill</p></li>
 </ul>
 </td>
-<td colspan="5"><p><em>ParallelismConfig</em></p></td>
+<td colspan="4"><p><em>Enable Chunked Prefill</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to enable chunked prefill for vLLM.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>max_response_length</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Max Response Length</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Max output length of rollout generation.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>2048</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>n_generation</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>N Generation</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>n parameter same like what in OpenAI chat API.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>16</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>n_generation_to_batch</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>N Generation To Batch</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to treat n_generation as batch dimension in rollout generation.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>batch_size</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Batch Size</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Batch size for rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>quantization</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Quantization</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Quantization in vllm rollout generation.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>none</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>seed</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Seed</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>random seed for rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td><ul class="simple">
+<li><p>sampling_config</p></li>
+</ul>
+</td>
+<td colspan="4"><p><span class="xref std std-ref">#/$defs/SamplingConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>vllm_use_flashinfer</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Vllm Use Flashinfer</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Use flashinfer for vllm rollout.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>backend</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Backend</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Backend for rollout. Currently support <cite>vllm</cite> and <cite>trtllm</cite>, and other custom backends.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>vllm</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="2"><ul class="simple">
+<li><p>multi_turn_config</p></li>
+</ul>
+</td>
+<td colspan="4"><p>Configuration for multi-turn rollout.</p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p><span class="xref std std-ref">#/$defs/MultiTurnRolloutConfig</span></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="39"><ul class="simple">
+<li><p>RolloutParallelismConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>RolloutParallelismConfig</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
@@ -1689,754 +2292,172 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>1</p></td>
 </tr>
-<tr class="row-even"><td rowspan="35"><ul class="simple">
-<li><p>PolicyConfig</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>PolicyConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td><ul class="simple">
-<li><p>parallelism</p></li>
-</ul>
-</td>
-<td colspan="4"><p><span class="xref std std-ref">#/$defs/ParallelismConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>model_name_or_path</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Model Name Or Path</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>The model name or path, compatible with huggingface model name or local path</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>Qwen/Qwen2.5-VL-7B-Instruct</p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>model_revision</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Model Revision</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>The revision of the model to use</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>string</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>model_max_length</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Model Max Length</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>The maximum length for training, longer than this will be ignored for training stability</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>4096</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>model_gradient_checkpointing</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Model Gradient Checkpointing</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Whether to use gradient checkpointing</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>True</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>lora</p></li>
-</ul>
-</td>
-<td colspan="4"><p>LoRA configuration</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td colspan="3"><p><span class="xref std std-ref">#/$defs/LoraConfig</span></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="6"><ul class="simple">
-<li><p>trainable_map</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Trainable Map</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Mapping of name -&gt; bool. Keys can either be: - exact parameter names (from model.named_parameters()) - exact module paths (from model.named_modules())</p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>additionalProperties</p></td>
-<td><p>type</p></td>
-<td><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>enable_liger_kernel</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Enable Liger Kernel</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Whether to use liger kernel.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="13"><ul class="simple">
-<li><p>ProfilerConfig</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>ProfilerConfig</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="4"><p><em>object</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="5"><p>properties</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_profiler</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Enable Profiler</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Enable profiler for training</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_nsys</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Enable Nsys</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Enable nsys for training</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><ul class="simple">
-<li><p>sub_profiler_config</p></li>
-</ul>
-</td>
-<td colspan="4"><p>Sub profiler config</p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/SubProfilerConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="56"><ul class="simple">
-<li><p>RolloutConfig</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>RolloutConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td><ul class="simple">
-<li><p>parallelism</p></li>
-</ul>
-</td>
-<td colspan="4"><p><span class="xref std std-ref">#/$defs/RolloutParallelismConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enforce_eager</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Enforce Eager</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to enable eager execution for vLLM.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>True</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>include_stop_str_in_output</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Include Stop Str In Output</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to include stop string in output.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>gpu_memory_utilization</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Gpu Memory Utilization</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>GPU memory utilization factor for rollout backend.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>0.8</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>enable_chunked_prefill</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Enable Chunked Prefill</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to enable chunked prefill for vLLM.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>max_response_length</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Max Response Length</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Max output length of rollout generation.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>2048</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>n_generation</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>N Generation</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>n parameter same like what in OpenAI chat API.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>16</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>n_generation_to_batch</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>N Generation To Batch</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to treat n_generation as batch dimension in rollout generation.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>batch_size</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Batch Size</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Batch size for rollout.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>quantization</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Quantization</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Quantization in vllm rollout generation.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>none</p></td>
-</tr>
-<tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>seed</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Seed</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>random seed for rollout.</p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="2"><p><em>null</em></p></td>
-</tr>
-<tr class="row-odd"><td><ul class="simple">
-<li><p>sampling_config</p></li>
-</ul>
-</td>
-<td colspan="4"><p><span class="xref std std-ref">#/$defs/SamplingConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>vllm_use_flashinfer</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Vllm Use Flashinfer</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Use flashinfer for vllm rollout.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>backend</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Backend</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Backend for rollout. Currently support <cite>vllm</cite> and <cite>trtllm</cite>.</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>string</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>vllm</p></td>
-</tr>
-<tr class="row-even"><td rowspan="2"><ul class="simple">
-<li><p>multi_turn_config</p></li>
-</ul>
-</td>
-<td colspan="4"><p>Configuration for multi-turn rollout.</p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/MultiTurnRolloutConfig</span></p></td>
-</tr>
-<tr class="row-even"><td rowspan="39"><ul class="simple">
-<li><p>RolloutParallelismConfig</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>RolloutParallelismConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>n_init_replicas</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>N Init Replicas</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Number of initial replicas to be created</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>tp_size</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Tp Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Tensor parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>2</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>cp_size</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Cp Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Context parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>ep_size</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Ep Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Expert parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>dp_shard_size</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Dp Shard Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Data Parallelism size in sharded mode</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>-1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_size</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Pp Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Pipeline parallelism size</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_dynamic_shape</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Pp Dynamic Shape</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Pipeline parallelism dynamic shape</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>pp_micro_batch_size</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Pp Micro Batch Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Pipeline parallelism micro batch size, <cite>n_micro_batch = batch_size / pp_micro_batch_size</cite>, which must be divisible by <cite>pp</cite> stages</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>dp_replicate_size</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Dp Replicate Size</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Data Parallelism size in replica mode, only 1 is supported for dynamic scaling purpose.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="41"><ul class="simple">
+<tr class="row-even"><td rowspan="45"><ul class="simple">
 <li><p>SFTDataConfig</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>SFTDataConfig</em></p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="5"><p>properties</p></td>
+<tr class="row-even"><td colspan="5"><p>properties</p></td>
 </tr>
-<tr class="row-even"><td rowspan="3"><ul class="simple">
+<tr class="row-odd"><td rowspan="3"><ul class="simple">
 <li><p><strong>type</strong></p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Type</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-even"><td><p>const</p></td>
+<tr class="row-odd"><td><p>const</p></td>
 <td colspan="3"><p>sft</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="2"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>trainer_type</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Trainer Type</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Type of the trainer for SFT.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>sft</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><ul class="simple">
 <li><p>dataset</p></li>
 </ul>
 </td>
 <td colspan="4"><p>Dataset configuration for SFT training. It includes dataset name, subset, revision, train split, and test split.</p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p><span class="xref std std-ref">#/$defs/DatasetConfig</span></p></td>
+<tr class="row-odd"><td colspan="4"><p><span class="xref std std-ref">#/$defs/DatasetConfig</span></p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>mini_batch</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Mini Batch</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>mini-batch size for training.</p></td>
+<tr class="row-odd"><td colspan="4"><p>mini-batch size for training.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>2</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>dataloader_shuffle</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Dataloader Shuffle</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Shuffle the dataloader. If False, the dataloader will be used in the order it is loaded.</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>True</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>enable_dataset_cache</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Enable Dataset Cache</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Enable dataset cache process results, maybe accelerate the dataset loading</p></td>
+<tr class="row-odd"><td colspan="4"><p>Enable dataset cache process results, maybe accelerate the dataset loading</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<tr class="row-even"><td rowspan="4"><ul class="simple">
 <li><p>dataloader_num_workers</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Dataloader Num Workers</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Number of subprocess to use for data loading</p></td>
+<tr class="row-odd"><td colspan="4"><p>Number of subprocess to use for data loading</p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-even"><td><p>default</p></td>
+<tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>0</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<tr class="row-even"><td rowspan="5"><ul class="simple">
 <li><p>dataloader_prefetch_factor</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Dataloader Prefetch Factor</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Number of batches loaded in advance by each worker.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Number of batches loaded in advance by each worker.</p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>None</p></td>
 </tr>
-<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
 <td colspan="2"><p><em>integer</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>type</p></td>
+<tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>conversation_column_name</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Conversation Column Name</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Column name for formated conversation json</p></td>
+<tr class="row-even"><td colspan="4"><p>Column name for formated conversation json</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>conversations</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>system_prompt</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>System Prompt</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>System prompt for the model, which will be prepended to the prompt</p></td>
+<tr class="row-even"><td colspan="4"><p>System prompt for the model, which will be prepended to the prompt</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>string</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>balance_dp_token</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Balance Dp Token</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to balance the number of tokens in each data parallel replica when calculating the loss.</p></td>
+<tr class="row-even"><td colspan="4"><p>Whether to balance the number of tokens in each data parallel replica when calculating the loss.</p></td>
 </tr>
-<tr class="row-even"><td><p>type</p></td>
+<tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
 </tr>
-<tr class="row-odd"><td><p>default</p></td>
+<tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>True</p></td>
 </tr>
-<tr class="row-even"><td rowspan="23"><ul class="simple">
+<tr class="row-odd"><td rowspan="23"><ul class="simple">
 <li><p>SamplingConfig</p></li>
 </ul>
 </td>
 <td colspan="5"><p><em>SamplingConfig</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="4"><p><em>object</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="5"><p>properties</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>temperature</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Temperature</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Temperature for sampling.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>top_p</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Top P</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Top-p for sampling.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>top_k</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Top K</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Top-k for sampling.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>-1</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>repetition_penalty</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Repetition Penalty</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Repetition penalty for sampling.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>number</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>1.0</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>use_flashinfer</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Use Flashinfer</em></p></td>
-</tr>
-<tr class="row-even"><td colspan="4"><p>Use flashinfer for sampling.</p></td>
-</tr>
-<tr class="row-odd"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-odd"><td rowspan="39"><ul class="simple">
-<li><p>SubProfilerConfig</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>SubProfilerConfig</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
@@ -2444,83 +2465,68 @@
 <tr class="row-odd"><td colspan="5"><p>properties</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>do_profile</p></li>
+<li><p>temperature</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Do Profile</em></p></td>
+<td colspan="4"><p><em>Temperature</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to profile, only used in runtime.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Temperature for sampling.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
+<td colspan="3"><p><em>number</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
+<td colspan="3"><p>1.0</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>active_steps</p></li>
+<li><p>top_p</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Active Steps</em></p></td>
+<td colspan="4"><p><em>Top P</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Number of active steps</p></td>
+<tr class="row-odd"><td colspan="4"><p>Top-p for sampling.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>1.0</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>top_k</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Top K</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Top-k for sampling.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>integer</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
+<td colspan="3"><p>-1</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>warmup_steps</p></li>
+<li><p>repetition_penalty</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Warmup Steps</em></p></td>
+<td colspan="4"><p><em>Repetition Penalty</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Number of warmup steps</p></td>
+<tr class="row-odd"><td colspan="4"><p>Repetition penalty for sampling.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
+<td colspan="3"><p><em>number</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
+<td colspan="3"><p>1.0</p></td>
 </tr>
 <tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>wait_steps</p></li>
+<li><p>use_flashinfer</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Wait Steps</em></p></td>
+<td colspan="4"><p><em>Use Flashinfer</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Number of wait steps</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>1</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>rank_filter</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Rank Filter</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Rank filter</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>array</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>items</p></td>
-<td><p>type</p></td>
-<td colspan="2"><p><em>integer</em></p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>record_shape</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>Record Shape</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to record shape</p></td>
+<tr class="row-odd"><td colspan="4"><p>Use flashinfer for sampling.</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
@@ -2528,67 +2534,166 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>profile_memory</p></li>
+<tr class="row-even"><td rowspan="39"><ul class="simple">
+<li><p>SubProfilerConfig</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Profile Memory</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to profile memory</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>with_stack</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>With Stack</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to profile stack</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="4"><ul class="simple">
-<li><p>with_modules</p></li>
-</ul>
-</td>
-<td colspan="4"><p><em>With Modules</em></p></td>
-</tr>
-<tr class="row-odd"><td colspan="4"><p>Whether to profile modules</p></td>
-</tr>
-<tr class="row-even"><td><p>type</p></td>
-<td colspan="3"><p><em>boolean</em></p></td>
-</tr>
-<tr class="row-odd"><td><p>default</p></td>
-<td colspan="3"><p>False</p></td>
-</tr>
-<tr class="row-even"><td rowspan="197"><ul class="simple">
-<li><p>TrainingConfig</p></li>
-</ul>
-</td>
-<td colspan="5"><p><em>TrainingConfig</em></p></td>
+<td colspan="5"><p><em>SubProfilerConfig</em></p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="4"><p><em>object</em></p></td>
 </tr>
 <tr class="row-even"><td colspan="5"><p>properties</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="48"><ul class="simple">
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>do_profile</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Do Profile</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to profile, only used in runtime.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>active_steps</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Active Steps</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Number of active steps</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>warmup_steps</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Warmup Steps</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Number of warmup steps</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>wait_steps</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Wait Steps</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Number of wait steps</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>rank_filter</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Rank Filter</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Rank filter</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>array</em></p></td>
+</tr>
+<tr class="row-even"><td><p>items</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>record_shape</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Record Shape</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to record shape</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>profile_memory</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Profile Memory</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to profile memory</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>with_stack</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>With Stack</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to profile stack</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>with_modules</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>With Modules</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to profile modules</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="213"><ul class="simple">
+<li><p>TrainingConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>TrainingConfig</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="4"><p><em>object</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="5"><p>properties</p></td>
+</tr>
+<tr class="row-even"><td rowspan="51"><ul class="simple">
 <li><p>train_policy</p></li>
 </ul>
 </td>
 <td colspan="4"><p><em>Train Policy</em></p></td>
 </tr>
-<tr class="row-even"><td rowspan="45"><p>default</p></td>
+<tr class="row-odd"><td rowspan="48"><p>default</p></td>
 <td><p>type</p></td>
+<td colspan="2"><p>grpo</p></td>
+</tr>
+<tr class="row-even"><td><p>trainer_type</p></td>
 <td colspan="2"><p>grpo</p></td>
 </tr>
 <tr class="row-odd"><td><p>variant</p></td>
@@ -2674,6 +2779,12 @@
 </tr>
 <tr class="row-odd"><td><p>kl_beta</p></td>
 <td colspan="2"><p>0.0</p></td>
+</tr>
+<tr class="row-even"><td><p>unbiased_kl_estimate</p></td>
+<td colspan="2"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td><p>off_policy_masking_delta</p></td>
+<td colspan="2"><p>None</p></td>
 </tr>
 <tr class="row-even"><td><p>aipo_rho</p></td>
 <td colspan="2"><p>None</p></td>
@@ -2950,6 +3061,20 @@
 <td colspan="3"><p>None</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>logprob_dtype</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Logprob Dtype</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>The data type for logprobs calculation.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>float32</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
 <li><p>fsdp_reduce_dtype</p></li>
 </ul>
 </td>
@@ -3222,30 +3347,30 @@
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
 <tr class="row-even"><td rowspan="5"><ul class="simple">
-<li><p>max_num_steps</p></li>
+<li><p>force_use_hf</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Max Num Steps</em></p></td>
+<td colspan="4"><p><em>Force Use Hf</em></p></td>
 </tr>
-<tr class="row-odd"><td colspan="4"><p>Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.</p></td>
+<tr class="row-odd"><td colspan="4"><p>Whether to force using Huggingface dataset even if local dataset is available.</p></td>
 </tr>
 <tr class="row-even"><td><p>default</p></td>
-<td colspan="3"><p>None</p></td>
+<td colspan="3"><p>False</p></td>
 </tr>
 <tr class="row-odd"><td rowspan="2"><p>anyOf</p></td>
 <td><p>type</p></td>
-<td colspan="2"><p><em>integer</em></p></td>
+<td colspan="2"><p><em>boolean</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
 </tr>
 <tr class="row-odd"><td rowspan="4"><ul class="simple">
-<li><p>sequence_packing</p></li>
+<li><p>non_text</p></li>
 </ul>
 </td>
-<td colspan="4"><p><em>Sequence Packing</em></p></td>
+<td colspan="4"><p><em>Non Text</em></p></td>
 </tr>
-<tr class="row-even"><td colspan="4"><p>Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.</p></td>
+<tr class="row-even"><td colspan="4"><p>Whether train in non-text mode. If set to True, the inputs and outputs are not pure text, but may contain other modalities like images, videos, tensors, etc.</p></td>
 </tr>
 <tr class="row-odd"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>
@@ -3253,7 +3378,148 @@
 <tr class="row-even"><td><p>default</p></td>
 <td colspan="3"><p>False</p></td>
 </tr>
-<tr class="row-odd"><td rowspan="53"><ul class="simple">
+<tr class="row-odd"><td rowspan="5"><ul class="simple">
+<li><p>max_num_steps</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Max Num Steps</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Optional upper bound on total training steps. If set, training stops when either this step count or the epoch-based limit is reached (whichever comes first). Handy for quick smoke tests.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="2"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>sequence_packing</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Sequence Packing</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Whether to enable sequence packing for training. If set to True, the input sequences will be packed into a single tensor for training.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="31"><ul class="simple">
+<li><p>VLAConfig</p></li>
+</ul>
+</td>
+<td colspan="5"><p><em>VLAConfig</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="4"><p><em>object</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="5"><p>properties</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>vla_type</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Vla Type</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>VLA type, could be ‘openvla-oft’ or ‘openvla’</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>string</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>openvla-oft</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>use_proprio</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Use Proprio</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Whether to use proprioceptive information.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>proprio_dim</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Proprio Dim</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Dimension of proprioceptive information.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>7</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>num_images_in_input</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Num Images In Input</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Number of images in input.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>training_chunk_size</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Training Chunk Size</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Number of chunks to train in one iteration.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>integer</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>16</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>filter_lower_bound</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Filter Lower Bound</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Lower success rate bound for filtering the rollout generation groups.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>0.1</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="4"><ul class="simple">
+<li><p>filter_upper_bound</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Filter Upper Bound</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Upper success rate bound for filtering the rollout generation groups.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td colspan="3"><p><em>number</em></p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td colspan="3"><p>0.9</p></td>
+</tr>
+<tr class="row-odd"><td rowspan="57"><ul class="simple">
 <li><p>ValidationConfig</p></li>
 </ul>
 </td>
@@ -3271,6 +3537,20 @@
 <td colspan="4"><p><em>Enable</em></p></td>
 </tr>
 <tr class="row-odd"><td colspan="4"><p>Enable validation during training.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="3"><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>False</p></td>
+</tr>
+<tr class="row-even"><td rowspan="4"><ul class="simple">
+<li><p>val_before_train</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Val Before Train</em></p></td>
+</tr>
+<tr class="row-odd"><td colspan="4"><p>Enable validation before training starts (at step 0, after weight initialization).</p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="3"><p><em>boolean</em></p></td>

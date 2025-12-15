@@ -1,0 +1,217 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Diffusion Models &mdash; cosmos-rl 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="prev" title="FP8 Quantization" href="../quantization/fp8.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            cosmos-rl
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Quick Start</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/single_node_example.html">Single node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/configuration.html">Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/dataflow.html">Dataset &amp; Process</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/customization.html">Customization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart/hf_models_support.html">Hugging Face Model Support</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Rollout</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/vllm.html">vLLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rollout/trtllm.html">[Experimental] TensorRT-LLM</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Multi nodes training</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/overview.html">Multi-node example</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/dgxc_lepton.html">DGXC-Lepton Job</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../multinodes/slurm.html">Slurm Job</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Elastic &amp; Fault Tolerance</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../elastic/overview.html">Elastic Scaling and Fault Tolerance</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Async RL</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#key-features">Key Features</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#architecture">Architecture</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../async/overview.html#putting-it-all-together">Putting It All Together</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Parallelism</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../parallelism/overview.html">Parallelism</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Quantization</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../quantization/fp8.html">FP8 Quantization</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">World Foundational Models</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Diffusion Models</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#sft">SFT</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#rl">RL</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">cosmos-rl</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Diffusion Models</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/wfm/overview.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="diffusion-models">
+<h1>Diffusion Models<a class="headerlink" href="#diffusion-models" title="Link to this heading"></a></h1>
+<p>Cosmos-RL provides native support for SFT and RL of diffusion models.</p>
+<section id="sft">
+<h2>SFT<a class="headerlink" href="#sft" title="Link to this heading"></a></h2>
+<p>(Coming soon)</p>
+</section>
+<section id="rl">
+<h2>RL<a class="headerlink" href="#rl" title="Link to this heading"></a></h2>
+<p>Cosmos-RL supports <a class="reference external" href="https://arxiv.org/pdf/2505.05470">FlowGRPO</a> and <a class="reference external" href="https://arxiv.org/pdf/2512.04332">DDRL</a> algorithms for diffusion model reinforcement learning.</p>
+<p><strong>Quick start</strong>: A quick start guide for diffusion model RL:
+1. Configure the training recipe by editing toml files under <code class="docutils literal notranslate"><span class="pre">configs/diffusion/</span></code>.
+2. Launch the reward service, you can refer docs here: <a class="reference external" href="../../reward_service/README.md">Reward Service</a>.
+3. Launch the training script with the configured recipe.</p>
+<blockquote>
+<div><div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cosmos</span><span class="o">-</span><span class="n">rl</span> <span class="o">--</span><span class="n">config</span> <span class="o">./</span><span class="n">configs</span><span class="o">/</span><span class="n">diffusion</span><span class="o">/</span><span class="n">cosmos_predict2</span><span class="o">-</span><span class="mi">5_2</span><span class="n">b_480_grpo_mock_data</span><span class="o">.</span><span class="n">toml</span> <span class="o">--</span><span class="n">diffusion</span><span class="o">-</span><span class="n">mode</span> <span class="o">./</span><span class="n">cosmos_rl</span><span class="o">/</span><span class="n">tools</span><span class="o">/</span><span class="n">dataset</span><span class="o">/</span><span class="n">diffusion_grpo</span><span class="o">.</span><span class="n">py</span>
+</pre></div>
+</div>
+</div></blockquote>
+<ol class="arabic simple" start="4">
+<li><p>Monitor training progress via Wandb.</p></li>
+<li><p>Evaluate the trained diffusion model using the evaluation script. For Cosmos-Predict2.5, you can refer this repo: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-predict2.5">cosmos-predict2.5</a>.</p></li>
+</ol>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ol class="arabic simple">
+<li><p>You can find detailed tutorials for DDRL here: <a class="reference external" href="../../examples/ddrl.md">DDRL Tutorials</a>.</p></li>
+<li><p>For a quick rollout of the training pipeline, we recommend you use the mock_data config file, i.e., ./configs/diffusion/cosmos_predict2-5_2b_480_grpo_mock_data.toml</p></li>
+</ol>
+</div>
+<p><strong>Reward services</strong>: Considering the computation overhead, it’s necessary to use a seperated async service for reward computing.
+- You can launch a reward service by following the instructions here: <a class="reference external" href="../../reward_service/README.md">Reward Service</a>.
+- Configure the environment variable <code class="docutils literal notranslate"><span class="pre">DIFFUSION_REWARD_TOKEN</span></code>, <code class="docutils literal notranslate"><span class="pre">DIFFUSION_REWARD_ENQUEUE_URL</span></code>, and <code class="docutils literal notranslate"><span class="pre">DIFFUSION_REWARD_FETCH_URL</span></code> to make the trainer communicate with the reward service.</p>
+<p><strong>Models</strong>:
+- Cosmos-Predict2.5-2B/14B
+- Wan2.1 (coming soon)</p>
+<p><strong>Datasets</strong>:
+- Local dataset: you can use local dataset for training. We follows the local dataset structure as <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-predict2.5/blob/main/docs/post-training_video2world_cosmos_nemo_assets.md">Cosmos-Predict2.5</a>. The dataset folder format should be:</p>
+<blockquote>
+<div><dl>
+<dt><a href="#id3"><span class="problematic" id="id4">``</span></a><a href="#id5"><span class="problematic" id="id6">`</span></a></dt><dd><p>datasets/&lt;your_local_dataset&gt;/
+├── metas/
+│   └── <a href="#id7"><span class="problematic" id="id8">*</span></a>.txt
+├── videos/
+│   └── <a href="#id9"><span class="problematic" id="id10">*</span></a>.mp4
+└── text_embedding &lt;optional&gt; /</p>
+<blockquote>
+<div><p>└── <a href="#id11"><span class="problematic" id="id12">*</span></a>.pickle</p>
+</div></blockquote>
+</dd>
+</dl>
+<p><a href="#id13"><span class="problematic" id="id14">``</span></a><a href="#id15"><span class="problematic" id="id16">`</span></a></p>
+</div></blockquote>
+<ul class="simple">
+<li><dl class="simple">
+<dt>Webdataset: you need to configure the s3 access via environment variables, then you can use webdataset for training.</dt><dd><ul>
+<li><p>PROD_S3_CHECKPOINT_ACCESS_KEY_ID: Your S3 access key ID.</p></li>
+<li><p>PROD_S3_CHECKPOINT_SECRET_ACCESS_KEY: Your S3 secret access key.</p></li>
+<li><p>PROD_S3_CHECKPOINT_ENDPOINT_URL: Your S3 endpoint url.</p></li>
+<li><p>PROD_S3_CHECKPOINT_REGION_NAME: Your S3 region name.</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+<p><strong>Storage</strong>:
+- Local storage: you can use local disk for storing checkpoints and logs.
+- S3 storage: you need to configure the s3 access via environment variables, then you can use s3 storage for storing checkpoints and logs.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../quantization/fp8.html" class="btn btn-neutral float-left" title="FP8 Quantization" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, NVIDIA.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
