@@ -22,13 +22,13 @@ from typing import List, Optional, Callable
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.logging import logger
+from cosmos_rl.rollout.worker import update_payload_from_rollout_result
 from cosmos_rl.rollout.worker.rollout_control import DisaggregatedRolloutControlWorker
 from cosmos_rl.rollout.worker.asynchronous.rollout_task_scheduler import (
     RolloutTaskScheduler,
     RolloutTask,
     CompletedRollout,
 )
-from cosmos_rl.rollout.utils import update_payload_from_rollout_result
 from cosmos_rl.dispatcher.protocol import ValidationReportRequest
 from cosmos_rl.dispatcher.command import (
     Command,
