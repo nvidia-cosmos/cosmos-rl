@@ -1127,7 +1127,7 @@ class RolloutConfig(BaseModel):
         if isinstance(self.parallelism, dict):
             self.parallelism = RolloutParallelismConfig(**self.parallelism)
 
-        backends_to_check = ["vllm", "trtllm"]
+        backends_to_check = ["vllm", "trtllm", "vllm_async"]
         if self.backend in backends_to_check:
             _fields_no_need_to_check = ["n_init_replicas", "tp_size", "pp_size"]
             for field_name, field_info in RolloutParallelismConfig.model_fields.items():
