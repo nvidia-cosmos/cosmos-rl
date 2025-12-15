@@ -380,6 +380,10 @@ class GroupedExpertsDeepEP(nn.Module):
 
         indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
 
+        # permuted_local_hidden_states: [total_dispatched_num_tokens, hidden_size]: tokens that dispatched to current EP rank, grouped by the selected experts, split by `tokens_per_expert`.
+        # tokens_per_expert: [num_local_experts]: number of tokens dispatched to each expert.
+        #   The sum of tokens_per_expert is equal to the total number of tokens dispatched to the current EP rank, i.e., total_dispatched_num_tokens.
+        # permuted_probs: [total_dispatched_num_tokens, topk]: probabilities of the selected expert for each dispatched token.
         (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
             self.token_dispatcher.token_permutation2(
                 hidden_states=x,
@@ -396,19 +400,20 @@ class GroupedExpertsDeepEP(nn.Module):
                 tokens_per_expert,
                 trans_b=True,
             )
-
             if self.enable_glu:
                 output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             else:
                 output1_ = (self.act_fn(output1) * permuted_probs).to(output1.dtype)
-
+            # output1_: # [total_dispatched_num_tokens, moe_inter_dim * 2]
             output2 = ops.gmm(
                 output1_,
                 self.down_projs.to_local(),
                 tokens_per_expert,
                 trans_b=True,
-            )
+            )  # [total_dispatched_num_tokens, hidden_size]
         else:
+            # No tokens dispatched to the current EP rank
+            # [hidden_size] @ [hidden_size, moe_inter_dim * 2] = [moe_inter_dim * 2]
             output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0].t())
             if self.enable_glu:
                 output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
@@ -545,7 +550,7 @@ class Gate(nn.Module):
             indices (torch.Tensor): Indices of the selected experts.
             aux_loss (Optional[torch.Tensor]): Auxiliary loss for load balancing.
         """
-        scores = F.linear(x, self.weight)
+        scores = F.linear(x, self.weight)  # scores: [num_tokens, num_experts]
 
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1, dtype=torch.float32)
@@ -568,8 +573,10 @@ class Gate(nn.Module):
             mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True)
             scores = (scores * mask.unsqueeze(-1)).flatten(1)
 
-        indices = torch.topk(scores, self.topk, dim=-1)[1]
-        weights = original_scores.gather(1, indices)
+        indices = torch.topk(scores, self.topk, dim=-1)[
+            1
+        ]  # indices: [num_tokens, topk]
+        weights = original_scores.gather(1, indices)  # [num_tokens, topk]
 
         if self.score_func == "sigmoid" or self.norm_topk_prob:
             weights = weights / weights.sum(dim=-1, keepdim=True)
@@ -835,6 +842,7 @@ class MoE(nn.Module):
         else:
             token_mask = torch.ones(x.size(0), dtype=torch.bool, device=x.device)
 
+        # weights: [num_tokens, topk], indices: [num_tokens, topk]
         weights, indices, aux_loss = self.gate(x, token_mask, cp_mesh)
 
         y = self.experts(x, token_mask, weights, indices)
