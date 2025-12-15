@@ -1464,9 +1464,6 @@ class ParallelizedShardMapper:
         :return: A list of receive instructions for rollout.
         """
         if self.recv_insts_for_rollout[rank] is None:
-            try:
-                self.recv_insts_for_rollout[rank] = await self.rollout_results[rank]
-            except Exception:
-                pass
+            self.recv_insts_for_rollout[rank] = await self.rollout_results[rank]
         self.cleanup()
         return self.recv_insts_for_rollout[rank]
