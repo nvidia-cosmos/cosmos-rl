@@ -847,6 +847,8 @@ def main():
             )
             min_n_gpus_policy = min_n_gpus_policy * n_policy
             n_policy = 1
+    if not cosmos_config.get("distillation", {}).get("enable", False):
+        n_reference = 0
 
     is_colocated = cosmos_config.get("mode", "disaggregated") == "colocated"
     if is_colocated:
