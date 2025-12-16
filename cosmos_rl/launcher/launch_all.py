@@ -133,6 +133,12 @@ def parse_args():
         help="Total number of rollout replicas to launch in the whole system. If not provided, the number of rollout replicas will be obtained from TOML configuration file.",
     )
     parser.add_argument(
+        "--reference",
+        type=int,
+        default=None,
+        help="Total number of reference replicas to launch in the whole system. If not provided, the number of reference replicas will be obtained from TOML configuration file.",
+    )
+    parser.add_argument(
         "--p2r-ratio",
         type=str,
         default=None,
@@ -369,8 +375,10 @@ def replica_placement(
     available_gpus: List[int],
     n_policy: int,
     n_rollouts: int,
+    n_reference: int,
     min_n_gpus_policy: int,
     min_n_gpus_rollout: int,
+    min_n_gpus_reference: int,
     replica_script: str,
     control_url: str,
     output_dir: Optional[str],
@@ -579,6 +587,106 @@ def replica_placement(
             )
             gpu_idx += min_n_gpus_rollout
 
+    if min_n_gpus_reference > len(global_available_gpus[global_worker_idx]):
+        # If the number of GPUs needed for reference is more than available GPUs, we need to allocate a new worker
+        if gpu_idx > 0:
+            global_launch_settings.append(
+                [commands, gpu_devices, control_urls, output_files]
+            )
+            commands = []
+            gpu_devices = []
+            control_urls = []
+            output_files = []
+            gpu_idx = 0
+            global_worker_idx += 1
+            global_available_gpus.append(available_gpus)
+
+    for i in range(n_reference):
+        if min_n_gpus_reference > len(global_available_gpus[global_worker_idx]):
+            assert (
+                min_n_gpus_reference % len(global_available_gpus[global_worker_idx])
+                == 0
+            ), f"min_n_gpus_reference {min_n_gpus_reference} is not divisible by {len(global_available_gpus[global_worker_idx])}"
+            nodes_needed = min_n_gpus_reference // len(
+                global_available_gpus[global_worker_idx]
+            )
+            rdzv_ip = "localhost"
+            for node_in_replica in range(nodes_needed):
+                gpu_devices.append(
+                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
+                )
+                commands.append(
+                    f"{replica_script} --type reference --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
+                )
+                if script is not None:
+                    commands[-1] += f" --script {script}"
+                if node_in_replica == 0:
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+                    if get_worker_ip is not None:
+                        rdzv_ip = get_worker_ip(global_worker_idx, args)
+                else:
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+
+                if script_args is not None:
+                    commands[-1] += f" {' '.join(script_args)}"
+
+                control_urls.append(control_url)
+                output_files.append(
+                    os.path.join(output_dir, f"reference_{i}.log")
+                    if output_dir is not None
+                    else None
+                )
+                global_launch_settings.append(
+                    [commands, gpu_devices, control_urls, output_files]
+                )
+                commands = []
+                gpu_devices = []
+                control_urls = []
+                output_files = []
+                global_worker_idx += 1
+                global_available_gpus.append(available_gpus)
+        else:
+            if gpu_idx + min_n_gpus_reference > len(
+                global_available_gpus[global_worker_idx]
+            ):
+                global_launch_settings.append(
+                    [commands, gpu_devices, control_urls, output_files]
+                )
+                commands = []
+                gpu_devices = []
+                control_urls = []
+                output_files = []
+                gpu_idx = 0
+                global_worker_idx += 1
+                global_available_gpus.append(available_gpus)
+
+            gpu_devices.append(
+                ",".join(
+                    [
+                        str(g)
+                        for g in available_gpus[
+                            gpu_idx : gpu_idx + min_n_gpus_reference
+                        ]
+                    ]
+                )
+            )
+            commands.append(
+                f"{replica_script} --type reference --ngpus {min_n_gpus_reference} --backend {backend} --config {config_path}"
+            )
+            if script is not None:
+                commands[-1] += f" --script {script}"
+
+            if script_args is not None:
+                commands[-1] += f" {' '.join(script_args)}"
+
+            control_urls.append(control_url)
+            output_files.append(
+                os.path.join(output_dir, f"reference_{i}.log")
+                if output_dir is not None
+                else None
+            )
+            gpu_idx += min_n_gpus_reference
+
     if len(commands) > 0:
         global_launch_settings.append(
             [commands, gpu_devices, control_urls, output_files]
@@ -632,6 +740,7 @@ def main():
     # and the number of replicas for each
     policy_parallelism = cosmos_config.get("policy", {}).get("parallelism", {})
     rollout_parallelism = cosmos_config.get("rollout", {}).get("parallelism", {})
+    reference_parallelism = cosmos_config.get("reference", {}).get("parallelism", {})
     # Calculate the minimum number of GPUs required for policy and rollout
     # based on the parallelism settings in the configuration
     # Treat dp_shard_size as 1 if it is not set
@@ -647,12 +756,22 @@ def main():
         * rollout_parallelism.get("pp_size", 1)
         * rollout_parallelism.get("cp_size", 1)
     )
+    min_n_gpus_reference = (
+        reference_parallelism.get("tp_size", 1)
+        * reference_parallelism.get("dp_replicate_size", 1)
+        * reference_parallelism.get("pp_size", 1)
+        * reference_parallelism.get("cp_size", 1)
+    )
     if policy_parallelism.get("dp_shard_size", 1) >= 1:
         min_n_gpus_policy = min_n_gpus_policy * policy_parallelism.get(
             "dp_shard_size", 1
         )
     if rollout_parallelism.get("dp_shard_size", 1) >= 1:
         min_n_gpus_rollout = min_n_gpus_rollout * rollout_parallelism.get(
+            "dp_shard_size", 1
+        )
+    if reference_parallelism.get("dp_shard_size", 1) >= 1:
+        min_n_gpus_reference = min_n_gpus_reference * reference_parallelism.get(
             "dp_shard_size", 1
         )
     backend = cosmos_config.get("rollout", {}).get("backend", "vllm")
@@ -685,6 +804,10 @@ def main():
         )
         args.policy = int(num_per_ratio * p_ratio)
         args.rollout = int(num_per_ratio * r_ratio)
+        args.reference = 0
+        logger.warning(
+            "Reference training is not supported yet in P2R ratio mode, set number of reference replicas to 0"
+        )
         assert args.policy >= 1, "Number of policy replicas must be at least 1"
         assert (
             args.policy * min_n_gpus_policy + args.rollout * min_n_gpus_rollout
@@ -699,6 +822,10 @@ def main():
         n_rollouts = rollout_parallelism.get("n_init_replicas", 1)
     else:
         n_rollouts = args.rollout
+    if args.reference is None:
+        n_reference = reference_parallelism.get("n_init_replicas", 1)
+    else:
+        n_reference = args.reference
 
     # If the training type is SFT, set n_rollouts to 0
     if (
@@ -706,6 +833,7 @@ def main():
         == "sft"
     ):
         n_rollouts = 0
+        n_reference = 0
         if n_policy > 1:
             logger.warning(
                 "Warning: n_init_replicas for rollout is set to 0 for SFT training, but n_init_replicas for policy is more than 1."
@@ -742,6 +870,8 @@ def main():
             cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
         if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
+        if "reference" in cosmos_config and "parallelism" in cosmos_config["reference"]:
+            cosmos_config["reference"]["parallelism"]["n_init_replicas"] = n_reference
         config_content = toml.dumps(cosmos_config)
         launch_cmd = f"""\
 cat >config.toml <<EOF
@@ -761,8 +891,10 @@ cosmos-rl --config config.toml"""
             list(range(num_gpus_per_node)),
             n_policy,
             0 if is_colocated else n_rollouts,
+            n_reference,
             min_n_gpus_policy,
             min_n_gpus_rollout,
+            min_n_gpus_reference,
             replica_script="",
             control_url="",
             output_dir=None,
@@ -784,6 +916,9 @@ cosmos-rl --config config.toml"""
     )
     logger.info(
         f"Number of rollout replicas: {n_rollouts} with {min_n_gpus_rollout} gpus each"
+    )
+    logger.info(
+        f"Number of reference replicas: {n_reference} with {min_n_gpus_reference} gpus each"
     )
 
     # Get available GPUs
@@ -875,13 +1010,15 @@ cosmos-rl --config config.toml"""
 
     controller_cmd = None
     tmpfile_toml = None
-    if n_policy > 0 or n_rollouts > 0:
+    if n_policy > 0 or n_rollouts > 0 or n_reference > 0:
         # Do not update the config if no replicas are needed which means launch controller only.
         if "policy" in cosmos_config and "parallelism" in cosmos_config["policy"]:
             cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
         if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
             # Only available for RL.
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
+        if "reference" in cosmos_config and "parallelism" in cosmos_config["reference"]:
+            cosmos_config["reference"]["parallelism"]["n_init_replicas"] = n_reference
     # Create a temporary file and write to it
     tmpfile_toml = dump_config_with_literal_patterns_to_tmpfile(cosmos_config)
 
@@ -899,8 +1036,10 @@ cosmos-rl --config config.toml"""
         available_gpus,
         n_policy,
         0 if is_colocated else n_rollouts,
+        n_reference,
         min_n_gpus_policy,
         min_n_gpus_rollout,
+        min_n_gpus_reference,
         replica_script,
         control_url,
         output_dir,
@@ -923,7 +1062,8 @@ cosmos-rl --config config.toml"""
         len(available_gpus) * num_workers
         >= min_n_gpus_policy * n_policy
         + min_n_gpus_rollout * (0 if is_colocated else n_rollouts)
-    ), f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * (0 if is_colocated else n_rollouts)}, Available: {len(available_gpus)}"
+        + min_n_gpus_reference * n_reference
+    ), f"Not enough GPUs available. Required: {min_n_gpus_policy * n_policy + min_n_gpus_rollout * (0 if is_colocated else n_rollouts) + min_n_gpus_reference * n_reference}, Available: {len(available_gpus)}"
 
     if "LEPTON_JOB_WORKER_INDEX" in os.environ:
         prefix = os.environ.get(

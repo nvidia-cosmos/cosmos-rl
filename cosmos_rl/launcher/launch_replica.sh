@@ -17,7 +17,7 @@ print_help() {
   echo "Usage: ./launch_replica.sh [OPTIONS]"
   echo ""
   echo "Options:"
-  echo "  --type <rollout|policy>            Required. Type of replica to launch."
+  echo "  --type <rollout|policy|reference>  Required. Type of replica to launch."
   echo "  --nnodes <int>                     Number of nodes to launch. Default: 1"
   echo "  --ngpus <int>                      Number of GPUs per node. Default: 2"
   echo "  --log-rank <comma-separated ints>  Comma-separated list of ranks to enable logging. Default: Empty for all ranks."
@@ -125,8 +125,12 @@ elif [ "$TYPE" == "policy" ]; then
   DEFAULT_MODULE="cosmos_rl.policy.train"
   export COSMOS_ROLE="Policy"
   set_env "PYTORCH_CUDA_ALLOC_CONF" "expandable_segments:True"
+elif [ "$TYPE" == "reference" ]; then
+  DEFAULT_MODULE="cosmos_rl.reference.reference_entry"
+  export COSMOS_ROLE="Reference"
+  set_env "PYTORCH_CUDA_ALLOC_CONF" "expandable_segments:True"
 else
-  echo "Error: Invalid --type value '$TYPE'. Must be 'rollout' or 'policy'."
+  echo "Error: Invalid --type value '$TYPE'. Must be 'rollout' or 'policy' or 'reference'."
   print_help
   exit 1
 fi
@@ -183,6 +187,19 @@ elif [ "$TYPE" == "rollout" ]; then
     if [ -n "$LOG_RANKS" ]; then
       LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
     fi
+  fi
+elif [ "$TYPE" == "reference" ]; then
+  LAUNCH_CMD+=(
+    --nproc-per-node="$NGPU"
+    --nnodes="$NNODES"
+    --role rank
+    --tee 3
+    --rdzv_backend c10d
+    --rdzv_endpoint="$RDZV_ENDPOINT"
+  )
+
+  if [ -n "$LOG_RANKS" ]; then
+    LAUNCH_CMD+=(--local-ranks-filter "$LOG_RANKS")
   fi
 fi
 

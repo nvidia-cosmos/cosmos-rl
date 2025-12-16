@@ -210,3 +210,5 @@ class Rollout(BaseModel):
         default=None,
         description="The report_metrics for the rollout used for metrics collection and reporting.",
     )
+
+    uuid: str = Field(default="", description="The uuid for the rollout.")

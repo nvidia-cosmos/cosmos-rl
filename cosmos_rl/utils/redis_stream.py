@@ -25,7 +25,8 @@ from cosmos_rl.utils.network_util import make_request_with_retry
 from functools import partial
 from cosmos_rl.utils.logging import logger
 import enum
-import msgpack, uuid
+import msgpack
+import uuid
 
 
 class RedisOpType(enum.Enum):
@@ -235,7 +236,7 @@ class RedisStreamHandler:
                     rollouts.append(message_data[b"rollout"])
                     self.latest_id_rollout = message_id
         return rollouts
-    
+
     def create_teacher_request_group(self):
         if hasattr(self, "teacher_request_group_created"):
             return
@@ -257,7 +258,6 @@ class RedisStreamHandler:
             logger.error(f"Failed to write to Redis stream teacher_request: {e}")
             raise e
 
-
     def publish_teacher_request(self, data: Dict, replica_name: str) -> str:
         """
         Write data to the Redis stream.
@@ -271,7 +271,10 @@ class RedisStreamHandler:
         """
         uuid_value = str(uuid.uuid4())
         data.update({"uuid": uuid_value, "replica_name": replica_name})
-        message = {"teacher_request": msgpack.packb(data), "timestamp": datetime.now().isoformat()}
+        message = {
+            "teacher_request": msgpack.packb(data),
+            "timestamp": datetime.now().isoformat(),
+        }
         self.create_teacher_request_group()
         # Add message to stream
         try:
@@ -290,7 +293,9 @@ class RedisStreamHandler:
             raise e
         return uuid_value
 
-    def subscribe_teacher_request(self, replica_name: str, count: int = -1) -> List[Dict]:
+    def subscribe_teacher_request(
+        self, replica_name: str, count: int = -1
+    ) -> List[Dict]:
         """
         Read data from the Redis stream.
 
@@ -308,7 +313,7 @@ class RedisStreamHandler:
                     RedisOpType.XREADGROUP,
                     self.teacher_request_group,
                     replica_name,
-                    {self.teacher_request_stream: '>'},
+                    {self.teacher_request_stream: ">"},
                     count=RedisStreamConstant.TEACHER_REQUEST_FETCH_SIZE
                     if count <= 0
                     else count,
@@ -336,7 +341,9 @@ class RedisStreamHandler:
                             max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
                         )
                     except Exception as e:
-                        logger.error(f"Failed to acknowledge message {message_id} from Redis stream teacher_request: {e}")
+                        logger.error(
+                            f"Failed to acknowledge message {message_id} from Redis stream teacher_request: {e}"
+                        )
                     teacher_requests.append(teacher_request)
         return teacher_requests
 
@@ -351,17 +358,19 @@ class RedisStreamHandler:
         Returns:
             str: The UUID of the teacher result.
         """
-        data.update({
-            "timestamp": datetime.now().isoformat(),
-            "replica_name": replica_name,
-            })
-        try: 
+        data.update(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "replica_name": replica_name,
+            }
+        )
+        try:
             self.set_key_value(uuid_value, msgpack.packb(data))
         except Exception as e:
             logger.error(f"Failed to write to Redis key {uuid_value}: {e}")
             raise e
         return uuid_value
-    
+
     def get_teacher_result(self, uuid_value: str) -> Dict:
         """
         Get teacher result from Redis.
@@ -371,7 +380,7 @@ class RedisStreamHandler:
 
         Returns:
             Dict: The teacher result.
-    """
+        """
         value = self.get_key_value(uuid_value)
         return msgpack.unpackb(value)
 

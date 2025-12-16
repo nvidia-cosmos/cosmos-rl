@@ -1116,9 +1116,10 @@ class VLAConfig(BaseModel):
     def check_params_value(self):
         return self
 
+
 class DistillationConfig(BaseModel):
     enable: bool = Field(default=False, description="Whether to enable distillation.")
-    
+
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
 
     model_name_or_path: str = Field(
@@ -1136,8 +1137,10 @@ class DistillationConfig(BaseModel):
         default=4096,
         description="The maximum length for teacher model, longer than this will be ignored for training stability",
     )
-    
-    compile: bool = Field(default=True, description="Whether to use torch.compile for teacher model.")
+
+    compile: bool = Field(
+        default=True, description="Whether to use torch.compile for teacher model."
+    )
     # --------- FSDP ---------
 
     master_dtype: str = Field(
@@ -1174,11 +1177,12 @@ class DistillationConfig(BaseModel):
         description="Reshard the param after forward pass in FSDP for teacher model.",
         choices=["always", "never", "default"],
     )
-    
+
     batch_size: int = Field(default=1, description="Batch size for teacher model.")
-    seed: Optional[int] = Field(default=None, description="Random seed for teacher model.")
-    
-    
+    seed: Optional[int] = Field(
+        default=None, description="Random seed for teacher model."
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert (
@@ -1192,6 +1196,7 @@ class DistillationConfig(BaseModel):
             self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
         ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
         return self
+
 
 class Config(BaseModel):
     custom: Dict[str, Any] = Field(

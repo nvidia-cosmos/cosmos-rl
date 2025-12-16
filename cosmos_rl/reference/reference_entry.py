@@ -18,11 +18,9 @@ import torch
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.distributed import init_distributed
-from cosmos_rl.policy.worker.rl_worker import RLPolicyWorker
-from cosmos_rl.policy.worker.sft_worker import SFTPolicyWorker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
-from cosmos_rl.colocated.rl_worker import ColocatedRLControlWorker
+from cosmos_rl.reference.worker.teacher_worker import TeacherWorker
 
 
 def reference_entry(**kwargs):
@@ -49,45 +47,13 @@ def reference_entry(**kwargs):
     custom_logger_fns = kwargs.get("custom_logger_fns", [])
     hook_fns = kwargs.get("hook_fns", {})
 
-
-
-    if cosmos_config.mode == "colocated":
-        logger.info("Starting colocated RL worker...")
-        policy_worker = ColocatedRLControlWorker(
-            config=cosmos_config,
-            parallel_dims=parallel_dims,
-            **kwargs,
-        )
-    elif policy_type == "grpo":
-        policy_worker = RLPolicyWorker(
-            config=cosmos_config,
-            parallel_dims=parallel_dims,
-            dataset=kwargs.get("dataset", None),
-            data_packer=kwargs.get("data_packer", None),
-            val_dataset=kwargs.get("val_dataset", None),
-            val_data_packer=kwargs.get("val_data_packer", None),
-            # custom logger functions and hook functions haven't been used in RLPolicyWorker yet
-            custom_logger_fns=custom_logger_fns,
-            hook_fns=hook_fns,
-        )
-    elif policy_type == "sft":
-        custom_sft_dataset = kwargs.get("dataset")
-        custom_sft_data_packer = kwargs.get("data_packer")
-        policy_worker = SFTPolicyWorker(
-            config=cosmos_config,
-            parallel_dims=parallel_dims,
-            dataset=custom_sft_dataset,
-            data_packer=custom_sft_data_packer,
-            val_dataset=kwargs.get("val_dataset", None),
-            val_data_packer=kwargs.get("val_data_packer", None),
-            sampler=kwargs.get("sampler", None),
-            batch_sampler=kwargs.get("batch_sampler", None),
-            val_sampler=kwargs.get("val_sampler", None),
-            val_batch_sampler=kwargs.get("val_batch_sampler", None),
-            custom_logger_fns=custom_logger_fns,
-            hook_fns=hook_fns,
-        )
-    else:
-        raise ValueError(f"Unknown policy type: {policy_type}")
-
-    policy_worker.execute()
+    reference_worker = TeacherWorker(
+        config=cosmos_config,
+        parallel_dims=parallel_dims,
+        dataset=kwargs.get("dataset", None),
+        data_packer=kwargs.get("data_packer", None),
+        # custom logger functions and hook functions haven't been used in RLPolicyWorker yet
+        custom_logger_fns=custom_logger_fns,
+        hook_fns=hook_fns,
+    )
+    reference_worker.execute()

@@ -29,88 +29,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from cosmos_rl.policy.worker.base import PolicyWorkerBase
 from cosmos_rl.reference.engine.torch_engine import TorchEngine
-import torch
 import atexit
-import time
-import msgpack
 import asyncio
 import threading
-from functools import partial
 from typing import List, Optional, Union, Callable, Dict
 from torch.utils.data import Dataset
 from queue import Queue
 import torch.distributed as dist
 from queue import Empty
-
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.comm.base import CommMixin
-from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.dispatcher.data.schema import Rollout
-from cosmos_rl.policy.trainer.llm_trainer.grpo_trainer import GRPOTrainer
-from cosmos_rl.utils.distributed import HighAvailabilitylNccl, destroy_distributed
-from cosmos_rl.utils.parallelism_map import (
-    ParallelTopoMapperGroup,
-)
-import cosmos_rl.utils.distributed as dist_util
-import os
-import torch
-
-from transformers import AutoConfig
+from cosmos_rl.utils.distributed import destroy_distributed
 
 
-from cosmos_rl.comm.base import WorkerBase
-from cosmos_rl.comm.base import CommMixin
-from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.utils.parallelism import ParallelDims
-from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils import util
-from cosmos_rl.dispatcher.protocol import Role
-from cosmos_rl.utils.profiler import CosmosProfiler
+class TeacherWorker(PolicyWorkerBase):
+    def update_config(self, config: CosmosConfig):
+        # Update train config to reference config to reuse the logic of policy trainer
+        config.train.seed = config.reference.seed
+        config.train.compile = config.reference.compile
+        config.train.master_dtype = config.reference.master_dtype
+        config.train.param_dtype = config.reference.param_dtype
+        config.train.logprob_dtype = config.reference.logprob_dtype
+        config.train.fsdp_reduce_dtype = config.reference.fsdp_reduce_dtype
+        config.train.fsdp_offload = config.reference.fsdp_offload
+        config.train.fsdp_reshard_after_forward = (
+            config.reference.fsdp_reshard_after_forward
+        )
+        config.policy.model_name_or_path = config.reference.model_name_or_path
+        config.policy.model_max_length = config.reference.model_max_length
+        config.policy.model_revision = config.reference.model_revision
+        config.policy.parallelsim = config.reference.parallelsim
+        return config
 
-
-class TeacherWorker(WorkerBase, CommMixin):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
-        super(TeacherWorker, self).__init__(config)
-        self.parallel_dims = parallel_dims
+        config = self.update_config(config)
+        assert isinstance(
+            config, CosmosConfig
+        ), "config must be a CosmosConfig object for this trainer"
+        super().__init__(config, parallel_dims=parallel_dims)
 
-        self.hf_config = util.retry(AutoConfig.from_pretrained)(
-            self.config.reference.model_name_or_path,
-            trust_remote_code=True,
-        )
-
-        if self.config.reference.parallelism.dp_shard_size == -1:
-            self.config.reference.parallelism.dp_shard_size = parallel_dims.dp_shard
-        # Parallel parameters
-
-        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        self.global_rank = int(os.environ.get("RANK", 0))
-        self.role = Role.POLICY
-        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
-        self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
-
-        self.check_config()
-        self.dp_rank, self.dp_world_size = 0, 1
-        if self.parallel_dims.dp_enabled:
-            self.dp_rank = self.parallel_dims.mesh["dp"].get_local_rank()
-            self.dp_world_size = self.parallel_dims.mesh["dp"].size()
-
-        self.teacher_stream = torch.cuda.current_stream()
-        self.init_comm()
-
-        # profiler is initialized after the init_comm()
-        self.profiler = CosmosProfiler(
-            self.config,
-            parallel_dims,
-            replica_name=self.replica_name,
-            api_client=self.api_client,
-        )
-        
         # For hooks and custom logger functions
         self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
         self.hook_fns = kwargs.get("hook_fns", {})
@@ -118,69 +81,32 @@ class TeacherWorker(WorkerBase, CommMixin):
         # Initialize the teacher
         dataset = kwargs.get("dataset", None)
         data_packer = kwargs.get("data_packer", None)
-        val_dataset = kwargs.get("val_dataset", None)
-        val_data_packer = kwargs.get("val_data_packer", None)
         self.build_runner(
             dataset=dataset,
             data_packer=data_packer,
-            val_dataset=val_dataset,
-            val_data_packer=val_data_packer,
         )
 
         # For rollouts fetch
         self.data_queue = Queue()
         self.fetch_rollouts_thread = None
-        
+        self.end_event = threading.Event()
+
         atexit.register(self.handle_shutdown)
-
-        
-
-    def check_config(self):
-        dp_shard_size = self.config.reference.parallelism.dp_shard_size
-        dp_replicate = self.config.reference.parallelism.dp_replicate
-        batch_size = self.config.reference.batch_size
-        assert dp_shard_size > 0, "dp_shard_size must be greater than 0"
-        assert dp_replicate > 0, "dp_replicate must be greater than 0"
-        assert batch_size > 0, "batch_size must be greater than 0"
-        assert batch_size % (dp_shard_size * dp_replicate) == 0, "batch_size must be divisible by dp_shard_size * dp_replicate"
-        logger.info("Config checked successfully")
-
-
-    def execute(self):
-        """
-        Execute the training.
-        """
-        assert self.engine is not None, "[Reference] Engine has not been built."
-        try:
-            self.main_loop()
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            raise e
-        finally:
-            self.destroy_worker()
-
 
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         data_packer: Optional[BaseDataPacker] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
     ):
         # setup data packer first
         self.init_data_packer(
             data_packer=data_packer,
-            val_data_packer=val_data_packer,
         )
         # Set up data fetcher
         self.data_fetcher = WorkerDataFetcher(
             config=self.config,
             dataset=dataset,
-            val_dataset=val_dataset,
             data_packer=self.data_packer,
-            val_data_packer=self.val_data_packer,
             is_rl=True,
         )
 
@@ -201,50 +127,51 @@ class TeacherWorker(WorkerBase, CommMixin):
             # Manually unregister from controller
             self.unregister_from_controller()
 
-
     async def fetch_rollouts(self):
         assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
         while not self.shutdown_signal.is_set():
             teacher_requests = []
             try:
-                teacher_requests = self.redis_controller.subscribe_teacher_request(self.replica_name, count=self.engine.batch_size)
+                teacher_requests = self.redis_controller.subscribe_teacher_request(
+                    self.replica_name, count=self.engine.batch_size
+                )
             except Exception as e:
                 logger.debug(f"Failed to get rollouts: {e}, wait for next round")
             for rollout in teacher_requests:
                 self.data_queue.put_nowait(rollout)
 
-
     def dispatch_rollouts(self) -> List[Rollout]:
-        def preprocess_rollouts(rollouts: List[Rollout]):
-            assert all(
-                rollout.prompt_idx >= 0 for rollout in rollouts
-            ), "All rollouts from controller should have a valid prompt index"
-            if self.config.train.local_dataset:
-                for i in range(len(rollouts)):
-                    rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
-                        rollouts[i].prompt_idx
+        def preprocess_rollouts(rollouts: List[Dict]):
+            updated_rollouts: List[Rollout] = []
+            for i in range(len(rollouts)):
+                if "is_end" in rollouts[i]:
+                    self.end_event.set()
+                    continue
+                updated_rollouts.append(
+                    Rollout(
+                        prompt=self.data_fetcher.get_payload_by_index(
+                            rollouts[i]["prompt_idx"]
+                        ),
+                        prompt_idx=rollouts[i]["prompt_idx"],
+                        uuid=rollouts[i]["uuid"],
+                        completion_token_ids=rollouts[i]["completion_token_ids"],
                     )
-
-                    rollouts[i].conversation = self.data_fetcher.get_payload_by_index(
-                        rollouts[i].prompt_idx,
-                        attr="conversation",
-                    )
-            return rollouts
+                )
+            return updated_rollouts
 
         rollouts = [[]]
         scattered_rollouts = [[] for _ in range(self.world_size)]
         if self.global_rank == 0:
-            batch_for_this_step = (
-                self.replica_batch_for_this_step
-                // self.dp_world_size
-                * self.dp_world_size
-            )
+            batch_for_this_step = self.engine.batch_size
             assert batch_for_this_step % self.dp_world_size == 0
-
             dp_id = 0
             for _ in range(batch_for_this_step):
                 try:
                     rollout = self.data_queue.get(block=True, timeout=None)
+                    if "is_end" in rollout:
+                        for i in range(self.world_size):
+                            scattered_rollouts[i].append(rollout)
+                        break
                 except Empty:
                     raise Empty(
                         "[Policy] Rollouts queue is empty, please check the dispatcher."
@@ -256,8 +183,12 @@ class TeacherWorker(WorkerBase, CommMixin):
                 dp_id += 1
                 if dp_id >= self.dp_world_size:
                     dp_id = 0
+            for i in range(self.world_size):
+                assert (
+                    len(scattered_rollouts[i]) == len(scattered_rollouts[0])
+                ), f"Rank {i} has {len(scattered_rollouts[i])} rollouts, but rank 0 has {len(scattered_rollouts[0])} rollouts"
         if self.world_size == 1:
-            return preprocess_rollouts(scattered_rollouts[0])
+            data = preprocess_rollouts(scattered_rollouts[0])
 
         dist.scatter_object_list(
             rollouts,
@@ -265,9 +196,12 @@ class TeacherWorker(WorkerBase, CommMixin):
             src=0,
         )
         rollouts = rollouts[0]
-        return preprocess_rollouts(rollouts)
+        data = preprocess_rollouts(rollouts)
+        return data
 
     def main_loop(self):
+        self.engine.model_load_from_hf()
+
         def fetch_rollouts_helper(trainer):
             new_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(new_loop)
@@ -284,39 +218,27 @@ class TeacherWorker(WorkerBase, CommMixin):
                 name="fetch_rollouts_thread",
             ).start()
 
-        abort = False
         while True:
-            teacher_requests = []
-            if self.global_rank == 0 and len(self.data_queue.queue) >= self.engine.batch_size:
-                for i in range(self.engine.batch_size):
-                    rollout = self.data_queue.get(block=True, timeout=None)
-                    teacher_requests.append(rollout)
-                
-                
-            
-            
-
-            if abort_at_this_round:
+            rollouts = self.dispatch_rollouts()
+            data = self.engine.step_forward(rollouts)
+            for item in data:
+                id = item.pop("uuid")
+                self.redis_controller.set_teacher_result(id, item, self.replica_name)
+            if self.end_event.is_set():
                 break
         logger.info("[Policy] Main loop finished. Shutdown background task event set.")
-        self.teacher_stream.synchronize()
+        self.train_stream.synchronize()
         self.handle_shutdown()
-
-
 
     def build_runner(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         data_packer: Optional[BaseDataPacker] = None,
-        val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
-        val_data_packer: Optional[BaseDataPacker] = None,
     ):
         # Initialize data packer and setup data fetcher first.
         self.setup(
             dataset=dataset,
             data_packer=data_packer,
-            val_dataset=val_dataset,
-            val_data_packer=val_data_packer,
         )
         self.engine = TorchEngine(
             self.config,
@@ -324,7 +246,6 @@ class TeacherWorker(WorkerBase, CommMixin):
             device=self.device,
             train_stream=self.teacher_stream,
             data_packer=self.data_packer,
-            val_data_packer=self.val_data_packer,
         )
 
     def destroy_worker(self):
