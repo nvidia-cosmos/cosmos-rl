@@ -4,10 +4,11 @@ import math
 import torch
 
 from torch import nn
-from transformers import GemmaForCausalLM
-from transformers import PaliGemmaForConditionalGeneration
-from transformers.models.auto import CONFIG_MAPPING
-from transformers.models.gemma import modeling_gemma
+from cosmos_rl.policy.model.pi05.transformers_replace import GemmaForCausalLM, GemmaConfig
+from cosmos_rl.policy.model.pi05.transformers_replace import PaliGemmaForConditionalGeneration, PaliGemmaConfig
+from cosmos_rl.policy.model.pi05.transformers_replace import modeling_gemma
+
+
 
 
 def _default_lora_init(t: torch.Tensor) -> None:
@@ -125,7 +126,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             use_adarms = [False, False]
         super().__init__()
 
-        vlm_config_hf = CONFIG_MAPPING["paligemma"]()
+        vlm_config_hf = PaliGemmaConfig()
         vlm_config_hf._vocab_size = 257152  # noqa: SLF001
         vlm_config_hf.image_token_index = 257152
         vlm_config_hf.text_config.hidden_size = vlm_config.width
@@ -146,7 +147,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
         vlm_config_hf.vision_config.torch_dtype = "float32"
 
-        action_expert_config_hf = CONFIG_MAPPING["gemma"](
+        action_expert_config_hf = GemmaConfig(
             head_dim=action_expert_config.head_dim,
             hidden_size=action_expert_config.width,
             intermediate_size=action_expert_config.mlp_dim,

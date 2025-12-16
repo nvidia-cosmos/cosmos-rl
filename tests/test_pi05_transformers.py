@@ -68,6 +68,65 @@ def check_output(name: str, loss: torch.Tensor):
     )
 
 
+def save_inputs(obs, actions, noise, time, save_dir: str = "/workspace"):
+    """Save inputs to local directory."""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Save images and masks
+    images_data = {k: v for k, v in obs.images.items()}
+    masks_data = {k: v for k, v in obs.image_masks.items()}
+    
+    save_dict = {
+        "state": obs.state,
+        "tokenized_prompt": obs.tokenized_prompt,
+        "tokenized_prompt_mask": obs.tokenized_prompt_mask,
+        "token_ar_mask": obs.token_ar_mask,
+        "token_loss_mask": obs.token_loss_mask,
+        "actions": actions,
+        "noise": noise,
+        "time": time,
+        **{f"image_{k}": v for k, v in images_data.items()},
+        **{f"mask_{k}": v for k, v in masks_data.items()},
+    }
+    
+    save_path = os.path.join(save_dir, "inputs.safetensors")
+    safetensors.torch.save_file(save_dict, save_path)
+    print(f"Inputs saved to: {save_path}")
+
+
+def load_inputs(save_dir: str = "/workspace", device: str = "cuda"):
+    """Load inputs from local directory."""
+    load_path = os.path.join(save_dir, "inputs.safetensors")
+    data = safetensors.torch.load_file(load_path, device=device)
+    
+    class Observation:
+        pass
+    
+    obs = Observation()
+    
+    # Reconstruct images and masks
+    obs.images = {}
+    obs.image_masks = {}
+    for key, value in data.items():
+        if key.startswith("image_"):
+            obs.images[key[6:]] = value
+        elif key.startswith("mask_"):
+            obs.image_masks[key[5:]] = value
+    
+    obs.state = data["state"]
+    obs.tokenized_prompt = data["tokenized_prompt"]
+    obs.tokenized_prompt_mask = data["tokenized_prompt_mask"]
+    obs.token_ar_mask = data["token_ar_mask"]
+    obs.token_loss_mask = data["token_loss_mask"]
+    
+    actions = data["actions"]
+    noise = data["noise"]
+    time = data["time"]
+    
+    print(f"Inputs loaded from: {load_path}")
+    return obs, actions, noise, time
+
+
 if __name__ == "__main__":
     device = "cuda"
     model_id = "sunshk/pi05_libero_pytorch"
@@ -92,6 +151,7 @@ if __name__ == "__main__":
 
     # Create shared dummy input (use same random seed for fair comparison)
     torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
     obs, actions = create_dummy_input(
         batch_size=1,
         action_dim=action_dim,
@@ -101,6 +161,9 @@ if __name__ == "__main__":
     noise = torch.randn_like(actions)
     time = torch.rand(1, device=device) * 0.999 + 0.001
 
+    # Load inputs from /workspace
+    # obs, actions, noise, time = load_inputs(save_dir="/workspace", device=device)
+
     # ========== Cosmos-RL PI05 ==========
     print("\n[Cosmos-RL PI05]")
     cosmos_model = PI05(model_id, openpi_config).to(device)
@@ -108,32 +171,7 @@ if __name__ == "__main__":
     cosmos_model.eval()
 
     # Reset seed again to match the same augmentations
-    torch.manual_seed(123)
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             cosmos_loss = cosmos_model.forward(obs, actions, noise=noise, time=time)
     check_output("Cosmos-RL", cosmos_loss)
-
-    # # ========== Official OpenPI ==========
-    # print("\n[Official OpenPI]")
-    # openpi_model = PI0Pytorch(config=openpi_config).to(device)
-    # safetensors.torch.load_model(openpi_model, weight_path)
-    # openpi_model.eval()
-
-    # # Reset seed before forward to ensure deterministic preprocessing augmentations
-    # torch.manual_seed(123)
-    # with torch.no_grad():
-    #     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-    #         openpi_loss = openpi_model.forward(obs, actions, noise=noise, time=time)
-    # check_output("OpenPI", openpi_loss)
-
-    # # ========== Compare ==========
-    # print("\n[Comparison]")
-    # diff = (cosmos_loss - openpi_loss).abs()
-    # print(f"Max diff: {diff.max().item():.6f}")
-    # print(f"Mean diff: {diff.mean().item():.6f}")
-
-    # if diff.max().item() < 1e-3:
-    #     print("\n✅ Outputs match!")
-    # else:
-    #     print("\n⚠️  Outputs differ - check implementations")
