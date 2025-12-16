@@ -151,3 +151,5 @@ class RedisStreamConstant:
     STREAM_MAXLEN = 10000  # Keep latest n message entries
     ROLLOUT_READING_TIMEOUT_MS = 10 * 1000  # 10 seconds
     ROLLOUT_FETCH_SIZE = 8
+    TEACHER_REQUEST_READING_TIMEOUT_MS = 10 * 1000  # 10 seconds
+    TEACHER_REQUEST_FETCH_SIZE = 8
