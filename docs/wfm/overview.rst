@@ -32,12 +32,25 @@ Cosmos-RL supports `FlowGRPO <https://arxiv.org/pdf/2505.05470>`_ and `DDRL <htt
     2. For a quick rollout of the training pipeline, we recommend you use the mock_data config file, i.e., ./configs/wfm/cosmos_predict2-5_2b_480_grpo_mock_data.toml
 
 **Reward services**: Considering the computation overhead, it's necessary to use a seperated async service for reward computing.
+
 - You can launch a reward service by following the instructions here: `Reward Service <https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service>`_.
+
 - Configure the environment variable ``WFM_REWARD_TOKEN``, ``WFM_REWARD_ENQUEUE_URL``, and ``WFM_REWARD_FETCH_URL`` to make the trainer communicate with the reward service.
 
 **Models**:
+
 - Cosmos-Predict2.5-2B/14B
+
 - Wan2.1 (coming soon)
+
+**Parallelism**: Support HSDP/FSDP, and context parallel (CP) for world foundational model training. You can edit the related configurations in the toml file to enable these parallelism techniques.::
+
+    [model]
+    fsdp_shard_size = 8
+    dp_replicate_size = 4
+
+    [model_parallel]
+    context_parallel_size = 2
 
 **Datasets**:
 
@@ -52,11 +65,17 @@ Cosmos-RL supports `FlowGRPO <https://arxiv.org/pdf/2505.05470>`_ and `DDRL <htt
         └── *.pickle
 
 - Webdataset: you need to configure the s3 access via environment variables, then you can use webdataset for training.
+
     - PROD_S3_CHECKPOINT_ACCESS_KEY_ID: Your S3 access key ID.
+
     - PROD_S3_CHECKPOINT_SECRET_ACCESS_KEY: Your S3 secret access key.
+
     - PROD_S3_CHECKPOINT_ENDPOINT_URL: Your S3 endpoint url.
+
     - PROD_S3_CHECKPOINT_REGION_NAME: Your S3 region name.
 
 **Storage**:
+
 - Local storage: you can use local disk for storing checkpoints and logs.
+
 - S3 storage: you need to configure the s3 access via environment variables, then you can use s3 storage for storing checkpoints and logs.

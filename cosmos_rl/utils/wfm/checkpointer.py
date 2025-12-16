@@ -1058,8 +1058,8 @@ class DistributedCheckpointer(AbstractCheckpointer):
                                 f"{checkpoint_path}/checkpoints/{checkpoint_file}"
                             )
                         else:
-                            raise ValueError(
-                                f"Latest checkpoint file {latest_ckpt_path} not found"
+                            logger.warning(
+                                f"Latest checkpoint file {latest_ckpt_path} not found, use the load_path instead: {checkpoint_path}"
                             )
 
                 if self.load_training_state:
