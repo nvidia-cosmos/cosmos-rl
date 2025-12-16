@@ -164,6 +164,18 @@ class Rollout(BaseModel):
         default="", description="The generated completion for the rollout."
     )
 
+    teacher_result_uuid: str = Field(
+        default="", description="The uuid of the teacher result."
+    )
+
+    teacher_topk_logprobs: Optional[List[float]] = Field(
+        default=None, description="The topk logprobs of the teacher for the rollout."
+    )
+
+    teacher_topk_indices: Optional[List[int]] = Field(
+        default=None, description="The topk indices of the teacher for the rollout."
+    )
+
     completed_conversation: Optional[ConversationType] = Field(
         default=None, description="The generated conversation for the rollout."
     )
