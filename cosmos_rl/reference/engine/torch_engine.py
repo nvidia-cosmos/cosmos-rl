@@ -378,20 +378,19 @@ class TorchEngine(LLMTrainer):
                         is_full_logits=True if raw_logits.ndim == 3 else False,
                     )
                     data = []
-                    if self.parallel_dims.mesh["dp"].rank == 0:
-                        assert (
-                            len(current_per_token_logprobs) == len(cu_seqlens) - 1
-                        ), f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens.shape}"
+                    if self.parallel_dims.mesh["dp"].get_local_rank() == 0:
                         current_per_token_logprobs = current_per_token_logprobs.cpu()
                         cu_seqlens = cu_seqlens.cpu()
-                        for i in range(len(current_per_token_logprobs)):
-                            current_per_token_logprobs[i] = current_per_token_logprobs[
-                                i
-                            ][: cu_seqlens[i + 1] - cu_seqlens[i]]
+                        assert (
+                            len(current_per_token_logprobs) == cu_seqlens[-1]
+                        ), f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens}"
+                        for i in range(len(cu_seqlens) - 1):
                             data.append(
                                 {
-                                    "logprob": current_per_token_logprobs[i].tolist(),
-                                    "uuid": rollouts[i].uuid,
+                                    "logprobs": current_per_token_logprobs[
+                                        cu_seqlens[i] : cu_seqlens[i + 1]
+                                    ].tolist(),
+                                    "uuid": rollouts[i].teacher_result_uuid,
                                 }
                             )
         return data

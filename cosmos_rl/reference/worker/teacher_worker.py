@@ -47,6 +47,7 @@ from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.utils.distributed import destroy_distributed
 import os
 import torch
+import copy
 
 from transformers import AutoConfig
 
@@ -216,7 +217,10 @@ class TeacherWorker(WorkerBase, CommMixin):
             except Exception as e:
                 logger.debug(f"Failed to get rollouts: {e}, wait for next round")
             for rollout in teacher_requests:
-                self.data_queue.put_nowait(rollout)
+                for tokens in rollout["completion_token_ids"]:
+                    rollout_item = copy.deepcopy(rollout)
+                    rollout_item["completion_token_ids"] = tokens
+                    self.data_queue.put_nowait(rollout_item)
 
     def dispatch_rollouts(self) -> List[Rollout]:
         def preprocess_rollouts(rollouts: List[Dict]):
@@ -231,7 +235,7 @@ class TeacherWorker(WorkerBase, CommMixin):
                             rollouts[i]["prompt_idx"]
                         ),
                         prompt_idx=rollouts[i]["prompt_idx"],
-                        uuid=rollouts[i]["uuid"],
+                        teacher_result_uuid=rollouts[i]["uuid"],
                         completion_token_ids=rollouts[i]["completion_token_ids"],
                     )
                 )
@@ -267,7 +271,9 @@ class TeacherWorker(WorkerBase, CommMixin):
                 ), f"Rank {i} has {len(scattered_rollouts[i])} rollouts, but rank 0 has {len(scattered_rollouts[0])} rollouts"
         if self.world_size == 1:
             data = preprocess_rollouts(scattered_rollouts[0])
-
+        logger.info(
+            f"[Reference] Preprocessed rollouts, global rank {self.global_rank} number of rollouts: {[len(scattered_rollouts[i]) for i in range(self.world_size)]}"
+        )
         dist.scatter_object_list(
             rollouts,
             scattered_rollouts,

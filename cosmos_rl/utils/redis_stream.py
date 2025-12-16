@@ -251,6 +251,10 @@ class RedisStreamHandler:
                     mkstream=True,
                 ),
                 response_parser=None,
+                exception_parser=lambda e: "BUSYGROUP"
+                in str(
+                    e
+                ),  # If the group is already created, it will raise a BUSYGROUP error.
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
             self.teacher_request_group_created = True
@@ -275,13 +279,16 @@ class RedisStreamHandler:
             "teacher_request": msgpack.packb(data),
             "timestamp": datetime.now().isoformat(),
         }
+        logger.debug(
+            f"Publishing teacher request to Redis stream {self.teacher_request_group}: {message}"
+        )
         self.create_teacher_request_group()
         # Add message to stream
         try:
             make_request_with_retry(
                 self.requests_for_alternative_clients(
                     RedisOpType.XADD,
-                    self.teacher_request_group,
+                    self.teacher_request_stream,
                     message,
                     maxlen=RedisStreamConstant.STREAM_MAXLEN,
                 ),
@@ -291,6 +298,9 @@ class RedisStreamHandler:
         except Exception as e:
             logger.error(f"Failed to write to Redis stream teacher_request: {e}")
             raise e
+        logger.info(
+            f"Published teacher request to Redis stream {self.teacher_request_stream}: {uuid_value}"
+        )
         return uuid_value
 
     def subscribe_teacher_request(
@@ -307,6 +317,11 @@ class RedisStreamHandler:
             list: A list of stream entries.
         """
         self.create_teacher_request_group()
+
+        def exception_parser(e):
+            logger.info(f"Failed to read from Redis stream teacher_request: {e}")
+            return False
+
         try:
             messages = make_request_with_retry(
                 self.requests_for_alternative_clients(
@@ -320,6 +335,7 @@ class RedisStreamHandler:
                     block=RedisStreamConstant.TEACHER_REQUEST_READING_TIMEOUT_MS,
                 ),
                 response_parser=None,
+                exception_parser=exception_parser,
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
         except Exception as e:

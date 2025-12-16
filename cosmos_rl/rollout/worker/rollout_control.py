@@ -1561,13 +1561,35 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         )
                     )
                 valid_payloads.append(old_payload)
-
+            valid_payloads = self.enqueue_teacher_calculation(valid_payloads)
             self.reward_dispatcher.enqueue_rewards_cal(
                 valid_payloads,
                 False,
                 self.current_weight_version,
             )
         return valid_payloads_list, valid_result
+
+    def enqueue_teacher_calculation(self, payloads: List[RLPayload]) -> List[RLPayload]:
+        """
+        Enqueue the teacher calculation for the payloads.
+        Args:
+            payloads: The payloads to enqueue the teacher calculation for.
+        Returns:
+            The payloads with the teacher result uuid.
+        """
+        if not self.config.distillation.enable:
+            return payloads
+        assert all(
+            payload.completion_token_ids is not None for payload in payloads
+        ), "All payloads must have completion token ids"
+        for payload in payloads:
+            data = {
+                "prompt_idx": payload.prompt_idx,
+                "completion_token_ids": payload.completion_token_ids,
+            }
+            id = self.redis_controller.publish_teacher_request(data, self.replica_name)
+            payload.teacher_result_uuid = id
+        return payloads
 
     def work(self):
         # Start the thread with daemon=True, so it will exit when the main program exits.

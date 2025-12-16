@@ -65,6 +65,7 @@ class Controller:
     def _init_status(self):
         self.policy_status_manager = PolicyStatusManager()
         self.rollout_status_manager = RolloutStatusManager()
+        self.teacher_result_manager = set()
         self.stat_prompt_tokens_count = 0
         self.stat_completion_tokens_count = 0
         self.stat_n_samples = 0
@@ -456,6 +457,8 @@ class Controller:
             self.policy_status_manager.heartbeat(replica_name)
         elif replica_name in self.rollout_status_manager:
             self.rollout_status_manager.heartbeat(replica_name)
+        elif replica_name in self.teacher_result_manager:
+            pass
         else:
             logger.error(f"[Controller] Replica {replica_name} not found")
 
@@ -474,6 +477,7 @@ class Controller:
                     atom, self.config, self.policy_status_manager
                 )
             elif role == Role.REFERENCE:
+                self.teacher_result_manager.add(atom.replica_name)
                 logger.info(
                     f"[Controller] Registering reference replica {atom.replica_name}"
                 )

@@ -1315,6 +1315,12 @@ class Config(BaseModel):
         if self.train.transfer_dtype is None:
             # Default use master_dtype as transfer_dtype
             self.train.transfer_dtype = self.train.master_dtype
+
+        if self.distillation.enable:
+            self.train.train_policy.rollout_as_token_ids = True
+            logger.info(
+                "Distillation is enabled, so rollout_as_token_ids is set to True."
+            )
         return self
 
 

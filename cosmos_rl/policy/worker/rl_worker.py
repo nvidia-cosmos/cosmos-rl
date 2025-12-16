@@ -258,6 +258,9 @@ class RLPolicyWorker(PolicyWorkerBase):
             ), "All rollouts from controller should have a valid prompt index"
             for i in range(len(rollouts)):
                 if self.config.train.local_dataset:
+                    logger.info(
+                        f"Rollout {i} teacher result uuid: {rollouts[i].teacher_result_uuid}"
+                    )
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx
                     )

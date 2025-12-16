@@ -128,6 +128,10 @@ class RLPayload(BaseModel):
         description="The report_metrics for the rollout used for metrics collection and reporting.",
     )
 
+    teacher_result_uuid: str = Field(
+        default="", description="The uuid for the teacher result."
+    )
+
     @staticmethod
     def collate_fn(
         batch: List["IdxAndRLPayload"],
@@ -210,5 +214,3 @@ class Rollout(BaseModel):
         default=None,
         description="The report_metrics for the rollout used for metrics collection and reporting.",
     )
-
-    uuid: str = Field(default="", description="The uuid for the rollout.")
