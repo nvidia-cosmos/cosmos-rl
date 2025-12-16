@@ -1178,7 +1178,9 @@ class DistillationConfig(BaseModel):
         choices=["always", "never", "default"],
     )
 
-    batch_size: int = Field(default=1, description="Batch size for teacher model.")
+    batch_size_per_replica: int = Field(
+        default=1, description="Batch size for teacher model per replica."
+    )
     seed: Optional[int] = Field(
         default=None, description="Random seed for teacher model."
     )

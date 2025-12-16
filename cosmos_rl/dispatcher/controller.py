@@ -473,6 +473,10 @@ class Controller:
                 self.rollout_status_manager.register(
                     atom, self.config, self.policy_status_manager
                 )
+            elif role == Role.REFERENCE:
+                logger.info(
+                    f"[Controller] Registering reference replica {atom.replica_name}"
+                )
             else:
                 raise Exception(f"[Controller] Unknown role: {role}")
 

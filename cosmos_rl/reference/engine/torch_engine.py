@@ -107,7 +107,6 @@ class TorchEngine(LLMTrainer):
         parallel_dims: ParallelDims,
         train_stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
-        val_data_packer: BaseDataPacker,
         **kwargs,
     ):
         super(TorchEngine, self).__init__(
@@ -115,7 +114,7 @@ class TorchEngine(LLMTrainer):
             parallel_dims,
             train_stream=train_stream,
             data_packer=data_packer,
-            val_data_packer=val_data_packer,
+            val_data_packer=None,
             **kwargs,
         )
 
@@ -125,9 +124,15 @@ class TorchEngine(LLMTrainer):
                 "Please use elastic scaling feature instead."
             )
         # For iteration control
-        self.batch_size = self.config.reference.batch_size
-        self.max_length = self.config.reference.model_max_length
-        self.tokenizer = setup_tokenizer(self.config.reference.model_name_or_path)
+        self.batch_size = self.config.distillation.batch_size_per_replica
+        self.max_length = self.config.distillation.model_max_length
+        self.tokenizer = setup_tokenizer(self.config.distillation.model_name_or_path)
+
+    def step_training(self):
+        pass
+
+    def build_lr_schedulers(self):
+        pass
 
     def step_forward(
         self,
@@ -424,3 +429,16 @@ class TorchEngine(LLMTrainer):
             input_packing_mask=minibatch.get("input_packing_mask", None),
             **kwargs,
         )
+
+    @property
+    def pp_loss_fn(self):
+        def fake_compute_loss(
+            loss: torch.Tensor,
+            target: torch.Tensor,
+        ) -> torch.Tensor:
+            """
+            loss: the loss of shape `[n_tokens]`
+            """
+            pass
+
+        return fake_compute_loss

@@ -740,7 +740,7 @@ def main():
     # and the number of replicas for each
     policy_parallelism = cosmos_config.get("policy", {}).get("parallelism", {})
     rollout_parallelism = cosmos_config.get("rollout", {}).get("parallelism", {})
-    reference_parallelism = cosmos_config.get("reference", {}).get("parallelism", {})
+    reference_parallelism = cosmos_config.get("distillation", {}).get("parallelism", {})
     # Calculate the minimum number of GPUs required for policy and rollout
     # based on the parallelism settings in the configuration
     # Treat dp_shard_size as 1 if it is not set
@@ -872,8 +872,13 @@ def main():
             cosmos_config["policy"]["parallelism"]["n_init_replicas"] = n_policy
         if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
-        if "reference" in cosmos_config and "parallelism" in cosmos_config["reference"]:
-            cosmos_config["reference"]["parallelism"]["n_init_replicas"] = n_reference
+        if (
+            "distillation" in cosmos_config
+            and "parallelism" in cosmos_config["distillation"]
+        ):
+            cosmos_config["distillation"]["parallelism"]["n_init_replicas"] = (
+                n_reference
+            )
         config_content = toml.dumps(cosmos_config)
         launch_cmd = f"""\
 cat >config.toml <<EOF
@@ -1019,8 +1024,13 @@ cosmos-rl --config config.toml"""
         if "rollout" in cosmos_config and "parallelism" in cosmos_config["rollout"]:
             # Only available for RL.
             cosmos_config["rollout"]["parallelism"]["n_init_replicas"] = n_rollouts
-        if "reference" in cosmos_config and "parallelism" in cosmos_config["reference"]:
-            cosmos_config["reference"]["parallelism"]["n_init_replicas"] = n_reference
+        if (
+            "distillation" in cosmos_config
+            and "parallelism" in cosmos_config["distillation"]
+        ):
+            cosmos_config["distillation"]["parallelism"]["n_init_replicas"] = (
+                n_reference
+            )
     # Create a temporary file and write to it
     tmpfile_toml = dump_config_with_literal_patterns_to_tmpfile(cosmos_config)
 

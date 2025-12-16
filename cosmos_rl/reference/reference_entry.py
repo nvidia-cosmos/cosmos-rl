@@ -21,9 +21,25 @@ from cosmos_rl.utils.distributed import init_distributed
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.api.client import APIClient
 from cosmos_rl.reference.worker.teacher_worker import TeacherWorker
+import argparse
+from typing import Optional
+from cosmos_rl.dispatcher.data.packer.base import worker_entry_parser
 
 
-def reference_entry(**kwargs):
+def reference_entry(args: Optional[argparse.Namespace] = None, **kwargs):
+    # This means that args are not parsed in dataset entry script
+    # So we need to parse the args manually
+    if args is None:
+        parser = worker_entry_parser()
+        try:
+            args = parser.parse_args()
+        except SystemExit as e:
+            logger.error(
+                "Error when parsing args. Did you use custom arguments in your script? If so, please check your custom script and pass `args` to this main function."
+            )
+            raise e
+
+    logger.info(f"[Reference] Starting reference entry with kwargs: {kwargs}")
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 
     api_client = APIClient(role="REFERENCE")
@@ -39,7 +55,7 @@ def reference_entry(**kwargs):
 
     # Init distribution and build device mesh
     parallel_dims = ParallelDims.from_config(
-        parallesim_config=cosmos_config.reference.parallelism
+        parallesim_config=cosmos_config.distillation.parallelism
     )
     init_distributed()
     parallel_dims.build_mesh(device_type="cuda")
@@ -57,3 +73,7 @@ def reference_entry(**kwargs):
         hook_fns=hook_fns,
     )
     reference_worker.execute()
+
+
+if __name__ == "__main__":
+    reference_entry()

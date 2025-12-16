@@ -29,7 +29,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from cosmos_rl.policy.worker.base import PolicyWorkerBase
 from cosmos_rl.reference.engine.torch_engine import TorchEngine
 import atexit
 import asyncio
@@ -46,33 +45,60 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.utils.distributed import destroy_distributed
+import os
+import torch
+
+from transformers import AutoConfig
 
 
-class TeacherWorker(PolicyWorkerBase):
-    def update_config(self, config: CosmosConfig):
-        # Update train config to reference config to reuse the logic of policy trainer
-        config.train.seed = config.reference.seed
-        config.train.compile = config.reference.compile
-        config.train.master_dtype = config.reference.master_dtype
-        config.train.param_dtype = config.reference.param_dtype
-        config.train.logprob_dtype = config.reference.logprob_dtype
-        config.train.fsdp_reduce_dtype = config.reference.fsdp_reduce_dtype
-        config.train.fsdp_offload = config.reference.fsdp_offload
-        config.train.fsdp_reshard_after_forward = (
-            config.reference.fsdp_reshard_after_forward
-        )
-        config.policy.model_name_or_path = config.reference.model_name_or_path
-        config.policy.model_max_length = config.reference.model_max_length
-        config.policy.model_revision = config.reference.model_revision
-        config.policy.parallelsim = config.reference.parallelsim
-        return config
+from cosmos_rl.comm.base import WorkerBase
+from cosmos_rl.comm.base import CommMixin
+from cosmos_rl.utils import util
+from cosmos_rl.dispatcher.protocol import Role
+from cosmos_rl.utils.profiler import CosmosProfiler
 
+
+class TeacherWorker(WorkerBase, CommMixin):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
         config = self.update_config(config)
         assert isinstance(
             config, CosmosConfig
         ), "config must be a CosmosConfig object for this trainer"
-        super().__init__(config, parallel_dims=parallel_dims)
+        super(TeacherWorker, self).__init__(config)
+        self.parallel_dims = parallel_dims
+
+        self.hf_config = util.retry(AutoConfig.from_pretrained)(
+            self.config.distillation.model_name_or_path,
+            trust_remote_code=True,
+        )
+
+        if self.config.distillation.parallelism.dp_shard_size == -1:
+            self.config.distillation.parallelism.dp_shard_size = parallel_dims.dp_shard
+        # Parallel parameters
+
+        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        self.global_rank = int(os.environ.get("RANK", 0))
+        self.role = Role.REFERENCE
+        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+        self.device = torch.device(f"cuda:{self.local_rank}")
+        torch.cuda.set_device(self.device)
+
+        self.check_config()
+        self.dp_rank, self.dp_world_size = 0, 1
+        if self.parallel_dims.dp_enabled:
+            self.dp_rank = self.parallel_dims.mesh["dp"].get_local_rank()
+            self.dp_world_size = self.parallel_dims.mesh["dp"].size()
+
+        self.train_stream = torch.cuda.current_stream()
+        self.init_comm()
+
+        # profiler is initialized after the init_comm()
+        self.profiler = CosmosProfiler(
+            self.config,
+            parallel_dims,
+            replica_name=self.replica_name,
+            api_client=self.api_client,
+        )
 
         # For hooks and custom logger functions
         self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
@@ -93,6 +119,57 @@ class TeacherWorker(PolicyWorkerBase):
 
         atexit.register(self.handle_shutdown)
 
+    def check_config(self):
+        assert self.config.distillation.enable, "Distillation must be enabled"
+        assert (
+            self.config.distillation.batch_size_per_replica > 0
+        ), "Batch size per replica must be greater than 0"
+        assert (
+            self.config.distillation.parallelism.dp_shard_size > 0
+        ), "DP shard size must be greater than 0"
+        assert (
+            self.config.distillation.parallelism.dp_replicate_size == 1
+        ), "DP replicate size must be 1"
+        dp_shard_size = self.config.distillation.parallelism.dp_shard_size
+        assert dp_shard_size == self.parallel_dims.dp_shard
+        assert (
+            self.config.distillation.batch_size_per_replica % dp_shard_size == 0
+        ), "Batch size per replica must be divisible by DP shard size"
+        logger.info("[Reference] Config checked successfully")
+
+    def execute(self):
+        """
+        Execute the training.
+        """
+        assert self.engine is not None, "[Reference] Engine has not been built."
+        try:
+            self.main_loop()
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            raise e
+        finally:
+            self.destroy_worker()
+
+    def update_config(self, config: CosmosConfig):
+        # Update train config to reference config to reuse the logic of policy trainer
+        config.train.seed = config.distillation.seed
+        config.train.compile = config.distillation.compile
+        config.train.master_dtype = config.distillation.master_dtype
+        config.train.param_dtype = config.distillation.param_dtype
+        config.train.logprob_dtype = config.distillation.logprob_dtype
+        config.train.fsdp_reduce_dtype = config.distillation.fsdp_reduce_dtype
+        config.train.fsdp_offload = config.distillation.fsdp_offload
+        config.train.fsdp_reshard_after_forward = (
+            config.distillation.fsdp_reshard_after_forward
+        )
+        config.policy.model_name_or_path = config.distillation.model_name_or_path
+        config.policy.model_max_length = config.distillation.model_max_length
+        config.policy.model_revision = config.distillation.model_revision
+        config.policy.parallelism = config.distillation.parallelism
+        return config
+
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
@@ -107,6 +184,7 @@ class TeacherWorker(PolicyWorkerBase):
             config=self.config,
             dataset=dataset,
             data_packer=self.data_packer,
+            val_data_packer=None,
             is_rl=True,
         )
 
@@ -244,7 +322,7 @@ class TeacherWorker(PolicyWorkerBase):
             self.config,
             self.parallel_dims,
             device=self.device,
-            train_stream=self.teacher_stream,
+            train_stream=self.train_stream,
             data_packer=self.data_packer,
         )
 
