@@ -127,10 +127,12 @@ class DiffuserModel(BaseModel):
 
     def load_models_from_hf(self, model_str, device='cuda'):
         # TODO (yy): get all cls from diffusers config
+        # TODO (yy): maybe selective init, preprocessed embedding only need transformers
         transformer_cls, scheduler_cls, vae_cls = self.cls_mapping()
         self.transformer = transformer_cls.from_pretrained(
             model_str,
             subfolder="transformer",
+            torch_dtype=torch.bfloat16,
         ).to(device)
 
         # scheduler must init on cpu
@@ -143,6 +145,7 @@ class DiffuserModel(BaseModel):
         self.vae_model = vae_cls.from_pretrained(
             model_str,
             subfolder="vae",
+            torch_dtype=torch.bfloat16,
         ).to(device)
         self.vae_model.eval()
 
@@ -269,7 +272,6 @@ class DiffuserModel(BaseModel):
             timestep=timesteps,
             return_dict=False,
         )[0]
-        print_gpu_memory("After forward")
         target = noise - latents
         loss = mean_flat((target - model_output) ** 2)
         return {'loss': loss, 'x_t': noised_latents, "text_embedding":prompt_embedding, "visual_embedding": latents, "output": model_output}
@@ -358,41 +360,21 @@ class DiffuserModel(BaseModel):
 
         return visual_output
 
+    @property
+    def parallelize_fn(self):
+        from cosmos_rl.policy.model.diffusers.parallelize import parallelize
+
+        return parallelize, self
+
     def trained_model(self):
         return [self.transformer]
 
-    def apply_fsdp(self, fsdp_mesh, param_dtype, reduce_dtype):
-        mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-        fsdp_config = {"mesh": fsdp_mesh, "mp_policy": mp_policy}
+    def check_tp_compatible(self, tp_size):
+        assert tp_size == 1, "tp is not supported for DiffuserModel"
         
-        # shard transformer blocks
-        num_transformer_layers = len(self.transformer.transformer_blocks)
-        for layer_id, layer in enumerate(self.transformer.transformer_blocks):
-            reshard_after_forward = int(layer_id) < num_transformer_layers - 1
-            fully_shard(
-                layer,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
-            )
+    def check_cp_compatible(self, cp_size: int, tp_size: int):
+        assert cp_size == 1, "cp is not supported for DiffuserModel"
 
-        # shard embedders
-        fully_shard(
-            self.transformer.time_embed,
-            **fsdp_config,
-            reshard_after_forward=True,
-        )
-        fully_shard(
-            self.transformer.caption_projection,
-            **fsdp_config,
-            reshard_after_forward=True,
-        )
-
-        # shard whole model
-        fully_shard(
-            self.transformer,
-            **fsdp_config,
-            reshard_after_forward=True,
-        )
 
 if __name__ == '__main__':
     from PIL import Image
@@ -415,7 +397,6 @@ if __name__ == '__main__':
 
     # test video
     from diffusers.utils import export_to_video
-    from cosmos_rl.tools.dataset.diffusion.local_datasets.dataset_t2v import SanaVideoDataset
     model_str = "Efficient-Large-Model/SANA-Video_2B_480p_diffusers"
     
     ## Test generate
@@ -423,31 +404,14 @@ if __name__ == '__main__':
     bsz = 1
     prompt_list = ["Evening, backlight, side lighting, soft light, high contrast, mid-shot, centered composition, clean solo shot, warm color. A young Caucasian man stands in a forest, golden light glimmers on his hair as sunlight filters through the leaves. He wears a light shirt, wind gently blowing his hair and collar, light dances across his face with his movements. The background is blurred, with dappled light and soft tree shadows in the distance. The camera focuses on his lifted gaze, clear and emotional." for _ in range(bsz)]
 
-    # visual_output = sana_pipeline.inference(
-    #     prompt_list=prompt_list,
-    #     height=480,
-    #     width=832,
-    #     frames=81,
-    #     guidance_scale=4.5,
-    #     inference_step=20,
-    # )
+    visual_output = sana_pipeline.inference(
+        prompt_list=prompt_list,
+        height=480,
+        width=832,
+        frames=81,
+        guidance_scale=4.5,
+        inference_step=20,
+    )
     
-    # for idx, video in enumerate(visual_output):
-    #     export_to_video(video, f"sana_video_{idx}.mp4", fps=16)
-
-    # Test Train
-    dataset = SanaVideoDataset('/data/yangyangt/diffusion_related/video_toy_data/raw_data', num_frames=41)
-    batch_list = [dataset[i] for i in range(1)]
-
-    clean_image = [batch['video'] for batch in batch_list]
-    prompt_list = [batch['prompt'] for batch in batch_list]
-    torch.cuda.memory._record_memory_history()
-    try:
-        loss = sana_pipeline.training_step(clean_image, prompt_list)
-        loss['loss'].mean().backward()
-    except:
-        torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
-        raise ValueError
-
-    total_norm = torch.nn.utils.clip_grad_norm_(sana_pipeline.transformer.parameters(), max_norm=torch.inf)
-    print(f"loss: {loss['loss']}, grad_norm:{total_norm}")
+    for idx, video in enumerate(visual_output):
+        export_to_video(video, f"sana_video_{idx}.mp4", fps=16)

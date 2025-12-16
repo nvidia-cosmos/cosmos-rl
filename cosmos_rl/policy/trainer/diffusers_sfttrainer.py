@@ -1,0 +1,163 @@
+import os
+import torch
+import numpy as np
+
+import torch.distributed as dist
+
+from functools import partial
+
+from typing import Optional
+
+
+from cosmos_rl.utils.parallelism import (
+    ParallelDims,
+)
+from cosmos_rl.policy.config import (
+    Config as CosmosConfig,
+)
+from cosmos_rl.policy.trainer.optm import build_lr_schedulers
+from cosmos_rl.utils.logging import logger
+
+import cosmos_rl.utils.util as util
+import cosmos_rl.utils.distributed as dist_util
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
+
+from cosmos_rl.policy.trainer.diffusers_trainer import DiffusersTrainer
+from cosmos_rl.policy.trainer.base import TrainerRegistry
+
+@TrainerRegistry.register(trainer_type="diffusers_sft")
+class Diffusers_SFTTrainer(DiffusersTrainer):
+    def __init__(
+        self,
+        config: CosmosConfig,
+        parallel_dims: ParallelDims,
+        train_stream: torch.cuda.Stream,
+        data_packer: Optional[BaseDataPacker] = None,
+        val_data_packer: Optional[BaseDataPacker] = None,
+        **kwargs,
+    ):
+        super(Diffusers_SFTTrainer, self).__init__(
+            config,
+            parallel_dims,
+            train_stream,
+            data_packer,
+            val_data_packer,
+            **kwargs,
+        )
+
+        if self.parallel_dims.dp_shard_enabled:
+            dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
+        else:
+            dp_group = None
+
+        
+        if self.parallel_dims.cp_enabled:
+            cp_group = self.parallel_dims.mesh["cp"].get_group()
+        else:
+            cp_group = None
+
+    def load_model(self):
+        return 0,0
+
+    def checkpointing(
+        self,
+        total_steps: int,
+        train_step: int,
+        save_freq: int,
+        is_last_step: bool = False,
+        pp_last_stage: bool = False,
+        val_score: Optional[float] = None,
+    ):
+        # TODO(yy): implement checkpointing
+        pass
+
+    def step_training(
+        self,
+        global_batch,
+        total_steps,
+        train_step,
+        save_freq
+    ):
+        if self.lr_schedulers is None:
+            assert (
+                train_step == 0
+            ), "`SFTTrainer.lr_schedulers` should be None if training is from scratch"
+            self.lr_schedulers = build_lr_schedulers(
+                self.optimizers, self.config, total_steps
+            )
+        acc_loss = torch.zeros(1, device=self.device)
+        self.optimizers.zero_grad()
+        global_batch_size = len(global_batch)
+        # split global_batch into mini_batches
+        mini_batch_begin_idxs = list(
+            range(
+                0,
+                global_batch_size,
+                self.config.train.train_policy.mini_batch,
+            )
+        )
+        
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+
+        for i in mini_batch_begin_idxs:
+            # gradient accumulation
+            raw_batch = global_batch[i : i + self.config.train.train_policy.mini_batch]
+            batch = self.data_packer.sft_collate_fn(
+                raw_batch
+            )
+            loss_term = self.model.training_step(batch['visual'], batch['prompt'])
+            loss_term['loss'].mean().backward()
+
+        acc_loss += loss_term['loss'].detach()
+        all_params = [
+            p
+            for m in [model for model in self.model.trained_model() if model is not None]
+            for p in m.parameters()
+        ]
+        grad_norm = dist_util.gradient_norm_clipping(
+            all_params,
+            self.config.train.optm_grad_norm_clip,
+            foreach=True,
+            pp_mesh=self.parallel_dims.mesh["pp"]
+            if self.parallel_dims.pp_enabled
+            else None,
+            return_norm_only=(self.config.train.optm_grad_norm_clip <= 0.0),
+        )
+
+        self.optimizers.step()
+        self.lr_schedulers.step()
+
+        end_event.record()
+
+        if (
+            self.parallel_dims.dp_replicate_enabled
+            or self.parallel_dims.dp_shard_enabled
+            or self.parallel_dims.cp_enabled
+        ):
+            global_avg_loss, global_max_loss = (  # noqa: F841
+                dist_util.dist_mean(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+                dist_util.dist_max(acc_loss, self.parallel_dims.mesh["dp_cp"]),
+            )
+        else:
+            global_avg_loss = global_max_loss = acc_loss.item()  # noqa: F841
+
+        report_data = {}
+        if self.config.logging.logger:
+            if util.is_master_rank(self.parallel_dims, self.global_rank):
+                # Calculate last iteration time
+                assert end_event.query()
+                iter_time = start_event.elapsed_time(end_event) / 1000.0  # in seconds
+
+                report_data = {
+                    "train/iteration_time": iter_time,
+                    "train/loss_avg": global_avg_loss,
+                    "train/loss_max": global_max_loss,
+                    "train/learning_rate": self.lr_schedulers.get_last_lr()[0],
+                    "train/grad_norm": grad_norm if grad_norm is not None else -1,
+                }
+
+                # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
+                # it will be inaccurate. Need a reduce for all the metrics.
+        return report_data

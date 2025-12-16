@@ -1240,11 +1240,17 @@ def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
 
 
 @functools.lru_cache(maxsize=None)
-def setup_tokenizer(model_name_or_path: str) -> AutoTokenizer:
-    tokenizer = retry(AutoTokenizer.from_pretrained)(
-        model_name_or_path,
-        trust_remote_code=True,
-    )
+def setup_tokenizer(model_name_or_path: str, retry=True) -> AutoTokenizer:
+    if retry:
+        tokenizer = retry(AutoTokenizer.from_pretrained)(
+            model_name_or_path,
+            trust_remote_code=True,
+        )
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=True,
+        )
     # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
     if getattr(tokenizer, "pad_token_id", None) is None:
         try:
