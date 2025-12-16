@@ -55,7 +55,9 @@ class DiffuserModel(BaseModel):
 
 
         self.init_output_process(config)
-        # init sigmas
+        # init sigmas, 
+        # in diffusers, https://github.com/huggingface/diffusers/blob/a748a839add5fe9f45a66e45dd93d8db0b45ce0f/src/diffusers/schedulers/scheduling_dpmsolver_multistep.py#L433
+        # total step will add 1, so we need minus 1 here to match train sampling steps
         self.scheduler.set_timesteps(num_inference_steps=self.train_sampling_steps - 1)
         self.set_timestep_map()
     
@@ -63,14 +65,13 @@ class DiffuserModel(BaseModel):
         return next(self.transformer.parameters()).device
 
     def set_gradient_checkpointing_enabled(self, enabled: bool):
-        self._gradient_checkpointing_enabled = enabled
-        for module in self.transformer.modules():
-            if isinstance(module, torch.nn.Module):
-                if not hasattr(module, "_gradient_checkpointing_enabled"):
-                    setattr(module, "_gradient_checkpointing_enabled", enabled)
-
-    def parallelize_fn(self):
-        pass
+        '''
+            Diffusers's transformer model support gradient checkpointing, just need to set it to True
+        '''
+        super().set_gradient_checkpointing_enabled(enabled)
+        if hasattr(self.transform, "_supports_gradient_checkpointing") and \
+            self.transform._supports_gradient_checkpointing:
+            self.transform.gradient_checkpointing = True
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         pass
@@ -84,6 +85,9 @@ class DiffuserModel(BaseModel):
         assert False, "Pipeline split is not supported for DiffusersModel"
     
     def separate_model_parts(self):
+        '''
+            Return different model parts, diffusers usually contain transformer, vae_model and text_encoder
+        '''
         return [self.transformer, self.vae_model, self.text_encoder]
 
     def load_hf_weights(
@@ -104,6 +108,9 @@ class DiffuserModel(BaseModel):
         pass
 
     def init_output_process(self, config):
+        '''
+           For inference, output processer is needed to transfer latents back to visual output 
+        '''
         if self.is_video:
             vae_scale_factor = self.vae_model.config.scale_factor_spatial
             self.output_processer = VideoProcessor(vae_scale_factor)
@@ -113,6 +120,9 @@ class DiffuserModel(BaseModel):
         self.ratio_bin = get_ratio_bin(config.ratio_bin)
 
     def cls_mapping(self):
+        '''
+           Get init cls for all pipeline parts
+        '''
         # TODO: read out cls from pipeline config or load models by config
         if self.is_video:
             transformer_cls = SanaVideoTransformer3DModel
@@ -126,6 +136,9 @@ class DiffuserModel(BaseModel):
         return transformer_cls, scheduler_cls, vae_cls
 
     def load_models_from_hf(self, model_str, device='cuda'):
+        '''
+           Load all models
+        '''
         # TODO (yy): get all cls from diffusers config
         # TODO (yy): maybe selective init, preprocessed embedding only need transformers
         transformer_cls, scheduler_cls, vae_cls = self.cls_mapping()
@@ -166,19 +179,25 @@ class DiffuserModel(BaseModel):
 
     @classmethod
     def from_pretrained(cls, config, diffusers_config_args):
+        '''
+            Model initialize entrypoiny
+        '''
         return cls(config.policy.diffusers_config, model_str=config.policy.model_name_or_path)
 
     
     @classmethod
     def get_nparams_and_flops(self):
+        # TODO (yy): Support nparams and flops calculation
         pass
 
     def text_formatter(self, prompt):
+        # TODO (yy): Should remove here and add it to dataset
         return prompt.lower().strip()
 
     def text_embedding(self, prompt_list: List[str], device='cuda', dtype=torch.bfloat16):
-        # text clean
-        #prompt = [self.text_formatter(prompt) for prompt in prompt_list]
+        '''
+            Text embedding of list of prompts
+        '''
         self.text_encoder.to('cuda')
         prompt = [self.chi_prompt + p for p in prompt_list]
         if self.num_chi_prompt_tokens is None:
@@ -208,6 +227,9 @@ class DiffuserModel(BaseModel):
         return prompt_embeds, prompt_attention_mask
 
     def visual_embedding(self, input_image_list, device='cuda'):
+        '''
+            Text embedding of list of preprocessed image tensor
+        '''
         input_samples = torch.stack(input_image_list).to(device)
         if self.is_video:
             with torch.no_grad():
@@ -229,11 +251,19 @@ class DiffuserModel(BaseModel):
         return visual_embedding
 
     def set_timestep_map(self):
+        '''
+            Since timestep index will be random generated, timestep_map is needed to retrieve true timestep
+        '''
+        # Since in diffusers, timestep is in decrease order and ignore step=0
+        # Reverse and add back step=0
         self.timestep_map = torch.flip(self.scheduler.timesteps,dims=(0,)).to('cuda')
         zero = torch.zeros((1), dtype=self.timestep_map.dtype, device=self.timestep_map.device)
         self.timestep_map = torch.cat([zero, self.timestep_map], dim=0)
 
     def add_noise(self, clean_latents, device='cuda', timestep=None, noise=None):
+        '''
+            Add random noise by random sampling timestep index
+        '''
         # random timestep
         if timestep is None:
             bsz = clean_latents.shape[0]
@@ -258,7 +288,10 @@ class DiffuserModel(BaseModel):
         return noised_latent, noise, timesteps
     
     def training_step(self, clean_image, prompt_list, x_t=None, timestep=None, noise=None):
-        # generate latents
+        '''
+            Main training_step, do visual/text embedding on the fly
+            Only support MSE loss now
+        '''
         latents = self.visual_embedding(clean_image)
         prompt_embedding, prompt_attention_mask = self.text_embedding(prompt_list)
         noised_latents, noise, timesteps = self.add_noise(latents, timestep=timestep, noise=noise)
@@ -277,6 +310,9 @@ class DiffuserModel(BaseModel):
         return {'loss': loss, 'x_t': noised_latents, "text_embedding":prompt_embedding, "visual_embedding": latents, "output": model_output}
     
     def prepare_noise_latent(self, bsz, height, width, num_frames, dtype=torch.bfloat16, device='cuda'):
+        '''
+            Generate beginning noise latent for inference
+        '''
         if self.is_video:
             vae_scale_factor = self.vae_model.config.scale_factor_spatial
             vae_scale_factor_temporal = self.vae_model.config.scale_factor_temporal
@@ -303,11 +339,17 @@ class DiffuserModel(BaseModel):
         return torch.randn(shape, dtype=dtype, device=device)
 
     def inference(self, inference_step, height, width, prompt_list, guidance_scale, frames=None, negative_prompt=""):
+        '''
+            Main inference, do diffusers generation with given sampling parameters
+        '''
         bsz = len(prompt_list)
+        # CFG
         prompt_embedding, prompt_attention_mask = self.text_embedding(prompt_list)
         negative_prompt_embedding, negative_prompt_attention_mask = self.text_embedding([negative_prompt] * bsz)
         prompt_embeds = torch.cat([negative_prompt_embedding, prompt_embedding], dim=0)
         prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
+
+        # Set scheduler's timesteps to inference_steps
         self.scheduler.set_timesteps(inference_step, device='cuda')
         timesteps = self.scheduler.timesteps
         
@@ -316,6 +358,7 @@ class DiffuserModel(BaseModel):
         height, width = self.output_processer.classify_height_width_bin(height, width, ratios=self.ratio_bin)
         latents = self.prepare_noise_latent(bsz, height, width, frames, dtype=torch.float32)
 
+        # Denoise loop
         for i,t in enumerate(timesteps):
             latent_model_input = torch.cat([latents] * 2)
             timestep = t.expand(latent_model_input.shape[0])
@@ -335,6 +378,8 @@ class DiffuserModel(BaseModel):
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
         latents = latents.to(self.vae_model.dtype)
+        
+        # Transform latents back to visual output
         if self.is_video:
             latents_mean = (
                 torch.tensor(self.vae_model.config.latents_mean)
@@ -356,6 +401,8 @@ class DiffuserModel(BaseModel):
 
             visual_output = self.output_processer.resize_and_crop_tensor(visual_output, orig_width, orig_height)
             visual_output = self.output_processer.postprocess(visual_output, output_type='pil')
+
+        # After inference, set scheduler's timesteps back to train_sampling_steps for following train steps
         self.scheduler.set_timesteps(self.train_sampling_steps - 1, device='cuda')
 
         return visual_output
