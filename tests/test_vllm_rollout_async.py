@@ -17,13 +17,13 @@ import os
 import unittest
 import asyncio
 import toml
+import torch
 import threading
 import uuid
 import functools
 from typing import Optional, Tuple, List, Any, Dict
 import numpy as np
 from transformers import AutoTokenizer
-from vllm.sampling_params import SamplingParams, RequestOutputKind
 
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -39,6 +39,7 @@ from cosmos_rl.dispatcher.data.data_fetcher import ControllerDataFetcher
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.distributed import init_distributed, destroy_distributed
 from cosmos_rl.utils import async_utils
+from cosmos_rl.reward.reward_calculator import RewardCalculator
 
 
 def override_environment(port: int = 29500) -> dict[str, str]:
@@ -172,8 +173,11 @@ class TestAsyncVLLMRollout(unittest.TestCase):
     ) -> Tuple[vLLMRolloutAsync, DataPacker]:
         # initialize tokenizer
         tokenizer = AutoTokenizer.from_pretrained(config.policy.model_name_or_path)
+        parallel_dims = ParallelDims.from_config(config.rollout.parallelism)
         # initialize rollout engine
-        rollout_engine = vLLMRolloutAsync(config)
+        rollout_engine = vLLMRolloutAsync(
+            config, parallel_dims=parallel_dims, device=torch.device("cuda")
+        )
         rollout_engine.init_engine(quantization="none", seed=42, load_format="auto")
 
         # create data packer
@@ -210,14 +214,6 @@ class TestAsyncVLLMRollout(unittest.TestCase):
             # RLPayload(prompt="Explain AI in one sentence.", weight_version=0),
         ]
 
-        sampling_params = SamplingParams(
-            temperature=0.8,
-            top_p=0.95,
-            max_tokens=128,
-            n=2,  # 2 responses for each prompt
-            output_kind=RequestOutputKind.FINAL_ONLY,
-        )
-
         async def test_helper():
             rollout_engine, data_packer = self.get_rollout_engine_and_data_packer(
                 cosmos_config
@@ -226,7 +222,8 @@ class TestAsyncVLLMRollout(unittest.TestCase):
                 payloads=payloads,
                 stream=None,
                 data_packer=data_packer,
-                sampling_params=sampling_params,
+                data_fetcher=None,
+                is_validation=False,
             )
             rollout_engine.get_engine().shutdown()
             return results
@@ -236,7 +233,9 @@ class TestAsyncVLLMRollout(unittest.TestCase):
         # check results
         self.assertEqual(len(results), len(payloads))
         for i, result in enumerate(results):
-            self.assertEqual(len(result.completions), sampling_params.n)
+            self.assertEqual(
+                len(result.completions), cosmos_config.rollout.n_generation
+            )
 
 
 class TestAsyncRolloutWorker(unittest.TestCase):
@@ -250,6 +249,10 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self.old_env)
         destroy_distributed()
+
+        # clean singleton instance of RewardCalculator
+        if hasattr(RewardCalculator, "_instance"):
+            delattr(RewardCalculator, "_instance")
 
     def test_async_rollout_worker_1gpu(self):
         """Test async rollout worker."""
