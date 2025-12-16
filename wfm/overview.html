@@ -143,12 +143,25 @@ For Cosmos-Predict2.5, you can refer this repo: <a class="reference external" hr
 <li><p>For a quick rollout of the training pipeline, we recommend you use the mock_data config file, i.e., ./configs/wfm/cosmos_predict2-5_2b_480_grpo_mock_data.toml</p></li>
 </ol>
 </div>
-<p><strong>Reward services</strong>: Considering the computation overhead, it’s necessary to use a seperated async service for reward computing.
-- You can launch a reward service by following the instructions here: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service">Reward Service</a>.
-- Configure the environment variable <code class="docutils literal notranslate"><span class="pre">WFM_REWARD_TOKEN</span></code>, <code class="docutils literal notranslate"><span class="pre">WFM_REWARD_ENQUEUE_URL</span></code>, and <code class="docutils literal notranslate"><span class="pre">WFM_REWARD_FETCH_URL</span></code> to make the trainer communicate with the reward service.</p>
-<p><strong>Models</strong>:
-- Cosmos-Predict2.5-2B/14B
-- Wan2.1 (coming soon)</p>
+<p><strong>Reward services</strong>: Considering the computation overhead, it’s necessary to use a seperated async service for reward computing.</p>
+<ul class="simple">
+<li><p>You can launch a reward service by following the instructions here: <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/reward_service">Reward Service</a>.</p></li>
+<li><p>Configure the environment variable <code class="docutils literal notranslate"><span class="pre">WFM_REWARD_TOKEN</span></code>, <code class="docutils literal notranslate"><span class="pre">WFM_REWARD_ENQUEUE_URL</span></code>, and <code class="docutils literal notranslate"><span class="pre">WFM_REWARD_FETCH_URL</span></code> to make the trainer communicate with the reward service.</p></li>
+</ul>
+<p><strong>Models</strong>:</p>
+<ul class="simple">
+<li><p>Cosmos-Predict2.5-2B/14B</p></li>
+<li><p>Wan2.1 (coming soon)</p></li>
+</ul>
+<p><strong>Parallelism</strong>: Support HSDP/FSDP, and context parallel (CP) for world foundational model training. You can edit the related configurations in the toml file to enable these parallelism techniques.:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">[</span><span class="n">model</span><span class="p">]</span>
+<span class="n">fsdp_shard_size</span> <span class="o">=</span> <span class="mi">8</span>
+<span class="n">dp_replicate_size</span> <span class="o">=</span> <span class="mi">4</span>
+
+<span class="p">[</span><span class="n">model_parallel</span><span class="p">]</span>
+<span class="n">context_parallel_size</span> <span class="o">=</span> <span class="mi">2</span>
+</pre></div>
+</div>
 <p><strong>Datasets</strong>:</p>
 <ul>
 <li><p>Local dataset: you can use local dataset for training. We follows the local dataset structure as <a class="reference external" href="https://github.com/nvidia-cosmos/cosmos-predict2.5/blob/main/docs/post-training_video2world_cosmos_nemo_assets.md">Cosmos-Predict2.5</a>. The dataset folder format should be:</p>
@@ -162,20 +175,22 @@ For Cosmos-Predict2.5, you can refer this repo: <a class="reference external" hr
 </pre></div>
 </div>
 </li>
-<li><dl class="simple">
-<dt>Webdataset: you need to configure the s3 access via environment variables, then you can use webdataset for training.</dt><dd><ul class="simple">
+<li><p>Webdataset: you need to configure the s3 access via environment variables, then you can use webdataset for training.</p>
+<blockquote>
+<div><ul class="simple">
 <li><p>PROD_S3_CHECKPOINT_ACCESS_KEY_ID: Your S3 access key ID.</p></li>
 <li><p>PROD_S3_CHECKPOINT_SECRET_ACCESS_KEY: Your S3 secret access key.</p></li>
 <li><p>PROD_S3_CHECKPOINT_ENDPOINT_URL: Your S3 endpoint url.</p></li>
 <li><p>PROD_S3_CHECKPOINT_REGION_NAME: Your S3 region name.</p></li>
 </ul>
-</dd>
-</dl>
+</div></blockquote>
 </li>
 </ul>
-<p><strong>Storage</strong>:
-- Local storage: you can use local disk for storing checkpoints and logs.
-- S3 storage: you need to configure the s3 access via environment variables, then you can use s3 storage for storing checkpoints and logs.</p>
+<p><strong>Storage</strong>:</p>
+<ul class="simple">
+<li><p>Local storage: you can use local disk for storing checkpoints and logs.</p></li>
+<li><p>S3 storage: you need to configure the s3 access via environment variables, then you can use s3 storage for storing checkpoints and logs.</p></li>
+</ul>
 </section>
 </section>
 
