@@ -2,25 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Test PI05 forward pass and compare with official openpi implementation.
+Test PI05 forward pass with cosmos-rl implementation.
 
 Usage:
-    python tests/test_pi05_forward.py
+    python tests/test_pi05_transformers.py
 """
 
-import sys
-
-sys.path.insert(0, "/workspace/test_cosmos")
-from cosmos_rl.policy.model.pi05 import PI05
-# from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
-
-from openpi.models.pi0_config import Pi0Config as OpenPiConfig
-
 import os
+
 import torch
 import safetensors.torch
-from huggingface_hub import hf_hub_download, snapshot_download
-
+import sys
+sys.path.append("/workspace/test_cosmos")  # Ensure openpi is in the path
+from cosmos_rl.policy.model.pi05 import PI05
+from transformers import AutoConfig
 
 def create_dummy_input(
     batch_size: int = 1,
@@ -71,11 +66,10 @@ def check_output(name: str, loss: torch.Tensor):
 def save_inputs(obs, actions, noise, time, save_dir: str = "/workspace"):
     """Save inputs to local directory."""
     os.makedirs(save_dir, exist_ok=True)
-    
-    # Save images and masks
+
     images_data = {k: v for k, v in obs.images.items()}
     masks_data = {k: v for k, v in obs.image_masks.items()}
-    
+
     save_dict = {
         "state": obs.state,
         "tokenized_prompt": obs.tokenized_prompt,
@@ -88,7 +82,7 @@ def save_inputs(obs, actions, noise, time, save_dir: str = "/workspace"):
         **{f"image_{k}": v for k, v in images_data.items()},
         **{f"mask_{k}": v for k, v in masks_data.items()},
     }
-    
+
     save_path = os.path.join(save_dir, "inputs.safetensors")
     safetensors.torch.save_file(save_dict, save_path)
     print(f"Inputs saved to: {save_path}")
@@ -98,13 +92,12 @@ def load_inputs(save_dir: str = "/workspace", device: str = "cuda"):
     """Load inputs from local directory."""
     load_path = os.path.join(save_dir, "inputs.safetensors")
     data = safetensors.torch.load_file(load_path, device=device)
-    
+
     class Observation:
         pass
-    
+
     obs = Observation()
-    
-    # Reconstruct images and masks
+
     obs.images = {}
     obs.image_masks = {}
     for key, value in data.items():
@@ -112,17 +105,17 @@ def load_inputs(save_dir: str = "/workspace", device: str = "cuda"):
             obs.images[key[6:]] = value
         elif key.startswith("mask_"):
             obs.image_masks[key[5:]] = value
-    
+
     obs.state = data["state"]
     obs.tokenized_prompt = data["tokenized_prompt"]
     obs.tokenized_prompt_mask = data["tokenized_prompt_mask"]
     obs.token_ar_mask = data["token_ar_mask"]
     obs.token_loss_mask = data["token_loss_mask"]
-    
+
     actions = data["actions"]
     noise = data["noise"]
     time = data["time"]
-    
+
     print(f"Inputs loaded from: {load_path}")
     return obs, actions, noise, time
 
@@ -131,47 +124,36 @@ if __name__ == "__main__":
     device = "cuda"
     model_id = "sunshk/pi05_libero_pytorch"
 
-    # Model config for LIBERO (from openpi pi05_libero config)
-    action_dim = 32
-    action_horizon = 10
+    # ========== Load config via HF ==========
+    # This will error if the repo/folder does not contain a valid config.json (as desired).
+    hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=False)
 
-    # Download model weights
-    print(f"Downloading model from {model_id}...")
-    model_dir = snapshot_download(repo_id=model_id)
-    weight_path = os.path.join(model_dir, "model.safetensors")
-    print(f"Model downloaded to: {model_dir}")
+    # ========== Build model + load weights ==========
+    print(f"\n[Loading PI05 from {model_id}]")
+    
+    cosmos_model = PI05(model_id, hf_config).to(device)
+    
+    # Load weights
+    cosmos_model.load_hf_weights(model_id)
+    cosmos_model.eval()
 
-    # Create openpi config (this is what openpi uses internally)
-    openpi_config = OpenPiConfig(
-        pi05=True,
-        action_dim=action_dim,
-        action_horizon=action_horizon,
-        discrete_state_input=False,
-    )
-
-    # Create shared dummy input (use same random seed for fair comparison)
+    # ========== Create test input ==========
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
     obs, actions = create_dummy_input(
         batch_size=1,
-        action_dim=action_dim,
-        action_horizon=action_horizon,
+        action_dim=cosmos_model.action_dim,
+        action_horizon=cosmos_model.action_horizon,
         device=device,
     )
     noise = torch.randn_like(actions)
     time = torch.rand(1, device=device) * 0.999 + 0.001
 
-    # Load inputs from /workspace
-    # obs, actions, noise, time = load_inputs(save_dir="/workspace", device=device)
-
-    # ========== Cosmos-RL PI05 ==========
+    # ========== Forward pass ==========
     print("\n[Cosmos-RL PI05]")
-    cosmos_model = PI05(model_id, openpi_config).to(device)
-    safetensors.torch.load_model(cosmos_model, weight_path)
-    cosmos_model.eval()
-
-    # Reset seed again to match the same augmentations
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             cosmos_loss = cosmos_model.forward(obs, actions, noise=noise, time=time)
     check_output("Cosmos-RL", cosmos_loss)
+
+    print("\n✅ Test completed successfully!")

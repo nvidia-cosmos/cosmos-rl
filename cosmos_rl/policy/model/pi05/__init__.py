@@ -5,7 +5,6 @@ from cosmos_rl.policy.model.pi05.weight_mapper import Pi05WeightMapper
 from cosmos_rl.policy.model.pi05.model_utils import get_config
 from cosmos_rl.policy.model.pi05.model_utils import PaliGemmaWithExpertModel
 
-import dataclasses
 import logging
 import math
 import os
@@ -20,6 +19,23 @@ from collections.abc import Sequence
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import resolve_model_path
+
+# HF-native config registration: enables AutoConfig.from_pretrained(repo_id) when config.json has model_type="pi05"
+from transformers import AutoConfig
+from cosmos_rl.policy.model.pi05.configuration_pi05 import Pi05Config
+
+try:
+    AutoConfig.register("pi05", Pi05Config)
+except ValueError:
+    # already registered
+    pass
+
+# pi0 shares the same config schema; route model_type == "pi0" to Pi05Config as well.
+try:
+    AutoConfig.register("pi0", Pi05Config)
+except ValueError:
+    # already registered
+    pass
 
 
 IMAGE_KEYS = (
@@ -302,14 +318,12 @@ class PI05(BaseModel):
         self.model_name_or_path = model_name_or_path
 
         # Extract pi05-specific config from hf_config
-        self.pi05 = getattr(hf_config, "pi05", True)
-        self.action_dim = getattr(hf_config, "action_dim", 32)
-        self.action_horizon = getattr(hf_config, "action_horizon", 10)
-        paligemma_variant = getattr(hf_config, "paligemma_variant", "gemma_2b")
-        action_expert_variant = getattr(
-            hf_config, "action_expert_variant", "gemma_300m"
-        )
-        dtype = getattr(hf_config, "dtype", "bfloat16")
+        self.pi05 = hf_config.pi05
+        self.action_dim = hf_config.action_dim
+        self.action_horizon = hf_config.action_horizon
+        paligemma_variant = hf_config.paligemma_variant
+        action_expert_variant = hf_config.action_expert_variant
+        dtype = hf_config.dtype
 
         paligemma_config = get_config(paligemma_variant)
         action_expert_config = get_config(action_expert_variant)
