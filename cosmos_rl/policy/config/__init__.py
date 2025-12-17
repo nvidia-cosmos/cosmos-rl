@@ -651,6 +651,10 @@ class TrainingConfig(BaseModel):
         default=False,
         description="Resume training from a checkpoint. If True, will resume from the latest checkpoint of the `output_dir`. If a string, will resume from the specified checkpoint path.",
     )
+    resume_path: Optional[str] = Field(
+        default=None,
+        description="Resume training from a specific checkpoint path. If set, will resume from the specified checkpoint path.",
+    )
     epoch: int = Field(default=1, description="Number of epochs for training")
     output_dir: str = Field(default="./outputs", description="Output directory")
     timestamp: str = Field(

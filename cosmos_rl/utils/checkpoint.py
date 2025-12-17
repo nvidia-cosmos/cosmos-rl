@@ -72,6 +72,10 @@ class CheckpointMananger:
         if self.config.train.resume == True:  # noqa: E712
             root_output_dir = os.path.dirname(os.path.dirname(self.ckpt_output_dir))
             cur_timestamp = os.path.basename(os.path.dirname(self.ckpt_output_dir))
+
+            if self.config.train.resume_path:
+                return [self.config.train.resume_path]
+
             timestamps = os.listdir(root_output_dir)
             timestamps.sort()
             for timestamp in reversed(timestamps):
