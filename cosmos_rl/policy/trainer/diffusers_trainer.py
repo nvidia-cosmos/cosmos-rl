@@ -14,6 +14,7 @@ from cosmos_rl.policy.trainer.optm import build_optimizers, build_lr_schedulers
 
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
+from cosmos_rl.utils.checkpoint import CheckpointMananger
 
 class DiffusersTrainer(Trainer):
     def __init__(
@@ -73,8 +74,10 @@ class DiffusersTrainer(Trainer):
 
             traceback.print_exc()
             raise e
-        
-        #TODO (yy): Add checkpoint save and resume
+
+        self.ckpt_manager = CheckpointMananger(
+            self.config, self.parallel_dims, self.global_rank
+        )
 
         self.build_optimizers()
         self.lr_schedulers = None        
@@ -82,7 +85,7 @@ class DiffusersTrainer(Trainer):
 
     def build_optimizers(self):
         # TODO (yy): Add low precision support
-        self.optimizers = build_optimizers(self.model.trained_model(), self.config)
+        self.optimizers = build_optimizers(self.model.trained_model, self.config)
 
     def build_lr_schedulers(self):
         pass
@@ -106,8 +109,4 @@ class DiffusersTrainer(Trainer):
 
     def model_load_from_hf(self):
         # TODO (yy): meta init not support now
-        pass
-
-    def model_resume_from_checkpoint(self):
-        #TODO (yy): Add checkpoint save and resume
         pass

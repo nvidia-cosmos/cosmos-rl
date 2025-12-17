@@ -413,6 +413,7 @@ class DiffuserModel(BaseModel):
 
         return parallelize, self
 
+    @property
     def trained_model(self):
         return [self.transformer]
 

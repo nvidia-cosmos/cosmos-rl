@@ -57,7 +57,45 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             cp_group = None
 
     def load_model(self):
-        return 0,0
+        ckpt_total_steps = 0
+        train_step = 0
+        if (
+            not self.parallel_dims.dp_replicate_enabled
+        ) or self.parallel_dims.dp_replicate_coord[0] == 0:
+            if self.config.train.resume:
+                try:
+                    # early init the lr_schedulers to avoid it is not initialized when loading the checkpoint
+                    ckpt_extra_vars = self.model_resume_from_checkpoint()
+                    ckpt_total_steps = ckpt_extra_vars.get("total_steps", 0)
+                    train_step = ckpt_extra_vars.get("step", 0)
+                except Exception as e:
+                    logger.error(
+                        f"Cannot resume due to error: {e}. Trying to load from HuggingFace..."
+                    )
+                    self.lr_schedulers = None
+                    self.build_optimizers()
+                    self.model.load_hf_weights(
+                        self.config.policy.model_name_or_path,
+                        self.parallel_dims,
+                        self.device,
+                        revision=self.config.policy.model_revision,
+                    )
+            else:
+                self.model_load_from_hf()
+
+            # TODO (yy) support multi-replica
+        return ckpt_total_steps, train_step
+
+
+    def model_resume_from_checkpoint(self):
+        ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
+            model=self.model.trained_model[0],
+            optimizer=self.optimizers,
+            scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
+            model_name_or_path=self.config.policy.model_name_or_path,
+            revision=self.config.policy.model_revision,
+        )
+        return ckpt_extra_vars
 
     def checkpointing(
         self,
@@ -68,8 +106,27 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
         pp_last_stage: bool = False,
         val_score: Optional[float] = None,
     ):
-        # TODO(yy): implement checkpointing
-        pass
+        # Support save safetensor
+        if (
+            is_last_step or (train_step % save_freq == 0 and train_step > 0)
+            ) and self.parallel_dims.dp_replicate_coord[0] == 0:
+            if self.config.train.ckpt.enable_checkpoint:
+                logger.info(f"Saving cosmos checkpoint at step {train_step}...")
+                self.ckpt_manager.save_checkpoint(
+                    model=self.model.trained_model[0],
+                    optimizer=self.optimizers,
+                    scheduler=self.lr_schedulers,
+                    step=train_step,
+                    total_steps=total_steps,
+                )
+                self.ckpt_manager.save_check(
+                    step=train_step,
+                    val_score=val_score,
+                    pp_enabled=self.parallel_dims.pp_enabled,
+                    pp_last_stage=pp_last_stage,
+                    pp_master_rank=self.parallel_dims.world_size
+                    - self.parallel_dims.world_size / self.parallel_dims.pp,
+                )
 
     def step_training(
         self,
@@ -113,7 +170,7 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
         acc_loss += loss_term['loss'].detach()
         all_params = [
             p
-            for m in [model for model in self.model.trained_model() if model is not None]
+            for m in [model for model in self.model.trained_model if model is not None]
             for p in m.parameters()
         ]
         grad_norm = dist_util.gradient_norm_clipping(
@@ -158,6 +215,5 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
                     "train/grad_norm": grad_norm if grad_norm is not None else -1,
                 }
 
-                # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
-                # it will be inaccurate. Need a reduce for all the metrics.
+                # TODO (yy): support MFU calculation for diffusers
         return report_data
