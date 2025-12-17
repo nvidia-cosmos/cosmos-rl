@@ -17,7 +17,6 @@ import os
 import time
 import json
 import torch
-from cosmos_rl.vision_gen.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
 import numpy as np
 from cosmos_rl_reward.utils.logging import logger
 import multiprocessing as mp
@@ -108,7 +107,7 @@ class DecodeHandler:
             model_path (str): The path to the tokenizer model for decoding.
             device (str): The device to run the tokenizer on.
         """
-
+        from cosmos_rl.vision_gen.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
         self.latent_decoder = Wan2pt1TokenizerHelper(
             chunk_duration=chunk_duration,
             load_mean_std=load_mean_std,
@@ -173,6 +172,7 @@ class DecodeHandler:
         fields = json.loads(fields)
         logger.info(f"[{cls.name}] Setting latent attributes: {fields}")
         controller = cls.get_instance()
+        from cosmos_rl.vision_gen.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
         controller.latent_decoder = Wan2pt1TokenizerHelper(
             chunk_duration=fields.get("chunk_duration", 81),
             load_mean_std=fields.get("load_mean_std", False),
@@ -198,14 +198,17 @@ class DecodeHandler:
                 self.init_reward_process(r, shm)
 
     @classmethod
-    def initialize(cls, info={}, **kwargs):
+    def initialize(cls, info: dict = {}, requires_latent_decode: bool = True, **kwargs):
         """
-        Initialize the decode handler singleton instance in the process by setting up the latent decoder and initializing the communication with the reward processes.
+        Initialize the decode handler singleton instance in the process by setting up
+        the latent decoder (if required) and initializing the communication with the
+        reward processes.
         Args:
             info (dict): The information dictionary including reward names and their shared memory names.
+            requires_latent_decode (bool): Whether the latent decoder is required by any enabled reward.
         """
         controller = cls.get_instance()
-        if not hasattr(controller, "latent_decoder"):
+        if requires_latent_decode and not hasattr(controller, "latent_decoder"):
             controller.set_latent_decoder(**kwargs)
         controller.set_info(info)
         logger.info(f"[{cls.name}] Set up complete.")
@@ -261,76 +264,116 @@ class DecodeHandler:
 
             metadata = json.loads(info_data)
             reward_fn = metadata["reward_fn"]
-            for key in reward_fn:
+            for key in list(reward_fn.keys()):
                 if reward_fn[key] <= 0:
                     logger.warning(
                         f"[{self.name}] Reward function {key} has weight {reward_fn[key]}, which is less than or equal to 0. It will be ignored."
                     )
                     del reward_fn[key]
 
-            try:
-                buffer = io.BytesIO(file)
-                images = np.load(buffer)
-                images = torch.from_numpy(images)
-                if images.dtype == torch.uint8:
-                    images = images.view(torch.bfloat16)
-                else:
-                    images = images.to(torch.bfloat16)
-            except Exception:
-                buffer = io.BytesIO(file)
-                images = torch.load(buffer, map_location=torch.device("cpu"))
-                images = images.to(torch.bfloat16)
-            logger.info(
-                f"[{self.name}] Received raw tensor with shape: {images.shape} dtype: {images.dtype}, range: [{images.min():.3f}, {images.max():.3f}]"
-            )
-            logger.info(f"[{self.name}] Received metadata: {metadata}")
-            input_info = {
-                "shape": images.shape,
-                "dtype": str(images.dtype),
-                "min": f"{images.min():.3f}",
-                "max": f"{images.max():.3f}",
-            }
-            st = time.time()
-            batch_size = 1
-            images_batched = torch.chunk(
-                images, int(np.ceil(len(images) / batch_size)), dim=0
-            )
-            if "video_infos" not in metadata:
-                infos = [{}] * len(images)
-            else:
-                infos = metadata["video_infos"]
-            info_batched = np.array_split(infos, np.ceil(len(infos) / batch_size))
 
-            decoded_images = []
-            for image_latent, info_sample in zip(images_batched, info_batched):
-                if use_latent:
-                    image_latent = image_latent.to(self.device)
-                    logger.debug(
-                        f"Image latent shape: {image_latent.shape} {image_latent.dtype}"
-                    )
-                    decoded_images.append(self.decode_video(image_latent))
-                    if export_video:
-                        self.export_mp4(
-                            decoded_images[-1],
-                            info_sample[0].get("video_fps", 16),
-                            path=f"/tmp/decoded_video_{uuid}.mp4",
-                        )
-                else:
-                    decoded_images.append(image_latent)
-            decoded_images = torch.cat(decoded_images, dim=0)
-            logger.debug(
-                f"Decoded images shape: {decoded_images.shape} {decoded_images.dtype}"
+            media_type = metadata.get("media_type", None)
+            is_image_payload = (
+                media_type is not None and str(media_type).lower() == "image"
             )
-            duration = time.time() - st
-            decoded_info = {
-                "shape": decoded_images.shape,
-                "dtype": str(decoded_images.dtype),
-            }
-            metadata["decoded_info"] = decoded_info
-            metadata["decode_duration"] = f"{duration:.2f}"
-            metadata["input_info"] = input_info
-            metadata["uuid"] = uuid
-            logger.info(f"[{self.name}] Decoded images in {duration:.2f} seconds")
+
+            if is_image_payload:
+                # Parse image tensor payload; prefer NPY [B,C,H,W] uint8
+                try:
+                    buffer = io.BytesIO(file)
+                    npy = np.load(buffer, allow_pickle=False)
+                except Exception:
+                    buffer = io.BytesIO(file)
+                    npy = torch.load(buffer, map_location=torch.device("cpu")).cpu().numpy()
+
+                images_tensor = torch.from_numpy(npy)
+
+                decoded_images = images_tensor
+
+                logger.info(
+                    f"[{self.name}] Received image tensor with shape: {decoded_images.shape}, dtype: {decoded_images.dtype}"
+                )
+
+                decoded_info = {
+                    "shape": decoded_images.shape,
+                    "dtype": str(decoded_images.dtype),
+                }
+                metadata["decoded_info"] = decoded_info
+                metadata["decode_duration"] = "0.00"
+                metadata.setdefault("input_info", {})
+                metadata["input_info"].update({
+                    "shape": images_tensor.shape,
+                    "dtype": str(images_tensor.dtype),
+                })
+                metadata["uuid"] = uuid
+                logger.info(
+                    f"[{self.name}] Prepared image batch for {uuid}"
+                )
+            else:
+                try:
+                    buffer = io.BytesIO(file)
+                    images = np.load(buffer)
+                    images = torch.from_numpy(images)
+                    if images.dtype == torch.uint8:
+                        images = images.view(torch.bfloat16)
+                    else:
+                        images = images.to(torch.bfloat16)
+                except Exception:
+                    buffer = io.BytesIO(file)
+                    images = torch.load(buffer, map_location=torch.device("cpu"))
+                    images = images.to(torch.bfloat16)
+                logger.info(
+                    f"[{self.name}] Received raw tensor with shape: {images.shape} dtype: {images.dtype}, range: [{images.min():.3f}, {images.max():.3f}]"
+                )
+                logger.info(f"[{self.name}] Received metadata: {metadata}")
+                input_info = {
+                    "shape": images.shape,
+                    "dtype": str(images.dtype),
+                    "min": f"{images.min():.3f}",
+                    "max": f"{images.max():.3f}",
+                }
+                st = time.time()
+                batch_size = 1
+                images_batched = torch.chunk(
+                    images, int(np.ceil(len(images) / batch_size)), dim=0
+                )
+                if "video_infos" not in metadata:
+                    infos = [{}] * len(images)
+                else:
+                    infos = metadata["video_infos"]
+                info_batched = np.array_split(infos, np.ceil(len(infos) / batch_size))
+
+                decoded_images = []
+                for image_latent, info_sample in zip(images_batched, info_batched):
+                    if use_latent:
+                        image_latent = image_latent.to(self.device)
+                        logger.debug(
+                            f"Image latent shape: {image_latent.shape} {image_latent.dtype}"
+                        )
+                        decoded_images.append(self.decode_video(image_latent))
+                        if export_video:
+                            self.export_mp4(
+                                decoded_images[-1],
+                                info_sample[0].get("video_fps", 16),
+                                path=f"/tmp/decoded_video_{uuid}.mp4",
+                            )
+                    else:
+                        decoded_images.append(image_latent)
+                decoded_images = torch.cat(decoded_images, dim=0)
+                logger.debug(
+                    f"Decoded images shape: {decoded_images.shape} {decoded_images.dtype}"
+                )
+                duration = time.time() - st
+                decoded_info = {
+                    "shape": decoded_images.shape,
+                    "dtype": str(decoded_images.dtype),
+                }
+                metadata["decoded_info"] = decoded_info
+                metadata["decode_duration"] = f"{duration:.2f}"
+                metadata["input_info"] = input_info
+                metadata["uuid"] = uuid
+                logger.info(f"[{self.name}] Decoded images in {duration:.2f} seconds")
+
             for key in reward_fn:
                 if key not in self.reward_dispatcher:
                     raise ValueError(
