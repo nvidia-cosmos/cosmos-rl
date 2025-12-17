@@ -217,9 +217,16 @@ class TeacherWorker(WorkerBase, CommMixin):
             except Exception as e:
                 logger.debug(f"Failed to get rollouts: {e}, wait for next round")
             for rollout in teacher_requests:
-                for tokens in rollout["completion_token_ids"]:
+                assert (
+                    len(rollout["teacher_result_uuid"])
+                    == len(rollout["completion_token_ids"])
+                ), "Number of teacher result uuids and completion token ids must be the same"
+                for tokens, uuid in zip(
+                    rollout["completion_token_ids"], rollout["teacher_result_uuid"]
+                ):
                     rollout_item = copy.deepcopy(rollout)
                     rollout_item["completion_token_ids"] = tokens
+                    rollout_item["teacher_result_uuid"] = uuid
                     self.data_queue.put_nowait(rollout_item)
 
     def dispatch_rollouts(self) -> List[Rollout]:
@@ -235,7 +242,7 @@ class TeacherWorker(WorkerBase, CommMixin):
                             rollouts[i]["prompt_idx"]
                         ),
                         prompt_idx=rollouts[i]["prompt_idx"],
-                        teacher_result_uuid=rollouts[i]["uuid"],
+                        teacher_result_uuid=rollouts[i]["teacher_result_uuid"],
                         completion_token_ids=rollouts[i]["completion_token_ids"],
                     )
                 )
@@ -271,7 +278,7 @@ class TeacherWorker(WorkerBase, CommMixin):
                 ), f"Rank {i} has {len(scattered_rollouts[i])} rollouts, but rank 0 has {len(scattered_rollouts[0])} rollouts"
         if self.world_size == 1:
             data = preprocess_rollouts(scattered_rollouts[0])
-        logger.info(
+        logger.debug(
             f"[Reference] Preprocessed rollouts, global rank {self.global_rank} number of rollouts: {[len(scattered_rollouts[i]) for i in range(self.world_size)]}"
         )
         dist.scatter_object_list(
@@ -305,8 +312,11 @@ class TeacherWorker(WorkerBase, CommMixin):
         while True:
             rollouts = self.dispatch_rollouts()
             data = self.engine.step_forward(rollouts)
+            logger.debug(
+                f"[Reference] Step forward uuids: {[item['teacher_result_uuid'] for item in data]}"
+            )
             for item in data:
-                id = item.pop("uuid")
+                id = item.pop("teacher_result_uuid")
                 self.redis_controller.set_teacher_result(id, item, self.replica_name)
             if self.end_event.is_set():
                 break

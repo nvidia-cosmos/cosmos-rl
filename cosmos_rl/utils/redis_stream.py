@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+from cosmos_rl.utils import constant
 import redis
 from datetime import datetime
 from cosmos_rl.utils.constant import (
@@ -93,7 +95,7 @@ class RedisStreamHandler:
             )
             return value
         except Exception as e:
-            logger.error(f"Failed to read from Redis key {key}: {e}")
+            logger.info(f"Failed to read from Redis key {key}: {e}")
             return None
 
     def remove_key(self, key: str):
@@ -262,7 +264,7 @@ class RedisStreamHandler:
             logger.error(f"Failed to write to Redis stream teacher_request: {e}")
             raise e
 
-    def publish_teacher_request(self, data: Dict, replica_name: str) -> str:
+    def publish_teacher_request(self, data: Dict, replica_name: str) -> List[str]:
         """
         Write data to the Redis stream.
 
@@ -271,10 +273,13 @@ class RedisStreamHandler:
             stream_name (str): The name of the Redis stream to write to.
 
         Returns:
-            str: The ID of the added stream entry.
+            List[str]: The UUIDs of the teacher result.
         """
-        uuid_value = str(uuid.uuid4())
-        data.update({"uuid": uuid_value, "replica_name": replica_name})
+        uuid_values = []
+        for _ in data["completion_token_ids"]:
+            uuid_value = str(uuid.uuid4())
+            uuid_values.append(uuid_value)
+        data.update({"teacher_result_uuid": uuid_values, "replica_name": replica_name})
         message = {
             "teacher_request": msgpack.packb(data),
             "timestamp": datetime.now().isoformat(),
@@ -298,10 +303,10 @@ class RedisStreamHandler:
         except Exception as e:
             logger.error(f"Failed to write to Redis stream teacher_request: {e}")
             raise e
-        logger.info(
-            f"Published teacher request to Redis stream {self.teacher_request_stream}: {uuid_value}"
+        logger.debug(
+            f"Published teacher request to Redis stream {self.teacher_request_stream}: {uuid_values}"
         )
-        return uuid_value
+        return uuid_values
 
     def subscribe_teacher_request(
         self, replica_name: str, count: int = -1
@@ -383,11 +388,15 @@ class RedisStreamHandler:
         try:
             self.set_key_value(uuid_value, msgpack.packb(data))
         except Exception as e:
-            logger.error(f"Failed to write to Redis key {uuid_value}: {e}")
+            logger.info(f"Failed to write to Redis key {uuid_value}: {e}")
             raise e
         return uuid_value
 
-    def get_teacher_result(self, uuid_value: str) -> Dict:
+    def get_teacher_result(
+        self,
+        uuid_value: str,
+        timeout: float = constant.COSMOS_TEACHER_RESULT_GET_TIMEOUT,
+    ) -> Dict:
         """
         Get teacher result from Redis.
 
@@ -397,7 +406,15 @@ class RedisStreamHandler:
         Returns:
             Dict: The teacher result.
         """
-        value = self.get_key_value(uuid_value)
+        start_time = time.time()
+        while time.time() - start_time < float(timeout):
+            value = self.get_key_value(uuid_value)
+            if value is not None:
+                break
+            time.sleep(constant.COSMOS_TEACHER_RESULT_GET_TIMEOUT_INTERVAL)
+        if value is None:
+            logger.error(f"Failed to get teacher result from Redis key {uuid_value}")
+            return None
         return msgpack.unpackb(value)
 
     def requests_for_alternative_clients(self, op: RedisOpType, *args, **kwargs):

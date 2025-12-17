@@ -258,9 +258,6 @@ class RLPolicyWorker(PolicyWorkerBase):
             ), "All rollouts from controller should have a valid prompt index"
             for i in range(len(rollouts)):
                 if self.config.train.local_dataset:
-                    logger.info(
-                        f"Rollout {i} teacher result uuid: {rollouts[i].teacher_result_uuid}"
-                    )
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx
                     )
@@ -269,6 +266,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                         attr="conversation",
                     )
                 if rollouts[i].teacher_result_uuid:
+                    logger.debug(
+                        f"[Policy] Getting teacher result {rollouts[i].teacher_result_uuid} from Redis"
+                    )
                     # Interactive with teacher if the teacher result uuid is not empty
                     teacher_result = self.redis_controller.get_teacher_result(
                         rollouts[i].teacher_result_uuid
@@ -278,6 +278,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                     )
                     rollouts[i].teacher_topk_indices = teacher_result.get(
                         "teacher_topk_indices", None
+                    )
+                    logger.debug(
+                        f"[Policy] Teacher result: {len(rollouts[i].teacher_topk_logprobs) if rollouts[i].teacher_topk_logprobs is not None else 0} items, {len(rollouts[i].teacher_topk_indices) if rollouts[i].teacher_topk_indices is not None else 0} indices"
                     )
 
         while not self.shutdown_signal.is_set():

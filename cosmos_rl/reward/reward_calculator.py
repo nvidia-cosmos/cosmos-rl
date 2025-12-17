@@ -309,7 +309,7 @@ class RewardCalculator:
                         for rollout in rollouts_group
                     ],
                     cumulative_logprob=payloads[idx].cumulative_logprob,
-                    teacher_result_uuid=payloads[idx].teacher_result_uuid,
+                    teacher_result_uuids=payloads[idx].teacher_result_uuids,
                 )
             )
         return payload_list, True, step
@@ -441,7 +441,7 @@ class RewardCalculator:
                             for rollout in rollouts_group
                         ],
                         cumulative_logprob=payloads[idx].cumulative_logprob,
-                        teacher_result_uuid=payloads[idx].teacher_result_uuid,
+                        teacher_result_uuids=payloads[idx].teacher_result_uuids,
                     )
                 )
             else:
@@ -485,7 +485,7 @@ class RewardCalculator:
                             for rollout in rollouts_group
                         ],
                         cumulative_logprob=payloads[idx].cumulative_logprob,
-                        teacher_result_uuid=payloads[idx].teacher_result_uuid,
+                        teacher_result_uuids=payloads[idx].teacher_result_uuids,
                     )
                 )
         return payload_list, False, step

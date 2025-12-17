@@ -415,7 +415,7 @@ class GrpoConfig(BaseModel):
     )
 
     outdated_rollout_fetch_batch_size: int = Field(
-        default=1,
+        default=0,
         description="Number of outdated rollouts to fetch. If set to 0, the rollout engine will stop generating rollouts if the weight is outdated.",
     )
 

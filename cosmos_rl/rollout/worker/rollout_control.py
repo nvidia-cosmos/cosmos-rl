@@ -1587,8 +1587,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 "prompt_idx": payload.prompt_idx,
                 "completion_token_ids": payload.completion_token_ids,
             }
-            id = self.redis_controller.publish_teacher_request(data, self.replica_name)
-            payload.teacher_result_uuid = id
+            uuids = self.redis_controller.publish_teacher_request(
+                data, self.replica_name
+            )
+            payload.teacher_result_uuids = uuids
         return payloads
 
     def work(self):
