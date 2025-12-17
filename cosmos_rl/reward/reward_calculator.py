@@ -310,6 +310,7 @@ class RewardCalculator:
                     ],
                     cumulative_logprob=payloads[idx].cumulative_logprob,
                     teacher_result_uuids=payloads[idx].teacher_result_uuids,
+                    prompt_logprobs=payloads[idx].prompt_logprobs,
                 )
             )
         return payload_list, True, step
@@ -442,6 +443,7 @@ class RewardCalculator:
                         ],
                         cumulative_logprob=payloads[idx].cumulative_logprob,
                         teacher_result_uuids=payloads[idx].teacher_result_uuids,
+                        prompt_logprobs=payloads[idx].prompt_logprobs,
                     )
                 )
             else:
@@ -486,6 +488,7 @@ class RewardCalculator:
                         ],
                         cumulative_logprob=payloads[idx].cumulative_logprob,
                         teacher_result_uuids=payloads[idx].teacher_result_uuids,
+                        prompt_logprobs=payloads[idx].prompt_logprobs,
                     )
                 )
         return payload_list, False, step

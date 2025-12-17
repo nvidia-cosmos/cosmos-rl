@@ -462,6 +462,11 @@ class GrpoConfig(BaseModel):
         description="Whether to use token ids for rollouts instead of text. This can save tokenization time during rollout generation.",
     )
 
+    collect_rollout_logprobs: bool = Field(
+        default=False,
+        description="Whether to collect logprobs for rollouts instead of text. This can save logprob calculation time during rollout generation.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
@@ -488,6 +493,7 @@ class GrpoConfig(BaseModel):
             self.dataloader_batch_size = None
         if self.use_decoupled_loss:
             self.rollout_as_token_ids = True
+            self.collect_rollout_logprobs = True
             logger.warning(
                 "Decoupled loss is enabled, so rollout_as_token_ids is set to True."
             )

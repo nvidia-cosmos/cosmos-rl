@@ -31,7 +31,7 @@ seed = 42
 
 [policy]
 model_name_or_path = "Qwen/Qwen3-8B"
-model_max_length = 1024
+model_max_length = 4096
 model_gradient_checkpointing = true
 
 [logging]
@@ -55,6 +55,7 @@ kl_beta = 0.0
 mu_iterations = 1
 mini_batch = 4
 min_filter_prefix_tokens = 1
+collect_rollout_logprobs = true
 
 [validation]
 temperature = 0.0
@@ -85,7 +86,7 @@ dp_replicate_size = 1
 [distillation]
 enable = true
 model_name_or_path = "Qwen/Qwen3-8B"
-model_max_length = 1024
+model_max_length = 4096
 compile = true
 master_dtype = "float32"
 param_dtype = "bfloat16"

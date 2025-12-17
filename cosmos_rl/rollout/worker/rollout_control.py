@@ -781,6 +781,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         p.completions = rr.completions
                         p.completion_logprobs = rr.completion_logprobs
                         p.completion_token_ids = rr.completion_token_ids
+                        p.prompt_logprobs = rr.prompt_logprobs
                         p.weight_version = self.current_weight_version
                         p.cumulative_logprob = rr.cumulative_logprob
                         if self.config.rollout.multi_turn_config.enable:
@@ -1550,6 +1551,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completions = result.completions
                 old_payload.completion_logprobs = result.completion_logprobs
                 old_payload.completion_token_ids = result.completion_token_ids
+                old_payload.prompt_logprobs = result.prompt_logprobs
                 old_payload.weight_version = self.current_weight_version
                 old_payload.cumulative_logprob = result.cumulative_logprob
                 if self.config.rollout.multi_turn_config.enable:

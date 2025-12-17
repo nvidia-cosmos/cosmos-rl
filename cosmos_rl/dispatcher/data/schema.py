@@ -117,6 +117,10 @@ class RLPayload(BaseModel):
         default=None, description="The logprobs of each completion."
     )
 
+    prompt_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of the input prompt."
+    )
+
     # The cumulative logprob of the generated completions which indicates the total probability of the generated completions
     cumulative_logprob: Optional[List[float]] = Field(
         default=None,
@@ -200,6 +204,10 @@ class Rollout(BaseModel):
 
     completion_logprobs: Optional[List[float]] = Field(
         default=None, description="The logprobs of current rollout's completion."
+    )
+
+    prompt_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of the input prompt."
     )
 
     weight_version: int = Field(

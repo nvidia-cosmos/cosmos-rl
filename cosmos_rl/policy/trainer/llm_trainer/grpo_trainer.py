@@ -678,7 +678,12 @@ class GRPOTrainer(LLMTrainer):
                 # get the teacher logprobs for current rollout
                 teacher_logprobs = rollouts[i].teacher_logprobs
                 logprob_mask = processed_samples[i].logprob_masks
-                sampled_logprobs = rollouts[i].completion_logprobs
+                sampled_completion_logprobs = rollouts[i].completion_logprobs
+                sampled_prompt_logprobs = rollouts[i].prompt_logprobs
+                sampled_logprobs = (
+                    sampled_prompt_logprobs + sampled_completion_logprobs + [0]
+                )
+                teacher_logprobs = teacher_logprobs[:-1] + [0]
                 reversed_kl = (sampled_logprobs - teacher_logprobs) * logprob_mask
                 kl_advantages = (
                     -kl_penalty_coef * logprob_mask * reversed_kl
