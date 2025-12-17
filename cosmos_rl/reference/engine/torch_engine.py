@@ -40,6 +40,7 @@ from cosmos_rl.utils.ulysses import (
 )
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
+from transformers import AutoTokenizer
 
 
 # TODO: (lms) May be it's better to register this func as a hook to the last stage model.
@@ -107,6 +108,7 @@ class TorchEngine(LLMTrainer):
         parallel_dims: ParallelDims,
         train_stream: torch.cuda.Stream,
         data_packer: BaseDataPacker,
+        student_tokenizer: AutoTokenizer,
         **kwargs,
     ):
         super(TorchEngine, self).__init__(
@@ -126,13 +128,55 @@ class TorchEngine(LLMTrainer):
         # For iteration control
         self.batch_size = self.config.distillation.batch_size_per_replica
         self.max_length = self.config.distillation.model_max_length
+
+        # Setup tokenizer for teacher and student
         self.tokenizer = setup_tokenizer(self.config.distillation.model_name_or_path)
+        self.student_tokenizer = student_tokenizer
+        self.data_packer.tokenizer = self.tokenizer
 
     def step_training(self):
         pass
 
     def build_lr_schedulers(self):
         pass
+
+    def tokenizer_mapping(self) -> Dict[int, int]:
+        if hasattr(self, "tokenizer_mapping_cache"):
+            return self.tokenizer_mapping_cache
+        self.tokenizer_mapping_cache = {}
+        student_vocab = dict(self.student_tokenizer.vocab)
+        vocab = dict(self.tokenizer.vocab)
+        for key, value in student_vocab.items():
+            if key in vocab:
+                self.tokenizer_mapping_cache[value] = vocab[key]
+            else:
+                logger.warning(f"[Reference] Token {key} not found in tokenizer")
+        return self.tokenizer_mapping_cache
+
+    def map_student_token_ids_to_tokenizer_token_ids(
+        self, tokens: List[int]
+    ) -> List[int]:
+        new_tokens = []
+        for token in tokens:
+            if token not in self.tokenizer_mapping():
+                logger.warning(f"Token {token} not found in tokenizer")
+                raise RuntimeError(f"Token {token} not found in tokenizer")
+            else:
+                new_tokens.append(self.tokenizer_mapping()[token])
+        return new_tokens
+
+    def map_student_text_to_tokenizer_student_token_ids_and_check(
+        self, text: str
+    ) -> List[int]:
+        input_ids = self.student_tokenizer(
+            text, add_special_tokens=False
+        ).input_ids  # not padded yet
+        input_ids_mapped = self.map_student_token_ids_to_tokenizer_token_ids(input_ids)
+        input_ids_new = self.tokenizer(text, add_special_tokens=False).input_ids
+        assert (
+            input_ids_mapped == input_ids_new
+        ), f"Input ids mapped: {input_ids_mapped} != input ids new: {input_ids_new}"
+        return input_ids
 
     def step_forward(
         self,
@@ -173,8 +217,18 @@ class TorchEngine(LLMTrainer):
             and len(rollout.completion_token_ids) > 0
             for rollout in rollouts
         ), "All rollouts should have a valid completion token ids"
-
-        completions_list = [rollout.completion_token_ids for rollout in rollouts]
+        _ = [
+            self.map_student_text_to_tokenizer_student_token_ids_and_check(
+                rollout.prompt
+            )
+            for rollout in rollouts
+        ]
+        completions_list = [
+            self.map_student_token_ids_to_tokenizer_token_ids(
+                rollout.completion_token_ids
+            )
+            for rollout in rollouts
+        ]
         n_ignore_prefix_tokens_list = [
             rollout.n_ignore_prefix_tokens for rollout in rollouts
         ]
@@ -189,6 +243,15 @@ class TorchEngine(LLMTrainer):
             )
             for i in range(len(samples))
         ]
+        for i in range(len(processed_samples)):
+            if hasattr(processed_samples[i], "logprob_masks"):
+                processed_samples[i].logprob_masks = [
+                    1 for _ in range(len(processed_samples[i].logprob_masks))
+                ]
+            else:
+                processed_samples[i]["logprob_masks"] = [
+                    1 for _ in range(len(processed_samples[i]["logprob_masks"]))
+                ]
 
         batch_size = len(rollouts)
         mini_batch_size = batch_size
@@ -394,6 +457,9 @@ class TorchEngine(LLMTrainer):
                                         i
                                     ].teacher_result_uuid,
                                 }
+                            )
+                            logger.debug(
+                                f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])}"
                             )
         return data
 

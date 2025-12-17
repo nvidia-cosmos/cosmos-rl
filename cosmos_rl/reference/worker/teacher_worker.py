@@ -48,10 +48,10 @@ from cosmos_rl.utils.distributed import destroy_distributed
 import os
 import torch
 import copy
-
 from transformers import AutoConfig
-
-
+from cosmos_rl.utils.util import (
+    setup_tokenizer,
+)
 from cosmos_rl.comm.base import WorkerBase
 from cosmos_rl.comm.base import CommMixin
 from cosmos_rl.utils import util
@@ -61,6 +61,7 @@ from cosmos_rl.utils.profiler import CosmosProfiler
 
 class TeacherWorker(WorkerBase, CommMixin):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
+        self.student_tokenizer = setup_tokenizer(config.policy.model_name_or_path)
         config = self.update_config(config)
         assert isinstance(
             config, CosmosConfig
@@ -268,7 +269,6 @@ class TeacherWorker(WorkerBase, CommMixin):
                 for i in range(self.world_size):
                     if self.parallel_dims.get_rank_in_dim("dp", i) == dp_id:
                         scattered_rollouts[i].append(rollout)
-                        # logger.info(f"[Policy] Rollout {dp_id} dispatched to rank {i}, dp world_size {self.dp_world_size}")
                 dp_id += 1
                 if dp_id >= self.dp_world_size:
                     dp_id = 0
@@ -320,7 +320,9 @@ class TeacherWorker(WorkerBase, CommMixin):
                 self.redis_controller.set_teacher_result(id, item, self.replica_name)
             if self.end_event.is_set():
                 break
-        logger.info("[Policy] Main loop finished. Shutdown background task event set.")
+        logger.info(
+            "[Reference] Main loop finished. Shutdown background task event set."
+        )
         self.train_stream.synchronize()
         self.handle_shutdown()
 
@@ -340,6 +342,7 @@ class TeacherWorker(WorkerBase, CommMixin):
             device=self.device,
             train_stream=self.train_stream,
             data_packer=self.data_packer,
+            student_tokenizer=self.student_tokenizer,
         )
 
     def destroy_worker(self):

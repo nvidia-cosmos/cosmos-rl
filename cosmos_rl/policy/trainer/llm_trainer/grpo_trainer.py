@@ -651,27 +651,42 @@ class GRPOTrainer(LLMTrainer):
         kl_penalty_coef = self.config.distillation.kl_penalty_coef
         kl_discount_factor = self.config.distillation.kl_discount_factor
 
-        def discounted_future_sum_loop(x: list[float], gamma: float) -> list[float]:
-            returns = [0] * len(x)
-            cumulative = 0
+        if self.config.distillation.enable:
+            for idx, rollout in enumerate(rollouts):
+                if hasattr(processed_samples[idx], "input_ids"):
+                    assert (
+                        len(rollout.teacher_logprobs)
+                        == len(processed_samples[idx].input_ids)
+                    ), f"Teacher topk logprobs length {len(rollout.teacher_logprobs)} != input ids length {len(processed_samples[idx].input_ids)}"
+                else:
+                    assert (
+                        len(rollout.teacher_logprobs)
+                        == len(processed_samples[idx]["input_ids"])
+                    ), f"Teacher topk logprobs length {len(rollout.teacher_logprobs)} != input ids length {len(processed_samples[idx]["input_ids"])}"
 
-            for i in range(len(x) - 1, -1, -1):
-                cumulative = x[i] + gamma * cumulative
-                returns[i] = cumulative
-            return returns
+            def discounted_future_sum_loop(x: list[float], gamma: float) -> list[float]:
+                returns = [0] * len(x)
+                cumulative = 0
 
-        teacher_kl_advantages_list = []
-        for i in range(len(rollouts)):
-            # get the teacher logprobs for current rollout
-            teacher_logprobs = rollouts[i].teacher_logprobs
-            logprob_mask = processed_samples[i].logprob_masks
-            sampled_logprobs = rollouts[i].completion_logprobs
-            reversed_kl = (sampled_logprobs - teacher_logprobs) * logprob_mask
-            kl_advantages = -kl_penalty_coef * logprob_mask * reversed_kl  # [n_tokens]
-            kl_advantages_discounted = discounted_future_sum_loop(
-                kl_advantages, kl_discount_factor
-            )
-            teacher_kl_advantages_list.append(kl_advantages_discounted)
+                for i in range(len(x) - 1, -1, -1):
+                    cumulative = x[i] + gamma * cumulative
+                    returns[i] = cumulative
+                return returns
+
+            teacher_kl_advantages_list = []
+            for i in range(len(rollouts)):
+                # get the teacher logprobs for current rollout
+                teacher_logprobs = rollouts[i].teacher_logprobs
+                logprob_mask = processed_samples[i].logprob_masks
+                sampled_logprobs = rollouts[i].completion_logprobs
+                reversed_kl = (sampled_logprobs - teacher_logprobs) * logprob_mask
+                kl_advantages = (
+                    -kl_penalty_coef * logprob_mask * reversed_kl
+                )  # [n_tokens]
+                kl_advantages_discounted = discounted_future_sum_loop(
+                    kl_advantages, kl_discount_factor
+                )
+                teacher_kl_advantages_list.append(kl_advantages_discounted)
 
         self.metrics = {
             "entropy": 0.0,
