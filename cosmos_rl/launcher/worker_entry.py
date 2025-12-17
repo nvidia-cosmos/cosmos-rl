@@ -29,7 +29,12 @@ def main(
         logger.warning(f"Unused kwargs: {list(kwargs.keys())}")
 
     role = os.environ.get("COSMOS_ROLE")
-    assert role in ["Policy", "Rollout", "Controller"], f"Invalid role: {role}"
+    assert role in [
+        "Policy",
+        "Rollout",
+        "Controller",
+        "Reference",
+    ], f"Invalid role: {role}"
     if role == "Controller":
         from cosmos_rl.dispatcher.run_web_panel import main as controller_main
 

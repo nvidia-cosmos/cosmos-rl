@@ -608,6 +608,11 @@ class GRPOTrainer(LLMTrainer):
                 returns[i] = cumulative
             return returns
 
+        metrics = {
+            "teacher_reversed_kl": reversed_kl.sum() / logprob_masks.sum(),
+            "teacher_kl_advantages": kl_advantages.sum() / logprob_masks.sum(),
+        }
+
         assert (
             cu_seqlens[-1] == kl_advantages.shape[0]
         ), f"cu_seqlens[-1]: {cu_seqlens[-1]} != kl_advantages.shape[0]: {kl_advantages.shape[0]}"
@@ -621,7 +626,13 @@ class GRPOTrainer(LLMTrainer):
                 kl_advantages_discounted
             ).to(self.device)
         advantages = current_advantages + kl_advantages
-        return advantages
+        metrics.update(
+            {
+                "teacher_kl_advantages_discounted": kl_advantages.sum()
+                / logprob_masks.sum(),
+            }
+        )
+        return advantages, metrics
 
     def step_training(
         self,
@@ -1203,12 +1214,14 @@ class GRPOTrainer(LLMTrainer):
                                         logprob_masks * minibatched_advantages
                                     )
                                     if self.config.distillation.enable:
-                                        current_advantages = self.compute_teacher_kl_advantages(
-                                            current_logprobs=current_per_token_logprobs,
-                                            teacher_logprobs=minibatched_teacher_logprobs,
-                                            current_advantages=current_advantages,
-                                            logprob_masks=logprob_masks,
-                                            cu_seqlens=cu_seqlens,
+                                        current_advantages, teacher_metrics = (
+                                            self.compute_teacher_kl_advantages(
+                                                current_logprobs=current_per_token_logprobs,
+                                                teacher_logprobs=minibatched_teacher_logprobs,
+                                                current_advantages=current_advantages,
+                                                logprob_masks=logprob_masks,
+                                                cu_seqlens=cu_seqlens,
+                                            )
                                         )
 
                                     # Compute ref per-token logprobs if needed
@@ -1393,6 +1406,9 @@ class GRPOTrainer(LLMTrainer):
                         report_data[f"train/{k}"] = (
                             v.item() if isinstance(v, torch.Tensor) else v
                         ) / loss_count
+                if self.config.distillation.enable:
+                    for k, v in teacher_metrics.items():
+                        report_data[f"train/{k}"] = v.item()
 
                 # FIXME(dinghaoy): only compute MFU of rank 0, if enable tp or pp,
                 # it will be inaccurate. Need a reduce for all the metrics.
