@@ -172,12 +172,8 @@ class Rollout(BaseModel):
         default="", description="The uuid of the teacher result."
     )
 
-    teacher_topk_logprobs: Optional[List[float]] = Field(
-        default=None, description="The topk logprobs of the teacher for the rollout."
-    )
-
-    teacher_topk_indices: Optional[List[int]] = Field(
-        default=None, description="The topk indices of the teacher for the rollout."
+    teacher_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of the teacher for the current rollout."
     )
 
     completed_conversation: Optional[ConversationType] = Field(
@@ -199,11 +195,11 @@ class Rollout(BaseModel):
     )
 
     completion_token_ids: Optional[List[int]] = Field(
-        default=None, description="The token ids of each completion."
+        default=None, description="The token ids of current rollout's completion."
     )
 
     completion_logprobs: Optional[List[float]] = Field(
-        default=None, description="The logprobs of each completion."
+        default=None, description="The logprobs of current rollout's completion."
     )
 
     weight_version: int = Field(

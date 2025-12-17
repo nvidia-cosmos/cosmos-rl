@@ -1181,8 +1181,17 @@ class DistillationConfig(BaseModel):
     batch_size_per_replica: int = Field(
         default=1, description="Batch size for teacher model per replica."
     )
+
     seed: Optional[int] = Field(
         default=None, description="Random seed for teacher model."
+    )
+
+    kl_penalty_coef: float = Field(
+        default=1.0, description="The coefficient for KL penalty."
+    )
+
+    kl_discount_factor: float = Field(
+        default=0.0, description="The discount factor for KL penalty."
     )
 
     @model_validator(mode="after")

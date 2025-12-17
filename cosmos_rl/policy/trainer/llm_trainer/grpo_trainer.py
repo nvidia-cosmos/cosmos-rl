@@ -501,6 +501,19 @@ def _swizzle_pp_grpo_forward(
     return loss.unsqueeze(0) * loss_scaling
 
 
+def collate_teacher_kl_advantages(
+    teacher_kl_advantages: List[List[float]],
+    device: torch.device,
+    computed_max_len: int,
+) -> torch.Tensor:
+    return torch.tensor(
+        [
+            x[:computed_max_len] + [0] * (max(0, computed_max_len - len(x)))
+            for x in teacher_kl_advantages
+        ]
+    ).to(device)
+
+
 @TrainerRegistry.register(trainer_type="grpo")
 class GRPOTrainer(LLMTrainer):
     def __init__(
@@ -602,7 +615,7 @@ class GRPOTrainer(LLMTrainer):
             else rollout.completion
             for rollout in rollouts
         ]
-        advantages_list = [rollout.advantage for rollout in rollouts]
+
         # Optional Positive-NLL support: only compute flags when coefficient > 0
         pos_coef_global = self.config.train.train_policy.positive_nll_coef
         if pos_coef_global is not None and pos_coef_global > 0.0:
@@ -629,12 +642,42 @@ class GRPOTrainer(LLMTrainer):
             for i in range(len(samples))
         ]
 
+        # On-policy Distillation related computations
+        assert (
+            len(processed_samples) == len(rollouts) and len(samples) == len(rollouts)
+        ), f"Length of processed_samples {len(processed_samples)} should be equal to length of rollouts {len(rollouts)}"
+        advantages_list = [rollout.advantage for rollout in rollouts]
+        advantages_t = torch.tensor(advantages_list).to(self.device)
+        kl_penalty_coef = self.config.distillation.kl_penalty_coef
+        kl_discount_factor = self.config.distillation.kl_discount_factor
+
+        def discounted_future_sum_loop(x: list[float], gamma: float) -> list[float]:
+            returns = [0] * len(x)
+            cumulative = 0
+
+            for i in range(len(x) - 1, -1, -1):
+                cumulative = x[i] + gamma * cumulative
+                returns[i] = cumulative
+            return returns
+
+        teacher_kl_advantages_list = []
+        for i in range(len(rollouts)):
+            # get the teacher logprobs for current rollout
+            teacher_logprobs = rollouts[i].teacher_logprobs
+            logprob_mask = processed_samples[i].logprob_masks
+            sampled_logprobs = rollouts[i].completion_logprobs
+            reversed_kl = (sampled_logprobs - teacher_logprobs) * logprob_mask
+            kl_advantages = -kl_penalty_coef * logprob_mask * reversed_kl  # [n_tokens]
+            kl_advantages_discounted = discounted_future_sum_loop(
+                kl_advantages, kl_discount_factor
+            )
+            teacher_kl_advantages_list.append(kl_advantages_discounted)
+
         self.metrics = {
             "entropy": 0.0,
             "effective_entropy": 0.0,
         }
         # user_info_keys = list(kwargs.keys())
-        advantages_t = torch.tensor(advantages_list).to(self.device)
         batch_size = len(rollouts)
         per_optimize_batch_size = (
             min(self.batch_size_per_optimize, batch_size)
@@ -803,6 +846,21 @@ class GRPOTrainer(LLMTrainer):
                                     .expand(-1, computed_max_len)
                                     .to(self.device)
                                 )
+
+                                if len(teacher_kl_advantages_list) > 0:
+                                    minibatched_teacher_kl_advantages = (
+                                        collate_teacher_kl_advantages(
+                                            teacher_kl_advantages_list[
+                                                mini_batch_indices
+                                            ],
+                                            self.device,
+                                            computed_max_len,
+                                        )
+                                    )
+                                    minibatched_advantages = (
+                                        minibatched_advantages
+                                        + minibatched_teacher_kl_advantages
+                                    )
 
                                 user_mini_batch: Dict[str, Any] = (
                                     self.data_packer.policy_collate_fn(
