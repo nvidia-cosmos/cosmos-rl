@@ -197,7 +197,8 @@ def launch_vision_gen(
         * dp_replicate_size
     )
 
-    num_replicas = args.wfm_num_replicas
+    # We use HSDP (dp_replicate_size) for the multi-node case, so the number of replicas is 1
+    num_replicas = 1
     logger.info(f"Number of replicas: {num_replicas}")
 
     if args.lepton_mode:
