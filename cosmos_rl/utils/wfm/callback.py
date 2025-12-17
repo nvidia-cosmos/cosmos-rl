@@ -1706,7 +1706,7 @@ class EveryNDrawSample(EveryN):
                 self.fix_batch = utils.to(easy_io.load(self.fix_batch), "cpu")
 
         if self.parallel_dims is not None:
-            self.data_parallel_id = self.parallel_dims.dp_shard_coord[1]
+            self.data_parallel_id = self.parallel_dims.dp_coord[0]
         else:
             self.data_parallel_id = self.rank
 
@@ -1913,7 +1913,7 @@ class EveryNDrawSample(EveryN):
 
         to_show = []
         for guidance in self.guidance:
-            sample = model.generate_samples_from_batch(
+            sample = trainer.rollout_runner.rollout_generation(
                 data_batch,
                 guidance=guidance,
                 # make sure no mismatch and also works for cp

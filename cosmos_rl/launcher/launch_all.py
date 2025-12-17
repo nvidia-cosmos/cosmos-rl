@@ -323,13 +323,6 @@ def parse_args():
         default=False,
         help="In World foundational model mode.",
     )
-    wfm_group.add_argument(
-        "--wfm-num-replicas",
-        "-dfn",
-        type=int,
-        default=1,
-        help="Number of replicas for the World foundational model mode",
-    )
 
     # Positional arguments
     parser.add_argument(
