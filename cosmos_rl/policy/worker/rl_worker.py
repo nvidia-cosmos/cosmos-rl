@@ -278,7 +278,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                         "teacher_logprobs", None
                     )
                     logger.debug(
-                        f"[Policy] Teacher result: {len(rollouts[i].teacher_topk_logprobs) if rollouts[i].teacher_topk_logprobs is not None else 0} items, {len(rollouts[i].teacher_topk_indices) if rollouts[i].teacher_topk_indices is not None else 0} indices"
+                        f"[Policy] Teacher result: {len(rollouts[i].teacher_logprobs) if rollouts[i].teacher_logprobs is not None else 0} items"
                     )
 
         while not self.shutdown_signal.is_set():

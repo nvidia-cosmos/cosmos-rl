@@ -387,7 +387,7 @@ class TorchEngine(LLMTrainer):
                         for i in range(len(cu_seqlens) - 1):
                             data.append(
                                 {
-                                    "teacher_topk_logprobs": current_per_token_logprobs[
+                                    "teacher_logprobs": current_per_token_logprobs[
                                         cu_seqlens[i] : cu_seqlens[i + 1]
                                     ].tolist(),
                                     "teacher_result_uuid": rollouts[
