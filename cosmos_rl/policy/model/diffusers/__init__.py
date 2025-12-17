@@ -246,7 +246,7 @@ class DiffuserModel(BaseModel):
         else:
             scaling_factor = self.vae_model.config.scaling_factor
             with torch.no_grad():
-                visual_embedding = self.vae_model.encode(input_samples, return_dict=False)[0] * scaling_factor
+                visual_embedding = self.vae_model.encode(input_samples.to(torch.bfloat16), return_dict=False)[0] * scaling_factor
         torch.cuda.empty_cache()
         return visual_embedding
 
@@ -338,7 +338,7 @@ class DiffuserModel(BaseModel):
             )
         return torch.randn(shape, dtype=dtype, device=device)
 
-    def inference(self, inference_step, height, width, prompt_list, guidance_scale, frames=None, negative_prompt=""):
+    def inference(self, inference_step, height, width, prompt_list, guidance_scale, save_dir="", frames=None, negative_prompt=""):
         '''
             Main inference, do diffusers generation with given sampling parameters
         '''
@@ -359,6 +359,7 @@ class DiffuserModel(BaseModel):
         latents = self.prepare_noise_latent(bsz, height, width, frames, dtype=torch.float32)
 
         # Denoise loop
+        self.transformer.eval()
         for i,t in enumerate(timesteps):
             latent_model_input = torch.cat([latents] * 2)
             timestep = t.expand(latent_model_input.shape[0])
@@ -376,8 +377,9 @@ class DiffuserModel(BaseModel):
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-
         latents = latents.to(self.vae_model.dtype)
+
+        self.transformer.train()
         
         # Transform latents back to visual output
         if self.is_video:

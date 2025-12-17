@@ -25,6 +25,9 @@ from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.trainer.diffusers_trainer import DiffusersTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 
+from diffusers.utils import export_to_video
+from PIL import Image
+
 @TrainerRegistry.register(trainer_type="diffusers_sft")
 class Diffusers_SFTTrainer(DiffusersTrainer):
     def __init__(
@@ -44,6 +47,8 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             val_data_packer,
             **kwargs,
         )
+
+        self.is_video = config.policy.diffusers_config.is_video
 
         if self.parallel_dims.dp_shard_enabled:
             dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
@@ -217,3 +222,39 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
 
                 # TODO (yy): support MFU calculation for diffusers
         return report_data
+
+    def save_visual_output(self, visual_output, save_dir, filename):
+        suffix = 'mp4' if self.is_video else 'png'
+        filename = f"{save_dir}/{filename}.{suffix}"
+        if self.is_video:
+            export_to_video(visual_output, filename, fps=16)
+        else:
+            visual_output.save(filename)
+
+    def step_validation(self, val_global_batch, train_step: int, total_steps: int):
+        if not self.config.validation.enable:
+            return
+        if self.parallel_dims.dp_replicate_coord[0] != 0:
+            return
+        
+        val_batch = self.val_data_packer.sft_collate_fn(
+            val_global_batch,
+            is_validation=True,
+        )
+        save_dir = os.path.join(self.config.train.output_dir, "visual_output", str(train_step))
+        os.makedirs(save_dir, exist_ok=True)
+        for batch in val_batch:
+            if self.is_video:
+                frame = batch['frames']
+            else:
+                frame = None
+            visual_output = self.model.inference(
+                inference_step = batch['inference_step'],
+                height = batch['height'],
+                width = batch['width'],
+                guidance_scale=batch['guidance_scale'],
+                prompt_list=[batch['prompt']],
+                frames=frame,
+            )[0]
+            self.save_visual_output(visual_output, save_dir, batch['prompt'][:10])
+        return 0.0

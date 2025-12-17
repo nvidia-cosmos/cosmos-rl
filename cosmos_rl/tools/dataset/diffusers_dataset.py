@@ -27,7 +27,7 @@ import json
 from decord import VideoReader, cpu
 import numpy as np
 import os
-
+from PIL import Image
 from cosmos_rl.tools.dataset.wfm.local_datasets.dataset_utils import (
     ResizePreprocess,
     ToTensorVideo,
@@ -51,7 +51,7 @@ class LocalDiffusersDataset(Dataset):
             self.suffix = 'mp4'
         else:
             self.suffix = 'jpg'
-        self.visual_preprocess = self.visual_preprocess()
+        self.visual_preprocess = self.visual_preprocess(1024)
         self.all_file_names = [os.path.basename(f).split('.')[0] for f in prompt_files]
 
     def __len__(self):
@@ -83,7 +83,7 @@ class LocalDiffusersDataset(Dataset):
 
         return data
     
-    def visual_preprocess(self):
+    def visual_preprocess(self, resolution):
         if self.is_video:
             transforms = [
                     ToTensorVideo(),  # TCHW
@@ -93,8 +93,8 @@ class LocalDiffusersDataset(Dataset):
         else:
             transforms = [
                 T.Lambda(lambda img: img.convert("RGB")),
-                T.Resize(image_size),  # Image.BICUBIC
-                T.CenterCrop(image_size),
+                T.Resize(resolution),  # Image.BICUBIC
+                T.CenterCrop(resolution),
                 # T.RandomHorizontalFlip(),
                 T.ToTensor(),
                 T.Normalize([0.5], [0.5]),
@@ -133,7 +133,7 @@ class LocalDiffusersDataset(Dataset):
         frames = self.visual_preprocess(frames)
         return frames, fps
 
-    def _get_image(self):
+    def _get_image(self, file_path):
         image = Image.open(file_path)
         image = self.visual_preprocess(image)
         return image
@@ -149,7 +149,8 @@ class LocalDiffusersValDataset(Dataset):
                 "Validation is not enabled in the config. Skipping setup for MathValDataset."
             )
             return
-        local_path = config.validation.dataset.self.local_dir
+        local_path = config.validation.dataset.local_dir
+        self.is_video = config.policy.diffusers_config.is_video
         self.prompts = json.load(open(local_path))
 
     def __len__(self):
@@ -157,13 +158,14 @@ class LocalDiffusersValDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
         data = {
-            'height':480,
-            'width':832,
-            'frames':41,
-            'guidance_scale':4.5,
-            'inference_step':20,
-            'prompt':self.prompts[idx]
+            'height': 480,
+            'width': 832,
+            'guidance_scale': 4.5,
+            'inference_step': 20,
+            'prompt': self.prompts[idx]['prompt']
         }
+        if self.is_video:
+            data.update({'frames': 41})
 
         return data
 
@@ -228,19 +230,14 @@ class DiffusersPacker(DataPacker):
     def sft_collate_fn(
         self,
         processed_samples: List[Dict[str, Any]],
+        is_validation: int = False
     ) -> Dict[str, Any]:
-        batch_image = [sample["visual"] for sample in processed_samples]
-        batch_prompt = [sample["prompt"] for sample in processed_samples]
-
-        return {"visual": batch_image, "prompt": batch_prompt}
-    
-    def sft_collate_fn_valid(
-        self,
-        processed_samples: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-
-        return processed_samples
-        
+        if not is_validation:
+            batch_image = [sample["visual"] for sample in processed_samples]
+            batch_prompt = [sample["prompt"] for sample in processed_samples]
+            return {"visual": batch_image, "prompt": batch_prompt}
+        else:
+            return processed_samples
 
 if __name__ == "__main__":
 
