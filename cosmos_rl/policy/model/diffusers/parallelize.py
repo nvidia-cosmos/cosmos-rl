@@ -67,6 +67,8 @@ def apply_fsdp(
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     high_precision_mp_policy = MixedPrecisionPolicy(param_dtype=reduce_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    from cosmos_rl.patch import apply_preforward_postforward_patch
+    apply_preforward_postforward_patch()
 
     # For diffusers, only shard transformer now
     fsdp_non_split_modules = getattr(model, "_no_split_modules", None)

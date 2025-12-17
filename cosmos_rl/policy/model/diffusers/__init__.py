@@ -69,9 +69,9 @@ class DiffuserModel(BaseModel):
             Diffusers's transformer model support gradient checkpointing, just need to set it to True
         '''
         super().set_gradient_checkpointing_enabled(enabled)
-        if hasattr(self.transform, "_supports_gradient_checkpointing") and \
-            self.transform._supports_gradient_checkpointing:
-            self.transform.gradient_checkpointing = True
+        if hasattr(self.transformer, "_supports_gradient_checkpointing") and \
+            self.transformer._supports_gradient_checkpointing and enabled:
+            self.transformer.enable_gradient_checkpointing()
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, int]:
         pass
