@@ -55,7 +55,6 @@ kl_beta = 0.0
 mu_iterations = 1
 mini_batch = 4
 min_filter_prefix_tokens = 1
-collect_rollout_logprobs = true
 
 [validation]
 temperature = 0.0

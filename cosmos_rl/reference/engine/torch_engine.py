@@ -89,16 +89,20 @@ def _swizzle_pp_grpo_forward(
         logits=raw_logits,
         is_full_logits=True if raw_logits.ndim == 3 else False,
     )
-    assert (
-        len(current_per_token_logprobs) == len(cu_seqlens) - 1
-    ), f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens.shape}"
     current_per_token_logprobs = current_per_token_logprobs.cpu()
     cu_seqlens = cu_seqlens.cpu()
-    for i in range(len(current_per_token_logprobs)):
-        current_per_token_logprobs[i] = current_per_token_logprobs[i][
-            : cu_seqlens[i + 1] - cu_seqlens[i]
-        ]
-    return current_per_token_logprobs
+    assert (
+        len(current_per_token_logprobs) == cu_seqlens[-1]
+    ), f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens}"
+    for i in range(len(cu_seqlens) - 1):
+        trainer.pp_data.append(
+            {
+                "teacher_logprobs": current_per_token_logprobs[
+                    cu_seqlens[i] : cu_seqlens[i + 1]
+                ].tolist(),
+            }
+        )
+    return None
 
 
 class TorchEngine(LLMTrainer):
@@ -381,6 +385,7 @@ class TorchEngine(LLMTrainer):
                     pp_first_stage = self.parallel_dims.pp_coord[0] == 0
                     # Pipeline Parallel forward / backward inside step() call
                     losses = [] if pp_last_stage else None
+                    self.pp_data = []
                     if pp_last_stage:
                         # Inject the `mini-batch` and `micro-batch` ids to the input so that the last stage can know which microbatch it is processing
                         user_mini_batch["micro_batch_ids"] = micro_batch_ids_cpu
@@ -404,7 +409,21 @@ class TorchEngine(LLMTrainer):
                     else:
                         # Middle stages: forward data from previous stage
                         self.pp_scheduler.step(position_ids=position_ids)
-                    assert False, "Not implemented"
+
+                    if (
+                        pp_last_stage
+                        and self.parallel_dims.tp_coord[0] == 0
+                        and self.parallel_dims.cp_coord[0] == 0
+                    ):
+                        data = []
+                        for i, item in enumerate(self.pp_data):
+                            item.update(
+                                {"teacher_result_uuid": rollouts[i].teacher_result_uuid}
+                            )
+                            data.append(item)
+                            logger.debug(
+                                f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])}"
+                            )
                 else:
                     with self.act_offloading_ctx_manager:
                         raw_logits = self.model(**user_mini_batch)

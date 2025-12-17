@@ -123,7 +123,12 @@ def compute_loss(
     **kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Turn current_advantages from [batch_size, max_len] to [n_logprob_tokens]
-    current_advantages = torch.masked_select(current_advantages, logprob_masks)
+    if current_advantages.shape == logprob_masks.shape:
+        current_advantages = torch.masked_select(current_advantages, logprob_masks)
+    else:
+        assert (
+            current_advantages.shape == current_token_logps.shape
+        ), f"current_advantages.shape: {current_advantages.shape} != current_token_logps.shape: {current_token_logps.shape}"
 
     assert (
         current_token_logps.shape == current_advantages.shape
@@ -501,19 +506,6 @@ def _swizzle_pp_grpo_forward(
     return loss.unsqueeze(0) * loss_scaling
 
 
-def collate_teacher_kl_advantages(
-    teacher_kl_advantages: List[List[float]],
-    device: torch.device,
-    computed_max_len: int,
-) -> torch.Tensor:
-    return torch.tensor(
-        [
-            x[:computed_max_len] + [0] * (max(0, computed_max_len - len(x)))
-            for x in teacher_kl_advantages
-        ]
-    ).to(device)
-
-
 @TrainerRegistry.register(trainer_type="grpo")
 class GRPOTrainer(LLMTrainer):
     def __init__(
@@ -561,6 +553,75 @@ class GRPOTrainer(LLMTrainer):
             logger.info("[Policy] Use GSPO loss in RL.")
 
         self.tokenizer = setup_tokenizer(self.config.policy.model_name_or_path)
+
+    def collate_teacher_logprobs(
+        self,
+        rollouts: List[Rollout],
+        computed_max_len: int,
+    ) -> List[List[float]]:
+        teacher_logprobs_list = []
+        for i in range(len(rollouts)):
+            # get the teacher logprobs for current rollout
+            teacher_logprobs = rollouts[i].teacher_logprobs
+            teacher_logprobs = teacher_logprobs[:-1] + [0]
+            if self.config.train.train_policy.collect_rollout_logprobs:
+                sampled_completion_logprobs = rollouts[i].completion_logprobs
+                sampled_prompt_logprobs = rollouts[i].prompt_logprobs
+                sampled_logprobs = (
+                    sampled_prompt_logprobs + sampled_completion_logprobs + [0]
+                )
+                assert (
+                    len(sampled_logprobs) == len(teacher_logprobs)
+                ), f"sampled_logprobs: {len(sampled_logprobs)} != teacher_logprobs: {len(teacher_logprobs)}"
+            teacher_logprobs_list.append(teacher_logprobs)
+
+        return torch.tensor(
+            [
+                x[:computed_max_len] + [0] * (max(0, computed_max_len - len(x)))
+                for x in teacher_logprobs_list
+            ]
+        ).to(self.device)
+
+    def compute_teacher_kl_advantages(
+        self,
+        current_logprobs: torch.Tensor,
+        teacher_logprobs: torch.Tensor,
+        current_advantages: torch.Tensor,
+        logprob_masks: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        kl_penalty_coef = self.config.distillation.kl_penalty_coef
+        kl_discount_factor = self.config.distillation.kl_discount_factor
+        current_advantages = torch.masked_select(current_advantages, logprob_masks)
+        teacher_logprobs = torch.masked_select(teacher_logprobs, logprob_masks)
+        assert (
+            current_logprobs.shape == teacher_logprobs.shape == current_advantages.shape
+        ), f"current_logprobs.shape: {current_logprobs.shape} != teacher_logprobs.shape: {teacher_logprobs.shape} != current_advantages.shape: {current_advantages.shape}"
+        reversed_kl = current_logprobs - teacher_logprobs
+        kl_advantages = -kl_penalty_coef * reversed_kl  # [n_tokens]
+
+        def discounted_future_sum_loop(x: list[float], gamma: float) -> list[float]:
+            returns = [0] * len(x)
+            cumulative = 0
+            for i in range(len(x) - 1, -1, -1):
+                cumulative = x[i] + gamma * cumulative
+                returns[i] = cumulative
+            return returns
+
+        assert (
+            cu_seqlens[-1] == kl_advantages.shape[0]
+        ), f"cu_seqlens[-1]: {cu_seqlens[-1]} != kl_advantages.shape[0]: {kl_advantages.shape[0]}"
+        for i in range(cu_seqlens.shape[0] - 1):
+            start_idx = cu_seqlens[i]
+            end_idx = cu_seqlens[i + 1]
+            kl_advantages_discounted = discounted_future_sum_loop(
+                kl_advantages[start_idx:end_idx].tolist(), kl_discount_factor
+            )
+            kl_advantages[start_idx:end_idx] = torch.tensor(
+                kl_advantages_discounted
+            ).to(self.device)
+        advantages = current_advantages + kl_advantages
+        return advantages
 
     def step_training(
         self,
@@ -648,50 +709,6 @@ class GRPOTrainer(LLMTrainer):
         ), f"Length of processed_samples {len(processed_samples)} should be equal to length of rollouts {len(rollouts)}"
         advantages_list = [rollout.advantage for rollout in rollouts]
         advantages_t = torch.tensor(advantages_list).to(self.device)
-        kl_penalty_coef = self.config.distillation.kl_penalty_coef
-        kl_discount_factor = self.config.distillation.kl_discount_factor
-
-        if self.config.distillation.enable:
-            for idx, rollout in enumerate(rollouts):
-                if hasattr(processed_samples[idx], "input_ids"):
-                    assert (
-                        len(rollout.teacher_logprobs)
-                        == len(processed_samples[idx].input_ids)
-                    ), f"Teacher topk logprobs length {len(rollout.teacher_logprobs)} != input ids length {len(processed_samples[idx].input_ids)}"
-                else:
-                    assert (
-                        len(rollout.teacher_logprobs)
-                        == len(processed_samples[idx]["input_ids"])
-                    ), f"Teacher topk logprobs length {len(rollout.teacher_logprobs)} != input ids length {len(processed_samples[idx]["input_ids"])}"
-
-            def discounted_future_sum_loop(x: list[float], gamma: float) -> list[float]:
-                returns = [0] * len(x)
-                cumulative = 0
-
-                for i in range(len(x) - 1, -1, -1):
-                    cumulative = x[i] + gamma * cumulative
-                    returns[i] = cumulative
-                return returns
-
-            teacher_kl_advantages_list = []
-            for i in range(len(rollouts)):
-                # get the teacher logprobs for current rollout
-                teacher_logprobs = rollouts[i].teacher_logprobs
-                logprob_mask = processed_samples[i].logprob_masks
-                sampled_completion_logprobs = rollouts[i].completion_logprobs
-                sampled_prompt_logprobs = rollouts[i].prompt_logprobs
-                sampled_logprobs = (
-                    sampled_prompt_logprobs + sampled_completion_logprobs + [0]
-                )
-                teacher_logprobs = teacher_logprobs[:-1] + [0]
-                reversed_kl = (sampled_logprobs - teacher_logprobs) * logprob_mask
-                kl_advantages = (
-                    -kl_penalty_coef * logprob_mask * reversed_kl
-                )  # [n_tokens]
-                kl_advantages_discounted = discounted_future_sum_loop(
-                    kl_advantages, kl_discount_factor
-                )
-                teacher_kl_advantages_list.append(kl_advantages_discounted)
 
         self.metrics = {
             "entropy": 0.0,
@@ -867,21 +884,15 @@ class GRPOTrainer(LLMTrainer):
                                     .to(self.device)
                                 )
 
-                                if len(teacher_kl_advantages_list) > 0:
-                                    minibatched_teacher_kl_advantages = (
-                                        collate_teacher_kl_advantages(
-                                            teacher_kl_advantages_list[
-                                                mini_batch_indices
+                                if self.config.distillation.enable:
+                                    minibatched_teacher_logprobs = (
+                                        self.collate_teacher_logprobs(
+                                            rollouts=[
+                                                rollouts[i] for i in mini_batch_indices
                                             ],
-                                            self.device,
-                                            computed_max_len,
+                                            computed_max_len=computed_max_len,
                                         )
                                     )
-                                    minibatched_advantages = (
-                                        minibatched_advantages
-                                        + minibatched_teacher_kl_advantages
-                                    )
-
                                 user_mini_batch: Dict[str, Any] = (
                                     self.data_packer.policy_collate_fn(
                                         minibatched_processed_samples,
@@ -1191,6 +1202,14 @@ class GRPOTrainer(LLMTrainer):
                                     current_advantages = (
                                         logprob_masks * minibatched_advantages
                                     )
+                                    if self.config.distillation.enable:
+                                        current_advantages = self.compute_teacher_kl_advantages(
+                                            current_logprobs=current_per_token_logprobs,
+                                            teacher_logprobs=minibatched_teacher_logprobs,
+                                            current_advantages=current_advantages,
+                                            logprob_masks=logprob_masks,
+                                            cu_seqlens=cu_seqlens,
+                                        )
 
                                     # Compute ref per-token logprobs if needed
                                     if is_computing_ref:
