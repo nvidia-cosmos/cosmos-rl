@@ -406,10 +406,10 @@ def replica_placement_per_role(
             global_launch_settings.append(
                 [commands, gpu_devices, control_urls, output_files]
             )
-            commands.clear()
-            gpu_devices.clear()
-            control_urls.clear()
-            output_files.clear()
+            commands = []
+            gpu_devices = []
+            control_urls = []
+            output_files = []
             gpu_idx = 0
             global_worker_idx += 1
             global_available_gpus.append(available_gpus)
@@ -451,10 +451,10 @@ def replica_placement_per_role(
                 global_launch_settings.append(
                     [commands, gpu_devices, control_urls, output_files]
                 )
-                commands.clear()
-                gpu_devices.clear()
-                control_urls.clear()
-                output_files.clear()
+                commands = []
+                gpu_devices = []
+                control_urls = []
+                output_files = []
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus)
         else:
@@ -464,10 +464,10 @@ def replica_placement_per_role(
                 global_launch_settings.append(
                     [commands, gpu_devices, control_urls, output_files]
                 )
-                commands.clear()
-                gpu_devices.clear()
-                control_urls.clear()
-                output_files.clear()
+                commands = []
+                gpu_devices = []
+                control_urls = []
+                output_files = []
                 gpu_idx = 0
                 global_worker_idx += 1
                 global_available_gpus.append(available_gpus)
@@ -496,7 +496,7 @@ def replica_placement_per_role(
                 else None
             )
             gpu_idx += min_n_gpus_replica
-    return gpu_idx, global_worker_idx
+    return gpu_idx, global_worker_idx, commands, gpu_devices, control_urls, output_files
 
 
 def replica_placement(
@@ -541,7 +541,14 @@ def replica_placement(
         [n_policy, n_rollouts, n_reference],
         [min_n_gpus_policy, min_n_gpus_rollout, min_n_gpus_reference],
     ):
-        gpu_idx, global_worker_idx = replica_placement_per_role(
+        (
+            gpu_idx,
+            global_worker_idx,
+            commands,
+            gpu_devices,
+            control_urls,
+            output_files,
+        ) = replica_placement_per_role(
             commands=commands,
             gpu_devices=gpu_devices,
             control_urls=control_urls,
