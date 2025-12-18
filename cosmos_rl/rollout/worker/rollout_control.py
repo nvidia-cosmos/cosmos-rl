@@ -818,22 +818,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 ), f"Payloads must be for validation if not empty {is_validation}, {payloads}, {empty}"
                 if payloads is not None:
                     for i in range(len(payloads)):
-                        (
-                            payloads[i].completions,
-                            payloads[i].completed_conversations,
-                            payloads[i].completion_logprobs,
-                            payloads[i].completion_token_ids,
-                            _,
-                        ) = self.val_data_packer.get_rollout_output(
-                            payloads[i].completions,
-                            payloads[i].completed_conversations,
-                            payloads[i].completion_logprobs,
-                            payloads[i].completion_token_ids,
-                        )
-                        if self.config.train.train_policy.rollout_as_token_ids:
-                            payloads[i].completions = [""] * len(
-                                payloads[i].completions
-                            )
+                        # we don't need to upload completions, completed_conversations, completion_logprobs, completion_token_ids for validation.
+                        # some other fields are removed inside `report_rollouts` function.
+                        payloads[i].completions = None
+                        payloads[i].completed_conversations = None
+                        payloads[i].completion_logprobs = None
+                        payloads[i].completion_token_ids = None
 
                     response = ValidationReportRequest(
                         src_replica_name=self.replica_name,

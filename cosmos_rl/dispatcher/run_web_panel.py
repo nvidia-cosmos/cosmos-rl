@@ -392,7 +392,7 @@ async def get_batched_prompt(n: int, validation_step: Optional[int] = None):
 
 @app.post(COSMOS_API_VALIDATION_REPORT_SUFFIX)
 async def validation_report(request: ValidationReportRequest):
-    rollouts_list = extract_rollouts(request.payloads, True)
+    rollouts_list = extract_rollouts(request.payloads, True, is_validation=True)
     controller.policy_status_manager.validation_report_validation_results(
         request.validation_step, rollouts_list, controller.rollout_status_manager
     )
