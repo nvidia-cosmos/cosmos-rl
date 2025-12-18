@@ -291,7 +291,7 @@ class DecodeHandler:
                 decoded_images = images_tensor
 
                 logger.info(
-                    f"[{self.name}] Received image tensor with shape: {decoded_images.shape}, dtype: {decoded_images.dtype}"
+                    f"[{self.name}] Received image tensor with shape: {decoded_images.shape}, dtype: {decoded_images.dtype}, range: [{images_tensor.min():.3f}, {images_tensor.max():.3f}]"
                 )
 
                 decoded_info = {
@@ -304,6 +304,8 @@ class DecodeHandler:
                 metadata["input_info"].update({
                     "shape": images_tensor.shape,
                     "dtype": str(images_tensor.dtype),
+                    "min": f"{images_tensor.min():.3f}",
+                    "max": f"{images_tensor.max():.3f}",
                 })
                 metadata["uuid"] = uuid
                 logger.info(
