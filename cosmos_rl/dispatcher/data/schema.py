@@ -132,8 +132,8 @@ class RLPayload(BaseModel):
         description="The report_metrics for the rollout used for metrics collection and reporting.",
     )
 
-    teacher_result_uuids: List[str] = Field(
-        default=[], description="The uuids for the teacher results."
+    teacher_result_uuids: Optional[List[str]] = Field(
+        default=None, description="The uuids for the teacher results."
     )
 
     @staticmethod
