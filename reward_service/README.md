@@ -5,7 +5,19 @@ A service for calculating rewards of generated videos for world foundational mod
 
 ## Overview
 
-`cosmos_rl_reward` is a Python package that provides a service architecture for computing rewards in world foundational model RL applications. It handles reward calculation requests from client, enabling efficient and scalable reward computation. Currently two types of reward are supported: `cosmos_reason1` and `dance_grpo`. `cosmos_reason1` uses [`nvidia/Cosmos-Reason1-7B-Reward`](https://huggingface.co/nvidia/Cosmos-Reason1-7B-Reward) as the reward model, while `dance_grpo` adopts the [`VideoAlign`](https://huggingface.co/KwaiVGI/VideoReward) based `VQ`, `MQ` and `TA` scores from [`DanceGRPO`](https://github.com/XueZeyue/DanceGRPO)
+`cosmos_rl_reward` is a Python package that provides a service architecture for computing rewards in world foundational model RL applications. It handles reward calculation requests from client, enabling efficient and scalable reward computation.
+
+### Supported Reward Types
+
+**Video Rewards:**
+- `cosmos_reason1`: Uses [`nvidia/Cosmos-Reason1-7B-Reward`](https://huggingface.co/nvidia/Cosmos-Reason1-7B-Reward) as the reward model
+- `dance_grpo`: Adopts the [`VideoAlign`](https://huggingface.co/KwaiVGI/VideoReward) based `VQ`, `MQ` and `TA` scores from [`DanceGRPO`](https://github.com/XueZeyue/DanceGRPO)
+
+**Image Rewards:**
+- `hpsv2`: [HPSv2](https://github.com/tgxs002/HPSv2) - Human Preference Score v2 for text-to-image alignment
+- `image_reward`: [ImageReward](https://github.com/THUDM/ImageReward) - Image quality and prompt alignment scoring
+- `ocr`: [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) based reward for text rendering accuracy
+- `gen_eval`: [GenEval](https://github.com/djghosh13/geneval) - Object detection based compositional generation evaluation
 
 ## Installation
 
@@ -238,6 +250,94 @@ Retrieve completed reward calculation results.
 - `400 Not Ready`: Scores calculation not completed and please retry later
 
 For more detailed usage of the above interface apis, please refer to `cosmos_rl_reward/example/client.py`.
+
+## Image Rewards
+
+For image-based rewards, the request format differs from video rewards. Images are sent as numpy arrays and the service will pass them directly to the reward handler.
+
+**Note:** The current four image rewards (`hpsv2`, `image_reward`, `ocr`, `gen_eval`) expect NHWC format `[B, H, W, C]` with `uint8` dtype. If you implement a custom image reward, you can define your own expected image format in your reward handler's `calculate_reward` method.
+
+### Request Format
+
+**Payload Structure**: `<JSON_METADATA>\n<NPY_BYTES>`
+
+The metadata must include `"media_type": "image"` to indicate this is an image request.
+
+```python
+import numpy as np
+import json
+import io
+import requests
+
+# Prepare image as numpy array [B, H, W, C] uint8
+images = [np.array(img.convert("RGB"), dtype=np.uint8) for img in pil_images]
+arr = np.stack(images, axis=0)  # Shape: [B, H, W, 3]
+
+# Save to bytes
+buf = io.BytesIO()
+np.save(buf, arr, allow_pickle=False)
+npy_bytes = buf.getvalue()
+
+# Build metadata (must include media_type: image)
+metadata = {
+    "media_type": "image",
+    "reward_fn": {"hpsv2": 1.0},
+    "prompts": ["prompt for image 1", "prompt for image 2"],
+}
+# Combine metadata + npy bytes
+payload = json.dumps(metadata).encode("utf-8") + b"\n" + npy_bytes
+response = requests.post(
+    "http://localhost:8080/api/reward/enqueue",
+    data=payload,
+    headers={"Content-Type": "application/octet-stream"},
+)
+uuid = response.json()["uuid"]
+```
+
+### Metadata Examples for Each Image Reward
+
+#### HPSv2 (Human Preference Score v2)
+```json
+{
+  "media_type": "image",
+  "reward_fn": {"hpsv2": 1.0},
+  "prompts": ["a photo of a cat", "a beautiful sunset"]
+}
+```
+
+#### Image Reward
+```json
+{
+  "media_type": "image",
+  "reward_fn": {"image_reward": 1.0},
+  "prompts": ["a photo of a cat", "a beautiful sunset"]
+}
+```
+
+#### OCR Reward
+```json
+{
+  "media_type": "image",
+  "encoding": "npy_uint8",
+  "reward_fn": {"ocr": 1.0},
+  "prompts": ["New York Skyline with 'Hello World' written with fireworks"],
+  "ocr_use_gpu": false
+}
+```
+
+#### GenEval (Object Detection Evaluation)
+```json
+{
+  "media_type": "image",
+  "reward_fn": {"gen_eval": 1.0},
+  "tag": "single_object",
+  "include": [
+    {"class": "giraffe", "count": 1, "color": "brown"},
+    {"class": "stop sign", "count": 1, "color": "black"}
+  ],
+  "prompt": "a photo of a brown giraffe and a white stop sign"
+}
+```
 
 ## Building Distribution
 

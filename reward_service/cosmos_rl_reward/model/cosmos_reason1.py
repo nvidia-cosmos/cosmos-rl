@@ -59,6 +59,7 @@ class CosmosReason1Reward(BaseRewardHandler):
     """
 
     reward_name = "cosmos_reason1"
+    NEEDS_LATENT_DECODER = True
 
     def __init__(
         self,

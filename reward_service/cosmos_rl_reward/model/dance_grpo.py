@@ -44,6 +44,7 @@ class DanceGRPOVideoReward(BaseRewardHandler):
     """
 
     reward_name = "dance_grpo"
+    NEEDS_LATENT_DECODER = True
 
     def __init__(
         self,

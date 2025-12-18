@@ -62,6 +62,10 @@ def main():
 
     cur_dir = os.path.dirname(os.path.abspath(__file__))
     for reward_arg in loaded_config.reward_args:
+        # Respect the enable flag; skip disabled rewards during environment preparation
+        if hasattr(reward_arg, "enable") and not reward_arg.enable:
+            logger.info(f"Skipping setup for disabled reward: {reward_arg.reward_type}")
+            continue
         logger.info(f"Setting up reward: {reward_arg.reward_type}")
         key = reward_arg.reward_type
         download_path = reward_arg.download_path
