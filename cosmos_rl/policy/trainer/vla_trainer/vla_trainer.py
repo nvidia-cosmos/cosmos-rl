@@ -65,10 +65,7 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
         logger.info(
             f"[VLA Train] Starting VLA training for step {current_step}/{total_steps}"
         )
-        if self.config.mode == "colocated":
-            for m in self.model.modules():
-                if isinstance(m, torch.distributed.fsdp.FSDPModule):
-                    m.set_reshard_after_forward(True)
+        self.model._set_fsdp_reshard_after_forward(self.config.train.fsdp_reshard_after_forward)
 
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)

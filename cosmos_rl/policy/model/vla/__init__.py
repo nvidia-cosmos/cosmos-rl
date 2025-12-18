@@ -416,6 +416,12 @@ class OpenVLA(BaseModel):
         """
         pass
 
+    def _set_fsdp_reshard_after_forward(self, policy_str: str = "default"):
+        reshard_after_forward = False if policy_str == "never" else True
+        for m in self.model.modules():
+            if isinstance(m, torch.distributed.fsdp.FSDPModule):
+                m.set_reshard_after_forward(reshard_after_forward)
+
     def _replace_rope_modules_float32(self):
         """Replace RoPE modules with fresh float32 versions.
 

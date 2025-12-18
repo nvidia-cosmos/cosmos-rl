@@ -67,9 +67,7 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             return
         self.rollout.set_underlying_model(self.api_client.get_policy_model())
         if self.get_underlying_model() is not None:
-            for m in self.get_underlying_model().modules():
-                if isinstance(m, torch.distributed.fsdp.FSDPModule):
-                    m.set_reshard_after_forward(False)
+            self.get_underlying_model()._set_fsdp_reshard_after_forward("never")
         logger.info(
             f"[Rollout] Reset model from Policy replica {command.src_replica_name} to Rollout replica {self.replica_name}."
         )

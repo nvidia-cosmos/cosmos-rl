@@ -145,9 +145,6 @@ class OpenVLARollout(RolloutBase):
                 self.config.policy.model_name_or_path
             )
 
-        # rollout will not reshard after forward pass to avoid repeated all-gathers
-        self.config.train.fsdp_reshard_after_forward = "never"
-
         self.sim_processes = []
         self.sim_input_queues = []
         self.sim_output_queues = []

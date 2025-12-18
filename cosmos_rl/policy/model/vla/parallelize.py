@@ -206,13 +206,6 @@ def apply_vla_fsdp(
     # VLAModel wraps the actual model in self.model
     actual_model = model.model if hasattr(model, "model") else model
 
-    if reshard_after_forward_policy == "always":
-        reshard_after_forward = True
-    elif reshard_after_forward_policy == "never":
-        reshard_after_forward = False
-    else:  # default
-        reshard_after_forward = True
-
     # Count layers for logging
     if (
         hasattr(actual_model, "language_model")
@@ -228,31 +221,26 @@ def apply_vla_fsdp(
                 fully_shard(
                     llm.model.layers[i],
                     **fsdp_config,
-                    reshard_after_forward=reshard_after_forward,
                 )
             fully_shard(
                 llm.model.embed_tokens,
                 **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
             )
             fully_shard(
                 llm.model.norm,
                 **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
             )
         fully_shard(
-            llm.lm_head, **fsdp_config, reshard_after_forward=reshard_after_forward
+            llm.lm_head, **fsdp_config
         )
 
     fully_shard(
         actual_model.vision_backbone,
         **fsdp_config,
-        reshard_after_forward=reshard_after_forward,
     )
     fully_shard(
         actual_model.projector,
         **fsdp_config,
-        reshard_after_forward=reshard_after_forward,
     )
 
 
