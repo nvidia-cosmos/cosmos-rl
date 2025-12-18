@@ -614,6 +614,12 @@ class OpenVLARollout(RolloutBase):
         # Generation parameters
         temperature = self.config.rollout.sampling_config.temperature
 
+        if self.config.mode == "colocated":
+            for m in self.model.modules():
+                if isinstance(m, torch.distributed.fsdp.FSDPModule):
+                    m.unshard()
+
+
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             # Try to call the VLA model's generation method
             actions, responses = self.model.model.generate_action(
@@ -691,6 +697,11 @@ class OpenVLARollout(RolloutBase):
 
         # Compute old_log_probs for each episode by replaying trajectory
         completions = []
+        if self.config.mode == "colocated":
+            for m in self.model.modules():
+                if isinstance(m, torch.distributed.fsdp.FSDPModule):
+                    m.unshard()
+
         with (
             torch.no_grad(),
             torch.autocast(device_type="cuda", dtype=torch.bfloat16),
