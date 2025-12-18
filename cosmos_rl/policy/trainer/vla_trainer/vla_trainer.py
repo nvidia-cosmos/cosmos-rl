@@ -65,7 +65,9 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
         logger.info(
             f"[VLA Train] Starting VLA training for step {current_step}/{total_steps}"
         )
-        self.model._set_fsdp_reshard_after_forward(self.config.train.fsdp_reshard_after_forward)
+        self.model._set_fsdp_reshard_after_forward(
+            self.config.train.fsdp_reshard_after_forward
+        )
 
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)

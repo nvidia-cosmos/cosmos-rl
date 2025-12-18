@@ -230,9 +230,7 @@ def apply_vla_fsdp(
                 llm.model.norm,
                 **fsdp_config,
             )
-        fully_shard(
-            llm.lm_head, **fsdp_config
-        )
+        fully_shard(llm.lm_head, **fsdp_config)
 
     fully_shard(
         actual_model.vision_backbone,
