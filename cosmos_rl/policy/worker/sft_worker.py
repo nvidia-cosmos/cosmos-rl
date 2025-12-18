@@ -16,7 +16,7 @@
 
 import os
 import torch
-from typing import Optional, Union, Callable, Dict, Any, List
+from typing import Optional, Union, Callable, Dict, Any
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from itertools import islice
@@ -226,20 +226,17 @@ class SFTPolicyWorker(PolicyWorkerBase):
         data_packer: Optional[BaseDataPacker] = None,
         val_dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
-        custom_logger_fns: Optional[List[Callable]] = None,
-        hook_fns: Optional[Dict[str, Callable]] = None,
         sampler: Optional[Callable] = None,
         batch_sampler: Optional[Callable] = None,
         val_sampler: Optional[Callable] = None,
         val_batch_sampler: Optional[Callable] = None,
+        **kwargs,
     ):
-        super(SFTPolicyWorker, self).__init__(config, parallel_dims)
+        super(SFTPolicyWorker, self).__init__(config, parallel_dims, **kwargs)
 
         # Enlarge the compile cache size for validation
         if self.config.train.compile and self.config.validation.enable:
             torch._dynamo.config.cache_size_limit = 64
-
-        self.hook_fns = hook_fns if hook_fns is not None else {}
 
         # Prepare wandb
         if "wandb" in self.config.logging.logger and is_wandb_available():
@@ -263,11 +260,6 @@ class SFTPolicyWorker(PolicyWorkerBase):
             val_batch_sampler=val_batch_sampler,
             dataset=dataset,
             val_dataset=val_dataset,
-        )
-
-        # For hooks and custom logger functions
-        self.custom_logger_fns = (
-            custom_logger_fns if custom_logger_fns is not None else []
         )
 
     def setup(

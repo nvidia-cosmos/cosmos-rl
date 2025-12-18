@@ -45,66 +45,29 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.utils.distributed import destroy_distributed
-import os
-import torch
 import copy
-from transformers import AutoConfig
 from cosmos_rl.utils.util import (
     setup_tokenizer,
 )
-from cosmos_rl.comm.base import WorkerBase
-from cosmos_rl.comm.base import CommMixin
-from cosmos_rl.utils import util
+from cosmos_rl.policy.worker.base import PolicyWorkerBase
 from cosmos_rl.dispatcher.protocol import Role
-from cosmos_rl.utils.profiler import CosmosProfiler
 
 
-class TeacherWorker(WorkerBase, CommMixin):
+class TeacherWorker(PolicyWorkerBase):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs):
-        self.student_tokenizer = setup_tokenizer(config.policy.model_name_or_path)
+        # parallel_dims is built from distillation parallelism config
         config = self.update_config(config)
         assert isinstance(
             config, CosmosConfig
         ), "config must be a CosmosConfig object for this trainer"
-        super(TeacherWorker, self).__init__(config)
-        self.parallel_dims = parallel_dims
 
-        self.hf_config = util.retry(AutoConfig.from_pretrained)(
-            self.config.distillation.model_name_or_path,
-            trust_remote_code=True,
+        kwargs["role"] = Role.REFERENCE
+
+        super(TeacherWorker, self).__init__(
+            config, parallel_dims=parallel_dims, **kwargs
         )
 
-        if self.config.distillation.parallelism.dp_shard_size == -1:
-            self.config.distillation.parallelism.dp_shard_size = parallel_dims.dp_shard
-        # Parallel parameters
-
-        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        self.global_rank = int(os.environ.get("RANK", 0))
-        self.role = Role.REFERENCE
-        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
-        self.device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(self.device)
-
-        self.check_config()
-        self.dp_rank, self.dp_world_size = 0, 1
-        if self.parallel_dims.dp_enabled:
-            self.dp_rank = self.parallel_dims.mesh["dp"].get_local_rank()
-            self.dp_world_size = self.parallel_dims.mesh["dp"].size()
-
-        self.train_stream = torch.cuda.current_stream()
-        self.init_comm()
-
-        # profiler is initialized after the init_comm()
-        self.profiler = CosmosProfiler(
-            self.config,
-            parallel_dims,
-            replica_name=self.replica_name,
-            api_client=self.api_client,
-        )
-
-        # For hooks and custom logger functions
-        self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
-        self.hook_fns = kwargs.get("hook_fns", {})
+        self.student_tokenizer = setup_tokenizer(config.policy.model_name_or_path)
 
         # Initialize the teacher
         dataset = kwargs.get("dataset", None)
