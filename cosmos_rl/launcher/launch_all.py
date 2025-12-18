@@ -371,6 +371,134 @@ def get_local_ip():
         return None
 
 
+def replica_placement_per_role(
+    # Dynamically updated arguments
+    commands: List[str],
+    gpu_devices: List[str],
+    control_urls: List[str],
+    output_files: List[str],
+    global_launch_settings: List[List[str]],
+    global_worker_idx: int,
+    global_available_gpus: List[List[int]],
+    available_gpus: List[int],
+    gpu_idx: int,
+    # Fixed arguments
+    n_replicas: int,
+    min_n_gpus_replica: int,
+    role: str,
+    replica_script: str,
+    control_url: str,
+    args: argparse.Namespace,
+    rdzv_port: int,
+    check_last_state: bool,
+    output_dir: Optional[str] = None,
+    get_worker_ip: Optional[Callable] = None,
+    script: Optional[str] = None,
+    backend: str = "vllm",
+    config_path: Optional[str] = None,
+    script_args: Optional[List[Any]] = None,
+):
+    if check_last_state and min_n_gpus_replica > len(
+        global_available_gpus[global_worker_idx]
+    ):
+        # If the number of GPUs needed for one replica of this role is more than available GPUs, we need to allocate a new worker
+        if gpu_idx > 0:
+            global_launch_settings.append(
+                [commands, gpu_devices, control_urls, output_files]
+            )
+            commands.clear()
+            gpu_devices.clear()
+            control_urls.clear()
+            output_files.clear()
+            gpu_idx = 0
+            global_worker_idx += 1
+            global_available_gpus.append(available_gpus)
+
+    for i in range(n_replicas):
+        if min_n_gpus_replica > len(global_available_gpus[global_worker_idx]):
+            assert (
+                min_n_gpus_replica % len(global_available_gpus[global_worker_idx]) == 0
+            ), f"min_n_gpus_replica {min_n_gpus_replica} is not divisible by {len(global_available_gpus[global_worker_idx])}"
+            nodes_needed = min_n_gpus_replica // len(
+                global_available_gpus[global_worker_idx]
+            )
+            rdzv_ip = "localhost"
+            for node_in_replica in range(nodes_needed):
+                gpu_devices.append(
+                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
+                )
+                commands.append(
+                    f"{replica_script} --type {role} --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
+                )
+                if script is not None:
+                    commands[-1] += f" --script {script}"
+                if node_in_replica == 0:
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+                    if get_worker_ip is not None:
+                        rdzv_ip = get_worker_ip(global_worker_idx, args)
+                else:
+                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
+
+                if script_args is not None:
+                    commands[-1] += f" {' '.join(script_args)}"
+
+                control_urls.append(control_url)
+                output_files.append(
+                    os.path.join(output_dir, f"{role}_{i}.log")
+                    if output_dir is not None
+                    else None
+                )
+                global_launch_settings.append(
+                    [commands, gpu_devices, control_urls, output_files]
+                )
+                commands.clear()
+                gpu_devices.clear()
+                control_urls.clear()
+                output_files.clear()
+                global_worker_idx += 1
+                global_available_gpus.append(available_gpus)
+        else:
+            if gpu_idx + min_n_gpus_replica > len(
+                global_available_gpus[global_worker_idx]
+            ):
+                global_launch_settings.append(
+                    [commands, gpu_devices, control_urls, output_files]
+                )
+                commands.clear()
+                gpu_devices.clear()
+                control_urls.clear()
+                output_files.clear()
+                gpu_idx = 0
+                global_worker_idx += 1
+                global_available_gpus.append(available_gpus)
+
+            gpu_devices.append(
+                ",".join(
+                    [
+                        str(g)
+                        for g in available_gpus[gpu_idx : gpu_idx + min_n_gpus_replica]
+                    ]
+                )
+            )
+            commands.append(
+                f"{replica_script} --type {role} --ngpus {min_n_gpus_replica} --backend {backend} --config {config_path}"
+            )
+            if script is not None:
+                commands[-1] += f" --script {script}"
+
+            if script_args is not None:
+                commands[-1] += f" {' '.join(script_args)}"
+
+            control_urls.append(control_url)
+            output_files.append(
+                os.path.join(output_dir, f"{role}_{i}.log")
+                if output_dir is not None
+                else None
+            )
+            gpu_idx += min_n_gpus_replica
+    return gpu_idx, global_worker_idx
+
+
 def replica_placement(
     available_gpus: List[int],
     n_policy: int,
@@ -407,285 +535,37 @@ def replica_placement(
     global_worker_idx = 0
     global_launch_settings = []
     # Assign launch settings for each worker
-    for i in range(n_policy):
-        if min_n_gpus_policy > len(global_available_gpus[global_worker_idx]):
-            assert (
-                min_n_gpus_policy % len(global_available_gpus[global_worker_idx]) == 0
-            ), f"min_n_gpus_policy {min_n_gpus_policy} is not divisible by {len(global_available_gpus[global_worker_idx])}"
-            nodes_needed = min_n_gpus_policy // len(
-                global_available_gpus[global_worker_idx]
-            )
-            rdzv_ip = "localhost"
-            for node_in_replica in range(nodes_needed):
-                gpu_devices.append(
-                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
-                )
-                commands.append(
-                    f"{replica_script} --type policy --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
-                )
-                if script is not None:
-                    commands[-1] += f" --script {script}"
-                if node_in_replica == 0:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-                    if get_worker_ip is not None:
-                        rdzv_ip = get_worker_ip(global_worker_idx, args)
-                else:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
 
-                if script_args is not None:
-                    commands[-1] += f" {' '.join(script_args)}"
-
-                control_urls.append(control_url)
-                output_files.append(
-                    os.path.join(output_dir, f"policy_{i}.log")
-                    if output_dir is not None
-                    else None
-                )
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-        else:
-            if gpu_idx + min_n_gpus_policy > len(
-                global_available_gpus[global_worker_idx]
-            ):
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                gpu_idx = 0
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-
-            gpu_devices.append(
-                ",".join(
-                    [
-                        str(g)
-                        for g in global_available_gpus[global_worker_idx][
-                            gpu_idx : gpu_idx + min_n_gpus_policy
-                        ]
-                    ]
-                )
-            )
-            commands.append(
-                f"{replica_script} --type policy --ngpus {min_n_gpus_policy} --backend {backend} --config {config_path}"
-            )
-            if script is not None:
-                commands[-1] += f" --script {script}"
-            if script_args is not None:
-                commands[-1] += f" {' '.join(script_args)}"
-            control_urls.append(control_url)
-            output_files.append(
-                os.path.join(output_dir, f"policy_{i}.log")
-                if output_dir is not None
-                else None
-            )
-            gpu_idx += min_n_gpus_policy
-
-    if min_n_gpus_rollout > len(global_available_gpus[global_worker_idx]):
-        # If the number of GPUs needed for rollout is more than available GPUs, we need to allocate a new worker
-        if gpu_idx > 0:
-            global_launch_settings.append(
-                [commands, gpu_devices, control_urls, output_files]
-            )
-            commands = []
-            gpu_devices = []
-            control_urls = []
-            output_files = []
-            gpu_idx = 0
-            global_worker_idx += 1
-            global_available_gpus.append(available_gpus)
-
-    for i in range(n_rollouts):
-        if min_n_gpus_rollout > len(global_available_gpus[global_worker_idx]):
-            assert (
-                min_n_gpus_rollout % len(global_available_gpus[global_worker_idx]) == 0
-            ), f"min_n_gpus_rollout {min_n_gpus_rollout} is not divisible by {len(global_available_gpus[global_worker_idx])}"
-            nodes_needed = min_n_gpus_rollout // len(
-                global_available_gpus[global_worker_idx]
-            )
-            rdzv_ip = "localhost"
-            for node_in_replica in range(nodes_needed):
-                gpu_devices.append(
-                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
-                )
-                commands.append(
-                    f"{replica_script} --type rollout --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
-                )
-                if script is not None:
-                    commands[-1] += f" --script {script}"
-                if node_in_replica == 0:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-                    if get_worker_ip is not None:
-                        rdzv_ip = get_worker_ip(global_worker_idx, args)
-                else:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-
-                if script_args is not None:
-                    commands[-1] += f" {' '.join(script_args)}"
-
-                control_urls.append(control_url)
-                output_files.append(
-                    os.path.join(output_dir, f"rollout_{i}.log")
-                    if output_dir is not None
-                    else None
-                )
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-        else:
-            if gpu_idx + min_n_gpus_rollout > len(
-                global_available_gpus[global_worker_idx]
-            ):
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                gpu_idx = 0
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-
-            gpu_devices.append(
-                ",".join(
-                    [
-                        str(g)
-                        for g in available_gpus[gpu_idx : gpu_idx + min_n_gpus_rollout]
-                    ]
-                )
-            )
-            commands.append(
-                f"{replica_script} --type rollout --ngpus {min_n_gpus_rollout} --backend {backend} --config {config_path}"
-            )
-            if script is not None:
-                commands[-1] += f" --script {script}"
-
-            if script_args is not None:
-                commands[-1] += f" {' '.join(script_args)}"
-
-            control_urls.append(control_url)
-            output_files.append(
-                os.path.join(output_dir, f"rollout_{i}.log")
-                if output_dir is not None
-                else None
-            )
-            gpu_idx += min_n_gpus_rollout
-
-    if min_n_gpus_reference > len(global_available_gpus[global_worker_idx]):
-        # If the number of GPUs needed for reference is more than available GPUs, we need to allocate a new worker
-        if gpu_idx > 0:
-            global_launch_settings.append(
-                [commands, gpu_devices, control_urls, output_files]
-            )
-            commands = []
-            gpu_devices = []
-            control_urls = []
-            output_files = []
-            gpu_idx = 0
-            global_worker_idx += 1
-            global_available_gpus.append(available_gpus)
-
-    for i in range(n_reference):
-        if min_n_gpus_reference > len(global_available_gpus[global_worker_idx]):
-            assert (
-                min_n_gpus_reference % len(global_available_gpus[global_worker_idx])
-                == 0
-            ), f"min_n_gpus_reference {min_n_gpus_reference} is not divisible by {len(global_available_gpus[global_worker_idx])}"
-            nodes_needed = min_n_gpus_reference // len(
-                global_available_gpus[global_worker_idx]
-            )
-            rdzv_ip = "localhost"
-            for node_in_replica in range(nodes_needed):
-                gpu_devices.append(
-                    ",".join([str(g) for g in global_available_gpus[global_worker_idx]])
-                )
-                commands.append(
-                    f"{replica_script} --type reference --ngpus {len(global_available_gpus[global_worker_idx])} --nnodes {nodes_needed} --backend {backend} --config {config_path}"
-                )
-                if script is not None:
-                    commands[-1] += f" --script {script}"
-                if node_in_replica == 0:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-                    if get_worker_ip is not None:
-                        rdzv_ip = get_worker_ip(global_worker_idx, args)
-                else:
-                    commands[-1] += f" --rdzv-endpoint {rdzv_ip}:{rdzv_port}"
-
-                if script_args is not None:
-                    commands[-1] += f" {' '.join(script_args)}"
-
-                control_urls.append(control_url)
-                output_files.append(
-                    os.path.join(output_dir, f"reference_{i}.log")
-                    if output_dir is not None
-                    else None
-                )
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-        else:
-            if gpu_idx + min_n_gpus_reference > len(
-                global_available_gpus[global_worker_idx]
-            ):
-                global_launch_settings.append(
-                    [commands, gpu_devices, control_urls, output_files]
-                )
-                commands = []
-                gpu_devices = []
-                control_urls = []
-                output_files = []
-                gpu_idx = 0
-                global_worker_idx += 1
-                global_available_gpus.append(available_gpus)
-
-            gpu_devices.append(
-                ",".join(
-                    [
-                        str(g)
-                        for g in available_gpus[
-                            gpu_idx : gpu_idx + min_n_gpus_reference
-                        ]
-                    ]
-                )
-            )
-            commands.append(
-                f"{replica_script} --type reference --ngpus {min_n_gpus_reference} --backend {backend} --config {config_path}"
-            )
-            if script is not None:
-                commands[-1] += f" --script {script}"
-
-            if script_args is not None:
-                commands[-1] += f" {' '.join(script_args)}"
-
-            control_urls.append(control_url)
-            output_files.append(
-                os.path.join(output_dir, f"reference_{i}.log")
-                if output_dir is not None
-                else None
-            )
-            gpu_idx += min_n_gpus_reference
+    for role, n_replicas, min_n_gpus_replica in zip(
+        ["policy", "rollout", "reference"],
+        [n_policy, n_rollouts, n_reference],
+        [min_n_gpus_policy, min_n_gpus_rollout, min_n_gpus_reference],
+    ):
+        gpu_idx, global_worker_idx = replica_placement_per_role(
+            commands=commands,
+            gpu_devices=gpu_devices,
+            control_urls=control_urls,
+            output_files=output_files,
+            global_launch_settings=global_launch_settings,
+            global_worker_idx=global_worker_idx,
+            global_available_gpus=global_available_gpus,
+            available_gpus=available_gpus,
+            gpu_idx=gpu_idx,
+            n_replicas=n_replicas,
+            min_n_gpus_replica=min_n_gpus_replica,
+            role=role,
+            replica_script=replica_script,
+            control_url=control_url,
+            args=args,
+            rdzv_port=rdzv_port,
+            check_last_state=role != "policy",
+            output_dir=output_dir,
+            get_worker_ip=get_worker_ip,
+            script=script,
+            backend=backend,
+            config_path=config_path,
+            script_args=script_args,
+        )
 
     if len(commands) > 0:
         global_launch_settings.append(
