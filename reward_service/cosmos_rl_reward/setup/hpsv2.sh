@@ -11,6 +11,12 @@ VENV_PATH="${2:-/root/venv}"
 echo "[hpsv2 setup] Using download path: ${DOWNLOAD_PATH}"
 echo "[hpsv2 setup] Using venv: ${VENV_PATH}"
 
+# Install wget if not available
+if ! command -v wget &> /dev/null; then
+    echo "[hpsv2 setup] Installing wget..."
+    apt-get update && apt-get install -y wget
+fi
+
 if [ ! -d "$VENV_PATH" ]; then
     echo "[hpsv2 setup] Creating virtual environment at $VENV_PATH..."
     python -m pip install -U virtualenv >/dev/null 2>&1 || true
@@ -41,11 +47,17 @@ OUT_FILE="${OUT_DIR}/HPS_v2.1_compressed.pt"
 mkdir -p "${OUT_DIR}"
 cd "${OUT_DIR}"
 
-if [ ! -f "${OUT_FILE}" ]; then
+# Download if file doesn't exist or is empty
+if [ ! -s "${OUT_FILE}" ]; then
+  rm -f "${OUT_FILE}"
   echo "[hpsv2 setup] Downloading HPSv2 checkpoint..."
-  wget -q --show-progress \
-    "https://huggingface.co/xswu/HPSv2/resolve/main/HPS_v2.1_compressed.pt" \
+  wget "https://huggingface.co/xswu/HPSv2/resolve/main/HPS_v2.1_compressed.pt" \
     -O "${OUT_FILE}"
+  
+  if [ ! -s "${OUT_FILE}" ]; then
+    echo "[hpsv2 setup] ERROR: Download failed!"
+    exit 1
+  fi
 else
   echo "[hpsv2 setup] HPSv2 checkpoint already exists."
 fi
