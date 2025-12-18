@@ -66,8 +66,6 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
         if command.dst_replica_name != self.replica_name:
             return
         self.rollout.set_underlying_model(self.api_client.get_policy_model())
-        if self.get_underlying_model() is not None:
-            self.get_underlying_model()._set_fsdp_reshard_after_forward("never")
         logger.info(
             f"[Rollout] Reset model from Policy replica {command.src_replica_name} to Rollout replica {self.replica_name}."
         )
