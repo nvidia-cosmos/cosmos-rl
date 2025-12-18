@@ -41,7 +41,8 @@ def extract_rollouts(
             payload.completion_token_ids = [[]] * len(payload.rewards)
         if payload.report_metrics is None:
             payload.report_metrics = [{} for _ in range(len(payload.rewards))]
-
+        if payload.teacher_result_uuids is None:
+            payload.teacher_result_uuids = [""] * len(payload.rewards)
         rollouts = [
             Rollout(
                 prompt=payload.prompt,
@@ -58,8 +59,10 @@ def extract_rollouts(
                 completion_logprobs=completion_logprobs,
                 weight_version=payload.weight_version,
                 report_metrics=report_metrics,
+                teacher_result_uuid=teacher_result_uuid,
+                prompt_logprobs=payload.prompt_logprobs,
             )
-            for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, filter_reward, completion_token_ids, completion_logprobs, report_metrics in zip(
+            for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, filter_reward, completion_token_ids, completion_logprobs, report_metrics, teacher_result_uuid in zip(
                 payload.completions,
                 payload.completed_conversations,
                 payload.rewards,
@@ -69,6 +72,7 @@ def extract_rollouts(
                 payload.completion_token_ids,
                 payload.completion_logprobs,
                 payload.report_metrics,
+                payload.teacher_result_uuids,
             )
         ]
         assert all(

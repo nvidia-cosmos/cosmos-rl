@@ -45,12 +45,13 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
 
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.global_rank = int(os.environ.get("RANK", 0))
-        self.role = Role.POLICY
+        self.role = kwargs.get("role", Role.POLICY)
         self.world_size = int(os.environ.get("WORLD_SIZE", 1))
         self.device = torch.device(f"cuda:{self.local_rank}")
         torch.cuda.set_device(self.device)
 
         self.check_config()
+
         self.dp_rank, self.dp_world_size = 0, 1
         if self.parallel_dims.dp_enabled:
             self.dp_rank = self.parallel_dims.mesh["dp"].get_local_rank()
@@ -66,6 +67,10 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
             replica_name=self.replica_name,
             api_client=self.api_client,
         )
+
+        # For hooks and custom logger functions
+        self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
+        self.hook_fns = kwargs.get("hook_fns", {})
 
     def check_config(self):
         mini_batch = 1

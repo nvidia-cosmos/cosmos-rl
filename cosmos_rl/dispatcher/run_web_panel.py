@@ -190,6 +190,7 @@ async def unregister(request: UnregisterRequest):
             )
             and len(controller.policy_status_manager) == 0
             and len(controller.rollout_status_manager) == 0
+            and len(controller.teacher_result_manager) == 0
         ):
             logger.info("[Controller] All replicas are finished, finalizing...")
             global server

@@ -781,6 +781,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         p.completions = rr.completions
                         p.completion_logprobs = rr.completion_logprobs
                         p.completion_token_ids = rr.completion_token_ids
+                        p.prompt_logprobs = rr.prompt_logprobs
                         p.weight_version = self.current_weight_version
                         p.cumulative_logprob = rr.cumulative_logprob
                         if self.config.rollout.multi_turn_config.enable:
@@ -1146,6 +1147,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.validation_flag.set()
 
         if broadcast_command.replica_should_stop():
+            data = {
+                "is_end": True,
+                "prompt_idx": -1,
+                "completion_token_ids": [],
+            }
+            self.redis_controller.publish_teacher_request(data, self.replica_name)
+            logger.info("[Rollout] Published end event to reference")
             # Do validation if the flag is set before stopping.
             if self.validation_flag.is_set():
                 self.do_validation()
@@ -1550,6 +1558,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completions = result.completions
                 old_payload.completion_logprobs = result.completion_logprobs
                 old_payload.completion_token_ids = result.completion_token_ids
+                old_payload.prompt_logprobs = result.prompt_logprobs
                 old_payload.weight_version = self.current_weight_version
                 old_payload.cumulative_logprob = result.cumulative_logprob
                 if self.config.rollout.multi_turn_config.enable:
@@ -1561,13 +1570,37 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         )
                     )
                 valid_payloads.append(old_payload)
-
+            valid_payloads = self.enqueue_teacher_calculation(valid_payloads)
             self.reward_dispatcher.enqueue_rewards_cal(
                 valid_payloads,
                 False,
                 self.current_weight_version,
             )
         return valid_payloads_list, valid_result
+
+    def enqueue_teacher_calculation(self, payloads: List[RLPayload]) -> List[RLPayload]:
+        """
+        Enqueue the teacher calculation for the payloads.
+        Args:
+            payloads: The payloads to enqueue the teacher calculation for.
+        Returns:
+            The payloads with the teacher result uuid.
+        """
+        if not self.config.distillation.enable:
+            return payloads
+        assert all(
+            payload.completion_token_ids is not None for payload in payloads
+        ), "All payloads must have completion token ids"
+        for payload in payloads:
+            data = {
+                "prompt_idx": payload.prompt_idx,
+                "completion_token_ids": payload.completion_token_ids,
+            }
+            uuids = self.redis_controller.publish_teacher_request(
+                data, self.replica_name
+            )
+            payload.teacher_result_uuids = uuids
+        return payloads
 
     def work(self):
         # Start the thread with daemon=True, so it will exit when the main program exits.
