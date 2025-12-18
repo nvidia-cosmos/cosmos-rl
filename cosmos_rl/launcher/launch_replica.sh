@@ -128,6 +128,9 @@ elif [ "$TYPE" == "policy" ]; then
 elif [ "$TYPE" == "reference" ]; then
   DEFAULT_MODULE="cosmos_rl.reference.reference_entry"
   export COSMOS_ROLE="Reference"
+  # Set a longer timeout for reference to avoid timeout when waiting for teacher requests
+  # when reference is not used such as in validation mode.
+  export COSMOS_GLOO_TIMEOUT="6000"
   set_env "PYTORCH_CUDA_ALLOC_CONF" "expandable_segments:True"
 else
   echo "Error: Invalid --type value '$TYPE'. Must be 'rollout' or 'policy' or 'reference'."

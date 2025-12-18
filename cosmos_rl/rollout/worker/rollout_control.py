@@ -1147,6 +1147,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.validation_flag.set()
 
         if broadcast_command.replica_should_stop():
+            data = {
+                "is_end": True,
+                "prompt_idx": -1,
+                "completion_token_ids": [],
+            }
+            self.redis_controller.publish_teacher_request(data, self.replica_name)
+            logger.info("[Rollout] Published end event to reference")
             # Do validation if the flag is set before stopping.
             if self.validation_flag.is_set():
                 self.do_validation()

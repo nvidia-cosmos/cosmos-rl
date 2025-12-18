@@ -172,7 +172,8 @@ class TeacherWorker(PolicyWorkerBase):
 
     async def fetch_rollouts(self):
         assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
-        while not self.shutdown_signal.is_set():
+        running = True
+        while running:
             teacher_requests = []
             try:
                 teacher_requests = self.redis_controller.subscribe_teacher_request(
@@ -192,12 +193,17 @@ class TeacherWorker(PolicyWorkerBase):
                     rollout_item["completion_token_ids"] = tokens
                     rollout_item["teacher_result_uuid"] = uuid
                     self.data_queue.put_nowait(rollout_item)
+                if "is_end" in rollout:
+                    logger.info("[Reference] Exiting fetch rollouts")
+                    self.data_queue.put_nowait({"is_end": True})
+                    running = False
 
     def dispatch_rollouts(self) -> List[Rollout]:
         def preprocess_rollouts(rollouts: List[Dict]):
             updated_rollouts: List[Rollout] = []
             for i in range(len(rollouts)):
                 if "is_end" in rollouts[i]:
+                    logger.info("[Reference] Setting end event")
                     self.end_event.set()
                     continue
                 updated_rollouts.append(
@@ -223,6 +229,9 @@ class TeacherWorker(PolicyWorkerBase):
                     rollout = self.data_queue.get(block=True, timeout=None)
                     if "is_end" in rollout:
                         for i in range(self.world_size):
+                            logger.info(
+                                f"[Reference] Appending end rollout to rank {i}"
+                            )
                             scattered_rollouts[i].append(rollout)
                         break
                 except Empty:
@@ -273,7 +282,12 @@ class TeacherWorker(PolicyWorkerBase):
             ).start()
 
         while True:
+            if self.end_event.is_set():
+                logger.info("[Reference] End event set, breaking loop")
+                break
             rollouts = self.dispatch_rollouts()
+            if len(rollouts) == 0:
+                continue
             data = self.engine.step_forward(rollouts)
             logger.debug(
                 f"[Reference] Step forward uuids: {[item['teacher_result_uuid'] for item in data]}"
@@ -281,8 +295,6 @@ class TeacherWorker(PolicyWorkerBase):
             for item in data:
                 id = item.pop("teacher_result_uuid")
                 self.redis_controller.set_teacher_result(id, item, self.replica_name)
-            if self.end_event.is_set():
-                break
         logger.info(
             "[Reference] Main loop finished. Shutdown background task event set."
         )
