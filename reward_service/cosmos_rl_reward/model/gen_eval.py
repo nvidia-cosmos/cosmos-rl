@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Portions of this file are adapted from NVLabs DiffusionNFT (https://github.com/NVlabs/DiffusionNFT)
+# GenEval evaluation framework from djghosh13 (https://github.com/djghosh13/geneval)
 
 import json
 import os
@@ -115,7 +116,6 @@ class GenEvalReward(BaseRewardHandler):
         COLOR_CLASSIFIERS = {}
 
         object_detector, (clip_model, transform, tokenizer) = load_models()
-        # Determine class names strictly from provided file to keep logic simple
         if object_names_path and os.path.exists(object_names_path):
             with open(object_names_path) as f:
                 classnames = [line.strip() for line in f if line.strip()]
@@ -383,7 +383,6 @@ class GenEvalReward(BaseRewardHandler):
         return compute_geneval
 
     def _resolve_paths(self):
-        # Use download_path convention only, keep logic simple and predictable
         base_dir = self.download_path
         ckpt_basename = "mask2former_swin-s-p4-w7-224_lsj_8x2_50e_coco_20220504_001756-743b7d99"
         ckpt_path = os.path.join(base_dir, "reward_ckpts", f"{ckpt_basename}.pth")

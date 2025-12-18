@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Portions of this file are adapted from NVLabs DiffusionNFT (https://github.com/NVlabs/DiffusionNFT)
+# OCR functionality powered by PaddleOCR (https://github.com/PaddlePaddle/PaddleOCR)
 
 import os
 import time

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Portions of this file are adapted from NVLabs DiffusionNFT (https://github.com/NVlabs/DiffusionNFT)
+# ImageReward model from THUDM (https://github.com/THUDM/ImageReward)
 
 
 import os

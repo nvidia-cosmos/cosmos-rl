@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Portions of this file are adapted from NVLabs DiffusionNFT (https://github.com/NVlabs/DiffusionNFT)
+# HPSv2 model from tgxs002 (https://github.com/tgxs002/HPSv2)
 
 import os
 import torch
