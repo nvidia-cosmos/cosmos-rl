@@ -294,7 +294,10 @@ class TeacherWorker(PolicyWorkerBase):
             )
             for item in data:
                 id = item.pop("teacher_result_uuid")
-                self.redis_controller.set_teacher_result(id, item, self.replica_name)
+                if not self.redis_controller.set_teacher_result(
+                    id, item, self.replica_name
+                ):
+                    logger.error(f"[Reference] Failed to set teacher result {id}")
         logger.info(
             "[Reference] Main loop finished. Shutdown background task event set."
         )
