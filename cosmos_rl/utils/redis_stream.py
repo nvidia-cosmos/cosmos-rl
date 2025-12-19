@@ -68,7 +68,7 @@ class RedisStreamHandler:
         self.teacher_request_stream = "teacher_request_stream"
         self.ping()
 
-    def set_key_value(self, key: str, value: str):
+    def set_key_value(self, key: str, value: str) -> bool:
         # Add message to stream
         try:
             make_request_with_retry(
@@ -80,8 +80,10 @@ class RedisStreamHandler:
                 response_parser=None,
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
+            return True
         except Exception as e:
             logger.error(f"Failed to write to Redis stream {key}: {e}")
+            return False
 
     def get_key_value(self, key: str):
         try:
@@ -302,7 +304,8 @@ class RedisStreamHandler:
             )
         except Exception as e:
             logger.error(f"Failed to write to Redis stream teacher_request: {e}")
-            raise e
+            # return if failed to write to Redis stream for fault tolerance
+            # raise e
         logger.debug(
             f"Published teacher request to Redis stream {self.teacher_request_stream}: {uuid_values}"
         )
@@ -322,11 +325,6 @@ class RedisStreamHandler:
             list: A list of stream entries.
         """
         self.create_teacher_request_group()
-
-        def exception_parser(e):
-            logger.info(f"Failed to read from Redis stream teacher_request: {e}")
-            return False
-
         try:
             messages = make_request_with_retry(
                 self.requests_for_alternative_clients(
@@ -340,10 +338,10 @@ class RedisStreamHandler:
                     block=RedisStreamConstant.TEACHER_REQUEST_READING_TIMEOUT_MS,
                 ),
                 response_parser=None,
-                exception_parser=exception_parser,
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
         except Exception as e:
+            messages = []  # return empty list if failed to read from Redis stream
             logger.error(f"Failed to read from Redis stream teacher_request: {e}")
         teacher_requests = []
         if messages:
@@ -368,7 +366,13 @@ class RedisStreamHandler:
                     teacher_requests.append(teacher_request)
         return teacher_requests
 
-    def set_teacher_result(self, uuid_value: str, data: Dict, replica_name: str) -> str:
+    def set_teacher_result(
+        self,
+        uuid_value: str,
+        data: Dict,
+        replica_name: str,
+        timeout: float = constant.COSMOS_TEACHER_RESULT_SET_TIMEOUT,
+    ) -> bool:
         """
         Write teacher result to Redis.
 
@@ -377,7 +381,7 @@ class RedisStreamHandler:
             stream_name (str): The name of the Redis stream to write to.
             replica_name (str): The name of the replica to write to.
         Returns:
-            str: The UUID of the teacher result.
+            bool: True if successful, False otherwise.
         """
         data.update(
             {
@@ -385,12 +389,12 @@ class RedisStreamHandler:
                 "replica_name": replica_name,
             }
         )
-        try:
-            self.set_key_value(uuid_value, msgpack.packb(data))
-        except Exception as e:
-            logger.info(f"Failed to write to Redis key {uuid_value}: {e}")
-            raise e
-        return uuid_value
+        start_time = time.time()
+        while time.time() - start_time < float(timeout):
+            if self.set_key_value(uuid_value, msgpack.packb(data)):
+                return True
+            time.sleep(constant.COSMOS_TEACHER_RESULT_RETRY_TIMEOUT_INTERVAL)
+        return False
 
     def get_teacher_result(
         self,
@@ -411,7 +415,7 @@ class RedisStreamHandler:
             value = self.get_key_value(uuid_value)
             if value is not None:
                 break
-            time.sleep(constant.COSMOS_TEACHER_RESULT_GET_TIMEOUT_INTERVAL)
+            time.sleep(constant.COSMOS_TEACHER_RESULT_RETRY_TIMEOUT_INTERVAL)
         if value is None:
             logger.error(f"Failed to get teacher result from Redis key {uuid_value}")
             return None

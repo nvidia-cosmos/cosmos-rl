@@ -557,14 +557,20 @@ class GRPOTrainer(LLMTrainer):
     def collate_teacher_logprobs(
         self,
         rollouts: List[Rollout],
+        processed_samples: List[Any],
         computed_max_len: int,
     ) -> List[List[float]]:
         teacher_logprobs_list = []
+        assert (
+            len(processed_samples) == len(rollouts)
+        ), f"Length of processed_samples {len(processed_samples)} should be equal to length of rollouts {len(rollouts)}"
         for i in range(len(rollouts)):
             # get the teacher logprobs for current rollout
             teacher_logprobs = rollouts[i].teacher_logprobs
-            teacher_logprobs = teacher_logprobs[:-1] + [0]
-            if self.config.train.train_policy.collect_rollout_logprobs:
+            if (
+                self.config.train.train_policy.collect_rollout_logprobs
+                and teacher_logprobs is not None
+            ):
                 sampled_completion_logprobs = rollouts[i].completion_logprobs
                 sampled_prompt_logprobs = rollouts[i].prompt_logprobs
                 sampled_logprobs = (
@@ -573,6 +579,22 @@ class GRPOTrainer(LLMTrainer):
                 assert (
                     len(sampled_logprobs) == len(teacher_logprobs)
                 ), f"sampled_logprobs: {len(sampled_logprobs)} != teacher_logprobs: {len(teacher_logprobs)}"
+            if teacher_logprobs is None:
+                logger.warning(
+                    f"[Policy] Teacher logprobs is None for rollout {i}, using [0] * {computed_max_len} and set the logprob_masks to all 0 to avoid the loss calculation due to lack of teacher logprobs"
+                )
+                teacher_logprobs = [0] * computed_max_len
+                if hasattr(processed_samples[i], "logprob_masks"):
+                    # set the logprob_masks to all 0 to avoid the loss calculation due to lack of teacher logprobs
+                    processed_samples[i].logprob_masks = [
+                        0 for _ in processed_samples[i].logprob_masks
+                    ]
+                else:
+                    processed_samples[i]["logprob_masks"] = [
+                        0 for _ in processed_samples[i]["logprob_masks"]
+                    ]
+
+            teacher_logprobs = teacher_logprobs[:-1] + [0]
             teacher_logprobs_list.append(teacher_logprobs)
 
         return torch.tensor(
@@ -896,13 +918,12 @@ class GRPOTrainer(LLMTrainer):
                                 )
 
                                 if self.config.distillation.enable:
-                                    minibatched_teacher_logprobs = (
-                                        self.collate_teacher_logprobs(
-                                            rollouts=[
-                                                rollouts[i] for i in mini_batch_indices
-                                            ],
-                                            computed_max_len=computed_max_len,
-                                        )
+                                    minibatched_teacher_logprobs = self.collate_teacher_logprobs(
+                                        rollouts=[
+                                            rollouts[i] for i in mini_batch_indices
+                                        ],
+                                        processed_samples=minibatched_processed_samples,
+                                        computed_max_len=computed_max_len,
                                     )
                                 user_mini_batch: Dict[str, Any] = (
                                     self.data_packer.policy_collate_fn(
