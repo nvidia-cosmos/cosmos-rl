@@ -30,7 +30,10 @@ from cosmos_rl.utils.ipc import (
     named_tensors_to_serialize,
     named_tensors_from_serialize,
 )
-from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import apply_fp8_linear_patch
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+    apply_fp8_linear_patch,
+    simplify_process_weights_after_loading,
+)
 from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
 
 
@@ -68,6 +71,12 @@ class VLLMColocateWorkerExtension:
 
         with set_current_vllm_config(self.vllm_config):
             apply_fp8_linear_patch(self._get_model())
+
+    def simplify_process_weights_after_loading(self):
+        """
+        Simplify the process weights after loading to quantize the weight of linear only in `rowwise` mode.
+        """
+        simplify_process_weights_after_loading()
 
 
 @RolloutRegistry.register(rollout_type="vllm_async")
@@ -162,6 +171,11 @@ class vLLMRolloutAsync(vLLMRollout):
             if self.quantization == "fp8":
                 asyncio.run(
                     self.rollout_engine.collective_rpc("apply_fp8_linear_patch")
+                )
+                asyncio.run(
+                    self.rollout_engine.collective_rpc(
+                        "simplify_process_weights_after_loading"
+                    )
                 )
 
     def post_init_engine_hook(
