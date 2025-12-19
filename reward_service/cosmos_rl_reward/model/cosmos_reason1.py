@@ -245,7 +245,7 @@ class CosmosReason1Reward(BaseRewardHandler):
         all_yes_logit = []
         all_no_logit = []
         if "video_infos" not in metadata:
-            infos = [{}] * len(images)
+            infos = [{} for _ in range(len(images))]
         else:
             infos = metadata["video_infos"]
         info_batched = np.array_split(infos, np.ceil(len(infos) / batch_size))

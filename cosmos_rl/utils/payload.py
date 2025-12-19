@@ -18,20 +18,21 @@ from cosmos_rl.dispatcher.data.schema import Rollout, RLPayload
 
 
 def populate_for_none_fields(payload: RLPayload):
+    len_of_rewards = len(payload.rewards)
     if payload.filter_rewards is None:
-        payload.filter_rewards = [0.0] * len(payload.rewards)
+        payload.filter_rewards = [0.0] * len_of_rewards
     if payload.completion_logprobs is None:
-        payload.completion_logprobs = [[]] * len(payload.rewards)
+        payload.completion_logprobs = [[] for _ in range(len_of_rewards)]
     if payload.completion_token_ids is None:
-        payload.completion_token_ids = [[]] * len(payload.rewards)
+        payload.completion_token_ids = [[] for _ in range(len_of_rewards)]
     if payload.report_metrics is None:
-        payload.report_metrics = [{} for _ in range(len(payload.rewards))]
+        payload.report_metrics = [{} for _ in range(len_of_rewards)]
     if payload.teacher_result_uuids is None:
-        payload.teacher_result_uuids = [""] * len(payload.rewards)
+        payload.teacher_result_uuids = [""] * len_of_rewards
     if payload.completions is None:
-        payload.completions = [None] * len(payload.rewards)
+        payload.completions = [None] * len_of_rewards
     if payload.completed_conversations is None:
-        payload.completed_conversations = [None] * len(payload.rewards)
+        payload.completed_conversations = [None] * len_of_rewards
 
 
 def extract_rollouts(
