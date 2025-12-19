@@ -33,6 +33,8 @@ def populate_for_none_fields(payload: RLPayload):
         payload.completions = [None] * len_of_rewards
     if payload.completed_conversations is None:
         payload.completed_conversations = [None] * len_of_rewards
+    if payload.extra_info is None:
+        payload.extra_info = [{} for _ in range(len_of_rewards)]
 
 
 def extract_rollouts(
@@ -49,12 +51,17 @@ def extract_rollouts(
             # if this func is called for validation, we don't need to check the length of `completions`.
             assert (
                 len(payload.completions)
-                == len(payload.completed_conversations)
                 == len(payload.rewards)
                 == len(payload.advantages)
-                == len(payload.n_ignore_prefix_tokens)
-            ), "Length of completions, completed_conversations, rewards, advantages and n_ignore_prefix_tokens must be the same"
-
+            ), "Length of completions, rewards and advantages must be the same"
+            if payload.completed_conversations is not None:
+                assert len(payload.completions) == len(
+                    payload.completed_conversations
+                ), "Length of completions and completed_conversations must be the same"
+            if payload.n_ignore_prefix_tokens is not None:
+                assert len(payload.completions) == len(
+                    payload.n_ignore_prefix_tokens
+                ), "Length of completions and n_ignore_prefix_tokens must be the same"
         populate_for_none_fields(payload)
 
         rollouts = [
@@ -89,6 +96,13 @@ def extract_rollouts(
                 payload.teacher_result_uuids,
             )
         ]
+        # Extract the item from extra_info dict to single rollout's extra_info
+        if payload.extra_info is not None:
+            for idx, rollout in enumerate(rollouts):
+                rollout.extra_info = {}
+                for key, value in payload.extra_info.items():
+                    rollout.extra_info[key] = value[idx]
+
         assert all(
             rollout.prompt_idx >= 0 for rollout in rollouts
         ), "All rollouts should have a valid prompt index"

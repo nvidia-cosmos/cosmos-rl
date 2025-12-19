@@ -94,7 +94,7 @@ class DiffusersTrainer(Trainer):
         self.build_optimizers()
         self.lr_schedulers = None
 
-        self.is_video = config.policy.diffusers_config.is_video
+        self.is_video = config.policy.diffusers.is_video
         self.is_lora = config.policy.lora is not None
 
     def build_optimizers(self):

@@ -62,6 +62,7 @@ def make_request_with_retry(
     initial_delay: float = COSMOS_HTTP_RETRY_CONFIG.initial_delay,
     max_delay: float = COSMOS_HTTP_RETRY_CONFIG.max_delay,
     backoff_factor: float = COSMOS_HTTP_RETRY_CONFIG.backoff_factor,
+    timeout: float = COSMOS_HTTP_RETRY_CONFIG.timeout,
 ) -> Any:
     """
     Make an HTTP GET request with exponential backoff retry logic.
@@ -76,6 +77,7 @@ def make_request_with_retry(
         initial_delay (float): Initial delay between retries in seconds
         max_delay (float): Maximum delay between retries in seconds
         backoff_factor (float): Factor to increase delay between retries
+        timeout (float): Timeout for each request in seconds
 
     Returns:
         Any: The response object from the successful request or redis client request.
@@ -100,10 +102,10 @@ def make_request_with_retry(
                 request = requests[request_idx]
                 if urls is not None:
                     url = urls[url_index]
-                    r = request(url)
+                    r = request(url, timeout=timeout)
                 else:
                     url = None
-                    r = request()
+                    r = request(timeout=timeout)
                 if response_parser is not None:
                     response_parser(r)
                 return r
