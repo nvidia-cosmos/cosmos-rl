@@ -104,6 +104,7 @@ class CommMixin:
         data_packer: Optional[BaseDataPacker] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
     ):
+        logger.info(f"[Comm] Building data packer from {self.config.policy.model_name_or_path}")
         hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path, trust_remote_code=True
         )

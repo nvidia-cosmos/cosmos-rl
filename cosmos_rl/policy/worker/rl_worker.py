@@ -140,11 +140,13 @@ class RLPolicyWorker(PolicyWorkerBase):
         data_packer: Optional[BaseDataPacker] = None,
         val_data_packer: Optional[BaseDataPacker] = None,
     ):
+        logger.info(f"[Policy] Setting up data packer and data fetcher for RL worker")
         # setup data packer first
         self.init_data_packer(
             data_packer=data_packer,
             val_data_packer=val_data_packer,
         )
+        logger.info(f"[Policy] Initialized data packer and data fetcher for RL worker")
         # Set up data fetcher
         self.data_fetcher = WorkerDataFetcher(
             config=self.config,

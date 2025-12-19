@@ -172,6 +172,8 @@ maxmemory-policy allkeys-lfu
             ips=["0.0.0.0"], port=redis_free_port
         )
 
+        logger.info(f"[Controller] Setting up policy status manager")
+
         self.policy_status_manager.setup(
             config,
             self.redis_controller,
@@ -189,7 +191,9 @@ maxmemory-policy allkeys-lfu
             custom_logger_fns=custom_logger_fns,
             hook_fns=hook_fns,
         )
+        logger.info(f"[Controller] Setting up rollout status manager")
         self.rollout_status_manager.setup(config, self.redis_controller)
+
 
         # Register the exit function to be called when the program exits
         def exit_server(redis_server_proc, redis_free_port):

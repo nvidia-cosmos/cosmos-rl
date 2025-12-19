@@ -165,21 +165,25 @@ class OpenVLARollout(RolloutBase):
         if not self._engine_initialized:
             model_path = self.config.policy.model_name_or_path
 
-            if self.model_type == "openvla-oft":
-                from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import (
-                    PrismaticProcessor,
-                )
-            elif self.model_type == "openvla":
-                from cosmos_rl.policy.model.vla.openvla.processing_prismatic import (
-                    PrismaticProcessor,
-                )
+            if "pi05" in model_path.lower():
+                from transformers import AutoTokenizer
+                self.tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b")
             else:
-                raise ValueError(f"Unsupported vla model type: {self.model_type}")
+                if self.model_type == "openvla-oft":
+                    from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import (
+                        PrismaticProcessor,
+                    )
+                elif self.model_type == "openvla":
+                    from cosmos_rl.policy.model.vla.openvla.processing_prismatic import (
+                        PrismaticProcessor,
+                    )
+                else:
+                    raise ValueError(f"Unsupported vla model type: {self.model_type}")
 
-            self.processor = PrismaticProcessor.from_pretrained(
-                model_path, trust_remote_code=True
-            )
-            self.tokenizer = self.processor.tokenizer
+                self.processor = PrismaticProcessor.from_pretrained(
+                    model_path, trust_remote_code=True
+                )
+                self.tokenizer = self.processor.tokenizer
 
             self.model = ModelRegistry.build_model(self.config)
 
@@ -205,7 +209,8 @@ class OpenVLARollout(RolloutBase):
         is_validation: bool = False,
         **kwargs,
     ):
-        self.model._set_fsdp_reshard_after_forward("never")
+        if hasattr(self.model, "_set_fsdp_reshard_after_forward"):
+            self.model._set_fsdp_reshard_after_forward("never")
 
         if is_validation:
             results = self._rollout_validation(
@@ -216,9 +221,10 @@ class OpenVLARollout(RolloutBase):
                 payloads, stream, data_packer, data_fetcher, **kwargs
             )
 
-        self.model._set_fsdp_reshard_after_forward(
-            self.config.train.fsdp_reshard_after_forward
-        )
+        if hasattr(self.model, "_set_fsdp_reshard_after_forward"):
+            self.model._set_fsdp_reshard_after_forward(
+                self.config.train.fsdp_reshard_after_forward
+            )
 
         return results
 

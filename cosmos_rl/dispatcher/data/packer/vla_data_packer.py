@@ -314,4 +314,4 @@ class VLADataPacker(DataPacker):
 
 
 # Register VLA data packer for VLA model types
-DataPacker.register(["openvla", "openvla-oft"], VLADataPacker)
+DataPacker.register(["openvla", "openvla-oft", "pi05"], VLADataPacker)

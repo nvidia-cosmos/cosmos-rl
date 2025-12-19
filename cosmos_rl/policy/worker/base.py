@@ -34,6 +34,7 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
         super(PolicyWorkerBase, self).__init__(config)
         self.parallel_dims = parallel_dims
 
+        logger.info(f"[Policy] Building model from {self.config.policy.model_name_or_path}")
         self.hf_config = util.retry(AutoConfig.from_pretrained)(
             self.config.policy.model_name_or_path,
             trust_remote_code=True,

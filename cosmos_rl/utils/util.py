@@ -740,6 +740,9 @@ def retry(func=None, *, max_retry=10, max_delay=30.0):
                     return f(*args, **kwargs)
                 except Exception as e:
                     logger.warning(f"Retrying {f.__name__} due to error: {e}")
+                    # print stack trace
+                    import traceback
+                    traceback.print_exc()
                     if attempt == max_retry:
                         # out of retries: re-raise last exception
                         raise
@@ -1241,10 +1244,34 @@ def replace_with_liger_equivalents(root: torch.nn.Module) -> None:
 
 @functools.lru_cache(maxsize=None)
 def setup_tokenizer(model_name_or_path: str) -> AutoTokenizer:
-    tokenizer = retry(AutoTokenizer.from_pretrained)(
-        model_name_or_path,
-        trust_remote_code=True,
-    )
+    # Special handling for Pi05/Pi0 models - they use Gemma tokenizer but don't bundle tokenizer files
+    # Check if the config is Pi05/Pi0 and load tokenizer from a Gemma model instead
+    try:
+        from transformers import AutoConfig
+        config = retry(AutoConfig.from_pretrained)(
+            model_name_or_path, trust_remote_code=True
+        )
+        if hasattr(config, "model_type") and config.model_type in ["pi05", "pi0"]:
+            logger.info(
+                f"Detected {config.model_type} model. Loading tokenizer from google/gemma-2b instead of {model_name_or_path}"
+            )
+            # Pi05/Pi0 use Gemma tokenizer - load from a Gemma model
+            tokenizer = retry(AutoTokenizer.from_pretrained)(
+                "google/gemma-2b",
+                trust_remote_code=True,
+            )
+        else:
+            tokenizer = retry(AutoTokenizer.from_pretrained)(
+                model_name_or_path,
+                trust_remote_code=True,
+            )
+    except Exception as e:
+        logger.debug(f"Could not load config to check model type: {e}. Trying direct tokenizer load.")
+        tokenizer = retry(AutoTokenizer.from_pretrained)(
+            model_name_or_path,
+            trust_remote_code=True,
+        )
+    
     # Ensure pad_token_id is set; fallback to eos_token_id if missing (e.g., for models like Mistral)
     if getattr(tokenizer, "pad_token_id", None) is None:
         try:
