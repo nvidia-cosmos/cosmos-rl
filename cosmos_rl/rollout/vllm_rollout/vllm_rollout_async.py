@@ -119,8 +119,6 @@ class vLLMRolloutAsync(vLLMRollout):
                 % (tp_size, pp_size, rollout_parallelism.world_size)
             )
 
-            if quantization == "none":
-                quantization = None
             self.quantization = quantization
 
             policy_config = self.config.policy
