@@ -470,6 +470,11 @@ class PolicyStatusManager:
         if config.validation.enable and config.validation.val_before_train:
             self.data_fetcher.validation_activate_dataloader(0)
 
+        if self.config.validation.enable and (
+            self.config.validation.freq == 1 or self.total_steps == 1
+        ):
+            self.data_fetcher.validation_activate_dataloader(1)
+
         if (
             not self.policy_init_done
             and len(valid_replicas) >= config.policy.parallelism.n_init_replicas
@@ -1036,13 +1041,6 @@ class PolicyStatusManager:
                 self.all_ready_or_reduced() and self.rollouts_enough_for_one_step()
             )
 
-        if self.all_ready_or_reduced():
-            if self.config.validation.enable and (
-                self.current_step % self.config.validation.freq == 0
-                or self.current_step == self.total_steps
-            ):
-                self.data_fetcher.validation_activate_dataloader(self.current_step)
-
         # If the last command is fake, we need to trigger data fetch and training no matter
         # whether there are enough rollouts or whether replicas are `ready` or `reduced`.
         if all_ready_or_reduced:
@@ -1052,6 +1050,12 @@ class PolicyStatusManager:
 
             # From controller's perspective, the training step is already increased
             self.current_step += 1
+
+            if self.config.validation.enable and (
+                self.current_step % self.config.validation.freq == 0
+                or self.current_step == self.total_steps
+            ):
+                self.data_fetcher.validation_activate_dataloader(self.current_step)
 
             # FIXME: (lms) will this dipatch style cause non-alignment with VeRL?
             # This dispatch style will cause rollouts from same prompt may be dispatched to different replicas.
