@@ -1043,14 +1043,14 @@ class PolicyStatusManager:
             # Decrease the consumed rollouts number.
             self.remain_samples_num -= required_rollouts
 
-            # From controller's perspective, the training step is already increased
-            self.current_step += 1
-
             if self.config.validation.enable and (
                 self.current_step % self.config.validation.freq == 0
                 or self.current_step == self.total_steps
             ):
                 self.data_fetcher.validation_activate_dataloader(self.current_step)
+
+            # From controller's perspective, the training step is already increased
+            self.current_step += 1
 
             # FIXME: (lms) will this dipatch style cause non-alignment with VeRL?
             # This dispatch style will cause rollouts from same prompt may be dispatched to different replicas.

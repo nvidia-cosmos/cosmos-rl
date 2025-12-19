@@ -211,10 +211,10 @@ class OpenVLARollout(RolloutBase):
             results = self._rollout_validation(
                 payloads, stream, data_packer, data_fetcher, **kwargs
             )
-
-        results = self._rollout_collection(
-            payloads, stream, data_packer, data_fetcher, **kwargs
-        )
+        else:
+            results = self._rollout_collection(
+                payloads, stream, data_packer, data_fetcher, **kwargs
+            )
 
         self.model._set_fsdp_reshard_after_forward(
             self.config.train.fsdp_reshard_after_forward
