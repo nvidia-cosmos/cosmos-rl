@@ -100,13 +100,17 @@ class RolloutGroup:
         if self.payload.completed_conversations is not None:
             completed_conversations = self.payload.completed_conversations
         else:
-            completed_conversations = [[]] * len(self.payload.completions)
+            completed_conversations = [[] for _ in range(len(self.payload.completions))]
 
         if self.payload.completion_logprobs is None:
-            self.payload.completion_logprobs = [[]] * len(self.payload.completions)
+            self.payload.completion_logprobs = [
+                [] for _ in range(len(self.payload.completions))
+            ]
 
         if self.payload.completion_token_ids is None:
-            self.payload.completion_token_ids = [[]] * len(self.payload.completions)
+            self.payload.completion_token_ids = [
+                [] for _ in range(len(self.payload.completions))
+            ]
 
         return [
             Rollout(
