@@ -112,6 +112,7 @@ class CommMixin:
             model_type = hf_config.model_type
         else:
             model_type = "diffusers"
+            is_vlm = False
 
         if data_packer:
             assert isinstance(

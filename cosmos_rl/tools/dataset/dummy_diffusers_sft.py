@@ -33,9 +33,9 @@ def get_dummy_visual_dataset(
     config: CosmosConfig,
     **kwargs,
 ):
-    is_video = config.policy.diffusers_config.is_video
-    height, width = config.policy.diffusers_config.inference_size
-    train_frames = config.policy.diffusers_config.train_frames
+    is_video = config.policy.diffusers.is_video
+    height, width = config.policy.diffusers.inference_size
+    train_frames = config.policy.diffusers.train_frames
 
     def visual_fn():
         if is_video:
@@ -59,11 +59,11 @@ def get_dummy_validation_dataset(
     config: CosmosConfig,
     **kwargs,
 ):
-    is_video = config.policy.diffusers_config.is_video
-    height, width = config.policy.diffusers_config.inference_size
-    infernece_frame = config.policy.diffusers_config.inference_frames
-    inference_step = config.policy.diffusers_config.inference_step
-    guidance_scale = config.policy.diffusers_config.guidance_scale
+    is_video = config.policy.diffusers.is_video
+    height, width = config.policy.diffusers.inference_size
+    infernece_frame = config.policy.diffusers.inference_frames
+    inference_step = config.policy.diffusers.sample.num_steps
+    guidance_scale = config.policy.diffusers.sample.guidance_scale
 
     dict_dataset = {
         "height": LambdaDataset(lambda: height, length=32),

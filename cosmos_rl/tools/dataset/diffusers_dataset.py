@@ -42,9 +42,9 @@ class LocalDiffusersDataset(Dataset):
         """
         self.config = config
         # TODO (yy): set by config
-        self.is_video = config.policy.diffusers_config.is_video
-        self.height, self.width = config.policy.diffusers_config.inference_size
-        self.train_frames = config.policy.diffusers_config.train_frames
+        self.is_video = config.policy.diffusers.is_video
+        self.height, self.width = config.policy.diffusers.inference_size
+        self.train_frames = config.policy.diffusers.train_frames
         self.dataset_dir = self.config.train.train_policy.dataset.name
         prompt_files = glob.glob(os.path.join(self.dataset_dir, "*.json"))
         if self.is_video:
@@ -153,11 +153,11 @@ class LocalDiffusersValDataset(Dataset):
             )
             return
         local_path = config.validation.dataset.name
-        self.is_video = config.policy.diffusers_config.is_video
-        self.height, self.width = config.policy.diffusers_config.inference_size
-        self.infernece_frame = config.policy.diffusers_config.inference_frames
-        self.inference_step = config.policy.diffusers_config.inference_step
-        self.guidance_scale = config.policy.diffusers_config.guidance_scale
+        self.is_video = config.policy.diffusers.is_video
+        self.height, self.width = config.policy.diffusers.inference_size
+        self.infernece_frame = config.policy.diffusers.inference_frames
+        self.inference_step = config.policy.diffusers.sample.num_steps
+        self.guidance_scale = config.policy.diffusers.sample.guidance_scale
         self.prompts = json.load(open(local_path))
 
     def __len__(self):
