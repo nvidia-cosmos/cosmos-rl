@@ -445,8 +445,8 @@ class AsyncDisaggregatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
                     continue
 
                 # TODO(zjx):
-                # 1. 在 update weight 之前，应当等待正在执行的 rollout 任务完成。
-                # 2. 在 validation 时，应当确保 weight update 任务不要运行
+                # 1. should wait for the ongoing rollout tasks to complete before updating weight.
+                # 2. should ensure that the weight update task does not run during validation.
                 if self.validation_flag.is_set():
                     # If encounter validation flag during last rollout generation or this command fetch, do validation first.
                     await self.do_validation()
