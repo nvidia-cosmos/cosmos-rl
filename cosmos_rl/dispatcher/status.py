@@ -1036,18 +1036,19 @@ class PolicyStatusManager:
                 self.all_ready_or_reduced() and self.rollouts_enough_for_one_step()
             )
 
+        if self.all_ready_or_reduced():
+            if self.config.validation.enable and (
+                self.current_step % self.config.validation.freq == 0
+                or self.current_step == self.total_steps
+            ):
+                self.data_fetcher.validation_activate_dataloader(self.current_step)
+
         # If the last command is fake, we need to trigger data fetch and training no matter
         # whether there are enough rollouts or whether replicas are `ready` or `reduced`.
         if all_ready_or_reduced:
             rollouts_of_this_step: List[Rollout] = []
             # Decrease the consumed rollouts number.
             self.remain_samples_num -= required_rollouts
-
-            if self.config.validation.enable and (
-                self.current_step % self.config.validation.freq == 0
-                or self.current_step == self.total_steps
-            ):
-                self.data_fetcher.validation_activate_dataloader(self.current_step)
 
             # From controller's perspective, the training step is already increased
             self.current_step += 1
