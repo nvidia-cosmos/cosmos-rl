@@ -857,8 +857,8 @@ class PolicyConfig(BaseModel):
         description="Pattern-based configuration to freeze parts of the model. "
         "A list of regex patterns that match against parameter names; "
         "matched parameters will be frozen (requires_grad=False). "
-        "Example: ['visual\\\\..*'] freezes all visual components; "
-        "['model\\\\.layers\\\\.[0-9]\\\\.'] freezes layers 0-9.",
+        "Example: freeze_pattern = ['^visual\\..*'] freezes all visual components; "
+        "freeze_pattern = ['^model\\.layers\\.[0-9]+\\.'] freezes layers 0-9.",
     )
     enable_liger_kernel: bool = Field(
         default=False, description="Whether to use liger kernel."
