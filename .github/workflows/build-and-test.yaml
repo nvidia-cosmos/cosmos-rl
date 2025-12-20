@@ -56,6 +56,7 @@ jobs:
           ${DOCKER_RUN} python tests/test_comm.py
           ${DOCKER_RUN} python tests/test_fp8.py
           ${DOCKER_RUN} python tests/test_lora.py
+          ${DOCKER_RUN} python tests/test_freeze_pattern.py
           # ${DOCKER_RUN} python tests/test_grad_allreduce.py
           ${DOCKER_RUN} python tests/test_high_availability_nccl.py
           ${DOCKER_RUN} python tests/test_nccl_collectives.py
