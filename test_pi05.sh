@@ -1,0 +1,16 @@
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+export TOKENIZERS_PARALLELISM=0
+CONFIG=configs/pi05/pi05-libero10-grpo.toml
+
+ROBOT_PLATFORM=LIBERO PYTHONPATH=../LIBERO \
+uv run cosmos-rl --config $CONFIG \
+        cosmos_rl/tools/dataset/libero_grpo.py \
+        --policy 4 \
+        --rollout 4 \

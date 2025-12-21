@@ -20,12 +20,47 @@ Reimplemented from verl/utils/libero_utils.py to remove external dependencies.
 """
 
 import os
+import math
 import numpy as np
 from typing import Dict
 from cosmos_rl.utils.logging import logger
 
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
+
+
+def _quat2axisangle(quat):
+    """
+    Copied from robosuite: https://github.com/ARISE-Initiative/robosuite/blob/eafb81f54ffc104f905ee48a16bb15f059176ad3/robosuite/utils/transform_utils.py#L490C1-L512C55
+    """
+    # clip quaternion
+    if quat[3] > 1.0:
+        quat[3] = 1.0
+    elif quat[3] < -1.0:
+        quat[3] = -1.0
+
+    den = np.sqrt(1.0 - quat[3] * quat[3])
+    if math.isclose(den, 0.0):
+        # This is (close to) a zero degree rotation, immediately return
+        return np.zeros(3)
+
+    return (quat[:3] * 2.0 * math.acos(quat[3])) / den
+
+
+def libero_obs_to_state(obs: Dict) -> np.ndarray:
+    """
+    Build the low-dimensional LIBERO state vector used by OpenPI LIBERO example.
+
+    This intentionally matches `official_openpi/examples/libero/main.py` exactly:
+      np.concatenate((obs["robot0_eef_pos"], _quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"]))
+    """
+    return np.concatenate(
+        (
+            obs["robot0_eef_pos"],
+            _quat2axisangle(obs["robot0_eef_quat"]),
+            obs["robot0_gripper_qpos"],
+        )
+    )
 
 
 def get_libero_env(task, model_family: str, resolution: int = 256):
@@ -216,4 +251,23 @@ def obs_to_vla_input(obs: Dict, is_robotwin: bool = False) -> Dict:
             # Convert back to numpy array
             img = np.array(pil_img, dtype=np.uint8)
 
-        return {"full_image": img}
+        out = {"full_image": img}
+
+        # Provide wrist image for OpenPI-style multi-view models if available.
+        wrist = obs.get("robot0_eye_in_hand_image", None)
+        if wrist is not None:
+            out["state"] = libero_obs_to_state(obs)
+            if wrist.shape[0] != 224 or wrist.shape[1] != 224:
+                from PIL import Image
+                import io
+
+                pil_img = Image.fromarray(wrist.astype(np.uint8))
+                buffer = io.BytesIO()
+                pil_img.save(buffer, format="JPEG", quality=95)
+                buffer.seek(0)
+                pil_img = Image.open(buffer)
+                pil_img = pil_img.resize((224, 224), Image.Resampling.LANCZOS)
+                wrist = np.array(pil_img, dtype=np.uint8)
+            out["wrist_image"] = wrist
+
+        return out

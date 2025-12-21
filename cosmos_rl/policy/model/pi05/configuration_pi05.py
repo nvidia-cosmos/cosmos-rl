@@ -41,4 +41,3 @@ class Pi05Config(PretrainedConfig):
         self.action_expert_variant = action_expert_variant
         self.dtype = dtype
 
-

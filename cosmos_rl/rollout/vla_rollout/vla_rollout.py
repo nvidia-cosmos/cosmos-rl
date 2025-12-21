@@ -15,6 +15,7 @@
 
 from collections import defaultdict
 import os
+from types import SimpleNamespace
 import torch
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
@@ -176,13 +177,21 @@ class OpenVLARollout(RolloutBase):
                 from cosmos_rl.policy.model.vla.openvla.processing_prismatic import (
                     PrismaticProcessor,
                 )
+            elif self.model_type in ("pi05", "pi0"):
+                PrismaticProcessor = None  # noqa: N806
+                from cosmos_rl.policy.model.pi05.tokenizer import PaligemmaTokenizer
+                self.openpi_tokenizer = PaligemmaTokenizer(max_len=self.hf_config.max_token_len)
             else:
                 raise ValueError(f"Unsupported vla model type: {self.model_type}")
 
-            self.processor = PrismaticProcessor.from_pretrained(
-                model_path, trust_remote_code=True
-            )
-            self.tokenizer = self.processor.tokenizer
+            if PrismaticProcessor is not None:
+                self.processor = PrismaticProcessor.from_pretrained(
+                    model_path, trust_remote_code=True
+                )
+                self.tokenizer = self.processor.tokenizer
+            else:
+                self.processor = None
+                self.tokenizer = None
 
             self.model = ModelRegistry.build_model(self.config)
 
@@ -198,6 +207,117 @@ class OpenVLARollout(RolloutBase):
             )
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")
+
+    def _process_input_pi05(
+        self, inputs: List[Dict], task_descriptions: List[str]
+    ) -> Any:
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        batch_size = len(inputs)
+
+        def _to_pi05_img(arr: np.ndarray) -> torch.Tensor:
+            # OpenPI expects images in [-1, 1]. Resizing/padding is handled inside model preprocessing.
+            img = Image.fromarray(arr).convert("RGB")
+            t = torch.from_numpy(np.array(img)).float()  # [H, W, C]
+            return t / 127.5 - 1.0  # [-1, 1], channels-last
+
+        base_imgs: list[torch.Tensor] = []
+        wrist_imgs: list[torch.Tensor] = []
+        for inp in inputs:
+            if "full_image" in inp:
+                base_imgs.append(_to_pi05_img(inp["full_image"]))
+            elif "agentview_image" in inp:
+                base_imgs.append(_to_pi05_img(inp["agentview_image"]))
+            else:
+                base_imgs.append(torch.zeros(224, 224, 3, dtype=torch.float32))
+
+            if "wrist_image" in inp:
+                wrist_imgs.append(_to_pi05_img(inp["wrist_image"]))
+            else:
+                wrist_imgs.append(torch.zeros(224, 224, 3, dtype=torch.float32))
+
+        base_imgs_t = torch.stack(base_imgs, 0).to(device)  # [B, H, W, C]
+        wrist_imgs_t = torch.stack(wrist_imgs, 0).to(device)
+
+        images = {
+            "base_0_rgb": base_imgs_t,
+            "left_wrist_0_rgb": wrist_imgs_t,
+            "right_wrist_0_rgb": torch.zeros_like(base_imgs_t),
+        }
+        image_masks = {
+            "base_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
+            "left_wrist_0_rgb": torch.tensor(
+                ["wrist_image" in x for x in inputs], dtype=torch.bool, device=device
+            ),
+            "right_wrist_0_rgb": torch.zeros(batch_size, dtype=torch.bool, device=device),
+        }
+
+        action_dim = self.hf_config.action_dim
+        state_list: list[torch.Tensor] = []
+        for inp in inputs:
+            st = inp.get("state", None)
+            if st is None:
+                st_np = np.zeros((action_dim,), dtype=np.float32)
+            else:
+                st_np = np.asarray(st, dtype=np.float32).reshape(-1)
+                if st_np.shape[0] < action_dim:
+                    st_np = np.pad(st_np, (0, action_dim - st_np.shape[0]))
+                elif st_np.shape[0] > action_dim:
+                    st_np = st_np[:action_dim]
+            state_list.append(torch.from_numpy(st_np).to(torch.float32))
+        state = torch.stack(state_list, dim=0).to(device)
+
+        tokenized_prompt = []
+        tokenized_prompt_mask = []
+        for i in range(batch_size):
+            prompt = task_descriptions[i]
+            state_np = None
+            if self.hf_config.discrete_state_input:
+                # OpenPI expects state normalized to [-1, 1] before discretization.
+                state_np = state[i].detach().float().cpu().numpy().astype(np.float32)
+                state_np = np.clip(state_np, -1.0, 1.0)
+            tokens, mask = self.openpi_tokenizer.tokenize(prompt, state=state_np)
+            tokenized_prompt.append(torch.from_numpy(tokens).to(torch.long))
+            tokenized_prompt_mask.append(torch.from_numpy(mask).to(torch.bool))
+        tokenized_prompt = torch.stack(tokenized_prompt, dim=0).to(device)
+        tokenized_prompt_mask = torch.stack(tokenized_prompt_mask, dim=0).to(device)
+        return SimpleNamespace(
+            images=images,
+            image_masks=image_masks,
+            state=state,
+            tokenized_prompt=tokenized_prompt,
+            tokenized_prompt_mask=tokenized_prompt_mask,
+            token_ar_mask=torch.zeros_like(tokenized_prompt, dtype=torch.bool),
+            token_loss_mask=torch.zeros_like(tokenized_prompt, dtype=torch.bool),
+        )
+
+    def _generate_one_step_pi05(self, observation: Any, is_valid: bool = False, is_training: bool = False):
+        """Generate one PI05 action chunk and adapt it to the LIBERO env_worker format.
+        
+        Args:
+            observation: PI05 observation object
+            is_valid: Whether this is validation mode
+            is_training: Whether to return training data (chains, denoise_inds)
+        """
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            # sample_actions always returns dict (matching RLinf)
+            mode = "train" if is_training else "eval"
+            outputs = self.model.sample_actions(
+                self.device, observation, mode=mode
+            )
+            actions = outputs["actions"]
+
+        actions = actions[:, :self.hf_config.action_horizon, :self.hf_config.action_env_dim].to(torch.float32)
+
+        # If PI05 gripper appears to be in env space [-1, 1], map it to [0, 1] expected by env_worker.
+        gripper = actions[..., -1]
+        if torch.min(gripper) < -0.1:
+            actions[..., -1] = torch.clamp((1.0 - gripper) * 0.5, 0.0, 1.0)
+
+        # Normalize output keys to Cosmos rollout expectations.
+        outputs["action"] = actions.detach().cpu().numpy()
+        
+        return outputs
 
     def rollout_generation(
         self,
@@ -676,6 +796,57 @@ class OpenVLARollout(RolloutBase):
         else:
             logger.info(f"[Validation] success rate: {n_success}/{group_size}")
 
+        # PI05/PI0 path
+        if self.model_type in ("pi05", "pi0"):
+            if is_validation:
+                # Eval mode: no training data needed
+                completions = [
+                    {
+                        "complete": bool(task_records[i]["complete"]),
+                        "finish_step": int(task_records[i]["finish_step"]),
+                    }
+                    for i in range(group_size)
+                ]
+                return [RolloutResult(completions=[c]) for c in completions]
+            
+            # Training mode: build trajectories for GRPO (RLinf-style chain replay)
+            keys = (
+                "chains",
+                "denoise_inds",
+                "old_log_probs",
+                "images",
+                "image_masks",
+                "state",
+                "tokenized_prompt",
+                "tokenized_prompt_mask",
+            )
+            if not vla_history:
+                raise RuntimeError("PI05 rollout produced empty vla_history in training mode.")
+            missing = [k for k in keys if k not in vla_history[0]]
+            if missing:
+                raise KeyError(
+                    f"PI05 rollout missing keys={missing} in step_data. Keys={list(vla_history[0].keys())}"
+                )
+
+            stacked = {k: torch.stack([s[k] for s in vla_history], 0) for k in keys}  # [T, B, ...]
+            trajectories = [
+                {k: stacked[k][:, i].detach().cpu() for k in keys}
+                for i in range(group_size)
+            ]
+
+            buffer_dir = os.path.join(self.config.train.output_dir, "replay_buffer")
+            completions = [
+                {
+                    "complete": bool(task_records[i]["complete"]),
+                    "finish_step": int(task_records[i]["finish_step"]),
+                    "trajectory_id": save_trajectory_to_buffer(
+                        trajectories[i], buffer_dir=buffer_dir
+                    ),
+                }
+                for i in range(group_size)
+            ]
+            return [RolloutResult(completions=completions)]
+
         # Check GRPO filtering criteria first (before expensive log prob computation)
         num_chunks = len(vla_history)
         trajectories = [{} for _ in range(group_size)]
@@ -797,8 +968,32 @@ class OpenVLARollout(RolloutBase):
             current_inputs = inputs
             current_task_descriptions = task_descriptions
 
-            vla_input = self._process_input(current_inputs, current_task_descriptions)
-            vla_output = self._generate_one_step_oft(vla_input, is_validation)
+            if self.model_type in ("pi05", "pi0"):
+                pi05_obs = self._process_input_pi05(current_inputs, current_task_descriptions)
+                vla_output = self._generate_one_step_pi05(pi05_obs, is_validation, is_training=not is_validation)
+
+                image_keys = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
+                step_data = {
+                    "action": vla_output["action"],
+                    "chains": vla_output["chains"],
+                    "denoise_inds": vla_output["denoise_inds"],
+                    "old_log_probs": vla_output["old_log_probs"],
+                    "images": torch.stack([pi05_obs.images[k] for k in image_keys], dim=1),
+                    "image_masks": torch.stack([pi05_obs.image_masks[k] for k in image_keys], dim=1),
+                    "state": pi05_obs.state,
+                    "tokenized_prompt": pi05_obs.tokenized_prompt,
+                    "tokenized_prompt_mask": pi05_obs.tokenized_prompt_mask,
+                }
+            else:
+                vla_input = self._process_input(current_inputs, current_task_descriptions)
+                vla_output = self._generate_one_step_oft(vla_input, is_validation)
+                step_data = {
+                    "input_ids": vla_input["input_ids"],
+                    "attention_mask": vla_input["attention_mask"],
+                    "pixel_values": vla_input["pixel_values"],
+                    "responses": vla_output["responses"],
+                    "action": vla_output["action"],
+                }
 
             # if task_ids[0] == 0 and trial_ids[0] == 0 and gen_indices[0] == 0:
             #     # logger.info(f"task_suite_name: {task_suite_names[0]}, task_id: {task_ids[0]}, trial_id: {trial_ids[0]}, gen_idx: {gen_indices[0]}")
@@ -809,19 +1004,19 @@ class OpenVLARollout(RolloutBase):
             #     for k, v in vla_output.items():
             #         logger.info(f"vla_output {k} {v.shape}")
 
-            step_data = {
-                "input_ids": vla_input["input_ids"],
-                "attention_mask": vla_input["attention_mask"],
-                "pixel_values": vla_input["pixel_values"],
-                "responses": vla_output["responses"],
-                "action": vla_output["action"],
-            }
-
             vla_history.append(step_data)
+
+            if self.model_type in ("pi05", "pi0"):
+                action_horizon = self.hf_config.action_horizon
+                cfg_replan = self.config.pi05.replan_steps if self.config.pi05.replan_steps is not None else action_horizon
+                replan_steps = max(1, min(cfg_replan, action_horizon))
 
             # Send actions to active workers
             for idx in active_indices:
-                self.sim_input_queues[idx].put(step_data["action"][idx])
+                if self.model_type in ("pi05", "pi0"):
+                    self.sim_input_queues[idx].put(step_data["action"][idx][:replan_steps])
+                else:
+                    self.sim_input_queues[idx].put(step_data["action"][idx])
 
             # Collect results from active workers
             new_inputs = inputs.copy()
@@ -852,7 +1047,11 @@ class OpenVLARollout(RolloutBase):
                     )
 
             inputs = new_inputs
-            step += NUM_ACTIONS_CHUNK
+            if self.model_type in ("pi05", "pi0"):
+                # OpenPI-style: advance by executed replan steps.
+                step += replan_steps
+            else:
+                step += NUM_ACTIONS_CHUNK
 
         # Save rollout videos
         if valid_video:
