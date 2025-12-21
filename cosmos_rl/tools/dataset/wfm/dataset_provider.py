@@ -126,10 +126,10 @@ def get_video_dataset(
     global_parallelism = get_global_parallel_dims()
     assert global_parallelism is not None, "global_parallelism not initialized"
     _, cp_world_size = global_parallelism.cp_coord
-    _, model_world_size = global_parallelism.mp_coord
-    if cp_world_size > 1 or model_world_size > 1:
+    _, tp_world_size = global_parallelism.tp_coord
+    if cp_world_size > 1 or tp_world_size > 1:
         logger.critical(
-            f"Using parallelism size CP :{cp_world_size}, TP :{model_world_size} for video dataset, switch to ShardlistMultiAspectRatioParallelSync distributor"
+            f"Using parallelism size CP :{cp_world_size}, TP :{tp_world_size} for video dataset, switch to ShardlistMultiAspectRatioParallelSync distributor"
         )
         distributor = (
             parallel_sync_multi_aspect_ratio.ShardlistMultiAspectRatioParallelSync(
@@ -221,11 +221,11 @@ def get_image_dataset(
     global_parallelism = get_global_parallel_dims()
     assert global_parallelism is not None, "global_parallelism not initialized"
     _, cp_world_size = global_parallelism.cp_coord
-    _, model_world_size = global_parallelism.mp_coord
+    _, tp_world_size = global_parallelism.tp_coord
 
-    if cp_world_size > 1 or model_world_size > 1:
+    if cp_world_size > 1 or tp_world_size > 1:
         logger.critical(
-            f"Using parallelism size CP :{cp_world_size}, TP :{model_world_size} for video dataset, switch to ShardlistMultiAspectRatioParallelSync distributor"
+            f"Using parallelism size CP :{cp_world_size}, TP :{tp_world_size} for video dataset, switch to ShardlistMultiAspectRatioParallelSync distributor"
         )
         distributor = (
             parallel_sync_multi_aspect_ratio.ShardlistMultiAspectRatioParallelSync(

@@ -381,8 +381,8 @@ def parallel_model_wrapper(
     if dist.is_available() and dist.is_initialized():
         local_rank = int(os.getenv("LOCAL_RANK", 0))
         try:
-            # So we use dp_shard_cp group for DDP, include cp as megatron does: with_context_parallel
-            ddp_group = _COSMOS_GLOBAL_PARALLEL_DIMS.mesh["dp_shard_cp"].get_group()
+            # So we use dp_cp group for DDP, include cp as megatron does: with_context_parallel
+            ddp_group = _COSMOS_GLOBAL_PARALLEL_DIMS.mesh["dp_cp"].get_group()
         except Exception as e:
             logger.info(e)
             logger.info(
@@ -465,10 +465,10 @@ def is_tp_cp_pp_rank0():
     assert (
         _COSMOS_GLOBAL_PARALLEL_DIMS is not None
     ), "global_parallelism not initialized"
-    mp_rank, _ = _COSMOS_GLOBAL_PARALLEL_DIMS.mp_coord
+    tp_rank, _ = _COSMOS_GLOBAL_PARALLEL_DIMS.tp_coord
     cp_rank, _ = _COSMOS_GLOBAL_PARALLEL_DIMS.cp_coord
     pp_rank, _ = _COSMOS_GLOBAL_PARALLEL_DIMS.pp_coord
-    return mp_rank == 0 and pp_rank == 0 and cp_rank == 0
+    return tp_rank == 0 and pp_rank == 0 and cp_rank == 0
 
 
 def initialize_global_parallelism(config: CosmosVisionGenConfig):
@@ -477,15 +477,15 @@ def initialize_global_parallelism(config: CosmosVisionGenConfig):
     tp_size = config.model_parallel.tensor_model_parallel_size
     pp_size = config.model_parallel.pipeline_model_parallel_size
     cp_size = config.model_parallel.context_parallel_size
-    dp_shard_size = config.model.fsdp_shard_size
-    model_size = tp_size * pp_size * cp_size * dp_shard_size
+    model_size = tp_size * pp_size * cp_size
     world_size = dist.get_world_size()
     assert (
         world_size % model_size == 0
     ), f"world_size must be divisible by model_size, got: {world_size} % {model_size} != 0"
-    dp_size = world_size // model_size
+    dp_shard_size = config.model.fsdp_shard_size
+    dp_replicate_size = world_size // (model_size * dp_shard_size)
     _COSMOS_GLOBAL_PARALLEL_DIMS = ParallelDims(
-        dp_replicate=dp_size,
+        dp_replicate=dp_replicate_size,
         dp_shard=dp_shard_size,
         cp=cp_size,
         tp=tp_size,
