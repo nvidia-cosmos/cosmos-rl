@@ -11,6 +11,6 @@ CONFIG=configs/pi05/pi05-libero10-grpo.toml
 
 ROBOT_PLATFORM=LIBERO PYTHONPATH=../LIBERO \
 uv run cosmos-rl --config $CONFIG \
-        cosmos_rl/tools/dataset/libero_grpo.py \
         --policy 4 \
         --rollout 4 \
+        cosmos_rl/tools/dataset/libero_grpo.py

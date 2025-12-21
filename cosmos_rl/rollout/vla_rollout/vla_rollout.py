@@ -136,6 +136,7 @@ class OpenVLARollout(RolloutBase):
         super().__init__(config, parallel_dims, device, **kwargs)
 
     def post_init_hook(self, **kwargs):
+        self._model_param_map = None  # Required by RolloutBase.model_param_map()
         self.model_type = self.config.vla.vla_type
 
         model_cls = ModelRegistry._MODEL_REGISTRY[self.model_type]
@@ -179,8 +180,7 @@ class OpenVLARollout(RolloutBase):
                 )
             elif self.model_type in ("pi05", "pi0"):
                 PrismaticProcessor = None  # noqa: N806
-                from cosmos_rl.policy.model.pi05.tokenizer import PaligemmaTokenizer
-                self.openpi_tokenizer = PaligemmaTokenizer(max_len=self.hf_config.max_token_len)
+                self.tokenizer = util.setup_tokenizer(model_path)
             else:
                 raise ValueError(f"Unsupported vla model type: {self.model_type}")
 
@@ -191,7 +191,6 @@ class OpenVLARollout(RolloutBase):
                 self.tokenizer = self.processor.tokenizer
             else:
                 self.processor = None
-                self.tokenizer = None
 
             self.model = ModelRegistry.build_model(self.config)
 
@@ -216,7 +215,6 @@ class OpenVLARollout(RolloutBase):
         batch_size = len(inputs)
 
         def _to_pi05_img(arr: np.ndarray) -> torch.Tensor:
-            # OpenPI expects images in [-1, 1]. Resizing/padding is handled inside model preprocessing.
             img = Image.fromarray(arr).convert("RGB")
             t = torch.from_numpy(np.array(img)).float()  # [H, W, C]
             return t / 127.5 - 1.0  # [-1, 1], channels-last
@@ -252,19 +250,27 @@ class OpenVLARollout(RolloutBase):
             "right_wrist_0_rgb": torch.zeros(batch_size, dtype=torch.bool, device=device),
         }
 
-        action_dim = self.hf_config.action_dim
+        # Precompute normalization stats
+        norm_stats = {}
+        if self.hf_config.discrete_state_input:
+            # Try to find stats for "state" or "proprio"
+            norm_stats = self.hf_config.norm_stats.get("state", self.hf_config.norm_stats.get("proprio", {}))
+
         state_list: list[torch.Tensor] = []
         for inp in inputs:
             st = inp.get("state", None)
             if st is None:
-                st_np = np.zeros((action_dim,), dtype=np.float32)
+                # Fallback to zero state if missing (using action_dim as heuristic size)
+                st_np = np.zeros((self.hf_config.action_dim,), dtype=np.float32)
             else:
                 st_np = np.asarray(st, dtype=np.float32).reshape(-1)
-                if st_np.shape[0] < action_dim:
-                    st_np = np.pad(st_np, (0, action_dim - st_np.shape[0]))
-                elif st_np.shape[0] > action_dim:
-                    st_np = st_np[:action_dim]
+                # Normalize state using model stats (crucial for axis-angle rotation)
+                if norm_stats:
+                    st_np = normalize_proprio(st_np, norm_stats)
+            
             state_list.append(torch.from_numpy(st_np).to(torch.float32))
+        
+        # Note: We assume all states in the batch have the same dimension.
         state = torch.stack(state_list, dim=0).to(device)
 
         tokenized_prompt = []
@@ -276,7 +282,7 @@ class OpenVLARollout(RolloutBase):
                 # OpenPI expects state normalized to [-1, 1] before discretization.
                 state_np = state[i].detach().float().cpu().numpy().astype(np.float32)
                 state_np = np.clip(state_np, -1.0, 1.0)
-            tokens, mask = self.openpi_tokenizer.tokenize(prompt, state=state_np)
+            tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=state_np)
             tokenized_prompt.append(torch.from_numpy(tokens).to(torch.long))
             tokenized_prompt_mask.append(torch.from_numpy(mask).to(torch.bool))
         tokenized_prompt = torch.stack(tokenized_prompt, dim=0).to(device)
@@ -308,11 +314,6 @@ class OpenVLARollout(RolloutBase):
             actions = outputs["actions"]
 
         actions = actions[:, :self.hf_config.action_horizon, :self.hf_config.action_env_dim].to(torch.float32)
-
-        # If PI05 gripper appears to be in env space [-1, 1], map it to [0, 1] expected by env_worker.
-        gripper = actions[..., -1]
-        if torch.min(gripper) < -0.1:
-            actions[..., -1] = torch.clamp((1.0 - gripper) * 0.5, 0.0, 1.0)
 
         # Normalize output keys to Cosmos rollout expectations.
         outputs["action"] = actions.detach().cpu().numpy()
@@ -1008,7 +1009,9 @@ class OpenVLARollout(RolloutBase):
 
             if self.model_type in ("pi05", "pi0"):
                 action_horizon = self.hf_config.action_horizon
-                cfg_replan = self.config.pi05.replan_steps if self.config.pi05.replan_steps is not None else action_horizon
+                pi05_cfg = (self.config.custom.get("pi05", {}) or {}) if hasattr(self.config, "custom") else {}
+                cfg_replan = pi05_cfg.get("replan_steps", None)
+                cfg_replan = action_horizon if cfg_replan is None else cfg_replan
                 replan_steps = max(1, min(cfg_replan, action_horizon))
 
             # Send actions to active workers

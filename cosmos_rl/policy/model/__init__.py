@@ -13,28 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# from cosmos_rl.policy.model.gpt import GPT
-# from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
-# from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
-# from cosmos_rl.policy.model.qwen3_vl_moe import Qwen3VLMoeModel
-# from cosmos_rl.policy.model.hf_models import HFModel
-# from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
-# from cosmos_rl.policy.model.internvl import InternVLChatModel
-# from cosmos_rl.policy.model.vla import OpenVLA
-# from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, WeightMapper
+from cosmos_rl.policy.model.gpt import GPT
+from cosmos_rl.policy.model.qwen2_5_vl import Qwen2_5_VLConditionalModel
+from cosmos_rl.policy.model.qwen3_moe import Qwen3MoE
+from cosmos_rl.policy.model.qwen3_vl_moe import Qwen3VLMoeModel
+from cosmos_rl.policy.model.hf_models import HFModel
+from cosmos_rl.policy.model.deepseek_v3 import DeepseekV3MoEModel
+from cosmos_rl.policy.model.internvl import InternVLChatModel
+from cosmos_rl.policy.model.vla import OpenVLA
+from cosmos_rl.policy.model.base import ModelRegistry, BaseModel, WeightMapper
 from cosmos_rl.policy.model.pi05 import PI05
 
 __all__ = [
-    # "GPT",
-    # "Qwen2_5_VLConditionalModel",
-    # "Qwen3MoE",
-    # "Qwen3VLMoeModel",
-    # "HFModel",
-    # "DeepseekV3MoEModel",
-    # "InternVLChatModel",
-    # "OpenVLA",
-    # "BaseModel",
-    # "WeightMapper",
-    # "ModelRegistry",
+    "GPT",
+    "Qwen2_5_VLConditionalModel",
+    "Qwen3MoE",
+    "Qwen3VLMoeModel",
+    "HFModel",
+    "DeepseekV3MoEModel",
+    "InternVLChatModel",
+    "OpenVLA",
+    "BaseModel",
+    "WeightMapper",
+    "ModelRegistry",
     "PI05",
 ]

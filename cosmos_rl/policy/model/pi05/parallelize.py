@@ -49,7 +49,7 @@ def parallelize(
         raise ValueError("PI05 does not support tensor parallelism")
     if parallel_dims.pp > 1:
         raise ValueError("PI05 does not support pipeline parallelism")
-    if parallel_dims.dp_shard_enabled:
+    if parallel_dims.dp_shard > 1:
         raise ValueError("PI05 does not support FSDP sharding, use DDP only")
 
     # Apply DDP

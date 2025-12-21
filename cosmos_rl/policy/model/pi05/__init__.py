@@ -21,23 +21,7 @@ from collections.abc import Sequence
 
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import resolve_model_path
-
-# HF-native config registration: enables AutoConfig.from_pretrained(repo_id) when config.json has model_type="pi05"
 from transformers import AutoConfig
-from cosmos_rl.policy.model.pi05.configuration_pi05 import Pi05Config
-
-try:
-    AutoConfig.register("pi05", Pi05Config)
-except ValueError:
-    # already registered
-    pass
-
-# pi0 shares the same config schema; route model_type == "pi0" to Pi05Config as well.
-try:
-    AutoConfig.register("pi0", Pi05Config)
-except ValueError:
-    # already registered
-    pass
 
 IMAGE_KEYS = (
     "base_0_rgb",
@@ -238,7 +222,7 @@ def create_sinusoidal_pos_embedding(
     dimension: int,
     min_period: float,
     max_period: float,
-    device="cpu",
+    device=torch.device("cpu"),
 ) -> Tensor:
     """Computes sine-cosine positional embedding vectors for scalar positions."""
     if dimension % 2 != 0:
@@ -367,7 +351,8 @@ class PI05(BaseModel):
             )
 
         torch.set_float32_matmul_precision("high")
-        self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
+        if getattr(hf_config, "cosmos_compile", False):
+            self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
@@ -394,6 +379,7 @@ class PI05(BaseModel):
         hf_config = AutoConfig.from_pretrained(
             config.policy.model_name_or_path, trust_remote_code=True
         )
+        hf_config.cosmos_compile = bool(getattr(config.train, "compile", False))
 
         # Runtime PI05 overrides live under `config.custom["pi05"]` (optional).
         overrides = {}
@@ -476,8 +462,11 @@ class PI05(BaseModel):
     def _preprocess_observation(self, observation, *, train=True):
         """Helper method to preprocess observation."""
         observation = preprocess_observation_pytorch(observation, train=train)
+        imgs = list(observation.images.values())
+        if imgs and imgs[0].ndim == 4 and imgs[0].shape[-1] == 3:
+            imgs = [x.permute(0, 3, 1, 2).contiguous() for x in imgs]
         return (
-            list(observation.images.values()),
+            imgs,
             list(observation.image_masks.values()),
             observation.tokenized_prompt,
             observation.tokenized_prompt_mask,
@@ -1149,7 +1138,15 @@ class PI05(BaseModel):
         # Resolve local path (downloads if HF repo_id provided)
         model_path = resolve_model_path(model_name_or_path, revision=revision)
 
-        # Load checkpoint tensors
+        device = device or torch.device("cpu")
+        if device.type == "cuda":
+            torch.cuda.set_device(device.index or torch.cuda.current_device())
+        if any(p.is_meta for p in self.parameters()) or any(
+            b.is_meta for b in self.buffers()
+        ):
+            self.to_empty(device=device)
+        else:
+            self.to(device)
         state_dict: dict[str, torch.Tensor] = {}
         safetensors_files = [
             f for f in os.listdir(model_path) if f.endswith(".safetensors")
@@ -1159,7 +1156,9 @@ class PI05(BaseModel):
 
             for fname in safetensors_files:
                 with safe_open(
-                    os.path.join(model_path, fname), framework="pt", device="cpu"
+                    os.path.join(model_path, fname),
+                    framework="pt",
+                    device=("cuda" if device.type == "cuda" else "cpu"),
                 ) as f:
                     for key in f.keys():
                         state_dict[key] = f.get_tensor(key)
@@ -1177,7 +1176,7 @@ class PI05(BaseModel):
                 state_dict.update(
                     torch.load(
                         os.path.join(model_path, fname),
-                        map_location="cpu",
+                        map_location=device,
                         weights_only=True,
                     )
                 )
