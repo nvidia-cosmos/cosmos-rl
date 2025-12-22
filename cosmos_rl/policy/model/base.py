@@ -342,6 +342,9 @@ class BaseModel(torch.nn.Module, ABC):
                 if pattern_re.search(param_name):
                     param.requires_grad = False
                     pattern_counts[pattern_str] += 1
+                    util.rank0_print(
+                        f"[freeze_pattern] freeze '{param_name}' (matched '{pattern_str}')"
+                    )
                     break
 
             if not param.requires_grad:
@@ -350,9 +353,9 @@ class BaseModel(torch.nn.Module, ABC):
         # Log summary
         for pattern, count in pattern_counts.items():
             if count > 0:
-                logger.info(f"[freeze_pattern] '{pattern}' matched {count} params")
+                util.rank0_print(f"[freeze_pattern] '{pattern}' matched {count} params")
 
-        logger.info(
+        util.rank0_print(
             f"[freeze_pattern] Total={total_params / 1e9:.2f}B, "
             f"Frozen={frozen_params:,}, Trainable={total_params - frozen_params:,}"
         )
