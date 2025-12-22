@@ -5,6 +5,7 @@ from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils import w8a8_utils
 from vllm.model_executor.layers.quantization.fp8 import (
@@ -19,6 +20,8 @@ from cosmos_rl.utils.parallelism import ParallelDims
 This file is used to patch the vllm model to use rowwise fp8 linear.
 """
 
+USE_PER_TOKEN_IF_DYNAMIC = True
+
 
 def apply_patch_to_dispatch():
     # ensure that fp8 linear kernel is dispatched to torch._scaled_mm per-token/rowwise
@@ -26,9 +29,6 @@ def apply_patch_to_dispatch():
         return w8a8_utils.torch_per_token_w8a8_scaled_mm
 
     w8a8_utils.dispatch_w8a8_scaled_mm = dispatch_fp8_linear_kernel_to_torch_scaled_mm
-
-
-apply_patch_to_dispatch()
 
 
 def simplify_process_weights_after_loading_for_linear():
@@ -42,9 +42,8 @@ def simplify_process_weights_after_loading_for_linear():
     def simplified_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Warning: this is only for rowwise fp8 linear.
         qweight, weight_scale = ops.scaled_fp8_quant(
-            layer.weight, scale=None, use_per_token_if_dynamic=True
+            layer.weight, scale=None, use_per_token_if_dynamic=USE_PER_TOKEN_IF_DYNAMIC
         )
-
         # Update the layer with the new values
         layer.weight = Parameter(qweight.t(), requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -103,11 +102,12 @@ def simplify_process_weights_after_loading_for_moe():
 
 def simplify_process_weights_after_loading_for_fp8():
     simplify_process_weights_after_loading_for_linear()
-    simplify_process_weights_after_loading_for_moe()
+    # simplify_process_weights_after_loading_for_moe()
 
 
 # patch the Linear layer.
 def apply_fp8_linear_patch(model: torch.nn.Module):
+    apply_patch_to_dispatch()
     for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if quant_method is None:
@@ -119,10 +119,9 @@ def apply_fp8_linear_patch(model: torch.nn.Module):
             # But at this time, `vllm_config` is empty. So there will have a warning that complains
             # it is not set. This only affects the padding, seems not a big problem.
             quant_method.fp8_linear = Fp8LinearOp(
-                # disable cutlass fp8, beacause we want that torch._scaled_mm is used for fp8 linear.
-                cutlass_fp8_supported=False,
-                # enable per token, because we are using rowwise now.
-                use_per_token_if_dynamic=True,
+                # Activation use dynamic quantization.
+                act_quant_static=False,
+                act_quant_group_shape=GroupShape.PER_TOKEN,  # Using per-token quantization for activation.
             )
         else:
             # We will not handle other quant methods.
@@ -192,3 +191,10 @@ def post_process_view_map_for_fp8(
             continue
         processed_view_map[key] = value
     return processed_view_map
+
+
+def monkey_patch_for_fp8(vllm_config, model):
+    from vllm.config import set_current_vllm_config
+
+    with set_current_vllm_config(vllm_config):
+        apply_fp8_linear_patch(model)
