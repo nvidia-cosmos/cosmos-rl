@@ -190,7 +190,10 @@ def obs_to_vla_input(obs: Dict, is_robotwin: bool = False) -> Dict:
     else:
         # LIBERO format
         # IMPORTANT: Resize to 224x224 to match SimpleVLA-RL's get_libero_image()
-        img = obs.get("agentview_image", np.zeros((256, 256, 3)))
+        if isinstance(obs, dict):
+            img = obs.get("agentview_image", np.zeros((256, 256, 3)))
+        else:
+            img = obs
 
         # Resize using PIL (matches SimpleVLA-RL's resize_image function behavior)
         if img.shape[0] != 224 or img.shape[1] != 224:
@@ -216,4 +219,4 @@ def obs_to_vla_input(obs: Dict, is_robotwin: bool = False) -> Dict:
             # Convert back to numpy array
             img = np.array(pil_img, dtype=np.uint8)
 
-        return {"full_image": img}
+        return {"full_image": img} if isinstance(obs, dict) else img

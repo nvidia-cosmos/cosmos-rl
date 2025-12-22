@@ -27,6 +27,8 @@ from typing import Optional
 import torch
 import torch.multiprocessing as mp
 
+from cosmos_rl.utils.util import logger
+
 
 def force_gc_tensor(tensor):
     if not torch.is_tensor(tensor):
@@ -58,7 +60,7 @@ def get_gpu_numa_node(gpu_id: int) -> int:
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
             # Get PCI bus info
             pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
-            pci_bus_id = pci_info.busId.encode("utf-8").lower()
+            pci_bus_id = pci_info.busId.lower()
         except ImportError:
             # Fallback to nvidia-smi
             result = subprocess.run(
@@ -80,8 +82,10 @@ def get_gpu_numa_node(gpu_id: int) -> int:
         # Get NUMA node from sysfs
         numa_node_path = f"/sys/bus/pci/devices/0000:{bus_number}:00.0/numa_node"
         if os.path.exists(numa_node_path):
+            logger.info(f"NUMA node path: {numa_node_path}")
             with open(numa_node_path, "r") as f:
                 numa_node = int(f.read().strip())
+                logger.info(f"NUMA node: {numa_node}")
                 if numa_node >= 0:
                     return numa_node
 
@@ -134,6 +138,9 @@ def set_process_numa_affinity(gpu_id: int) -> None:
             print(f"Warning: No CPUs found for NUMA node {numa_node}")
             return
 
+        logger.info(
+            f"Setting NUMA affinity for GPU {gpu_id} to NUMA node {numa_node} with CPUs {cpus}"
+        )
         os.sched_setaffinity(0, cpus)
         try:
             subprocess.run(
@@ -143,6 +150,7 @@ def set_process_numa_affinity(gpu_id: int) -> None:
             )
         except FileNotFoundError:
             pass  # numactl not available, that's ok
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     except Exception as e:
         print(f"Warning: Could not set NUMA affinity for GPU {gpu_id}: {e}")
@@ -166,16 +174,11 @@ class EnvManager:
         self,
         cfg,
         rank: int,
-        num_envs: int,
-        seed_offset: int,
-        total_num_processes: int,
         env_cls: str,
     ):
         self.cfg = cfg
         self.rank = rank
-        self.num_envs = num_envs
-        self.seed_offset = seed_offset
-        self.total_num_processes = total_num_processes
+        self.num_envs = self.cfg.num_envs
         self.process: Optional[mp.Process] = None
         self.command_queue: Optional[mp.Queue] = None
         self.result_queue: Optional[mp.Queue] = None
@@ -203,8 +206,6 @@ class EnvManager:
                 self.cfg,
                 self.rank,
                 self.num_envs,
-                self.seed_offset,
-                self.total_num_processes,
                 self.env_cls,
                 self.command_queue,
                 self.result_queue,
@@ -280,8 +281,6 @@ class EnvManager:
             "cfg",
             "rank",
             "num_envs",
-            "seed_offset",
-            "total_num_processes",
             "process",
             "command_queue",
             "result_queue",
@@ -326,8 +325,6 @@ def _simulator_worker(
     cfg,
     rank,
     num_envs,
-    seed_offset,
-    total_num_processes,
     env_cls,
     command_queue,
     result_queue,
@@ -340,7 +337,7 @@ def _simulator_worker(
         set_process_numa_affinity(rank)
 
     try:
-        simulator = env_cls(cfg, num_envs, seed_offset, total_num_processes)
+        simulator = env_cls(cfg, num_envs)
         if state_buffer:
             simulator.load_state(state_buffer)
 
