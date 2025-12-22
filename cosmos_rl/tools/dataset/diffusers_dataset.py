@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, ConcatDataset
 from datasets import load_dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.dispatcher.data.packer import DataPacker
+from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.utils.logging import logger
 from torchvision import transforms as T
 import torch
@@ -43,15 +43,16 @@ class LocalDiffusersDataset(Dataset):
         """
         self.config = config
         # TODO (yy): set by config
-        self.is_video = True
-        self.sequence_length = 41
+        self.is_video = config.policy.diffusers_config.is_video
+        self.height, self.width = config.policy.diffusers_config.inference_size
+        self.train_frames = config.policy.diffusers_config.train_frames
         self.dataset_dir = self.config.train.train_policy.dataset.local_dir
         prompt_files = glob.glob(os.path.join(self.dataset_dir, "*.json"))
         if self.is_video:
             self.suffix = 'mp4'
         else:
             self.suffix = 'jpg'
-        self.visual_preprocess = self.visual_preprocess(1024)
+        self.visual_preprocess = self.visual_preprocess()
         self.all_file_names = [os.path.basename(f).split('.')[0] for f in prompt_files]
 
     def __len__(self):
@@ -83,19 +84,17 @@ class LocalDiffusersDataset(Dataset):
 
         return data
     
-    def visual_preprocess(self, resolution):
+    def visual_preprocess(self):
         if self.is_video:
             transforms = [
-                    ToTensorVideo(),  # TCHW
-                    ResizePreprocess([480, 832]),
-                    T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
-                ]
+                ToTensorVideo(),  # TCHW
+                ResizePreprocess([self.height, self.width]),
+                T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
+            ]
         else:
             transforms = [
-                T.Lambda(lambda img: img.convert("RGB")),
-                T.Resize(resolution),  # Image.BICUBIC
-                T.CenterCrop(resolution),
-                # T.RandomHorizontalFlip(),
+                T.Resize(self.height),  # Image.BICUBIC
+                T.CenterCrop(self.height),
                 T.ToTensor(),
                 T.Normalize([0.5], [0.5]),
             ]
@@ -104,16 +103,16 @@ class LocalDiffusersDataset(Dataset):
     def _load_video(self, video_path: str) -> tuple[np.ndarray, float]:
         vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
         total_frames = len(vr)
-        if total_frames < self.sequence_length:
+        if total_frames < self.train_frames:
             raise ValueError(
                 f"Video {video_path} has only {total_frames} frames, "
-                f"at least {self.sequence_length} frames are required."
+                f"at least {self.train_frames} frames are required."
             )
 
         # randomly sample a sequence of frames
-        max_start_idx = total_frames - self.sequence_length
+        max_start_idx = total_frames - self.train_frames
         start_frame = np.random.randint(0, max_start_idx) if max_start_idx > 0 else 0
-        end_frame = start_frame + self.sequence_length if max_start_idx > 0 else self.sequence_length
+        end_frame = start_frame + self.train_frames if max_start_idx > 0 else self.train_frames
         frame_ids = np.arange(start_frame, end_frame).tolist()
 
         frame_data = vr.get_batch(frame_ids).asnumpy()
@@ -130,11 +129,13 @@ class LocalDiffusersDataset(Dataset):
         frames, fps = self._load_video(file_path)
         frames = frames.astype(np.uint8)
         frames = torch.from_numpy(frames).permute(0, 3, 1, 2)  # [T, C, H, W]
-        frames = self.visual_preprocess(frames)
+        frames = self.visual_preprocess(frames) # [C, T, H, W]
         return frames, fps
 
     def _get_image(self, file_path):
         image = Image.open(file_path)
+        if not image.mode == "RGB":
+                image = image.convert("RGB")
         image = self.visual_preprocess(image)
         return image
 
@@ -151,6 +152,10 @@ class LocalDiffusersValDataset(Dataset):
             return
         local_path = config.validation.dataset.local_dir
         self.is_video = config.policy.diffusers_config.is_video
+        self.height, self.width = config.policy.diffusers_config.inference_size
+        self.infernece_frame = config.policy.diffusers_config.inference_frames
+        self.inference_step = config.policy.diffusers_config.inference_step
+        self.guidance_scale = config.policy.diffusers_config.guidance_scale
         self.prompts = json.load(open(local_path))
 
     def __len__(self):
@@ -158,18 +163,18 @@ class LocalDiffusersValDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
         data = {
-            'height': 480,
-            'width': 832,
+            'height': self.height,
+            'width': self.width,
             'guidance_scale': 4.5,
-            'inference_step': 20,
+            'inference_step': self.inference_step,
             'prompt': self.prompts[idx]['prompt']
         }
         if self.is_video:
-            data.update({'frames': 41})
+            data.update({'frames': self.infernece_frame})
 
         return data
 
-class DiffusersPacker(DataPacker):
+class DiffusersPacker(BaseDataPacker):
     """
     This is a demo data packer that wraps the underlying data packer of the selected model.
     This is meaningless for this example, but useful for explaining:

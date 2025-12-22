@@ -17,7 +17,7 @@ import os
 import torch
 
 from transformers import AutoConfig
-
+from diffusers import DiffusionPipeline
 
 from cosmos_rl.comm.base import WorkerBase
 from cosmos_rl.comm.base import CommMixin
@@ -37,6 +37,11 @@ class PolicyWorkerBase(WorkerBase, CommMixin):
         # TODO (yy): hf_config is used for parameter sync
         if not config.policy.is_diffusers:
             self.hf_config = util.retry(AutoConfig.from_pretrained)(
+                self.config.policy.model_name_or_path,
+                trust_remote_code=True,
+            )
+        else:
+            self.hf_config = util.retry(DiffusionPipeline.load_config)(
                 self.config.policy.model_name_or_path,
                 trust_remote_code=True,
             )

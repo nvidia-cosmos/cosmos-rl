@@ -22,7 +22,7 @@ import cosmos_rl.utils.util as util
 import cosmos_rl.utils.distributed as dist_util
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 
-from cosmos_rl.policy.trainer.diffusers_trainer import DiffusersTrainer
+from cosmos_rl.policy.trainer import DiffusersTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 
 from diffusers.utils import export_to_video
@@ -124,14 +124,15 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
                     step=train_step,
                     total_steps=total_steps,
                 )
-                self.ckpt_manager.save_check(
-                    step=train_step,
-                    val_score=val_score,
-                    pp_enabled=self.parallel_dims.pp_enabled,
-                    pp_last_stage=pp_last_stage,
-                    pp_master_rank=self.parallel_dims.world_size
-                    - self.parallel_dims.world_size / self.parallel_dims.pp,
-                )
+                # TODO(yy): support save safetensor
+                # self.ckpt_manager.save_check(
+                #     step=train_step,
+                #     val_score=val_score,
+                #     pp_enabled=self.parallel_dims.pp_enabled,
+                #     pp_last_stage=pp_last_stage,
+                #     pp_master_rank=self.parallel_dims.world_size
+                #     - self.parallel_dims.world_size / self.parallel_dims.pp,
+                # )
 
     def step_training(
         self,

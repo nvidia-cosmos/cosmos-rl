@@ -23,11 +23,13 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 import torch
 from transformers import AutoConfig
+from diffusers import DiffusionPipeline
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import collections
 from functools import partial
 from typing import Mapping
 from accelerate import init_on_device
+from contextlib import nullcontext
 from cosmos_rl.policy.lora.plugin import LoraInjectedLinear
 from cosmos_rl.utils.dim_slice_info import (
     DimSliceInfo,
@@ -642,7 +644,7 @@ class ModelRegistry:
         # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
         model_name_or_path = config.policy.model_name_or_path
         model = None
-        model_type = 'diffusers'
+        model_type = util.retry(DiffusionPipeline.load_config)(model_name_or_path)['_class_name']
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
@@ -661,9 +663,10 @@ class ModelRegistry:
             return model
 
         def _get_init_context_for_model_build(device):
-            # Workaround for OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview
             # TODO(yy): support meta init for diffusers model
-            return torch.device(device)
+            # Cannot use torch.device('cuda') here, conflict with scheduler's initialization
+            # Control device inside model
+            return nullcontext()
 
         init_context = _get_init_context_for_model_build('cuda')
         with init_context:
