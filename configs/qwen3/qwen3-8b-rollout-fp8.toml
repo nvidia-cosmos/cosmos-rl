@@ -1,16 +1,15 @@
-
-redis = "12808"
+redis = "12800"
 
 [train]
 resume = false
 epoch = 1
-output_dir = "./outputs/qwen3-moe-30b-p-tp4-r-tp3-grpo-fp8"
+output_dir = "./outputs/qwen3-8b-p-fsdp1-tp4-r-tp4-pp1-grpo-fp8"
 epsilon = 1e-6
 optm_name = "AdamW"
 optm_lr = 1e-6
-optm_impl = "foreach"
+optm_impl = "fused"
 optm_weight_decay = 0.0
-optm_betas = [0.9, 0.999]
+optm_betas = [ 0.9, 0.999,]
 optm_warmup_steps = 20
 optm_grad_norm_clip = 1.0
 async_tp_enabled = false
@@ -19,28 +18,21 @@ param_dtype = "bfloat16"
 fsdp_reduce_dtype = "float32"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 2
+train_batch_per_replica = 128
 sync_weight_interval = 1
 
-# [train.fp8]
-# enable_fp8 = true
-# fp8_recipe = "dynamic_scaling"
-# quant_recipe = "rowwise"
-# fqn_filter=["lm_head"]
 
 [rollout]
 gpu_memory_utilization = 0.7
 enable_chunked_prefill = false
-max_response_length = 512 
 n_generation = 16
-batch_size = 1
+batch_size = 2
 quantization = "fp8"
-# quantization = "none"
 seed = 42
 
 [policy]
-model_name_or_path = "Qwen/Qwen3-30B-A3B"
-model_max_length = 512 
+model_name_or_path = "Qwen/Qwen3-8B"
+model_max_length = 1024
 model_gradient_checkpointing = true
 
 [logging]
@@ -54,29 +46,24 @@ dataset.name = "JiaxinTsao/math_examples"
 prompt_column_name = "prompt"
 response_column_name = "result"
 reward_function = "boxed_math"
-dataset.split = "train"
+dataset.split="train"
 temperature = 0.9
 epsilon_low = 0.2
 epsilon_high = 0.2
 kl_beta = 0.0
 mu_iterations = 1
 min_filter_prefix_tokens = 1
-mini_batch = 1
 
 [train.ckpt]
 enable_checkpoint = true
-save_freq = 20
+save_freq = 30
 save_mode = "async"
 
 [rollout.parallelism]
 n_init_replicas = 1
-tp_size = 2
+tp_size = 4
 pp_size = 1
 
-[rollout.sampling_config]
-temperature = 0.9
-top_p = 1.0
-top_k = 10
 
 [policy.parallelism]
 n_init_replicas = 1
