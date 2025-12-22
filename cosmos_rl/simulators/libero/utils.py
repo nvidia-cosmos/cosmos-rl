@@ -18,8 +18,10 @@ import numpy as np
 import libero.libero.benchmark as benchmark
 
 
-def get_libero_dummy_action() -> list:
-    return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]
+def get_libero_dummy_action(num_envs: int) -> list:
+    dummy_actions = np.zeros((num_envs, 7))
+    dummy_actions[:, -1] = -1.0
+    return dummy_actions
 
 
 def quat2axisangle(quat: np.ndarray) -> np.ndarray:

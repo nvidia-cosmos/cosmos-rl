@@ -121,7 +121,8 @@ def _worker(
                 obs = env.set_init_state(data)
                 p.send(obs)
             elif cmd == "reconfigure":
-                env.close()
+                if env is not None:
+                    env.close()
                 seed = data.pop("seed")
                 env = OffScreenRenderEnv(**data)
                 env.seed(seed)

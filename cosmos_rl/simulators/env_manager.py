@@ -170,7 +170,6 @@ class EnvManager:
         seed_offset: int,
         total_num_processes: int,
         env_cls: str,
-        enable_offload: bool = False,
     ):
         self.cfg = cfg
         self.rank = rank
@@ -181,25 +180,8 @@ class EnvManager:
         self.command_queue: Optional[mp.Queue] = None
         self.result_queue: Optional[mp.Queue] = None
         self.state_buffer: Optional[bytes] = None
-
-        if enable_offload:
-            import importlib
-
-            class_name = env_cls.__name__
-            offload_module = importlib.import_module("rlinf.envs.offload_wrapper")
-            if hasattr(offload_module, class_name):
-                offload_env_cls = getattr(offload_module, class_name)
-                self.env_cls = offload_env_cls
-            else:
-                raise RuntimeError(
-                    f"Environment class {class_name} does not support offload"
-                )
-            self.env = None
-        else:
-            self.env_cls = env_cls
-            self.env = self.env_cls(
-                self.cfg, num_envs, seed_offset, total_num_processes
-            )
+        self.env_cls = env_cls
+        self.env = None
 
     def start_simulator(self):
         """Start simulator process with shared memory queues"""

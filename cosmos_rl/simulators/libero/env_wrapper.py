@@ -44,7 +44,7 @@ class EnvStates:
 
 
 class LiberoEnvWrapper(gym.Env):
-    def __init__(self, cfg):
+    def __init__(self, cfg, *args, **kwargs):
         self.num_envs = getattr(cfg, "num_envs", 1)
         self.seed = getattr(cfg, "seed", 0)
         self.task_suite_name = getattr(cfg, "task_suite_name", "libero_all")
@@ -53,7 +53,7 @@ class LiberoEnvWrapper(gym.Env):
         self.max_steps = getattr(cfg, "max_steps", 512)
 
         self.task_suite = get_benchmark_overridden(self.task_suite_name)()
-        self.task_states = [EnvStates(env_idx=i) for i in range(self.num_envs)]
+        self.env_states = [EnvStates(env_idx=i) for i in range(self.num_envs)]
 
         self._init_env()
 
@@ -62,7 +62,7 @@ class LiberoEnvWrapper(gym.Env):
         dummy_env_fns = []
         for _ in range(self.num_envs):
 
-            def dummy_env_fn(task_id: int):
+            def dummy_env_fn():
                 return None
 
             dummy_env_fns.append(dummy_env_fn)
@@ -114,12 +114,12 @@ class LiberoEnvWrapper(gym.Env):
             desp, fn_params = self._get_fn_params(task_ids[i])
             task_descriptions[i] = desp
             env_fn_params[i] = fn_params
-            n_trial_ids = self.task_suite.get_task_num_trials(task_ids[i])
+            n_trial_ids = len(self.task_suite.get_task_init_states(task_ids[i]))
             init_state[i] = self.task_suite.get_task_init_states(task_ids[i])[
                 trial_ids[i] % n_trial_ids
             ]
 
-            self.task_states[env_id] = EnvStates(
+            self.env_states[env_id] = EnvStates(
                 env_idx=env_id,
                 task_id=task_ids[i],
                 trial_id=trial_ids[i],
@@ -127,13 +127,13 @@ class LiberoEnvWrapper(gym.Env):
         self.env.reconfigure_env_fns(env_fn_params, env_ids)
         self.env.set_init_state(init_state, env_ids)
 
-        dummy_action = get_libero_dummy_action()
+        dummy_actions = get_libero_dummy_action(len(env_ids))
         for _ in range(15):
-            obs, _, _, _ = self.env.step(dummy_action, env_ids)
+            obs, _, _, _ = self.env.step(dummy_actions, env_ids)
 
         images_and_states = self._extract_image_and_state(obs)
         for i, env_id in enumerate(env_ids):
-            self.task_states[env_id].current_obs = {
+            self.env_states[env_id].current_obs = {
                 "full_images": images_and_states["full_images"][i],
                 "wrist_images": images_and_states["wrist_images"][i],
                 "states": images_and_states["states"][i],
@@ -160,9 +160,9 @@ class LiberoEnvWrapper(gym.Env):
             env_ids, task_ids, trial_ids
         )
         for i, env_id in enumerate(env_ids):
-            self.task_states[env_id].do_validation = do_validataion[i]
+            self.env_states[env_id].do_validation = do_validataion[i]
             if do_validataion[i]:
-                self.task_states[env_id].valid_pixels = {
+                self.env_states[env_id].valid_pixels = {
                     "full_images": [],
                     "wrist_images": [],
                 }
@@ -173,35 +173,36 @@ class LiberoEnvWrapper(gym.Env):
         if isinstance(action, torch.Tensor):
             action = action.detach().cpu().numpy()
 
-        active_env_ids = [
-            i for i, env_id in enumerate(env_ids) if self.task_states[env_id].active
+        active_indices = [
+            i for i, env_id in enumerate(env_ids) if self.env_states[env_id].active
         ]
-        active_action = action[active_env_ids]
+        active_env_ids = [env_ids[i] for i in active_indices]
+        active_action = action[active_indices]
 
         obs, reward, done, info = self.env.step(active_action, active_env_ids)
         images_and_states = self._extract_image_and_state(obs)
         for i, env_id in enumerate(active_env_ids):
-            self.task_states[env_id].step += 1
-            if done[i] or self.task_states[env_id].step >= self.max_steps:
-                self.task_states[env_id].complete = done[i]
-                self.task_states[env_id].active = False
+            self.env_states[env_id].step += 1
+            if done[i] or self.env_states[env_id].step >= self.max_steps:
+                self.env_states[env_id].complete = done[i]
+                self.env_states[env_id].active = False
             for k, v in images_and_states.items():
-                self.task_states[env_id].current_obs[k] = v[i]
+                self.env_states[env_id].current_obs[k] = v[i]
 
-                if self.task_states[env_id].do_validation:
+                if self.env_states[env_id].do_validation:
                     for img_key in ["full_images", "wrist_images"]:
-                        self.task_states[env_id].valid_pixels[img_key].append(
+                        self.env_states[env_id].valid_pixels[img_key].append(
                             images_and_states[img_key][i]
                         )
 
-        completes = [self.task_states[env_id].complete for env_id in env_ids]
-        active = [self.task_states[env_id].active for env_id in env_ids]
-        finish_steps = [self.task_states[env_id].step for env_id in env_ids]
+        completes = [self.env_states[env_id].complete for env_id in env_ids]
+        active = [self.env_states[env_id].active for env_id in env_ids]
+        finish_steps = [self.env_states[env_id].step for env_id in env_ids]
 
         full_images_and_states = {}
         for key in ["full_images", "wrist_images", "states"]:
             full_images_and_states[key] = np.stack(
-                [self.task_states[env_id].current_obs[key] for env_id in env_ids]
+                [self.env_states[env_id].current_obs[key] for env_id in env_ids]
             )
 
         return {
@@ -219,4 +220,15 @@ class LiberoEnvWrapper(gym.Env):
         for step in range(steps):
             results = self.step(env_ids, actions[:, step])
 
+        return results
+
+    def get_env_states(self, env_ids: List[int]):
+        return [self.env_states[env_id] for env_id in env_ids]
+
+    def get_valid_pixels(self, env_ids: List[int]):
+        results = {}
+        for keys in ["full_images", "wrist_images"]:
+            results[keys] = np.stack(
+                [self.env_states[env_id].valid_pixels[keys] for env_id in env_ids]
+            )
         return results
