@@ -136,10 +136,6 @@ class CosmosVisionGenTrainer(ABC):
         distributed.initialize_global_parallelism(config)
         self.parallel_dims = distributed.get_global_parallel_dims()
 
-        if config.model_parallel.sequence_parallel:
-            # FIXME: (lms/dinghao) check sequence_parallel is used or not. Seems not used in VideoGen.
-            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-
         # Create the local job directory, save the config file, and pipe to a local logger.
         if distributed.get_rank() == 0:
             os.makedirs(config.job.path_local, exist_ok=True)

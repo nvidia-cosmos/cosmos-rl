@@ -255,7 +255,6 @@ class ParallelDims:
             mp_mesh_dim_names.append("tp")
         if self.pp_enabled:
             mp_mesh_dim_names.append("pp")
-        # FIXME: (lms/dinghao) From what megatron-core does, it merge tp and pp into mp. Check it.
 
         if dp_mesh_dim_names != []:
             mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
@@ -396,6 +395,15 @@ class ParallelDims:
         if not self.cp_enabled:
             return 0, 1
         return (self.mesh.get_local_rank(mesh_dim="cp"), self.cp)
+
+    @property
+    def dp_cp_coord(self):
+        if not self.dp_enabled and not self.cp_enabled:
+            return 0, 1
+        else:
+            return self.mesh[tuple(("dp_cp",))].get_local_rank(), self.mesh[
+                tuple(("dp_cp",))
+            ].size()
 
     @property
     def dp_shard_cp_coord(self):

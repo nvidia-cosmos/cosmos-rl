@@ -302,7 +302,7 @@ class EMAModelTracker(torch.nn.Module):
             return None
         global_parallelism = get_global_parallel_dims()
         assert global_parallelism is not None, "global_parallelism not initialized"
-        cur_dp_rank, _ = global_parallelism.dp_shard_cp_coord
+        cur_dp_rank, _ = global_parallelism.dp_cp_coord
         logger.critical(
             f"using Cosmos parallelism for EMA initialization. DP RANK: {cur_dp_rank}"
         )
@@ -380,7 +380,7 @@ class PowerEMATracker(EMAModelTracker):
             return None
         global_parallelism = get_global_parallel_dims()
         assert global_parallelism is not None, "global_parallelism not initialized"
-        cur_dp_rank, _ = global_parallelism.dp_shard_cp_coord
+        cur_dp_rank, _ = global_parallelism.dp_cp_coord
         logger.critical(
             f"using MCore parallel_state for EMA initialization. DP RANK: {cur_dp_rank}",
         )

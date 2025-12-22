@@ -13,6 +13,7 @@ input_key = "padding_mask"
 [[model.conditioner]]
 name = "text"
 type = "text_attr"
+dropout_rate = 0.2
 input_key = ["t5_text_embeddings"]
 
 [[model.conditioner]]
@@ -24,12 +25,10 @@ input_key = "fps"
 [model]
 text_encoder_class = "reason1_7B"
 fsdp_shard_size = 8
+resolution = "720"
 
 [model_parallel]
-tensor_model_parallel_size = 1
-pipeline_model_parallel_size = 1
-pipeline_parallel_size = 1
-context_parallel_size = 1
+context_parallel_size = 2
 
 [model.net]
 use_crossattn_projection = true
@@ -253,3 +252,4 @@ wandb_mode = "online"
 type = "distributed"
 load_path = "nvidia/Cosmos-Predict2.5-2B"
 model_id = "base/pre-trained/d20b7120-df3e-4911-919d-db6e08bad31c_ema_bf16.pt"
+save_iter = 32
