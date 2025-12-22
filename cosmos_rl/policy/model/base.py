@@ -569,8 +569,9 @@ class ModelRegistry:
                 model.apply_trainable(config.policy.trainable_map)
 
             # Apply pattern-based freeze configuration
-            if config.policy.freeze_pattern is not None:
-                model.apply_freeze_pattern(config.policy.freeze_pattern)
+            freeze_pattern = getattr(config.policy, "freeze_pattern", None)
+            if freeze_pattern is not None:
+                model.apply_freeze_pattern(freeze_pattern)
 
             return model
 
