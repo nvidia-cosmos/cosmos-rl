@@ -634,13 +634,27 @@ class OpenVLARollout(RolloutBase):
         # Episode execution loop
         step = 0
         vla_history = []
+        env_states = self.env_manager.get_env_states(env_ids)
+        task_records = [{} for _ in range(len(payloads))]
+        for i in range(len(payloads)):
+            task_records[i] = {
+                "task_id": payloads[i].prompt.get("task_id", 0),
+                "trial_id": payloads[i].prompt.get("trial_id", 0),
+                "gen_idx": gen_indices[i],
+                "task_suite_name": payloads[i].prompt.get("task_suite_name", ""),
+                "active": env_states[i].active,
+                "complete": env_states[i].complete,
+                "finish_step": env_states[i].step,
+            }
 
         from cosmos_rl.policy.model.vla.openvla_oft.constants import NUM_ACTIONS_CHUNK
 
+        import time
+
         while True:
-            env_states = self.env_manager.get_env_states(env_ids)
+            t1 = time.time()
             active_indices = [
-                i for i, env_state in enumerate(env_states) if env_state.active
+                i for i in range(len(env_states)) if task_records[i]["active"]
             ]
             if not active_indices:
                 break
@@ -658,16 +672,9 @@ class OpenVLARollout(RolloutBase):
             current_task_descriptions = task_descriptions
 
             vla_input = self._process_input(current_inputs, current_task_descriptions)
+            t2 = time.time()
             vla_output = self._generate_one_step_oft(vla_input, is_validation)
-
-            # if task_ids[0] == 0 and trial_ids[0] == 0 and gen_indices[0] == 0:
-            #     # logger.info(f"task_suite_name: {task_suite_names[0]}, task_id: {task_ids[0]}, trial_id: {trial_ids[0]}, gen_idx: {gen_indices[0]}")
-            #     # logger.info(f"current_inputs.full_image {current_inputs[0]['full_image'].shape}, {current_inputs[0]['full_image']}")
-            #     # logger.info(f"current_task_descriptions {current_task_descriptions}")
-            #     for k, v in vla_input.items():
-            #         logger.info(f"vla_input {k} {v.shape}")
-            #     for k, v in vla_output.items():
-            #         logger.info(f"vla_output {k} {v.shape}")
+            t3 = time.time()
 
             step_data = {
                 "input_ids": vla_input["input_ids"],
@@ -677,33 +684,28 @@ class OpenVLARollout(RolloutBase):
                 "action": vla_output["action"],
             }
 
-            for i in range(len(env_ids)):
-                logger.info(
-                    f"env_ids {env_ids[i]} active {env_states[env_ids[i]].active} complete {env_states[env_ids[i]].complete} step {env_states[env_ids[i]].step}"
-                )
-
             vla_history.append(step_data)
 
-            images_and_states = self.env_manager.chunk_step(
+            step_results = self.env_manager.chunk_step(
                 active_env_ids, step_data["action"]
             )
-            full_images = images_and_states["full_images"].copy()
-            wrist_images = images_and_states["wrist_images"].copy()
-            states = images_and_states["states"].copy()
+            full_images = step_results["full_images"].copy()
+            wrist_images = step_results["wrist_images"].copy()
+            states = step_results["states"].copy()
+            for i in range(len(env_ids)):
+                task_records[i]["active"] = step_results["active"][i]
+                task_records[i]["complete"] = step_results["completes"][i]
+                task_records[i]["finish_step"] = step_results["finish_steps"][i]
+            t4 = time.time()
+            logger.info(
+                f"env steps {[task_records[i]['finish_step'] for i in range(len(env_ids))]}"
+            )
+            logger.info(
+                f"time {t4 - t1}s, preprocess {t2 - t1}s, vla {t3 - t2}s, sim {t4 - t3}s"
+            )
             step += NUM_ACTIONS_CHUNK
 
         final_states = self.env_manager.get_env_states(env_ids)
-        task_records = [{} for _ in range(len(payloads))]
-        for i in range(len(payloads)):
-            task_records[i] = {
-                "task_id": payloads[i].prompt.get("task_id", 0),
-                "trial_id": payloads[i].prompt.get("trial_id", 0),
-                "gen_idx": gen_indices[i],
-                "task_suite_name": payloads[i].prompt.get("task_suite_name", ""),
-                "active": final_states[i].active,
-                "complete": final_states[i].complete,
-                "finish_step": final_states[i].step,
-            }
 
         if is_validation:
             valid_pixels = self.env_manager.get_valid_pixels(env_ids)["full_images"]

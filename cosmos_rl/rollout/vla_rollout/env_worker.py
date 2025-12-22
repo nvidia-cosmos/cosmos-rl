@@ -33,6 +33,7 @@ from cosmos_rl.rollout.vla_rollout.libero_utils import (
     normalize_gripper_action,
     invert_gripper_action,
 )
+import os
 
 
 @dataclass
@@ -106,6 +107,8 @@ def libero_env_worker(
                     logger.error(f"Error closing env: {close_error}")
             torch.cuda.empty_cache()
             gc.collect()
+
+    logger.info(os.environ)
 
     # Reset and set initial state
     env.reset()
