@@ -102,7 +102,7 @@ def simplify_process_weights_after_loading_for_moe():
 
 def simplify_process_weights_after_loading_for_fp8():
     simplify_process_weights_after_loading_for_linear()
-    # simplify_process_weights_after_loading_for_moe()
+    simplify_process_weights_after_loading_for_moe()
 
 
 # patch the Linear layer.
