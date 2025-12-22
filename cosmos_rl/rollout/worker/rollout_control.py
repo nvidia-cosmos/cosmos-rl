@@ -553,7 +553,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 target_tensor = target_tensor.to_local()
 
             if check_inside_group:
-                cloned_target_tensor = target_tensor.clone().cpu()
+                cloned_target_tensor = target_tensor.cpu()
                 # clear the current view
                 target_tensor.zero_()
 
@@ -621,7 +621,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 cloned_target_tensor = cloned_target_tensor.to(target_dtype).to(
                     cloned_target_tensor.dtype
                 )
-                if not torch.allclose(cloned_target_tensor, target_tensor.cpu()):
+                rhs = target_tensor.cpu()  # target_tensor: vLLM weight tensor on GPU.
+                lhs = cloned_target_tensor  # cloned_target_tensor: CPU tensor that holds the original weight.
+                if not torch.allclose(lhs, rhs):
+                    # This check is for tensor that without quantization.
                     raise ValueError(
                         f"Weight sync check failed after weight sync instruction: {insts} for {inst_dest_name}."
                     )

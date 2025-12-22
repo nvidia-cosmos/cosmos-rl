@@ -17,6 +17,14 @@ import threading
 import types
 import copy
 
+from cosmos_rl.dispatcher.data.data_fetcher import DataFetcherBase
+from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.rollout.vllm_rollout.monkey_patch_for_fp8 import (
+    monkey_patch_for_fp8,
+    simplify_process_weights_after_loading_for_fp8,
+)
+
+
 import vllm
 import torch
 
@@ -287,6 +295,16 @@ class vLLMRollout(RolloutBase):
 
             policy_config = self.config.policy
 
+            # patch the vllm model to use rowwise fp8
+            if self.quantization == "fp8":
+                # patch for weight quantization. [weight loading]
+                # patch must happen before `rollout_engine` is initialized.
+                # vllm_config = self.rollout_engine.llm_engine.vllm_config
+                simplify_process_weights_after_loading_for_fp8()
+                logger.info(
+                    f"[Rollout] Initializing vLLM engine with quantization: {self.quantization}"
+                )
+
             self.rollout_engine = LLM(
                 model=model_path,
                 enable_sleep_mode=False,  # enable sleep could corrupt the cuda allocator.
@@ -319,16 +337,13 @@ class vLLMRollout(RolloutBase):
             )
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")
-            # initialization done.
-
-            # patch the vllm model to use rowwise fp8
             if self.quantization == "fp8":
-                from vllm.config import set_current_vllm_config
-
-                vllm_config = self.rollout_engine.llm_engine.vllm_config
-                with set_current_vllm_config(vllm_config):
-                    apply_fp8_linear_patch(self.get_underlying_model())
-                simplify_process_weights_after_loading()
+                # Patch for computing kernel in rowwise fp8 manner. [computation]
+                monkey_patch_for_fp8(
+                    self.rollout_engine.llm_engine.vllm_config,
+                    self.get_underlying_model(),
+                )
+            # initialization done.
 
     def post_init_engine_hook(
         self, consume_command_hook, report_rollouts_hook, validation_flag, **kwargs
