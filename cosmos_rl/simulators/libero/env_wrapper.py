@@ -176,28 +176,29 @@ class LiberoEnvWrapper(gym.Env):
         active_indices = [
             i for i, env_id in enumerate(env_ids) if self.env_states[env_id].active
         ]
-        active_env_ids = [env_ids[i] for i in active_indices]
-        active_action = action[active_indices]
+        if active_indices:
+            active_env_ids = [env_ids[i] for i in active_indices]
+            active_action = action[active_indices]
 
-        obs, reward, done, info = self.env.step(active_action, active_env_ids)
-        images_and_states = self._extract_image_and_state(obs)
-        for i, env_id in enumerate(active_env_ids):
-            self.env_states[env_id].step += 1
-            if done[i] or self.env_states[env_id].step >= self.max_steps:
-                self.env_states[env_id].complete = done[i]
-                self.env_states[env_id].active = False
-            for k, v in images_and_states.items():
-                self.env_states[env_id].current_obs[k] = v[i]
+            obs, reward, done, info = self.env.step(active_action, active_env_ids)
+            images_and_states = self._extract_image_and_state(obs)
+            for i, env_id in enumerate(active_env_ids):
+                self.env_states[env_id].step += 1
+                if done[i] or self.env_states[env_id].step >= self.max_steps:
+                    self.env_states[env_id].complete = done[i]
+                    self.env_states[env_id].active = False
+                for k, v in images_and_states.items():
+                    self.env_states[env_id].current_obs[k] = v[i]
 
-                if self.env_states[env_id].do_validation:
-                    for img_key in ["full_images", "wrist_images"]:
-                        self.env_states[env_id].valid_pixels[img_key].append(
-                            images_and_states[img_key][i]
-                        )
+                    if self.env_states[env_id].do_validation:
+                        for img_key in ["full_images", "wrist_images"]:
+                            self.env_states[env_id].valid_pixels[img_key].append(
+                                images_and_states[img_key][i]
+                            )
 
-        completes = [self.env_states[env_id].complete for env_id in env_ids]
-        active = [self.env_states[env_id].active for env_id in env_ids]
-        finish_steps = [self.env_states[env_id].step for env_id in env_ids]
+        completes = np.array([self.env_states[env_id].complete for env_id in env_ids])
+        active = np.array([self.env_states[env_id].active for env_id in env_ids])
+        finish_steps = np.array([self.env_states[env_id].step for env_id in env_ids])
 
         full_images_and_states = {}
         for key in ["full_images", "wrist_images", "states"]:
@@ -207,9 +208,9 @@ class LiberoEnvWrapper(gym.Env):
 
         return {
             **full_images_and_states,
-            "completes": completes,
+            "complete": completes,
             "active": active,
-            "finish_steps": finish_steps,
+            "finish_step": finish_steps,
         }
 
     def chunk_step(self, env_ids: List[int], actions: torch.Tensor):

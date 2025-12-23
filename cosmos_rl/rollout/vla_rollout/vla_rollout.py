@@ -32,14 +32,14 @@ from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.rollout.rollout_base import RolloutBase, RolloutRegistry
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.utils import util
-from cosmos_rl.rollout.vla_rollout.libero_utils import (
+from cosmos_rl.simulators.libero.utils import (
+    normalize_gripper_action,
+    invert_gripper_action,
     obs_to_vla_input,
     save_rollout_video,
 )
-
 from cosmos_rl.simulators.env_manager import EnvManager
 from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
-
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
 
 MAX_STEPS_MAP = {
@@ -197,11 +197,12 @@ class OpenVLARollout(RolloutBase):
 
             self.model.eval()
 
-            self.model.load_hf_weights(
-                self.config.policy.model_name_or_path,
-                self.parallel_dims,
-                torch.device("cuda"),
-            )
+            if self.config.mode != "colocated":
+                self.model.load_hf_weights(
+                    self.config.policy.model_name_or_path,
+                    self.parallel_dims,
+                    torch.device("cuda"),
+                )
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")
 
@@ -358,7 +359,6 @@ class OpenVLARollout(RolloutBase):
         """
         full_images = inputs["full_images"]
         wrist_images = inputs["wrist_images"]
-        states = inputs["states"]
 
         vla_type = self.config.vla.vla_type
 
@@ -503,6 +503,9 @@ class OpenVLARollout(RolloutBase):
             else:
                 actions_np = actions
 
+            actions_np = normalize_gripper_action(actions_np)
+            actions_np = invert_gripper_action(actions_np)
+
             return {
                 "action": actions_np,
                 "responses": responses,
@@ -547,15 +550,11 @@ class OpenVLARollout(RolloutBase):
             logger.info(f"[Validation] success rate: {n_success}/{group_size}")
 
         # Check GRPO filtering criteria first (before expensive log prob computation)
-        num_chunks = len(vla_history)
         trajectories = [{} for _ in range(group_size)]
         for episode_idx in range(group_size):
             for key in ["input_ids", "attention_mask", "pixel_values", "responses"]:
                 trajectories[episode_idx][key] = torch.stack(
-                    [
-                        vla_history[step_idx][key][episode_idx]
-                        for step_idx in range(num_chunks)
-                    ],
+                    vla_history[episode_idx][key],
                     dim=0,
                 )
 
@@ -582,7 +581,6 @@ class OpenVLARollout(RolloutBase):
                         self.config.train.output_dir, "replay_buffer"
                     ),
                 )
-                # {'active': False, 'complete': True, 'finish_step': 164, 'task_file_name': 'libero_10_task_5_trial_13', 'task_id': 5, 'trial_id': 13, 'gen_idx': 0, 'task_suite_name': 'libero_10'}
                 completions.append(
                     {
                         "complete": bool(task_records[episode_idx]["complete"]),
@@ -627,9 +625,6 @@ class OpenVLARollout(RolloutBase):
 
         # Unpack initial data
         task_descriptions = initial_data["task_descriptions"]
-        full_images = initial_data["full_images"]
-        wrist_images = initial_data["wrist_images"]
-        states = initial_data["states"]
 
         # Episode execution loop
         step = 0
@@ -649,63 +644,52 @@ class OpenVLARollout(RolloutBase):
 
         from cosmos_rl.policy.model.vla.openvla_oft.constants import NUM_ACTIONS_CHUNK
 
-        import time
+        vla_history = [
+            {
+                key: []
+                for key in [
+                    "input_ids",
+                    "attention_mask",
+                    "pixel_values",
+                    "responses",
+                    "action",
+                ]
+            }
+            for _ in range(len(payloads))
+        ]
 
+        active_indices = active_env_ids = env_ids
+        current_inputs = {
+            "full_images": initial_data["full_images"],
+            "wrist_images": initial_data["wrist_images"],
+            "states": initial_data["states"],
+        }
         while True:
-            t1 = time.time()
-            active_indices = [
-                i for i in range(len(env_states)) if task_records[i]["active"]
-            ]
             if not active_indices:
                 break
-            active_env_ids = [env_ids[i] for i in active_indices]
-            active_full_images = full_images[active_indices]
-            active_wrist_images = wrist_images[active_indices]
-            active_states = states[active_indices]
-
-            # VLA model inference on all inputs
-            current_inputs = {
-                "full_images": active_full_images,
-                "wrist_images": active_wrist_images,
-                "states": active_states,
-            }
-            current_task_descriptions = task_descriptions
-
-            vla_input = self._process_input(current_inputs, current_task_descriptions)
-            t2 = time.time()
+            vla_input = self._process_input(current_inputs, task_descriptions)
             vla_output = self._generate_one_step_oft(vla_input, is_validation)
-            t3 = time.time()
-
-            step_data = {
-                "input_ids": vla_input["input_ids"],
-                "attention_mask": vla_input["attention_mask"],
-                "pixel_values": vla_input["pixel_values"],
-                "responses": vla_output["responses"],
-                "action": vla_output["action"],
-            }
-
-            vla_history.append(step_data)
-
             step_results = self.env_manager.chunk_step(
-                active_env_ids, step_data["action"]
+                active_env_ids, vla_output["action"]
             )
-            full_images = step_results["full_images"].copy()
-            wrist_images = step_results["wrist_images"].copy()
-            states = step_results["states"].copy()
-            for i in range(len(env_ids)):
-                task_records[i]["active"] = step_results["active"][i]
-                task_records[i]["complete"] = step_results["completes"][i]
-                task_records[i]["finish_step"] = step_results["finish_steps"][i]
-            t4 = time.time()
-            logger.info(
-                f"env steps {[task_records[i]['finish_step'] for i in range(len(env_ids))]}"
-            )
-            logger.info(
-                f"time {t4 - t1}s, preprocess {t2 - t1}s, vla {t3 - t2}s, sim {t4 - t3}s"
-            )
-            step += NUM_ACTIONS_CHUNK
+            for i, env_id in enumerate(active_env_ids):
+                for key in ["input_ids", "attention_mask", "pixel_values"]:
+                    vla_history[env_id][key].append(vla_input[key][i])
+                for key in ["responses", "action"]:
+                    vla_history[env_id][key].append(vla_output[key][i])
+                for key in ["active", "complete", "finish_step"]:
+                    task_records[env_id][key] = step_results[key][i]
 
-        final_states = self.env_manager.get_env_states(env_ids)
+            # update active indices, prepare data for next chunk
+            active_indices = [
+                i
+                for i, env_id in enumerate(active_env_ids)
+                if task_records[env_id]["active"]
+            ]
+            active_env_ids = [active_env_ids[i] for i in active_indices]
+            for key in ["full_images", "wrist_images", "states"]:
+                current_inputs[key] = step_results[key][active_indices].copy()
+            step += NUM_ACTIONS_CHUNK
 
         if is_validation:
             valid_pixels = self.env_manager.get_valid_pixels(env_ids)["full_images"]

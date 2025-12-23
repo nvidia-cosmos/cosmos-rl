@@ -75,9 +75,6 @@ class TestEnvManagerLibero(unittest.TestCase):
         self.env_manager = EnvManager(
             cfg=self.config,
             rank=0,
-            num_envs=self.config.num_envs,
-            seed_offset=0,
-            total_num_processes=1,
             env_cls=LiberoEnvWrapper,
         )
         self.env_manager.start_simulator()
@@ -179,10 +176,6 @@ class TestEnvManagerLibero(unittest.TestCase):
             self.assertIsNotNone(state.current_obs)
         print("✓ Task states updated correctly for reset environments")
 
-        # Verify non-reset environments were not affected
-        non_reset_env_states = self.env_manager.get_env_states(
-            list(range(self.config.num_envs))
-        )
         for env_id in range(self.config.num_envs):
             if env_id not in subset_env_ids:
                 state = self.env_manager.get_env_states([env_id])[0]
@@ -228,19 +221,18 @@ class TestEnvManagerLibero(unittest.TestCase):
         self.assertIn("full_images", result)
         self.assertIn("wrist_images", result)
         self.assertIn("states", result)
-        self.assertIn("completes", result)
+        self.assertIn("complete", result)
         self.assertIn("active", result)
-        self.assertIn("finish_steps", result)
+        self.assertIn("finish_step", result)
         print("✓ Step returned expected data structure")
 
         # Verify result shapes match the subset
         self.assertEqual(result["full_images"].shape[0], len(step_env_ids))
         self.assertEqual(result["wrist_images"].shape[0], len(step_env_ids))
         self.assertEqual(result["states"].shape[0], len(step_env_ids))
-        self.assertEqual(len(result["completes"]), len(step_env_ids))
+        self.assertEqual(len(result["complete"]), len(step_env_ids))
         self.assertEqual(len(result["active"]), len(step_env_ids))
-        self.assertEqual(len(result["finish_steps"]), len(step_env_ids))
-        print(result["finish_steps"])
+        self.assertEqual(len(result["finish_step"]), len(step_env_ids))
         print(f"✓ Result shapes correct for subset of {len(step_env_ids)} envs")
 
         # Verify step counter was incremented for stepped environments
@@ -310,9 +302,9 @@ class TestEnvManagerLibero(unittest.TestCase):
         self.assertIn("full_images", result)
         self.assertIn("wrist_images", result)
         self.assertIn("states", result)
-        self.assertIn("completes", result)
+        self.assertIn("complete", result)
         self.assertIn("active", result)
-        self.assertIn("finish_steps", result)
+        self.assertIn("finish_step", result)
         print("✓ Chunk step returned expected data structure")
 
         # Verify result shapes
@@ -398,7 +390,7 @@ class TestEnvManagerLibero(unittest.TestCase):
             actions = np.random.rand(len(all_env_ids), 7).astype(np.float32)
             actions[:, -1] = np.sign(actions[:, -1] - 0.5)
 
-            result = self.env_manager.step(env_ids=all_env_ids, action=actions)
+            self.env_manager.step(env_ids=all_env_ids, action=actions)
             print(f"  - Step {step_num + 1}/{num_steps} completed")
 
         print(f"✓ Completed {num_steps} steps for all environments")

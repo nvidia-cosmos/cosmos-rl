@@ -126,6 +126,7 @@ def _worker(
                 seed = data.pop("seed")
                 env = OffScreenRenderEnv(**data)
                 env.seed(seed)
+                env.reset()
                 p.send(None)
             else:
                 p.close()
