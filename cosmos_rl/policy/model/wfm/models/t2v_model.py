@@ -183,7 +183,7 @@ class WorldFoundationalModel(nn.Module):
 
         # 8. training states
         self.parallel_dims = get_global_parallel_dims()
-        self.data_parallel_size = self.parallel_dims.get_size_in_dim("dp_shard")
+        self.data_parallel_size = self.parallel_dims.get_size_in_dim("dp")
 
         # GRPO trajectory caching variables
         if config.rl.enabled:
@@ -409,7 +409,7 @@ class WorldFoundationalModel(nn.Module):
         torch.distributed.barrier()
         # Get parallelism information
         my_dp_rank, dp_world_size = (
-            self.parallel_dims.dp_shard_coord
+            self.parallel_dims.dp_coord
         )  # Number of model instances
         assert (
             dp_world_size % self.config.rl.num_rollout == 0

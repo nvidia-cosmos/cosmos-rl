@@ -117,6 +117,10 @@ class RLPayload(BaseModel):
         default=None, description="The logprobs of each completion."
     )
 
+    prompt_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of the input prompt."
+    )
+
     # The cumulative logprob of the generated completions which indicates the total probability of the generated completions
     cumulative_logprob: Optional[List[float]] = Field(
         default=None,
@@ -126,6 +130,10 @@ class RLPayload(BaseModel):
     report_metrics: Optional[List[Dict[str, Any]]] = Field(
         default=None,
         description="The report_metrics for the rollout used for metrics collection and reporting.",
+    )
+
+    teacher_result_uuids: Optional[List[str]] = Field(
+        default=None, description="The uuids for the teacher results."
     )
 
     @staticmethod
@@ -164,6 +172,14 @@ class Rollout(BaseModel):
         default="", description="The generated completion for the rollout."
     )
 
+    teacher_result_uuid: str = Field(
+        default="", description="The uuid of the teacher result."
+    )
+
+    teacher_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of the teacher for the current rollout."
+    )
+
     completed_conversation: Optional[ConversationType] = Field(
         default=None, description="The generated conversation for the rollout."
     )
@@ -183,11 +199,15 @@ class Rollout(BaseModel):
     )
 
     completion_token_ids: Optional[List[int]] = Field(
-        default=None, description="The token ids of each completion."
+        default=None, description="The token ids of current rollout's completion."
     )
 
     completion_logprobs: Optional[List[float]] = Field(
-        default=None, description="The logprobs of each completion."
+        default=None, description="The logprobs of current rollout's completion."
+    )
+
+    prompt_logprobs: Optional[List[float]] = Field(
+        default=None, description="The logprobs of the input prompt."
     )
 
     weight_version: int = Field(

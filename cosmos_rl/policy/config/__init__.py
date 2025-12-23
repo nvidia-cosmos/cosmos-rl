@@ -415,7 +415,7 @@ class GrpoConfig(BaseModel):
     )
 
     outdated_rollout_fetch_batch_size: int = Field(
-        default=1,
+        default=0,
         description="Number of outdated rollouts to fetch. If set to 0, the rollout engine will stop generating rollouts if the weight is outdated.",
     )
 
@@ -462,6 +462,11 @@ class GrpoConfig(BaseModel):
         description="Whether to use token ids for rollouts instead of text. This can save tokenization time during rollout generation.",
     )
 
+    collect_rollout_logprobs: bool = Field(
+        default=False,
+        description="Whether to collect logprobs for rollouts instead of text. This can save logprob calculation time during rollout generation.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
@@ -488,6 +493,7 @@ class GrpoConfig(BaseModel):
             self.dataloader_batch_size = None
         if self.use_decoupled_loss:
             self.rollout_as_token_ids = True
+            self.collect_rollout_logprobs = True
             logger.warning(
                 "Decoupled loss is enabled, so rollout_as_token_ids is set to True."
             )
@@ -1117,6 +1123,98 @@ class VLAConfig(BaseModel):
         return self
 
 
+class DistillationConfig(BaseModel):
+    enable: bool = Field(default=False, description="Whether to enable distillation.")
+
+    parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
+
+    model_name_or_path: str = Field(
+        # default="Qwen/Qwen2.5-3B-Instruct",  #'Qwen/Qwen2.5-VL-7B-Instruct'
+        default="Qwen/Qwen2.5-VL-7B-Instruct",
+        description="The teacher model name or path, compatible with huggingface model name or local path",
+    )
+
+    model_revision: Optional[str] = Field(
+        default=None,
+        description="The revision of the teacher model to use",
+    )
+
+    model_max_length: int = Field(
+        default=4096,
+        description="The maximum length for teacher model, longer than this will be ignored for training stability",
+    )
+
+    compile: bool = Field(
+        default=True, description="Whether to use torch.compile for teacher model."
+    )
+    # --------- FSDP ---------
+
+    master_dtype: str = Field(
+        default="float32",
+        description="The master weight data type for teacher model, is orthognal to `param_dtype`. Should be high precision for convergence consideration",
+        choices=["bfloat16", "float16", "float32"],
+    )
+
+    param_dtype: str = Field(
+        default="bfloat16",
+        description="The data type for forward/backward of teacher model. Outside forward/backward, params are in `master_dtype`",
+        choices=["bfloat16", "float16", "float32"],
+    )
+
+    logprob_dtype: str = Field(
+        default="float32",
+        description="The data type for logprobs calculation of teacher model.",
+        choices=["bfloat16", "float16", "float32"],
+    )
+
+    fsdp_reduce_dtype: str = Field(
+        default="float32",
+        description="The data type for reduction in FSDP for teacher model.",
+        choices=["float32"],
+    )
+
+    fsdp_offload: bool = Field(
+        default=False,
+        description="Whether to offload the teacher model to CPU if using FSDP",
+    )
+
+    fsdp_reshard_after_forward: str = Field(
+        default="default",
+        description="Reshard the param after forward pass in FSDP for teacher model.",
+        choices=["always", "never", "default"],
+    )
+
+    batch_size_per_replica: int = Field(
+        default=1, description="Batch size for teacher model per replica."
+    )
+
+    seed: Optional[int] = Field(
+        default=None, description="Random seed for teacher model."
+    )
+
+    kl_penalty_coef: float = Field(
+        default=1.0, description="The coefficient for KL penalty."
+    )
+
+    kl_discount_factor: float = Field(
+        default=0.0, description="The discount factor for KL penalty."
+    )
+
+    @model_validator(mode="after")
+    def check_params_value(self):
+        assert (
+            self.model_name_or_path is not None and self.model_name_or_path != ""
+        ), "model_name_or_path is required"
+        assert self.parallelism.tp_size > 0, "tp_size must be greater than 0"
+        assert self.parallelism.ep_size > 0, "ep_size must be greater than 0"
+        assert self.parallelism.cp_size > 0, "cp_size must be greater than 0"
+        assert self.parallelism.pp_size > 0, "pp_size must be greater than 0"
+        assert (
+            self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
+        ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
+        return self
+
+
 class Config(BaseModel):
     custom: Dict[str, Any] = Field(
         default_factory=dict, description="Custom script configuration."
@@ -1127,6 +1225,7 @@ class Config(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     profiler: ProfilerConfig = Field(default_factory=ProfilerConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    distillation: DistillationConfig = Field(default_factory=DistillationConfig)
     vla: VLAConfig = Field(default_factory=VLAConfig)
     redis: str = Field(
         default="",
@@ -1231,6 +1330,12 @@ class Config(BaseModel):
         if self.train.transfer_dtype is None:
             # Default use master_dtype as transfer_dtype
             self.train.transfer_dtype = self.train.master_dtype
+
+        if self.distillation.enable:
+            self.train.train_policy.rollout_as_token_ids = True
+            logger.info(
+                "Distillation is enabled, so rollout_as_token_ids is set to True."
+            )
         return self
 
 

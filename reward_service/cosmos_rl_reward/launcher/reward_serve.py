@@ -278,7 +278,11 @@ def main():
     redis_url = f"http://localhost:{port}"
     info = {"reward": {}}
     controllers: Dict[str, RewardProcessHandler] = {}
-    for reward_arg in loaded_config.reward_args:
+    # Filter only enabled rewards
+    enabled_reward_args = [
+        reward_arg for reward_arg in loaded_config.reward_args if getattr(reward_arg, "enable", True)
+    ]
+    for reward_arg in enabled_reward_args:
         logger.info(f"Setting up reward: {reward_arg.reward_type}")
         key = reward_arg.reward_type
         controllers[key] = RewardProcessHandler(
@@ -297,28 +301,46 @@ def main():
     # Build the worker process for DecodeHandler
     decoder.threading_pool = ProcessPoolExecutor(max_workers=1)
 
-    # Prepare model path for DecodeHandler
-    if os.path.exists(loaded_config.decode_args.model_path):
-        model_path = loaded_config.decode_args.model_path
-    else:
-        model_path = os.path.join(
-            get_cosmos_rl_reward_cache_dir(),
-            os.path.basename(loaded_config.decode_args.model_path),
-        )
-        if not os.path.exists(model_path):
-            download_file(loaded_config.decode_args.model_path, model_path)
+    requires_latent_decode = False
+    for reward_arg in enabled_reward_args:
+        try:
+            reward_cls = RewardRegistry.get_reward_class(reward_arg.reward_type)
+            if getattr(reward_cls, "NEEDS_LATENT_DECODER", False):
+                requires_latent_decode = True
+                break
+        except Exception:
+            continue
 
-    # Initialize the DecodeHandler in the worker process
-    initialized = decoder.threading_pool.submit(
-        DecodeHandler.initialize,
-        info=info,
-        model_path=model_path,
-        dtype=loaded_config.decode_args.dtype,
-        device=loaded_config.decode_args.device,
-        chunk_duration=loaded_config.decode_args.chunk_duration,
-        temporal_window=loaded_config.decode_args.temporal_window,
-        load_mean_std=loaded_config.decode_args.load_mean_std,
-    )
+    if requires_latent_decode:
+        # Prepare model path for DecodeHandler
+        if os.path.exists(loaded_config.decode_args.model_path):
+            model_path = loaded_config.decode_args.model_path
+        else:
+            model_path = os.path.join(
+                get_cosmos_rl_reward_cache_dir(),
+                os.path.basename(loaded_config.decode_args.model_path),
+            )
+            if not os.path.exists(model_path):
+                download_file(loaded_config.decode_args.model_path, model_path)
+        # Initialize the DecodeHandler in the worker process with decoder args
+        initialized = decoder.threading_pool.submit(
+            DecodeHandler.initialize,
+            info=info,
+            requires_latent_decode=True,
+            model_path=model_path,
+            dtype=loaded_config.decode_args.dtype,
+            device=loaded_config.decode_args.device,
+            chunk_duration=loaded_config.decode_args.chunk_duration,
+            temporal_window=loaded_config.decode_args.temporal_window,
+            load_mean_std=loaded_config.decode_args.load_mean_std,
+        )
+    else:
+        # Initialize without decoder (skip heavy imports/downloads)
+        initialized = decoder.threading_pool.submit(
+            DecodeHandler.initialize,
+            info=info,
+            requires_latent_decode=False,
+        )
     initialized.result()  # Wait for initialization to complete
 
     # Start the Uvicorn server

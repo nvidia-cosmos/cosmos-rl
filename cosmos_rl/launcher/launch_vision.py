@@ -187,15 +187,18 @@ def launch_vision_gen(
     context_parallel_size = model_parallel_config.context_parallel_size
     tensor_model_parallel_size = model_parallel_config.tensor_model_parallel_size
     fsdp_shard_size = config.model.fsdp_shard_size
+    dp_replicate_size = config.model.dp_replicate_size
     min_n_gpus = (
         data_parallel_size
         * pipeline_model_parallel_size
         * tensor_model_parallel_size
         * context_parallel_size
         * fsdp_shard_size
+        * dp_replicate_size
     )
 
-    num_replicas = args.wfm_num_replicas
+    # We use HSDP (dp_replicate_size) for the multi-node case, so the number of replicas is 1
+    num_replicas = 1
     logger.info(f"Number of replicas: {num_replicas}")
 
     if args.lepton_mode:

@@ -470,6 +470,11 @@ class PolicyStatusManager:
         if config.validation.enable and config.validation.val_before_train:
             self.data_fetcher.validation_activate_dataloader(0)
 
+        if self.config.validation.enable and (
+            self.config.validation.freq == 1 or self.total_steps == 1
+        ):
+            self.data_fetcher.validation_activate_dataloader(1)
+
         if (
             not self.policy_init_done
             and len(valid_replicas) >= config.policy.parallelism.n_init_replicas

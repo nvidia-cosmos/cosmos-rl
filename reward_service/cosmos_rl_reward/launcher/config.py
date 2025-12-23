@@ -87,6 +87,11 @@ class Config(BaseModel):
     Configuration for the whole reward service.
     """
 
+    no_latent_decoder: bool = Field(
+        default=False,
+        description="If true, do not initialize the latent decoder (image-only mode).",
+    )
+    
     host: str = Field(default="localhost", description="Host address for the launcher")
     port: int = Field(default=8080, description="Port number for the launcher")
 

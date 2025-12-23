@@ -76,10 +76,6 @@ class RLPolicyWorker(PolicyWorkerBase):
         ), "config must be a CosmosConfig object for this trainer"
         super().__init__(config, parallel_dims=parallel_dims)
 
-        # For hooks and custom logger functions
-        self.custom_logger_fns = kwargs.get("custom_logger_fns", [])
-        self.hook_fns = kwargs.get("hook_fns", {})
-
         self.report_data = {}
         self.upload_thread = None
 
@@ -616,19 +612,45 @@ class RLPolicyWorker(PolicyWorkerBase):
                 self.command_buffer.put_nowait(c)
 
     def dispatch_rollouts(self) -> List[Rollout]:
-        def preprocess_rollouts(rollouts: List[Rollout]):
+        def preprocess_rollouts(rollouts: List[Rollout]) -> List[Rollout]:
+            """
+            Processing rollouts that retrieved from the controller,
+            including:
+            - Getting the prompt and conversation from the local dataset if local_dataset is enabled
+            - Getting the teacher result from the Redis if the teacher result uuid is not empty
+            """
             assert all(
                 rollout.prompt_idx >= 0 for rollout in rollouts
             ), "All rollouts from controller should have a valid prompt index"
-            if self.config.train.local_dataset:
-                for i in range(len(rollouts)):
+            for i in range(len(rollouts)):
+                if self.config.train.local_dataset:
+                    # Populate the prompt and conversation from the local dataset
                     rollouts[i].prompt = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx
                     )
-
                     rollouts[i].conversation = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx,
                         attr="conversation",
+                    )
+                if rollouts[i].teacher_result_uuid:
+                    logger.debug(
+                        f"[Policy] Getting teacher result {rollouts[i].teacher_result_uuid} from Redis"
+                    )
+                    # Interactive with teacher if the teacher result uuid is not empty
+                    teacher_result = self.redis_controller.get_teacher_result(
+                        rollouts[i].teacher_result_uuid
+                    )
+                    if teacher_result is None:
+                        rollouts[i].teacher_logprobs = None
+                        logger.error(
+                            f"[Policy] Failed to get teacher result {rollouts[i].teacher_result_uuid} from Redis"
+                        )
+                    else:
+                        rollouts[i].teacher_logprobs = teacher_result.get(
+                            "teacher_logprobs", None
+                        )
+                    logger.debug(
+                        f"[Policy] Teacher result: {len(rollouts[i].teacher_logprobs) if rollouts[i].teacher_logprobs is not None else 0} items"
                     )
             return rollouts
 
@@ -665,8 +687,7 @@ class RLPolicyWorker(PolicyWorkerBase):
             scattered_rollouts,
             src=0,
         )
-        rollouts = rollouts[0]
-        return preprocess_rollouts(rollouts)
+        return preprocess_rollouts(rollouts[0])
 
     def main_loop(self):
         def fetch_command_helper(trainer: GRPOTrainer):

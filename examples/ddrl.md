@@ -34,16 +34,16 @@ class RLConfig:
     
     # Number of rollout group size. The total batch size is
     # World_size / num_rollout / model_parallel.context_parallel_size 
-    num_rollout: int = 2    
+    num_rollout: int = 8    
 
     on_policy: bool = True  # Whether to use training policy to rollout
-    sample_steps: int = 10  # How many sample steps in rollout
+    sample_steps: int = 20  # How many sample steps in rollout
     # Control sample data type (0-t2v, 1-i2v, 2-v2v)
-    min_num_conditional_frames: int = 1 
+    min_num_conditional_frames: int = 0 
     max_num_conditional_frames: int = 1
     
     # Whether to use same initial seed within a rollout group
-    use_same_seed: bool = True
+    use_same_seed: bool = False
 
     ## Standard sampler parameters ##
     solver_option: str = "2ab"  # Solver method (multistep or runge-kutta)
@@ -54,11 +54,11 @@ class RLConfig:
     guidance: float = 0.0       # We do not enable CFG during DDRL
     
     # Training parameters
-    train_on: list[int] = [0, 1, 2, 3]  
+    train_on: list[int] = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
     update_ref_every_iter: int = 0  # Frequency to update ref model
     clip_ratio: float = 0.0001
-    kl_beta: float = 0.01           # Coefficient of reverse KL
-    data_beta: float = 0.0          # Coefficient of diffusion loss
+    kl_beta: float = 0.0           # Coefficient of reverse KL
+    data_beta: float = 0.01          # Coefficient of diffusion loss
     
     # Diffusion loss paramteres. Required When data_beta > 0
     use_rl_sigma_and_noise: bool = True # whether to use rollout noise

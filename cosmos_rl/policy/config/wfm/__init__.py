@@ -216,6 +216,7 @@ class ModelConfig(BaseModel):
     ema: EMAConfig = Field(default_factory=EMAConfig)
     sde: SDEConfig = Field(default_factory=SDEConfig)
     fsdp_shard_size: int = 8
+    dp_replicate_size: int = 1
     sigma_data: float = 1.0
     precision: str = "bfloat16"
     input_data_key: str = "video"
@@ -310,6 +311,7 @@ class BaseDataloaderConfig(BaseModel):
     drop_last: bool = True
     num_workers: int
     pin_memory: bool = True
+    prefetch_factor: int = 4
 
 
 class ImageDataLoaderConfig(BaseDataloaderConfig):

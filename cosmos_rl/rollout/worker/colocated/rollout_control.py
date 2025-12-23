@@ -90,10 +90,17 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             ), f"current_step: {current_step} must be greater than or equal to self.current_weight_version: {self.current_weight_version}"
             self.current_weight_version = current_step
 
-        if current_step is not None and current_step > 0:
+        if current_step is not None and current_step >= 0:
+            is_initial_validation = (
+                current_step == 0 and self.config.validation.val_before_train
+            )
+            is_periodic_validation = (
+                current_step > 0 and current_step % self.config.validation.freq == 0
+            )
+            is_final_validation = current_step == broadcast_command.total_steps
+
             should_do_validation = self.config.validation.enable and (
-                current_step % self.config.validation.freq == 0
-                or current_step == broadcast_command.total_steps
+                is_initial_validation or is_periodic_validation or is_final_validation
             )
 
             if should_do_validation:

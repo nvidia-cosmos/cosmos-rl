@@ -138,7 +138,7 @@ class TestCustomRolloutOutput(unittest.TestCase):
                     prompt=dataset[i]["prompt"],
                     prompt_idx=0,  # Mock the prompt index
                     completions=[dataset[i]["result"] for _ in range(16)],
-                    completed_conversations=[[]] * 16,
+                    completed_conversations=[[] for _ in range(16)],
                     rewards=[0.5] * 16,
                     advantages=[0.5] * 16,
                     filter_rewards=[0.5] * 16,

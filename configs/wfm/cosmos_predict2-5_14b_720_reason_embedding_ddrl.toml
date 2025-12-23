@@ -13,6 +13,7 @@ input_key = "padding_mask"
 [[model.conditioner]]
 name = "text"
 type = "text_attr"
+dropout_rate = 0.2
 input_key = ["t5_text_embeddings"]
 
 [[model.conditioner]]
@@ -24,12 +25,10 @@ input_key = "fps"
 [model]
 text_encoder_class = "reason1_7B"
 fsdp_shard_size = 8
+resolution = "720"
 
 [model_parallel]
-tensor_model_parallel_size = 1
-pipeline_model_parallel_size = 1
-pipeline_parallel_size = 1
-context_parallel_size = 1
+context_parallel_size = 2
 
 [model.net]
 use_crossattn_projection = true
@@ -73,6 +72,7 @@ data_beta = 0.01
 guidance = 0.0
 kl_beta = 0.0
 min_num_conditional_frames = 0
+train_on = [0,2,4,6,8,10,12,14,16,18]
 
 [trainer]
 max_iter = 2001
@@ -145,8 +145,8 @@ step_size = 1
 n_x0_level = 4
 n_viz_sample = 3
 n_sample_to_save = 128
-num_sampling_step = 35
-guidance = []
+num_sampling_step = 20
+guidance = [7]
 is_x0 = false
 is_sample = true
 save_s3 = true
@@ -154,7 +154,7 @@ is_ema = false
 use_negative_prompt = false
 show_all_frames = false
 fps = 16
-every_n = 16
+every_n = 32
 
 [[trainer.callbacks]]
 name = "every_n_sample_ema"
@@ -163,8 +163,8 @@ step_size = 1
 n_x0_level = 4
 n_viz_sample = 3
 n_sample_to_save = 128
-num_sampling_step = 35
-guidance = []
+num_sampling_step = 20
+guidance = [7]
 is_x0 = false
 is_sample = true
 save_s3 = true
@@ -172,7 +172,7 @@ is_ema = true
 use_negative_prompt = false
 show_all_frames = false
 fps = 16
-every_n = 16
+every_n = 32
 
 [[trainer.callbacks]]
 name = "wandb"
@@ -252,3 +252,4 @@ wandb_mode = "online"
 type = "distributed"
 load_path = "nvidia/Cosmos-Predict2.5-2B"
 model_id = "base/pre-trained/d20b7120-df3e-4911-919d-db6e08bad31c_ema_bf16.pt"
+save_iter = 32
