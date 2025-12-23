@@ -553,7 +553,13 @@ class OpenVLARollout(RolloutBase):
         # Check GRPO filtering criteria first (before expensive log prob computation)
         trajectories = [{} for _ in range(group_size)]
         for episode_idx in range(group_size):
-            for key in ["input_ids", "attention_mask", "pixel_values", "responses", "old_log_probs"]:
+            for key in [
+                "input_ids",
+                "attention_mask",
+                "pixel_values",
+                "responses",
+                "old_log_probs",
+            ]:
                 trajectories[episode_idx][key] = torch.stack(
                     vla_history[episode_idx][key],
                     dim=0,
@@ -565,9 +571,7 @@ class OpenVLARollout(RolloutBase):
             traj = trajectories[episode_idx]
             trajectory_id = save_trajectory_to_buffer(
                 traj,
-                buffer_dir=os.path.join(
-                    self.config.train.output_dir, "replay_buffer"
-                ),
+                buffer_dir=os.path.join(self.config.train.output_dir, "replay_buffer"),
             )
             completions.append(
                 {

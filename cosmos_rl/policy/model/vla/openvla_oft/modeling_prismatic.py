@@ -13,10 +13,8 @@ from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 import timm
-import tokenizers
 import torch
 import torch.nn as nn
-import transformers
 from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
@@ -1912,7 +1910,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             original_ids_flat = sampled_indices_flat + (self.vocab_size - 256)
             reponse_ids = original_ids_flat.view(action_logits.shape[0], -1)
             logp = torch.log_softmax(scaled_logits, dim=-1).reshape(-1, probs.shape[-1])
-            logprobs = torch.gather(logp, dim=-1, index=sampled_indices_flat).reshape(action_logits.shape[0], -1)
+            logprobs = torch.gather(logp, dim=-1, index=sampled_indices_flat).reshape(
+                action_logits.shape[0], -1
+            )
 
             # padding + only get last 256 token end
 

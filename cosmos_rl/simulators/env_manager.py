@@ -27,8 +27,6 @@ from typing import Optional
 import torch
 import torch.multiprocessing as mp
 
-from cosmos_rl.utils.util import logger
-
 
 def force_gc_tensor(tensor):
     if not torch.is_tensor(tensor):

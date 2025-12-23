@@ -56,6 +56,7 @@ from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 
 os.environ["MUJOCO_GL"] = "egl"
 
+
 @dataclass
 class MockLiberoConfig:
     """Minimal configuration for LiberoEnvWrapper."""
