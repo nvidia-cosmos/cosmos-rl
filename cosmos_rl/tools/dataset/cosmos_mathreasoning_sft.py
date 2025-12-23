@@ -37,9 +37,7 @@ class MathReasoningSFTDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        item = self.dataset[idx]["messages"]
-        converted_item = self.convert_fn(item)
-        return converted_item
+        return self.dataset[idx]["messages"]
 
 
 if __name__ == "__main__":
