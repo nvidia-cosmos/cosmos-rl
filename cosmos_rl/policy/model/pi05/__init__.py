@@ -938,6 +938,9 @@ class PI05(BaseModel):
         suffix_out = suffix_out.to(dtype=torch.float32)
         return suffix_out
 
+    def _set_fsdp_reshard_after_forward(self, policy_str):
+        logging.info("FSDP reshard_after_forward setting is not applicable for PI05 model.")
+        pass
 
     def denoise_step(
         self,
@@ -1154,7 +1157,7 @@ class PI05(BaseModel):
         with safe_open(weight_path, framework="pt", device=("cuda" if device.type == "cuda" else "cpu")) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key)
-
+        logger.info(f'{state_dict.keys()}')
         # If embed_tokens is missing in the checkpoint, mirror lm_head (official tying).
         embed_key = "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
         lm_head_key = "paligemma_with_expert.paligemma.lm_head.weight"
@@ -1166,23 +1169,6 @@ class PI05(BaseModel):
             logger.warning(f"PI05 relaxed load: {len(missing)} missing keys. First 10: {missing[:10]}")
         if unexpected:
             logger.info(f"PI05 relaxed load: {len(unexpected)} unexpected keys (ignored)")
-
-        # Tie embedding weights if the checkpoint omitted them (mimic official OpenPI tie).
-        try:
-            embed = self.paligemma_with_expert.paligemma.model.language_model.embed_tokens
-            lm_head = self.paligemma_with_expert.paligemma.lm_head
-            if embed.weight.data_ptr() != lm_head.weight.data_ptr():
-                embed.weight = lm_head.weight  # share weights
-                logger.info("Tied paligemma embed_tokens.weight to lm_head.weight.")
-        except Exception as tie_e:  # pragma: no cover - defensive
-            logger.warning("Failed to tie embed_tokens to lm_head: %s", tie_e)
-
-        # Match official inference: keep specific params in float32 after load.
-        self.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
-        logger.info("PI05 weight load done via model.safetensors")
-        return
-
-
 
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
