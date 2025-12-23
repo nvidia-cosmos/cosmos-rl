@@ -27,7 +27,26 @@ jobs:
       - name: Build image
         run: |
           docker build -t ${{ steps.vars.outputs.image_tag }} .
+          docker build -t ${{ steps.vars.outputs.image_tag }}-vla --build-arg COSMOS_RL_EXTRAS=vla .
+      
+      - name: Run vla tests
+        id: vla-tests
+        run: |
+          set -ex
 
+          container_id=$(docker run -t -d --rm \
+            --gpus all \
+            --shm-size=24G \
+            -v ${{ github.workspace }}/tests:/workspace/cosmos-rl/tests:ro \
+            -v /tmp/cache:/root/.cache \
+            -e PYTHONPYCACHEPREFIX=/tmp/pycache \
+            -w /workspace/cosmos-rl \
+            ${{ steps.vars.outputs.image_tag }}-vla /bin/bash)
+
+          echo "container_id=${container_id}" >> $GITHUB_OUTPUT
+          DOCKER_RUN="timeout 10m docker exec ${container_id}"
+          ${DOCKER_RUN} python tests/test_env_manager_libero.py
+        
       - name: Run tests
         id: tests
         run: |
@@ -83,4 +102,6 @@ jobs:
         if: always()
         run: |
           docker stop "${{ steps.tests.outputs.container_id }}" || true
+          docker stop "${{ steps.vla-tests.outputs.container_id }}" || true
           docker rmi -f "${{ steps.vars.outputs.image_tag }}" || true
+          docker rmi -f "${{ steps.vars.outputs.image_tag }}-vla" || true

@@ -13,61 +13,90 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-LIBERO utility functions for environment interaction and action processing.
-
-Reimplemented from verl/utils/libero_utils.py to remove external dependencies.
-"""
-
 import os
+import math
 import numpy as np
+import libero.libero.benchmark as benchmark
 from typing import Dict
+
 from cosmos_rl.utils.logging import logger
 
-from libero.libero import get_libero_path
-from libero.libero.envs import OffScreenRenderEnv
+
+def get_libero_dummy_action(num_envs: int) -> list:
+    dummy_actions = np.zeros((num_envs, 7))
+    dummy_actions[:, -1] = -1.0
+    return dummy_actions
 
 
-def get_libero_env(task, model_family: str, resolution: int = 256):
+def quat2axisangle(quat: np.ndarray) -> np.ndarray:
     """
-    Initialize and return the LIBERO environment, along with the task description.
+    Copied from robosuite: https://github.com/ARISE-Initiative/robosuite/blob/eafb81f54ffc104f905ee48a16bb15f059176ad3/robosuite/utils/transform_utils.py#L490C1-L512C55
+
+    Converts quaternion to axis-angle format.
+    Returns a unit vector direction scaled by its angle in radians.
 
     Args:
-        task: LIBERO task object with language, problem_folder, and bddl_file attributes
-        model_family: Model family name (e.g., 'openvla')
-        resolution: Image resolution for camera
+        quat (np.array): (x,y,z,w) vec4 float angles
 
     Returns:
-        Tuple[env, task_description]: Environment and task description string
+        np.array: (ax,ay,az) axis-angle exponential coordinates
     """
+    # clip quaternion
+    if quat[3] > 1.0:
+        quat[3] = 1.0
+    elif quat[3] < -1.0:
+        quat[3] = -1.0
 
-    task_description = task.language
-    task_bddl_file = os.path.join(
-        get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
-    )
-    env_args = {
-        "bddl_file_name": task_bddl_file,
-        "camera_heights": resolution,
-        "camera_widths": resolution,
-    }
-    env = OffScreenRenderEnv(**env_args)
-    env.seed(
-        0
-    )  # IMPORTANT: seed affects object positions even when using fixed initial state
-    return env, task_description
+    den = np.sqrt(1.0 - quat[3] * quat[3])
+    if math.isclose(den, 0.0):
+        # This is (close to) a zero degree rotation, immediately return
+        return np.zeros(3)
+
+    return (quat[:3] * 2.0 * math.acos(quat[3])) / den
 
 
-def get_libero_dummy_action(model_family: str) -> list:
+def get_benchmark_overridden(benchmark_name) -> benchmark.Benchmark:
     """
-    Get dummy/no-op action, used to roll out the simulation while the robot does nothing.
+    Return the Benchmark class for a given name.
+    For "libero_all": return a dynamically aggregated class from all suites.
+    For others: delegate to the original LIBERO get_benchmark.
 
     Args:
-        model_family: Model family name (e.g., 'openvla')
+        benchmark_name: Name of the benchmark to get
 
     Returns:
-        list: Dummy action [x, y, z, rx, ry, rz, gripper]
+        Benchmark class
     """
-    return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]
+    name = str(benchmark_name).lower()
+    if name != "libero_all":
+        return benchmark.get_benchmark(benchmark_name)
+
+    libreo_cls = benchmark.BENCHMARK_MAPPING.get("libero_all", None)
+    if libreo_cls is not None:
+        return libreo_cls
+
+    # Build aggregated task map once, preserving order and de-duplicating by task name
+    aggregated_task_map: dict[str, benchmark.Task] = {}
+    for suite_name in getattr(benchmark, "libero_suites", []):
+        suite_map = benchmark.task_maps.get(suite_name, {})
+        for task_name, task in suite_map.items():
+            if task_name not in aggregated_task_map:
+                aggregated_task_map[task_name] = task
+
+    class LIBERO_ALL(benchmark.Benchmark):
+        def __init__(self, task_order_index=0):
+            super().__init__(task_order_index=task_order_index)
+            self.name = "libero_all"
+            self._make_benchmark()
+
+        def _make_benchmark(self):
+            tasks = list(aggregated_task_map.values())
+            self.tasks = tasks
+            self.n_tasks = len(self.tasks)
+
+    # Register for discoverability/help
+    benchmark.BENCHMARK_MAPPING["libero_all"] = LIBERO_ALL
+    return LIBERO_ALL
 
 
 def normalize_gripper_action(action: np.ndarray, binarize: bool = True) -> np.ndarray:
@@ -179,41 +208,14 @@ def obs_to_vla_input(obs: Dict, is_robotwin: bool = False) -> Dict:
     Returns:
         Dict with 'full_image' (and 'state' for RoboTwin)
     """
-    if is_robotwin:
-        # RoboTwin format
-        return {
-            "full_image": obs.get(
-                "agentview_image", obs.get("image", np.zeros((256, 256, 3)))
-            ),
-            "state": obs.get("robot0_proprio", obs.get("state", np.zeros(32))),
-        }
-    else:
-        # LIBERO format
-        # IMPORTANT: Resize to 224x224 to match SimpleVLA-RL's get_libero_image()
-        img = obs.get("agentview_image", np.zeros((256, 256, 3)))
 
-        # Resize using PIL (matches SimpleVLA-RL's resize_image function behavior)
-        if img.shape[0] != 224 or img.shape[1] != 224:
+    def resize_image(img: np.ndarray, resolution: int = 224) -> np.ndarray:
+        if img.shape[0] != resolution or img.shape[1] != resolution:
             from PIL import Image
-            import io
 
-            # Match SimpleVLA-RL's resize_image implementation:
-            # - Encode as JPEG (as done in RLDS dataset builder)
-            # - Decode back
-            # - Resize with Lanczos (high-quality resampling)
-            # - Clip to valid range
             pil_img = Image.fromarray(img.astype(np.uint8))
-
-            # Encode/decode as JPEG to match TF behavior
-            buffer = io.BytesIO()
-            pil_img.save(buffer, format="JPEG", quality=95)
-            buffer.seek(0)
-            pil_img = Image.open(buffer)
-
-            # Resize with Lanczos (equivalent to lanczos3)
-            pil_img = pil_img.resize((224, 224), Image.Resampling.LANCZOS)
-
-            # Convert back to numpy array
+            pil_img = pil_img.resize((resolution, resolution), Image.Resampling.LANCZOS)
             img = np.array(pil_img, dtype=np.uint8)
+        return img
 
-        return {"full_image": img}
+    return resize_image(obs, 224)

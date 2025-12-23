@@ -189,9 +189,12 @@ RUN rm /workspace/*.whl
 ## Image target: cosmos_rl
 FROM pre-package AS package
 
+ARG COSMOS_RL_EXTRAS
+
 COPY . /workspace/cosmos_rl
-RUN if [ -z "$COSMOS_RL_EXTRAS" ]; then \
-        pip install /workspace/cosmos_rl; \
-    else \
-        pip install "/workspace/cosmos_rl[$COSMOS_RL_EXTRAS]"; \
-    fi && rm -rf /workspace/cosmos_rl
+RUN apt install -y cmake && \
+    pip install /workspace/cosmos_rl${COSMOS_RL_EXTRAS:+[$COSMOS_RL_EXTRAS]} && \
+    if [[ ",$COSMOS_RL_EXTRAS," == *,vla,* ]]; then \
+        bash /workspace/cosmos_rl/tools/scripts/setup_vla.sh; \
+    fi && \
+    rm -rf /workspace/cosmos_rl

@@ -13,10 +13,8 @@ from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 import timm
-import tokenizers
 import torch
 import torch.nn as nn
-import transformers
 from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
@@ -368,16 +366,6 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             raise NotImplementedError(
                 "TIMM Version must be >= 0.9.10 and < 1.0.0 (breaking); please raise a GitHub Issue "
                 "if you urgently need support for latest TIMM versions."
-            )
-
-        if (transformers.__version__ != "4.40.1") or (
-            tokenizers.__version__ != "0.19.1"
-        ):
-            logger.warning(
-                f"Expected `transformers==4.40.1` and `tokenizers==0.19.1` but got "
-                f"`transformers=={transformers.__version__}` and `tokenizers=={tokenizers.__version__}`; "
-                f"there might be inference-time regressions due to dependency changes. If in doubt, please"
-                f"use the above versions."
             )
 
         # Instantiate PrismaticVisionBackbone (w/ Potential Fused Backbone)
@@ -1921,6 +1909,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             sampled_indices_flat = torch.multinomial(probs_flat, num_samples=1)
             original_ids_flat = sampled_indices_flat + (self.vocab_size - 256)
             reponse_ids = original_ids_flat.view(action_logits.shape[0], -1)
+            logp = torch.log_softmax(scaled_logits, dim=-1).reshape(-1, probs.shape[-1])
+            logprobs = torch.gather(logp, dim=-1, index=sampled_indices_flat).reshape(
+                action_logits.shape[0], -1
+            )
+
             # padding + only get last 256 token end
 
             predicted_action_token_ids = reponse_ids.cpu().numpy()
@@ -1933,7 +1926,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         # normalized_actions = normalized_actions.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
         normalized_actions = normalized_actions.reshape(-1, ACTION_DIM)
 
-        return normalized_actions, reponse_ids
+        return normalized_actions, reponse_ids, logprobs
         # return normalized_actions, actions_hidden_states
 
     def predict_action(
@@ -2058,7 +2051,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             )
         else:
             # Run regression or discrete token-based prediction
-            normalized_actions, actions_hidden_states = (
+            normalized_actions, actions_hidden_states, logprobs = (
                 self._regression_or_discrete_prediction(
                     input_embeddings,
                     all_actions_mask,
@@ -2074,7 +2067,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         # Unnormalize predicted actions
         actions = self._unnormalize_actions(normalized_actions, unnorm_key)
 
-        return actions, actions_hidden_states
+        return actions, actions_hidden_states, logprobs
 
     def generate_action(
         self,
@@ -2212,7 +2205,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             )
         else:
             # Run regression or discrete token-based prediction
-            normalized_actions, reponse_ids = self._discrete_prediction(
+            normalized_actions, reponse_ids, logprobs = self._discrete_prediction(
                 input_embeddings,
                 all_actions_mask,
                 projected_patch_embeddings,
@@ -2230,7 +2223,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         # verl add!
         actions = actions.reshape(-1, NUM_ACTIONS_CHUNK, ACTION_DIM)
         #
-        return actions, reponse_ids
+        return actions, reponse_ids, logprobs
 
     @staticmethod
     def _check_unnorm_key(
