@@ -48,7 +48,7 @@ jobs:
 
           ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
 
-          ${DOCKER_RUN} /bin/bash -c "bash tools/scripts/setup_egl.sh"
+          ${DOCKER_RUN} /bin/bash -c "cosmos_rl/tools/scripts/setup_egl.sh"
           ${DOCKER_RUN} /bin/bash -c "export NVIDIA_DRIVER_CAPABILITIES=all"
           ${DOCKER_RUN} python tests/test_env_manager_libero.py
 
