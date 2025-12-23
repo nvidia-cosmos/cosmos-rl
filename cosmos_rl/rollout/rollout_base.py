@@ -46,6 +46,7 @@ class RolloutBase(ABC):
         self.parallel_dims = parallel_dims
         self.device = device
         self._engine_initialized = False
+        self._model_param_map = None  # key: compatible name, value: param
 
         self.post_init_hook(**kwargs)
 

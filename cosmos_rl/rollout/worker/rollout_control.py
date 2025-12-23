@@ -287,7 +287,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             weight_mapper=self.weight_mapper,
         ).prepare_local_shard_infos(self.recv_param_key_n_rank_list, self.global_rank)
 
-        # this must be done after prepare_local_shard_infos
+        # this must be done after `prepare_local_shard_infos`
         self.weight_inplace_view_map = self.rollout.post_get_params_for_sync_hook(
             self.quantization_type,
             self.weight_mapper,
@@ -637,7 +637,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         if inst_group_full_weight_name in self.hp_weight_map:
                             weight_to_quantize = self.hp_weight_map[
                                 inst_group_full_weight_name
-                            ]  # [out_dim, in_dim]
+                            ]  # [out_dim, in_dim] for Linear, [experts, out_dim, in_dim] for MoE
                             quantized_weight, weight_scale = (
                                 self.rollout.fp8_quantization(weight_to_quantize)
                             )
@@ -660,6 +660,16 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                                 if not torch.allclose(
                                     bf16_underlying_native_weight, bf16_quantized_weight
                                 ):
+                                    for expert in range(
+                                        bf16_underlying_native_weight.shape[0]
+                                    ):
+                                        allclose = torch.allclose(
+                                            bf16_underlying_native_weight[expert],
+                                            bf16_quantized_weight[expert],
+                                        )
+                                        logger.info(
+                                            f"expert {expert} close: {allclose}, flatten_underlying_native_weight: {bf16_underlying_native_weight[expert].flatten()[0:10]}, flatten_quantized_weight: {bf16_quantized_weight[expert].flatten()[0:10]}"
+                                        )
                                     raise ValueError(
                                         f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
                                     )

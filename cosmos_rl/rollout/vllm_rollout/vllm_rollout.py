@@ -170,7 +170,6 @@ class vLLMRollout(RolloutBase):
     def post_init_hook(self, **kwargs):
         self.rollout_config = self.config.rollout
         self.validation_config = self.config.validation
-        self._model_param_map = None  # key: compatible name, value: param
 
         policy_config = self.config.policy
 
@@ -1018,7 +1017,7 @@ class vLLMRollout(RolloutBase):
 
             return qweight.t(), weight_scale
         elif ndim == 3:
-            # Fp8MoEMethod
+            # Fp8OnlineMoEMethod
             # per-tensor quantization for each expert.
             # weight has shape [num_experts, out_dim, in_dim]
             n_experts = weight.shape[0]
@@ -1028,12 +1027,8 @@ class vLLMRollout(RolloutBase):
             )
             for expert in range(n_experts):
                 qweight[expert, :, :], weight_scale[expert] = ops.scaled_fp8_quant(
-                    weight[expert, :, :], scale=None
+                    weight[expert, :, :]
                 )
-
-            qweight, weight_scale = ops.scaled_fp8_quant(
-                weight, scale=None, use_per_token_if_dynamic=True
-            )
 
             return qweight, weight_scale
 
