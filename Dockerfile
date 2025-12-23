@@ -28,6 +28,8 @@ ARG VLLM_VERSION=0.13.0
 ARG PYTHON_VERSION=3.12
 ARG COSMOS_RL_TORCH_VARIANT
 
+ARG TE_VERSION=2.10.0 # 2.10.0 contains the fix: fix crash when triton >= 3.5 of TE.
+
 # Torch related versions
 ARG TORCH_VERSION=2.9.0
 ARG TORCHVISION_VERSION=0.24.0
@@ -128,9 +130,8 @@ RUN set -eux; \
             ${FLASH_ATTN_WHEEL:-flash_attn=="${FLASH_ATTN_VERSION}"} \
             vllm=="${VLLM_VERSION}" \
             flashinfer-python=="${FLASHINFER_VERSION}" \
-            transformer_engine[pytorch] --no-build-isolation
+            transformer_engine[pytorch]==${TE_VERSION} --no-build-isolation
 # RUN pip install torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} torchaudio==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu128
-
 # RUN pip install \
 #     torchao==${TORCHAO_VERSION} \
 #     flash_attn==${FLASH_ATTN_VERSION} \
