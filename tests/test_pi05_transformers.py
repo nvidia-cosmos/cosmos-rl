@@ -17,6 +17,38 @@ sys.path.append("/workspace/test_cosmos")  # Ensure openpi is in the path
 from cosmos_rl.policy.model.pi05 import PI05
 from transformers import AutoConfig
 
+from contextlib import nullcontext
+
+
+def _inject_pi05_runtime_defaults(hf_config):
+    """
+    Pi05Config (HF) only stores core model fields. Cosmos-RL PI05 also expects
+    several runtime-only knobs (GRPO/OpenPI style). In training, these are injected
+    by `PI05.preprocess_hf_config`; for this standalone test we add safe defaults.
+    """
+    defaults = {
+        "num_steps": 10,
+        "action_chunk": 5,
+        "action_env_dim": 7,
+        "noise_method": "flow_sde",
+        "noise_level": 0.5,
+        "noise_anneal": False,
+        "noise_params": [0.7, 0.3, 400],
+        "noise_logvar_range": [0.08, 0.16],
+        "joint_logprob": False,
+        "safe_get_logprob": False,
+        "ignore_last": False,
+        "train_expert_only": True,
+        "discrete_state_input": False,
+        "max_token_len": 200,
+        "cosmos_compile": False,
+    }
+    for k, v in defaults.items():
+        if not hasattr(hf_config, k):
+            setattr(hf_config, k, v)
+    return hf_config
+
+
 def create_dummy_input(
     batch_size: int = 1,
     action_dim: int = 7,
@@ -48,8 +80,6 @@ def create_dummy_input(
     obs.tokenized_prompt_mask = torch.ones(
         batch_size, 64, dtype=torch.bool, device=device
     )
-    obs.token_ar_mask = torch.zeros(batch_size, 64, dtype=torch.bool, device=device)
-    obs.token_loss_mask = torch.zeros(batch_size, 64, dtype=torch.bool, device=device)
 
     actions = torch.randn(batch_size, action_horizon, action_dim, device=device)
 
@@ -74,8 +104,6 @@ def save_inputs(obs, actions, noise, time, save_dir: str = "/workspace"):
         "state": obs.state,
         "tokenized_prompt": obs.tokenized_prompt,
         "tokenized_prompt_mask": obs.tokenized_prompt_mask,
-        "token_ar_mask": obs.token_ar_mask,
-        "token_loss_mask": obs.token_loss_mask,
         "actions": actions,
         "noise": noise,
         "time": time,
@@ -109,8 +137,6 @@ def load_inputs(save_dir: str = "/workspace", device: str = "cuda"):
     obs.state = data["state"]
     obs.tokenized_prompt = data["tokenized_prompt"]
     obs.tokenized_prompt_mask = data["tokenized_prompt_mask"]
-    obs.token_ar_mask = data["token_ar_mask"]
-    obs.token_loss_mask = data["token_loss_mask"]
 
     actions = data["actions"]
     noise = data["noise"]
@@ -126,7 +152,8 @@ if __name__ == "__main__":
 
     # ========== Load config via HF ==========
     # This will error if the repo/folder does not contain a valid config.json (as desired).
-    hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=False)
+    hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    hf_config = _inject_pi05_runtime_defaults(hf_config)
 
     # ========== Build model + load weights ==========
     print(f"\n[Loading PI05 from {model_id}]")
@@ -135,7 +162,24 @@ if __name__ == "__main__":
     
     # Load weights
     cosmos_model.load_hf_weights(model_id)
+    # Some checkpoints/loaders may leave a subset of params on CPU; force-move after load.
+    cosmos_model = cosmos_model.to(device)
     cosmos_model.eval()
+
+    # Pick a safe autocast setting based on actual weight dtype to avoid
+    # "Input type (CUDABFloat16Type) and weight type (torch.FloatTensor) should be the same".
+    model_weight_dtype = next(cosmos_model.parameters()).dtype
+    use_cuda_amp = (device == "cuda") and (model_weight_dtype in (torch.float16, torch.bfloat16))
+    amp_ctx = (
+        torch.autocast(device_type="cuda", dtype=model_weight_dtype)
+        if use_cuda_amp
+        else nullcontext()
+    )
+
+    # Sanity check: all parameters should be on the same device as inputs.
+    param_devices = {p.device.type for p in cosmos_model.parameters()}
+    if len(param_devices) != 1 or (device == "cuda" and "cuda" not in param_devices):
+        raise RuntimeError(f"Model parameter devices mismatch: {sorted(param_devices)}")
 
     # ========== Create test input ==========
     torch.manual_seed(42)
@@ -149,11 +193,23 @@ if __name__ == "__main__":
     noise = torch.randn_like(actions)
     time = torch.rand(1, device=device) * 0.999 + 0.001
 
-    # ========== Forward pass ==========
-    print("\n[Cosmos-RL PI05]")
+    # ========== Forward pass (training loss) ==========
+    print("\n[Cosmos-RL PI05 Forward Pass]")
     with torch.no_grad():
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with amp_ctx:
             cosmos_loss = cosmos_model.forward(obs, actions, noise=noise, time=time)
-    check_output("Cosmos-RL", cosmos_loss)
+    check_output("Forward Loss", cosmos_loss)
+
+    # # ========== Sample actions (inference) ==========
+    # print("\n[Cosmos-RL PI05 Sample Actions]")
+    # with torch.no_grad():
+    #     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    #         result = cosmos_model.sample_actions(device, obs, noise=None, mode="eval")
+    
+    # print(f"  Actions shape: {result['actions'].shape}")
+    # print(f"  Chains shape: {result['chains'].shape}")
+    # print(f"  Denoise inds shape: {result['denoise_inds'].shape}")
+    # print(f"  Old log probs shape: {result['old_log_probs'].shape}")
+    # print(f"  Actions finite: {torch.isfinite(result['actions']).all().item()}")
 
     print("\n✅ Test completed successfully!")

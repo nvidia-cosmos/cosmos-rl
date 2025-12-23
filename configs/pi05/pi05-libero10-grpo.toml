@@ -119,9 +119,10 @@ filter_upper_bound = 0.9  # algorithm.rewards_upper_bound
 
 # Custom PI05 configurations (injected into model via custom field)
 [custom.pi05]
-num_steps = 4  # actor.model.num_steps (denoise steps)
+num_steps = 10  # actor.model.num_steps (denoise steps)
 action_chunk = 10  # Action chunking size
 action_env_dim = 7  # Environment action dimensions
+replan_steps = 5
 noise_method = "flow_sde"  # Noise method: "flow_sde", "flow_cps", "flow_noise"
 noise_level = 0.5
 noise_anneal = false
@@ -131,6 +132,6 @@ joint_logprob = false  # Whether to use joint log probability
 safe_get_logprob = false
 ignore_last = false  # Whether to ignore last denoise step in training
 train_expert_only = true  # Freeze VLM, only train action expert
-discrete_state_input = false
+discrete_state_input = true
 max_token_len = 200
 

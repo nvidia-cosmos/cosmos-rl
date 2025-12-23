@@ -22,6 +22,9 @@ from collections.abc import Sequence
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import resolve_model_path
 from transformers import AutoConfig
+from safetensors import safe_open
+
+
 
 IMAGE_KEYS = (
     "base_0_rgb",
@@ -201,8 +204,6 @@ def preprocess_observation_pytorch(
         state=observation.state,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
-        token_ar_mask=observation.token_ar_mask,
-        token_loss_mask=observation.token_loss_mask,
     )
 
 
@@ -1147,54 +1148,42 @@ class PI05(BaseModel):
             self.to_empty(device=device)
         else:
             self.to(device)
-        state_dict: dict[str, torch.Tensor] = {}
-        safetensors_files = [
-            f for f in os.listdir(model_path) if f.endswith(".safetensors")
-        ]
-        if safetensors_files:
-            from safetensors import safe_open
+        weight_path = os.path.join(model_path, "model.safetensors")
 
-            for fname in safetensors_files:
-                with safe_open(
-                    os.path.join(model_path, fname),
-                    framework="pt",
-                    device=("cuda" if device.type == "cuda" else "cpu"),
-                ) as f:
-                    for key in f.keys():
-                        state_dict[key] = f.get_tensor(key)
-        else:
-            pt_files = [
-                f
-                for f in os.listdir(model_path)
-                if f.startswith("pytorch_model") and f.endswith(".bin")
-            ]
-            if not pt_files:
-                raise FileNotFoundError(
-                    f"No .safetensors or pytorch_model*.bin found under {model_path}"
-                )
-            for fname in pt_files:
-                state_dict.update(
-                    torch.load(
-                        os.path.join(model_path, fname),
-                        map_location=device,
-                        weights_only=True,
-                    )
-                )
+        state_dict = {}
+        with safe_open(weight_path, framework="pt", device=("cuda" if device.type == "cuda" else "cpu")) as f:
+            for key in f.keys():
+                state_dict[key] = f.get_tensor(key)
 
-        # Load with strict=False to handle any key mismatches
+        # If embed_tokens is missing in the checkpoint, mirror lm_head (official tying).
+        embed_key = "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+        lm_head_key = "paligemma_with_expert.paligemma.lm_head.weight"
+        if embed_key not in state_dict and lm_head_key in state_dict:
+            state_dict[embed_key] = state_dict[lm_head_key]
+
         missing, unexpected = self.load_state_dict(state_dict, strict=False)
-
         if missing:
-            logger.warning(
-                f"PI05 weight load: {len(missing)} missing keys. First 10: {missing[:10]}"
-            )
+            logger.warning(f"PI05 relaxed load: {len(missing)} missing keys. First 10: {missing[:10]}")
         if unexpected:
-            logger.info(
-                f"PI05 weight load: {len(unexpected)} unexpected keys (ignored)"
-            )
-        logger.info(
-            f"PI05 weight load done. loaded={len(state_dict) - len(unexpected)} weights"
-        )
+            logger.info(f"PI05 relaxed load: {len(unexpected)} unexpected keys (ignored)")
+
+        # Tie embedding weights if the checkpoint omitted them (mimic official OpenPI tie).
+        try:
+            embed = self.paligemma_with_expert.paligemma.model.language_model.embed_tokens
+            lm_head = self.paligemma_with_expert.paligemma.lm_head
+            if embed.weight.data_ptr() != lm_head.weight.data_ptr():
+                embed.weight = lm_head.weight  # share weights
+                logger.info("Tied paligemma embed_tokens.weight to lm_head.weight.")
+        except Exception as tie_e:  # pragma: no cover - defensive
+            logger.warning("Failed to tie embed_tokens to lm_head: %s", tie_e)
+
+        # Match official inference: keep specific params in float32 after load.
+        self.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
+        logger.info("PI05 weight load done via model.safetensors")
+        return
+
+
+
 
     def check_cp_compatible(self, cp_size: int, tp_size: int):
         raise ValueError("PI05 does not support context parallelism")

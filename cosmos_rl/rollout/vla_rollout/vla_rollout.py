@@ -22,7 +22,7 @@ import numpy as np
 from typing import Optional, List, Dict, Any
 from multiprocessing import Process, Queue
 from PIL import Image
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
@@ -179,18 +179,19 @@ class OpenVLARollout(RolloutBase):
                     PrismaticProcessor,
                 )
             elif self.model_type in ("pi05", "pi0"):
-                PrismaticProcessor = None  # noqa: N806
-                self.tokenizer = util.setup_tokenizer(model_path)
+                PrismaticProcessor = None
             else:
                 raise ValueError(f"Unsupported vla model type: {self.model_type}")
 
-            if PrismaticProcessor is not None:
+            if self.model_type in ("pi05", "pi0"): 
+                self.processor = None
+                self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                self.norm_stats = self._load_pi05_norm_stats(model_path)
+            else:
                 self.processor = PrismaticProcessor.from_pretrained(
                     model_path, trust_remote_code=True
                 )
                 self.tokenizer = self.processor.tokenizer
-            else:
-                self.processor = None
 
             self.model = ModelRegistry.build_model(self.config)
 
@@ -207,6 +208,44 @@ class OpenVLARollout(RolloutBase):
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")
 
+    def _load_pi05_norm_stats(self, model_path: str) -> Optional[Dict[str, Any]]:
+        """Load PI05 norm_stats from canonical OpenPI path."""
+        import json
+
+        resolved = util.resolve_model_path(model_path)
+        p = os.path.join(resolved, "assets", "physical-intelligence", "libero", "norm_stats.json")
+        if not os.path.isfile(p):
+            return None
+        with open(p, "r") as f:
+            raw = json.load(f)
+        return raw['norm_stats']
+
+    def _normalize_pi05_state(self, state: np.ndarray) -> np.ndarray:
+        """official_openpi Normalize(use_quantiles=True): map state into [-1, 1] using q01/q99."""
+        s_stats = self.norm_stats.get("state") or self.norm_stats.get("proprio")
+        if not isinstance(s_stats, dict) or ("q01" not in s_stats) or ("q99" not in s_stats):
+            raise ValueError("PI05 norm_stats must contain state.q01 and state.q99 (quantiles).")
+        x = np.asarray(state, dtype=np.float32).reshape(-1)
+        q01 = np.asarray(s_stats["q01"], dtype=np.float32).reshape(-1)[: x.shape[0]]
+        q99 = np.asarray(s_stats["q99"], dtype=np.float32).reshape(-1)[: x.shape[0]]
+        return (x - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
+
+    def _unnormalize_pi05_actions(self, actions: np.ndarray) -> np.ndarray:
+        """official_openpi Unnormalize(use_quantiles=True): map actions from [-1, 1] back using q01/q99."""
+        a_stats = self.norm_stats.get("actions") or  self.norm_stats.get("action")
+        x = np.asarray(actions, dtype=np.float32)
+        dim = x.shape[-1]
+        q01 = np.asarray(a_stats["q01"], dtype=np.float32).reshape(-1)
+        q99 = np.asarray(a_stats["q99"], dtype=np.float32).reshape(-1)
+        if q01.size < dim:
+            # official_openpi: apply to first dim(q01), keep the rest unchanged
+            y0 = (x[..., : q01.size] + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+            return np.concatenate([y0, x[..., q01.size :]], axis=-1)
+        q01 = q01[:dim]
+        q99 = q99[:dim]
+        return (x + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+
+
     def _process_input_pi05(
         self, inputs: List[Dict], task_descriptions: List[str]
     ) -> Any:
@@ -219,20 +258,19 @@ class OpenVLARollout(RolloutBase):
             t = torch.from_numpy(np.array(img)).float()  # [H, W, C]
             return t / 127.5 - 1.0  # [-1, 1], channels-last
 
-        base_imgs: list[torch.Tensor] = []
-        wrist_imgs: list[torch.Tensor] = []
+        base_imgs = []
+        wrist_imgs = []
         for inp in inputs:
             if "full_image" in inp:
                 base_imgs.append(_to_pi05_img(inp["full_image"]))
             elif "agentview_image" in inp:
                 base_imgs.append(_to_pi05_img(inp["agentview_image"]))
             else:
-                base_imgs.append(torch.zeros(224, 224, 3, dtype=torch.float32))
+                raise RuntimeError(
+                    f"No image found in input_data, expected full_image or agentview_image, got {inp.keys()}"
+                )
 
-            if "wrist_image" in inp:
-                wrist_imgs.append(_to_pi05_img(inp["wrist_image"]))
-            else:
-                wrist_imgs.append(torch.zeros(224, 224, 3, dtype=torch.float32))
+            wrist_imgs.append(_to_pi05_img(inp["wrist_image"]))
 
         base_imgs_t = torch.stack(base_imgs, 0).to(device)  # [B, H, W, C]
         wrist_imgs_t = torch.stack(wrist_imgs, 0).to(device)
@@ -244,44 +282,21 @@ class OpenVLARollout(RolloutBase):
         }
         image_masks = {
             "base_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
-            "left_wrist_0_rgb": torch.tensor(
-                ["wrist_image" in x for x in inputs], dtype=torch.bool, device=device
-            ),
+            "left_wrist_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
             "right_wrist_0_rgb": torch.zeros(batch_size, dtype=torch.bool, device=device),
         }
 
-        # Precompute normalization stats
-        norm_stats = {}
-        if self.hf_config.discrete_state_input:
-            # Try to find stats for "state" or "proprio"
-            norm_stats = self.hf_config.norm_stats.get("state", self.hf_config.norm_stats.get("proprio", {}))
 
-        state_list: list[torch.Tensor] = []
-        for inp in inputs:
-            st = inp.get("state", None)
-            if st is None:
-                # Fallback to zero state if missing (using action_dim as heuristic size)
-                st_np = np.zeros((self.hf_config.action_dim,), dtype=np.float32)
-            else:
-                st_np = np.asarray(st, dtype=np.float32).reshape(-1)
-                # Normalize state using model stats (crucial for axis-angle rotation)
-                if norm_stats:
-                    st_np = normalize_proprio(st_np, norm_stats)
-            
-            state_list.append(torch.from_numpy(st_np).to(torch.float32))
+        state = torch.stack([
+            torch.as_tensor(self._normalize_pi05_state(inp["state"]), dtype=torch.float32, device=device)
+            for inp in inputs
+        ], dim=0)
         
-        # Note: We assume all states in the batch have the same dimension.
-        state = torch.stack(state_list, dim=0).to(device)
-
         tokenized_prompt = []
         tokenized_prompt_mask = []
         for i in range(batch_size):
             prompt = task_descriptions[i]
-            state_np = None
-            if self.hf_config.discrete_state_input:
-                # OpenPI expects state normalized to [-1, 1] before discretization.
-                state_np = state[i].detach().float().cpu().numpy().astype(np.float32)
-                state_np = np.clip(state_np, -1.0, 1.0)
+            state_np = state[i].detach().float().cpu().numpy().astype(np.float32)
             tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=state_np)
             tokenized_prompt.append(torch.from_numpy(tokens).to(torch.long))
             tokenized_prompt_mask.append(torch.from_numpy(mask).to(torch.bool))
@@ -293,31 +308,22 @@ class OpenVLARollout(RolloutBase):
             state=state,
             tokenized_prompt=tokenized_prompt,
             tokenized_prompt_mask=tokenized_prompt_mask,
-            token_ar_mask=torch.zeros_like(tokenized_prompt, dtype=torch.bool),
-            token_loss_mask=torch.zeros_like(tokenized_prompt, dtype=torch.bool),
         )
 
-    def _generate_one_step_pi05(self, observation: Any, is_valid: bool = False, is_training: bool = False):
+    def _generate_one_step_pi05(self, observation: Any):
         """Generate one PI05 action chunk and adapt it to the LIBERO env_worker format.
         
         Args:
             observation: PI05 observation object
-            is_valid: Whether this is validation mode
-            is_training: Whether to return training data (chains, denoise_inds)
         """
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            # sample_actions always returns dict (matching RLinf)
-            mode = "train" if is_training else "eval"
-            outputs = self.model.sample_actions(
-                self.device, observation, mode=mode
-            )
+            outputs = self.model.sample_actions(self.device, observation)
             actions = outputs["actions"]
 
         actions = actions[:, :self.hf_config.action_horizon, :self.hf_config.action_env_dim].to(torch.float32)
+        actions_np = actions.detach().cpu().numpy()
+        outputs["action"] = self._unnormalize_pi05_actions(actions_np)
 
-        # Normalize output keys to Cosmos rollout expectations.
-        outputs["action"] = actions.detach().cpu().numpy()
-        
         return outputs
 
     def rollout_generation(
@@ -971,7 +977,7 @@ class OpenVLARollout(RolloutBase):
 
             if self.model_type in ("pi05", "pi0"):
                 pi05_obs = self._process_input_pi05(current_inputs, current_task_descriptions)
-                vla_output = self._generate_one_step_pi05(pi05_obs, is_validation, is_training=not is_validation)
+                vla_output = self._generate_one_step_pi05(pi05_obs)
 
                 image_keys = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
                 step_data = {
@@ -1008,11 +1014,8 @@ class OpenVLARollout(RolloutBase):
             vla_history.append(step_data)
 
             if self.model_type in ("pi05", "pi0"):
-                action_horizon = self.hf_config.action_horizon
-                pi05_cfg = (self.config.custom.get("pi05", {}) or {}) if hasattr(self.config, "custom") else {}
-                cfg_replan = pi05_cfg.get("replan_steps", None)
-                cfg_replan = action_horizon if cfg_replan is None else cfg_replan
-                replan_steps = max(1, min(cfg_replan, action_horizon))
+                replan_steps = self.config.custom["pi05"]["replan_steps"]
+                assert replan_steps > 0 and replan_steps <= self.hf_config.action_horizon
 
             # Send actions to active workers
             for idx in active_indices:
@@ -1051,7 +1054,6 @@ class OpenVLARollout(RolloutBase):
 
             inputs = new_inputs
             if self.model_type in ("pi05", "pi0"):
-                # OpenPI-style: advance by executed replan steps.
                 step += replan_steps
             else:
                 step += NUM_ACTIONS_CHUNK
