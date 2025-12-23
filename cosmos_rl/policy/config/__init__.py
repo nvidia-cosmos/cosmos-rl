@@ -832,54 +832,47 @@ class LoraConfig(BaseModel):
             ), "target_modules must be a list of strings or 'all-linear'"
         return self
 
+
 class DiffusersConfig(BaseModel):
     is_video: bool = Field(
-        default = False,
-        description= "True if this model is video generate model"
+        default=False, description="True if this model is video generate model"
     )
     max_prompt_length: int = Field(
-        default=300,
-        description = "Maximum sequence length to use for the prompt"
+        default=300, description="Maximum sequence length to use for the prompt"
     )
     weighting_scheme: str = Field(
-        default = 'logit_normal',
-        description = "Method used to sample timestep"
+        default="logit_normal", description="Method used to sample timestep"
     )
     train_flow_shift: float = Field(
-        default=3.0,
-        description = "flow shift used for training"
+        default=3.0, description="flow shift used for training"
     )
     offload: bool = Field(
         default=True,
-        description = "Whether to dynamic offload model parts from cuda to cpu"
+        description="Whether to dynamic offload model parts from cuda to cpu",
     )
     logit_mean: float = Field(
         default=0.0,
-        description = "random sampling timestep logits mean for noise addition"
+        description="random sampling timestep logits mean for noise addition",
     )
     logit_std: float = Field(
         default=1.0,
-        description = "random sampling timestep logits std for noise addition"
+        description="random sampling timestep logits std for noise addition",
     )
-    inference_size : List[int] = Field(
-        default = [1024, 1024],
-        description = "Image/video size for generation, [height, width]"
+    inference_size: List[int] = Field(
+        default=[1024, 1024],
+        description="Image/video size for generation, [height, width]",
     )
     inference_frames: int = Field(
-        default = 41,
-        description = "Total frame of video size for generation"
+        default=41, description="Total frame of video size for generation"
     )
     train_frames: int = Field(
-        default = 41,
-        description = "Total frame of video size for training"
+        default=41, description="Total frame of video size for training"
     )
     inference_step: int = Field(
-        default = 50,
-        description = "Total denoise step used for validation generation"
+        default=50, description="Total denoise step used for validation generation"
     )
     guidance_scale: float = Field(
-        default = 4.5,
-        description = "CFG guidance scale for validation generation"
+        default=4.5, description="CFG guidance scale for validation generation"
     )
 
 
@@ -889,8 +882,7 @@ class PolicyConfig(BaseModel):
     diffusers_config: Optional[DiffusersConfig] = Field(default_factory=DiffusersConfig)
 
     is_diffusers: bool = Field(
-        default=False,
-        description="Whether this model is diffusers or not"
+        default=False, description="Whether this model is diffusers or not"
     )
 
     model_name_or_path: str = Field(

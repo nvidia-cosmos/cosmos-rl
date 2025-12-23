@@ -2,11 +2,8 @@ from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
-from torch.distributed._composable.replicate import replicate
-from torch.distributed.tensor.parallel import parallelize_module
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import (
-    CPUOffloadPolicy,
     fully_shard,
     MixedPrecisionPolicy,
 )
@@ -16,6 +13,7 @@ from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
 from cosmos_rl.policy.config import Config as CosmosConfig
 
+
 # TODO (yy): only support FSDP now, may support other parallelization policy if needed
 # TODO (yy): Add EMA warpper
 @pre_parallelize_sanity_check
@@ -24,7 +22,7 @@ def parallelize(
     parallel_dims: ParallelDims,
     config: CosmosConfig,
     pp_loss_fn: Optional[Callable] = None,
-    ):
+):
     world_mesh = parallel_dims.mesh
     _, pp_size = parallel_dims.pp_coord
 
@@ -50,9 +48,8 @@ def parallelize(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-        
-    return None, None
 
+    return None, None
 
 
 def apply_fsdp(
@@ -63,11 +60,14 @@ def apply_fsdp(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
-    ):
+):
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    high_precision_mp_policy = MixedPrecisionPolicy(param_dtype=reduce_dtype, reduce_dtype=reduce_dtype)
+    high_precision_mp_policy = MixedPrecisionPolicy(
+        param_dtype=reduce_dtype, reduce_dtype=reduce_dtype
+    )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     from cosmos_rl.patch import apply_preforward_postforward_patch
+
     apply_preforward_postforward_patch()
 
     # For diffusers, only shard transformer now
@@ -76,7 +76,7 @@ def apply_fsdp(
 
     high_precision_modules = []
     non_split_modules = []
-    
+
     for module in model.modules():
         if module.__class__.__name__ in layerwise_high_precision:
             high_precision_modules.append(module)
@@ -86,13 +86,10 @@ def apply_fsdp(
     for module in high_precision_modules:
         fsdp_config["mp_policy"] = high_precision_mp_policy
         fully_shard(module, **fsdp_config, reshard_after_forward=True)
-    
+
     for module in non_split_modules:
         fsdp_config["mp_policy"] = mp_policy
         fully_shard(module, **fsdp_config, reshard_after_forward=True)
 
     fsdp_config["mp_policy"] = mp_policy
     fully_shard(model, **fsdp_config, reshard_after_forward=True)
-
-    
-    

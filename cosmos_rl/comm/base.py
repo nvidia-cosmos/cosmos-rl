@@ -111,7 +111,7 @@ class CommMixin:
             is_vlm = getattr(hf_config, "vision_config", None) is not None
             model_type = hf_config.model_type
         else:
-            model_type = 'diffusers'
+            model_type = "diffusers"
 
         if data_packer:
             assert isinstance(

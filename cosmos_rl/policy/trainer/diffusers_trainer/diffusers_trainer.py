@@ -1,38 +1,35 @@
 import torch
-import os
-import time
 import random
 import numpy as np
-import json
-import threading
-from typing import Optional, Dict
+from typing import Optional
 
 from cosmos_rl.policy.trainer.base import Trainer
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.model import ModelRegistry
-from cosmos_rl.policy.trainer.optm import build_optimizers, build_lr_schedulers
+from cosmos_rl.policy.trainer.optm import build_optimizers
 
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 from cosmos_rl.utils.checkpoint import CheckpointMananger
 
+
 class DiffusersTrainer(Trainer):
     def __init__(
-        self, 
+        self,
         config: CosmosConfig,
         parallel_dims: ParallelDims,
         train_stream: Optional[torch.cuda.Stream] = None,
         data_packer: BaseDataPacker = None,
         val_data_packer: BaseDataPacker = None,
         **kwargs,
-        ):
+    ):
         super(DiffusersTrainer, self).__init__(
-            config = config,
-            parallel_dims = parallel_dims,
+            config=config,
+            parallel_dims=parallel_dims,
             train_stream=train_stream,
             data_packer=data_packer,
             val_data_packer=val_data_packer,
-            **kwargs
+            **kwargs,
         )
 
         if config.train.seed:
@@ -46,7 +43,7 @@ class DiffusersTrainer(Trainer):
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             torch.use_deterministic_algorithms(mode=True, warn_only=True)
-        
+
         # This model contains all part for a diffusers pipeline (transformers, vae, text_encoder)
         model = ModelRegistry.build_model(config)
 
@@ -80,8 +77,7 @@ class DiffusersTrainer(Trainer):
         )
 
         self.build_optimizers()
-        self.lr_schedulers = None        
-
+        self.lr_schedulers = None
 
     def build_optimizers(self):
         # TODO (yy): Add low precision support
@@ -95,7 +91,7 @@ class DiffusersTrainer(Trainer):
 
     def step_validation(self):
         pass
-    
+
     def export_safetensors(
         self,
         output_dir: str,

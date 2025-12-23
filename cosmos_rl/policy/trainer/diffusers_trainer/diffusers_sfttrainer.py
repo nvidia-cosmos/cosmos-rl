@@ -1,8 +1,6 @@
 import os
 import torch
-import numpy as np
 
-import torch.distributed as dist
 
 from functools import partial
 
@@ -26,7 +24,7 @@ from cosmos_rl.policy.trainer import DiffusersTrainer
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 
 from diffusers.utils import export_to_video
-from PIL import Image
+
 
 @TrainerRegistry.register(trainer_type="diffusers_sft")
 class Diffusers_SFTTrainer(DiffusersTrainer):
@@ -50,17 +48,6 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
 
         self.is_video = config.policy.diffusers_config.is_video
 
-        if self.parallel_dims.dp_shard_enabled:
-            dp_group = self.parallel_dims.mesh["dp_shard"].get_group()
-        else:
-            dp_group = None
-
-        
-        if self.parallel_dims.cp_enabled:
-            cp_group = self.parallel_dims.mesh["cp"].get_group()
-        else:
-            cp_group = None
-        
         self.is_lora = config.policy.lora is not None
 
     def load_model(self):
@@ -93,7 +80,6 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             # TODO (yy) support multi-replica
         return ckpt_total_steps, train_step
 
-
     def model_resume_from_checkpoint(self):
         ckpt_extra_vars, self.lr_schedulers = self.ckpt_manager.load_checkpoint(
             model=self.model.trained_model[0],
@@ -101,7 +87,7 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
             model_name_or_path=self.config.policy.model_name_or_path,
             revision=self.config.policy.model_revision,
-            strict=not self.is_lora, # For LoRA training, ckpt only save lora adapter's parameters, should load with restrict=False
+            strict=not self.is_lora,  # For LoRA training, ckpt only save lora adapter's parameters, should load with restrict=False
         )
         return ckpt_extra_vars
 
@@ -117,7 +103,7 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
         # Support save safetensor
         if (
             is_last_step or (train_step % save_freq == 0 and train_step > 0)
-            ) and self.parallel_dims.dp_replicate_coord[0] == 0:
+        ) and self.parallel_dims.dp_replicate_coord[0] == 0:
             if self.config.train.ckpt.enable_checkpoint:
                 logger.info(f"Saving cosmos checkpoint at step {train_step}...")
                 model_state_dict = self.model.get_trained_model_state_dict()
@@ -138,13 +124,7 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
                 #     - self.parallel_dims.world_size / self.parallel_dims.pp,
                 # )
 
-    def step_training(
-        self,
-        global_batch,
-        total_steps,
-        train_step,
-        save_freq
-    ):
+    def step_training(self, global_batch, total_steps, train_step, save_freq):
         if self.lr_schedulers is None:
             assert (
                 train_step == 0
@@ -163,7 +143,7 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
                 self.config.train.train_policy.mini_batch,
             )
         )
-        
+
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
@@ -171,13 +151,11 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
         for i in mini_batch_begin_idxs:
             # gradient accumulation
             raw_batch = global_batch[i : i + self.config.train.train_policy.mini_batch]
-            batch = self.data_packer.sft_collate_fn(
-                raw_batch
-            )
-            loss_term = self.model.training_step(batch['visual'], batch['prompt'])
-            loss_term['loss'].mean().backward()
+            batch = self.data_packer.sft_collate_fn(raw_batch)
+            loss_term = self.model.training_step(batch["visual"], batch["prompt"])
+            loss_term["loss"].mean().backward()
 
-        acc_loss += loss_term['loss'].detach()
+        acc_loss += loss_term["loss"].detach()
         all_params = [
             p
             for m in [model for model in self.model.trained_model if model is not None]
@@ -229,7 +207,7 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
         return report_data
 
     def save_visual_output(self, visual_output, save_dir, filename):
-        suffix = 'mp4' if self.is_video else 'png'
+        suffix = "mp4" if self.is_video else "png"
         filename = f"{save_dir}/{filename}.{suffix}"
         if self.is_video:
             export_to_video(visual_output, filename, fps=16)
@@ -241,25 +219,27 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             return
         if self.parallel_dims.dp_replicate_coord[0] != 0:
             return
-        
+
         val_batch = self.val_data_packer.sft_collate_fn(
             val_global_batch,
             is_validation=True,
         )
-        save_dir = os.path.join(self.config.train.output_dir, "visual_output", str(train_step))
+        save_dir = os.path.join(
+            self.config.train.output_dir, "visual_output", str(train_step)
+        )
         os.makedirs(save_dir, exist_ok=True)
         for batch in val_batch:
             if self.is_video:
-                frame = batch['frames']
+                frame = batch["frames"]
             else:
                 frame = None
             visual_output = self.model.inference(
-                inference_step = batch['inference_step'],
-                height = batch['height'],
-                width = batch['width'],
-                guidance_scale=batch['guidance_scale'],
-                prompt_list=[batch['prompt']],
+                inference_step=batch["inference_step"],
+                height=batch["height"],
+                width=batch["width"],
+                guidance_scale=batch["guidance_scale"],
+                prompt_list=[batch["prompt"]],
                 frames=frame,
             )[0]
-            self.save_visual_output(visual_output, save_dir, batch['prompt'][:10])
+            self.save_visual_output(visual_output, save_dir, batch["prompt"][:10])
         return 0.0

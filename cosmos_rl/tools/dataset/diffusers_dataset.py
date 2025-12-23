@@ -14,9 +14,8 @@
 # limitations under the License.
 
 
-from typing import Optional, Any, List, Dict, Union
-from torch.utils.data import Dataset, ConcatDataset
-from datasets import load_dataset
+from typing import Any, List, Dict, Union
+from torch.utils.data import Dataset
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
@@ -32,8 +31,8 @@ from cosmos_rl.tools.dataset.wfm.local_datasets.dataset_utils import (
     ResizePreprocess,
     ToTensorVideo,
 )
-import cosmos_rl.utils.util as util
 import glob
+
 
 class LocalDiffusersDataset(Dataset):
     def setup(self, config: CosmosConfig, *args, **kwargs):
@@ -49,19 +48,19 @@ class LocalDiffusersDataset(Dataset):
         self.dataset_dir = self.config.train.train_policy.dataset.local_dir
         prompt_files = glob.glob(os.path.join(self.dataset_dir, "*.json"))
         if self.is_video:
-            self.suffix = 'mp4'
+            self.suffix = "mp4"
         else:
-            self.suffix = 'jpg'
+            self.suffix = "jpg"
         self.visual_preprocess = self.visual_preprocess()
-        self.all_file_names = [os.path.basename(f).split('.')[0] for f in prompt_files]
+        self.all_file_names = [os.path.basename(f).split(".")[0] for f in prompt_files]
 
     def __len__(self):
         return len(self.all_file_names)
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
         data = {}
-        meta_file = os.path.join(self.dataset_dir, self.all_file_names[idx] + '.json')
-        visual_path = meta_file.replace('json', self.suffix)
+        meta_file = os.path.join(self.dataset_dir, self.all_file_names[idx] + ".json")
+        visual_path = meta_file.replace("json", self.suffix)
         if self.is_video:
             video, fps = self._get_frames(visual_path)
             video = video.permute(
@@ -83,7 +82,7 @@ class LocalDiffusersDataset(Dataset):
             data.update(meta_info)
 
         return data
-    
+
     def visual_preprocess(self):
         if self.is_video:
             transforms = [
@@ -99,7 +98,7 @@ class LocalDiffusersDataset(Dataset):
                 T.Normalize([0.5], [0.5]),
             ]
         return T.Compose(transforms)
-    
+
     def _load_video(self, video_path: str) -> tuple[np.ndarray, float]:
         vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
         total_frames = len(vr)
@@ -112,7 +111,9 @@ class LocalDiffusersDataset(Dataset):
         # randomly sample a sequence of frames
         max_start_idx = total_frames - self.train_frames
         start_frame = np.random.randint(0, max_start_idx) if max_start_idx > 0 else 0
-        end_frame = start_frame + self.train_frames if max_start_idx > 0 else self.train_frames
+        end_frame = (
+            start_frame + self.train_frames if max_start_idx > 0 else self.train_frames
+        )
         frame_ids = np.arange(start_frame, end_frame).tolist()
 
         frame_data = vr.get_batch(frame_ids).asnumpy()
@@ -124,20 +125,21 @@ class LocalDiffusersDataset(Dataset):
             fps = 16
         del vr  # delete the reader to avoid memory leak
         return frame_data, fps
-    
+
     def _get_frames(self, file_path):
         frames, fps = self._load_video(file_path)
         frames = frames.astype(np.uint8)
         frames = torch.from_numpy(frames).permute(0, 3, 1, 2)  # [T, C, H, W]
-        frames = self.visual_preprocess(frames) # [C, T, H, W]
+        frames = self.visual_preprocess(frames)  # [C, T, H, W]
         return frames, fps
 
     def _get_image(self, file_path):
         image = Image.open(file_path)
         if not image.mode == "RGB":
-                image = image.convert("RGB")
+            image = image.convert("RGB")
         image = self.visual_preprocess(image)
         return image
+
 
 class LocalDiffusersValDataset(Dataset):
     """
@@ -163,16 +165,17 @@ class LocalDiffusersValDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[str, str]:
         data = {
-            'height': self.height,
-            'width': self.width,
-            'guidance_scale': 4.5,
-            'inference_step': self.inference_step,
-            'prompt': self.prompts[idx]['prompt']
+            "height": self.height,
+            "width": self.width,
+            "guidance_scale": 4.5,
+            "inference_step": self.inference_step,
+            "prompt": self.prompts[idx]["prompt"],
         }
         if self.is_video:
-            data.update({'frames': self.infernece_frame})
+            data.update({"frames": self.infernece_frame})
 
         return data
+
 
 class DiffusersPacker(BaseDataPacker):
     """
@@ -233,9 +236,7 @@ class DiffusersPacker(BaseDataPacker):
         return sample
 
     def sft_collate_fn(
-        self,
-        processed_samples: List[Dict[str, Any]],
-        is_validation: int = False
+        self, processed_samples: List[Dict[str, Any]], is_validation: int = False
     ) -> Dict[str, Any]:
         if not is_validation:
             batch_image = [sample["visual"] for sample in processed_samples]
@@ -243,6 +244,7 @@ class DiffusersPacker(BaseDataPacker):
             return {"visual": batch_image, "prompt": batch_prompt}
         else:
             return processed_samples
+
 
 if __name__ == "__main__":
 

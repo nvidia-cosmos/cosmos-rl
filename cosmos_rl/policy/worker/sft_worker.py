@@ -316,7 +316,7 @@ class SFTPolicyWorker(PolicyWorkerBase):
         )
         trainer_type = self.config.train.train_policy.type
         if self.config.policy.is_diffusers:
-            trainer_type = 'diffusers_' + trainer_type
+            trainer_type = "diffusers_" + trainer_type
 
         self.trainer = TrainerRegistry.get_trainer_cls(trainer_type)(
             config=self.config,

@@ -196,7 +196,9 @@ class CheckpointMananger:
         elif isinstance(model, dict):
             state_dict = model
         else:
-            raise ValueError("Unsupport model type, should either be a torch.nn.Module or dict")
+            raise ValueError(
+                "Unsupport model type, should either be a torch.nn.Module or dict"
+            )
 
         if self.save_mode == "async":
             # wait for the previous save to finish
@@ -266,7 +268,7 @@ class CheckpointMananger:
         scheduler: Union[torch.optim.lr_scheduler._LRScheduler, Callable],
         model_name_or_path: str,
         revision: Optional[str] = None,
-        strict: bool = True
+        strict: bool = True,
     ):
         extra_vars = {}
         base_paths: List[str] = self.get_ckpt_path()
@@ -303,7 +305,9 @@ class CheckpointMananger:
                         scheduler = scheduler(training_steps=extra_vars["total_steps"])
                         outputs.append(scheduler)
 
-                    model.load_state_dict(torch.load(model_path, weights_only=False), strict=strict)
+                    model.load_state_dict(
+                        torch.load(model_path, weights_only=False), strict=strict
+                    )
                     optimizer.load_state_dict(
                         torch.load(optimizer_path, weights_only=False)
                     )

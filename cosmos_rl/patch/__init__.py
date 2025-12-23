@@ -31,6 +31,7 @@ from torch.distributed.pipelining.stage import (
 from cosmos_rl.utils.logging import logger
 import functools
 
+
 # Common functions for dynamic shape support
 def clear_stage(self):
     self._stage_initialized = False
@@ -707,12 +708,16 @@ def patch_fsdp_foreach_reduce():
 
     pg.foreach_reduce = foreach_reduce
 
+
 def apply_preforward_postforward_patch():
-    from torch.distributed.utils import _apply_to_tensors, _to_kwargs
+    from torch.distributed.utils import _apply_to_tensors
 
     from torch.distributed.fsdp._fully_shard._fsdp_state import disable_if_config_true
     from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
-    from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState, _cast_fp_tensor
+    from torch.distributed.fsdp._fully_shard._fsdp_common import (
+        TrainingState,
+        _cast_fp_tensor,
+    )
 
     def _pre_forward(
         self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -755,7 +760,9 @@ def apply_preforward_postforward_patch():
             if self._mp_policy.output_dtype is not None:
                 with torch.profiler.record_function("FSDP::cast_forward_outputs"):
                     output = _apply_to_tensors(
-                        functools.partial(_cast_fp_tensor, self._mp_policy.output_dtype),
+                        functools.partial(
+                            _cast_fp_tensor, self._mp_policy.output_dtype
+                        ),
                         output,
                     )
             return output
@@ -781,5 +788,9 @@ def apply_preforward_postforward_patch():
                 )
         return output
 
-    torch.distributed.fsdp._fully_shard._fsdp_state.FSDPState._pre_forward = disable_if_config_true(_pre_forward)
-    torch.distributed.fsdp._fully_shard._fsdp_state.FSDPState._post_forward = disable_if_config_true(_post_forward)
+    torch.distributed.fsdp._fully_shard._fsdp_state.FSDPState._pre_forward = (
+        disable_if_config_true(_pre_forward)
+    )
+    torch.distributed.fsdp._fully_shard._fsdp_state.FSDPState._post_forward = (
+        disable_if_config_true(_post_forward)
+    )

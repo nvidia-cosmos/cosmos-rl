@@ -41,7 +41,7 @@ from cosmos_rl.utils.dim_slice_info import (
 class BaseModel(torch.nn.Module, ABC):
     _gradient_checkpointing_enabled = False
 
-    def __init__(self, hf_config: Optional[AutoConfig]=None):
+    def __init__(self, hf_config: Optional[AutoConfig] = None):
         super().__init__()
         if hf_config is not None:
             self.weight_mapper = WeightMapper.get_weight_mapper(
@@ -644,7 +644,9 @@ class ModelRegistry:
         # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
         model_name_or_path = config.policy.model_name_or_path
         model = None
-        model_type = util.retry(DiffusionPipeline.load_config)(model_name_or_path)['_class_name']
+        model_type = util.retry(DiffusionPipeline.load_config)(model_name_or_path)[
+            "_class_name"
+        ]
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
@@ -656,10 +658,7 @@ class ModelRegistry:
 
         def _load_model_with_config(model_cls, config, model_name_or_path):
             """Load model and apply post-processing configurations."""
-            model = model_cls.from_pretrained(
-                config,
-                model_name_or_path
-            )
+            model = model_cls.from_pretrained(config, model_name_or_path)
             return model
 
         def _get_init_context_for_model_build(device):
@@ -668,7 +667,7 @@ class ModelRegistry:
             # Control device inside model
             return nullcontext()
 
-        init_context = _get_init_context_for_model_build('cuda')
+        init_context = _get_init_context_for_model_build("cuda")
         with init_context:
             with util.cosmos_default_dtype(cosmos_default_dtype):
                 try:
@@ -690,6 +689,7 @@ class ModelRegistry:
             return cls.build_hf_model(cls, config, hf_config_args)
         else:
             return cls.build_diffusers_model(cls, config, hf_config_args)
+
 
 class WeightMapper(ABC):
     _WEIGHT_MAPPER_BACKEND_SUPPORTED = ["vllm", "trtllm"]

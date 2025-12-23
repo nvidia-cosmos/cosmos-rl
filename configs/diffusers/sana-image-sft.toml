@@ -24,7 +24,7 @@ sync_weight_interval = 1
 [validation]
 enable = true
 freq = 10
-dataset.local_dir = "/data/yangyangt/diffusion_related/validation_prompts.json"
+dataset.local_dir = "local_dir"
 
 [policy]
 model_name_or_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
@@ -44,7 +44,7 @@ experiment_name = "None"
 
 [train.train_policy]
 type = "sft"
-dataset.local_dir = "/data/yangyangt/diffusion_related/datasets"
+dataset.local_dir = "local_validation_dir"
 mini_batch = 1
 
 
