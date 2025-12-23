@@ -316,6 +316,52 @@ class BaseModel(torch.nn.Module, ABC):
             raise KeyError(f"Path '{name}' not found among parameters or modules.")
         return {"touched_params": touched_params, "touched_modules": touched_modules}
 
+    def apply_freeze_pattern(self, freeze_pattern: List[str]) -> dict:
+        """
+        Apply pattern-based freezing to parameters using regex matching.
+
+        Args:
+            freeze_pattern: List of regex patterns to match against parameter names.
+                    Matched parameters will be frozen (requires_grad=False).
+
+        Returns:
+            A dict with pattern match counts.
+        """
+        import re
+
+        compiled_patterns = [(p, re.compile(p)) for p in freeze_pattern if p]
+
+        pattern_counts: Dict[str, int] = {p: 0 for p in freeze_pattern if p}
+        total_params = 0
+        frozen_params = 0
+
+        for param_name, param in self.named_parameters():
+            total_params += param.numel()
+
+            for pattern_str, pattern_re in compiled_patterns:
+                if pattern_re.search(param_name):
+                    param.requires_grad = False
+                    pattern_counts[pattern_str] += 1
+                    util.rank0_print(
+                        f"[freeze_pattern] freeze '{param_name}' (matched '{pattern_str}')"
+                    )
+                    break
+
+            if not param.requires_grad:
+                frozen_params += param.numel()
+
+        # Log summary
+        for pattern, count in pattern_counts.items():
+            if count > 0:
+                util.rank0_print(f"[freeze_pattern] '{pattern}' matched {count} params")
+
+        util.rank0_print(
+            f"[freeze_pattern] Total={total_params / 1e9:.2f}B, "
+            f"Frozen={frozen_params:,}, Trainable={total_params - frozen_params:,}"
+        )
+
+        return {"pattern_counts": pattern_counts}
+
     """
     Abstract methods
     """
@@ -524,6 +570,11 @@ class ModelRegistry:
                             "Otherwise, please instead include the trainable modules in `config.policy.lora.modules_to_save`."
                         )
                 model.apply_trainable(config.policy.trainable_map)
+
+            # Apply pattern-based freeze configuration
+            freeze_pattern = getattr(config.policy, "freeze_pattern", None)
+            if freeze_pattern is not None:
+                model.apply_freeze_pattern(freeze_pattern)
 
             return model
 

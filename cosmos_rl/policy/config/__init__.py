@@ -858,6 +858,14 @@ class PolicyConfig(BaseModel):
         "- exact parameter names (from model.named_parameters()) "
         "- exact module paths (from model.named_modules()) ",
     )
+    freeze_pattern: Optional[List[str]] = Field(
+        default=None,
+        description="Pattern-based configuration to freeze parts of the model. "
+        "A list of regex patterns that match against parameter names; "
+        "matched parameters will be frozen (requires_grad=False). "
+        "Example: freeze_pattern = ['^visual\\..*'] freezes all visual components; "
+        "freeze_pattern = ['^model\\.layers\\.[0-9]+\\.'] freezes layers 0-9.",
+    )
     enable_liger_kernel: bool = Field(
         default=False, description="Whether to use liger kernel."
     )
