@@ -2032,7 +2032,7 @@
 <tr class="row-odd"><td><p>default</p></td>
 <td colspan="3"><p>1</p></td>
 </tr>
-<tr class="row-even"><td rowspan="35"><ul class="simple">
+<tr class="row-even"><td rowspan="41"><ul class="simple">
 <li><p>PolicyConfig</p></li>
 </ul>
 </td>
@@ -2142,6 +2142,28 @@
 <tr class="row-odd"><td><p>additionalProperties</p></td>
 <td><p>type</p></td>
 <td><p><em>boolean</em></p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td colspan="2"><p><em>null</em></p></td>
+</tr>
+<tr class="row-odd"><td rowspan="6"><ul class="simple">
+<li><p>freeze_pattern</p></li>
+</ul>
+</td>
+<td colspan="4"><p><em>Freeze Pattern</em></p></td>
+</tr>
+<tr class="row-even"><td colspan="4"><p>Pattern-based configuration to freeze parts of the model. A list of regex patterns that match against parameter names; matched parameters will be frozen (requires_grad=False). Example: freeze_pattern = [‘^visual..*’] freezes all visual components; freeze_pattern = [‘^model.layers.[0-9]+.’] freezes layers 0-9.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td colspan="3"><p>None</p></td>
+</tr>
+<tr class="row-even"><td rowspan="3"><p>anyOf</p></td>
+<td><p>type</p></td>
+<td colspan="2"><p><em>array</em></p></td>
+</tr>
+<tr class="row-odd"><td><p>items</p></td>
+<td><p>type</p></td>
+<td><p><em>string</em></p></td>
 </tr>
 <tr class="row-even"><td><p>type</p></td>
 <td colspan="2"><p><em>null</em></p></td>
