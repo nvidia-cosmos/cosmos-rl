@@ -1,9 +1,9 @@
 redis = "12800"
 
 [train]
-resume = false
+resume = "/data/yangyangt/cosmos-rl/outputs/sft_sana_image/20251223084041/checkpoints/step_10/policy"
 epoch = 1
-output_dir = "./outputs/sft_sd3_image"
+output_dir = "./outputs/sft_sana_image"
 epsilon = 1e-5
 optm_name = "AdamW"
 optm_lr = 1e-4
@@ -27,7 +27,7 @@ freq = 10
 dataset.local_dir = "/data/yangyangt/diffusion_related/validation_prompts.json"
 
 [policy]
-model_name_or_path = "stabilityai/stable-diffusion-3.5-medium"
+model_name_or_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
 is_diffusers = true
 model_gradient_checkpointing = true
 
@@ -36,6 +36,12 @@ is_video = false
 max_prompt_length = 300
 weighting_scheme = "logit_normal"
 inference_size = [1024, 1024]
+
+[policy.lora]
+r = 4
+lora_alpha = 4
+init_lora_weights = "gaussian"
+target_modules = ["attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out.0", "attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out.0"]
 
 [logging]
 logger = ['console', 'wandb']
@@ -50,7 +56,7 @@ mini_batch = 1
 
 [train.ckpt]
 enable_checkpoint = true
-save_freq = 30
+save_freq = 10
 save_mode = "async"
 
 [policy.parallelism]

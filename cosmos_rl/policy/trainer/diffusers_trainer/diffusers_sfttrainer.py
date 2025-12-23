@@ -60,6 +60,8 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             cp_group = self.parallel_dims.mesh["cp"].get_group()
         else:
             cp_group = None
+        
+        self.is_lora = config.policy.lora is not None
 
     def load_model(self):
         ckpt_total_steps = 0
@@ -99,6 +101,7 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             scheduler=partial(build_lr_schedulers, self.optimizers, self.config),
             model_name_or_path=self.config.policy.model_name_or_path,
             revision=self.config.policy.model_revision,
+            strict=not self.is_lora, # For LoRA training, ckpt only save lora adapter's parameters, should load with restrict=False
         )
         return ckpt_extra_vars
 
@@ -117,8 +120,9 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             ) and self.parallel_dims.dp_replicate_coord[0] == 0:
             if self.config.train.ckpt.enable_checkpoint:
                 logger.info(f"Saving cosmos checkpoint at step {train_step}...")
+                model_state_dict = self.model.get_trained_model_state_dict()
                 self.ckpt_manager.save_checkpoint(
-                    model=self.model.trained_model[0],
+                    model=model_state_dict,
                     optimizer=self.optimizers,
                     scheduler=self.lr_schedulers,
                     step=train_step,

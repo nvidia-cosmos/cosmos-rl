@@ -37,8 +37,8 @@ class SD3Model(DiffuserModel):
     def supported_model_types():
         return ['StableDiffusion3Pipeline']
 
-    def __init__(self, config: DiffusersConfig, model_str: str = ""):
-        super().__init__(config, model_str)
+    def __init__(self, config: DiffusersConfig, **kwargs):
+        super().__init__(config, **kwargs)
         self.set_scheduler_timestep(timestep=self.train_sampling_steps)
 
     def text_embedding(self, prompt_list: List[str], device='cuda'):

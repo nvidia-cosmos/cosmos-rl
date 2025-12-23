@@ -29,7 +29,7 @@ dataset.local_dir = "/data/yangyangt/diffusion_related/validation_prompts.json"
 [policy]
 model_name_or_path = "Efficient-Large-Model/SANA-Video_2B_480p_diffusers"
 is_diffusers = true
-model_gradient_checkpointig = true
+model_gradient_checkpointing = true
 
 [policy.diffusers_config]
 is_video = true

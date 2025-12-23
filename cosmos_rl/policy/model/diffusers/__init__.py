@@ -17,12 +17,16 @@ from cosmos_rl.policy.model.base import BaseModel, ModelRegistry
 from cosmos_rl.policy.model.diffusers.weight_mapper import DiffuserModelWeightMapper
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.config import DiffusersConfig
+from cosmos_rl.policy.config import LoraConfig as cosmos_lora_config
 
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     fully_shard,
     MixedPrecisionPolicy,
 )
+
+from peft import LoraConfig, get_peft_model_state_dict
+
 import inspect
 
 def mean_flat(tensor):
@@ -38,16 +42,19 @@ class DiffuserModel(BaseModel, ABC):
     def supported_model_types():
         return ['diffusers']
 
-    def __init__(self, config: DiffusersConfig, model_str: str = ""):
+    def __init__(self, config: DiffusersConfig, lora_config: cosmos_lora_config = None, model_str: str = ""):
         super().__init__()
         self.config = config
         self.offload = self.config.offload
         self.load_models_from_hf(model_str)
+        if lora_config is not None:
+            self.is_lora = True
+            self.apply_lora(lora_config)
         # Decide timesampling method
         self.weighting_scheme = self.config.weighting_scheme
         self.train_sampling_steps = self.scheduler.config.num_train_timesteps
         self.init_output_process()
-    
+
     def register_models(self):
         self.valid_models = [k for k, v in self.pipeline._internal_dict.items() if isinstance(v, tuple) and v[0] is not None]
         self.model_parts = []
@@ -89,6 +96,11 @@ class DiffuserModel(BaseModel, ABC):
             Return different model parts, diffusers usually contain transformer, vae_model and text_encoder
         '''
         return self.model_parts
+
+    @property
+    def trainable_parameters(self):
+        # Get all trainable parameters
+        return [params for params in self.transformer.parameters if params.requires_grad]
 
     def load_hf_weights(
         self,
@@ -140,7 +152,7 @@ class DiffuserModel(BaseModel, ABC):
         '''
             Model initialize entrypoiny
         '''
-        return cls(config.policy.diffusers_config, model_str=config.policy.model_name_or_path)
+        return cls(config.policy.diffusers_config, lora_config=config.policy.lora, model_str=config.policy.model_name_or_path)
 
     
     @classmethod
@@ -200,6 +212,13 @@ class DiffuserModel(BaseModel, ABC):
         '''
         raise NotImplementedError
 
+    def get_trained_model_state_dict(self):
+        if self.is_lora:
+            model_state_dict = get_peft_model_state_dict(self.transformer)
+        else:
+            model_state_dict = self.transformer.state_dict()
+        return model_state_dict
+
     def inference(self, inference_step, height, width, prompt_list, guidance_scale, save_dir="", frames=None, negative_prompt=""):
         '''
             Main inference, do diffusers generation with given sampling parameters
@@ -240,6 +259,17 @@ class DiffuserModel(BaseModel, ABC):
         from cosmos_rl.policy.model.diffusers.parallelize import parallelize
 
         return parallelize, self
+    
+    # Lora Supports
+    def apply_lora(self, lora_config):
+        self.transformer.requires_grad_(False)
+        transformer_lora_config = LoraConfig(
+            r = lora_config.r,
+            lora_alpha = lora_config.lora_alpha,
+            init_lora_weights = lora_config.init_lora_weights,
+            target_modules = lora_config.target_modules,
+        )
+        self.transformer.add_adapter(transformer_lora_config)
 
     @property
     def trained_model(self):

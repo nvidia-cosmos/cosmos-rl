@@ -123,7 +123,7 @@ class CheckpointMananger:
 
     def save_checkpoint(
         self,
-        model: torch.nn.Module,
+        model: Optional[torch.nn.Module],
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         step: int,
@@ -191,6 +191,13 @@ class CheckpointMananger:
             cur_step_ckpt_dir, f"extra_info_rank_{self.global_rank}.pth"
         )
 
+        if isinstance(model, torch.nn.Module):
+            state_dict = model.state_dict()
+        elif isinstance(model, dict):
+            state_dict = model
+        else:
+            raise ValueError("Unsupport model type, should either be a torch.nn.Module or dict")
+
         if self.save_mode == "async":
             # wait for the previous save to finish
             if len(self.pre_save_futures) > 0:
@@ -199,7 +206,7 @@ class CheckpointMananger:
                 self.pre_save_futures = []
 
             # offload the state dict to CPU
-            model_state_dict_cpu = self.offload_state_dict_cpu(model.state_dict())
+            model_state_dict_cpu = self.offload_state_dict_cpu(state_dict)
             optimizer_state_dict_cpu = self.offload_state_dict_cpu(
                 optimizer.state_dict()
             )
@@ -243,7 +250,7 @@ class CheckpointMananger:
                 futures.wait(self.pre_save_futures)
                 self.pre_save_futures = []
         else:  # sync
-            _save_upload(model.state_dict(), model_ckpt_path, is_final)
+            _save_upload(state_dict, model_ckpt_path, is_final)
             _save_upload(optimizer.state_dict(), optimizer_ckpt_path, is_final)
             _save_upload(scheduler.state_dict(), scheduler_ckpt_path, is_final)
             _save_upload(extra_info, extra_info_ckpt_path, is_final)
@@ -259,6 +266,7 @@ class CheckpointMananger:
         scheduler: Union[torch.optim.lr_scheduler._LRScheduler, Callable],
         model_name_or_path: str,
         revision: Optional[str] = None,
+        strict: bool = True
     ):
         extra_vars = {}
         base_paths: List[str] = self.get_ckpt_path()
@@ -295,7 +303,7 @@ class CheckpointMananger:
                         scheduler = scheduler(training_steps=extra_vars["total_steps"])
                         outputs.append(scheduler)
 
-                    model.load_state_dict(torch.load(model_path, weights_only=False))
+                    model.load_state_dict(torch.load(model_path, weights_only=False), strict=strict)
                     optimizer.load_state_dict(
                         torch.load(optimizer_path, weights_only=False)
                     )
