@@ -23,6 +23,8 @@ ARG FLASH_ATTN_VERSION=2.8.3
 ARG VLLM_VERSION=0.13.0
 ARG PYTHON_VERSION=3.12
 
+ARG TE_VERSION=2.10.0 # 2.10.0 contains the fix: fix crash when triton >= 3.5 of TE.
+
 # Torch related versions
 ARG TORCH_VERSION=2.9.0
 ARG TORCHVISION_VERSION=0.24.0
@@ -100,7 +102,7 @@ RUN pip install \
     flash_attn==${FLASH_ATTN_VERSION} \
     vllm==${VLLM_VERSION} \
     flashinfer-python \
-    transformer_engine[pytorch] --no-build-isolation
+    transformer_engine[pytorch]==${TE_VERSION} --no-build-isolation
 
 # install apex
 RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https://github.com/NVIDIA/apex@bf903a2
