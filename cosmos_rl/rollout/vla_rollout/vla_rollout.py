@@ -486,7 +486,7 @@ class OpenVLARollout(RolloutBase):
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             # Try to call the VLA model's generation method
-            actions, responses = self.model.model.generate_action(
+            actions, responses, logprobs = self.model.model.generate_action(
                 input_ids=input_ids,
                 pixel_values=pixel_values,
                 proprio=proprio,
@@ -512,6 +512,7 @@ class OpenVLARollout(RolloutBase):
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
                 "pixel_values": pixel_values,
+                "old_log_probs": logprobs,
             }
 
     def _pack_grpo_results(
@@ -552,7 +553,7 @@ class OpenVLARollout(RolloutBase):
         # Check GRPO filtering criteria first (before expensive log prob computation)
         trajectories = [{} for _ in range(group_size)]
         for episode_idx in range(group_size):
-            for key in ["input_ids", "attention_mask", "pixel_values", "responses"]:
+            for key in ["input_ids", "attention_mask", "pixel_values", "responses", "old_log_probs"]:
                 trajectories[episode_idx][key] = torch.stack(
                     vla_history[episode_idx][key],
                     dim=0,
@@ -560,34 +561,21 @@ class OpenVLARollout(RolloutBase):
 
         # Compute old_log_probs for each episode by replaying trajectory
         completions = []
-        with (
-            torch.no_grad(),
-            torch.autocast(device_type="cuda", dtype=torch.bfloat16),
-        ):
-            for episode_idx in range(group_size):
-                traj = trajectories[episode_idx]
-                traj["old_log_probs"] = self.model.forward_with_trajectory_structure(
-                    input_ids=traj["input_ids"],
-                    pixel_values=traj["pixel_values"],
-                    attention_mask=traj["attention_mask"],
-                    labels=traj["responses"],
-                    temperature=self.config.rollout.sampling_config.temperature,
-                    proprio=None,
-                ).logprobs
-
-                trajectory_id = save_trajectory_to_buffer(
-                    traj,
-                    buffer_dir=os.path.join(
-                        self.config.train.output_dir, "replay_buffer"
-                    ),
-                )
-                completions.append(
-                    {
-                        "complete": bool(task_records[episode_idx]["complete"]),
-                        "finish_step": int(task_records[episode_idx]["finish_step"]),
-                        "trajectory_id": trajectory_id,
-                    }
-                )
+        for episode_idx in range(group_size):
+            traj = trajectories[episode_idx]
+            trajectory_id = save_trajectory_to_buffer(
+                traj,
+                buffer_dir=os.path.join(
+                    self.config.train.output_dir, "replay_buffer"
+                ),
+            )
+            completions.append(
+                {
+                    "complete": bool(task_records[episode_idx]["complete"]),
+                    "finish_step": int(task_records[episode_idx]["finish_step"]),
+                    "trajectory_id": trajectory_id,
+                }
+            )
         if is_validation:
             return [RolloutResult(completions=[c]) for c in completions]
         else:
@@ -653,6 +641,7 @@ class OpenVLARollout(RolloutBase):
                     "pixel_values",
                     "responses",
                     "action",
+                    "old_log_probs",
                 ]
             }
             for _ in range(len(payloads))
@@ -675,7 +664,7 @@ class OpenVLARollout(RolloutBase):
             for i, env_id in enumerate(active_env_ids):
                 for key in ["input_ids", "attention_mask", "pixel_values"]:
                     vla_history[env_id][key].append(vla_input[key][i])
-                for key in ["responses", "action"]:
+                for key in ["responses", "action", "old_log_probs"]:
                     vla_history[env_id][key].append(vla_output[key][i])
                 for key in ["active", "complete", "finish_step"]:
                     task_records[env_id][key] = step_results[key][i]

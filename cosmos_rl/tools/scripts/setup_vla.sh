@@ -1,7 +1,7 @@
 #!/bin/bash
 
 apt-get update
-apt-get install -y ca-certificates curl jq tini vim curl cmake
+apt-get install -y cmake
 
 ##################
 # setup egl      #
@@ -41,3 +41,9 @@ EOF
 
 ldconfig
 
+##################
+# setup libero   #
+##################
+mkdir -p ~/.libero
+touch ~/.libero/config.yaml && \
+python -c "from libero.libero import set_libero_default_path; set_libero_default_path()"

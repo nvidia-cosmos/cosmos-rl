@@ -29,7 +29,8 @@ jobs:
           docker build -t ${{ steps.vars.outputs.image_tag }} .
           docker build -t ${{ steps.vars.outputs.image_tag }}-vla --build-arg COSMOS_RL_EXTRAS=vla .
       
-      - name: Run simulation tests
+      - name: Run vla tests
+        id: vla-tests
         run: |
           set -ex
 
@@ -101,4 +102,6 @@ jobs:
         if: always()
         run: |
           docker stop "${{ steps.tests.outputs.container_id }}" || true
+          docker stop "${{ steps.vla-tests.outputs.container_id }}" || true
           docker rmi -f "${{ steps.vars.outputs.image_tag }}" || true
+          docker rmi -f "${{ steps.vars.outputs.image_tag }}-vla" || true

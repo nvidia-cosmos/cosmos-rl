@@ -49,10 +49,12 @@ import unittest
 import numpy as np
 import torch
 from dataclasses import dataclass
+import os
 
 from cosmos_rl.simulators.env_manager import EnvManager
 from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 
+os.environ["MUJOCO_GL"] = "egl"
 
 @dataclass
 class MockLiberoConfig:

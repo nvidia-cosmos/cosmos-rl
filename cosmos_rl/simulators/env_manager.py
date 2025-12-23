@@ -82,10 +82,8 @@ def get_gpu_numa_node(gpu_id: int) -> int:
         # Get NUMA node from sysfs
         numa_node_path = f"/sys/bus/pci/devices/0000:{bus_number}:00.0/numa_node"
         if os.path.exists(numa_node_path):
-            logger.info(f"NUMA node path: {numa_node_path}")
             with open(numa_node_path, "r") as f:
                 numa_node = int(f.read().strip())
-                logger.info(f"NUMA node: {numa_node}")
                 if numa_node >= 0:
                     return numa_node
 
@@ -138,9 +136,6 @@ def set_process_numa_affinity(gpu_id: int) -> None:
             print(f"Warning: No CPUs found for NUMA node {numa_node}")
             return
 
-        logger.info(
-            f"Setting NUMA affinity for GPU {gpu_id} to NUMA node {numa_node} with CPUs {cpus}"
-        )
         os.sched_setaffinity(0, cpus)
         try:
             subprocess.run(
