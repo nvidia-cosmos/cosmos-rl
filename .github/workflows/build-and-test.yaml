@@ -27,7 +27,7 @@ jobs:
       - name: Build image
         run: |
           docker build -t ${{ steps.vars.outputs.image_tag }} .
-
+        
       - name: Run tests
         id: tests
         run: |
@@ -47,6 +47,10 @@ jobs:
           LONG_DOCKER_RUN="timeout 15m docker exec ${container_id}"
 
           ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
+
+          ${DOCKER_RUN} /bin/bash -c "source /workspace/cosmos-rl/tools/scripts/setup_egl.sh"
+          ${DOCKER_RUN} /bin/bash -c "export NVIDIA_DRIVER_CAPABILITIES=all"
+          ${DOCKER_RUN} python tests/test_env_manager_libero.py
 
           # run tests
           ${DOCKER_RUN} python tests/test_apex.py
