@@ -1234,7 +1234,8 @@ class RolloutConfig(BaseModel):
         choices=["none", "fp8"],
     )
 
-    seed: Optional[int] = Field(default=None, description="random seed for rollout.")
+    # This default seed is aligned with vLLM
+    seed: int = Field(default=0, description="random seed for rollout.")
 
     sampling_config: SamplingConfig = Field(default_factory=SamplingConfig)
 
