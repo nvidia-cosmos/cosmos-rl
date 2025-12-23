@@ -15,7 +15,7 @@ For inference, you can see the Cosmos-Predict2.5 [document](https://github.com/n
 
 ## Tutorial
 
-For fully document about diffusion RL, you can find it at the [offical document](https://nvidia-cosmos.github.io/cosmos-rl/diffusion/overview.html) of Cosmos-RL.
+For fully document about diffusion RL, you can find it at the [offical document](https://nvidia-cosmos.github.io/cosmos-rl/wfm/overview.html) of Cosmos-RL.
 
 ### Configuration
 **Experiment**: DDRL configurations can be found in `configs/wfm`. 
