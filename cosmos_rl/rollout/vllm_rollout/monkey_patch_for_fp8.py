@@ -8,9 +8,7 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils import w8a8_utils
-from vllm.model_executor.layers.quantization.fp8 import (
-    Fp8MoEMethod,
-)
+from vllm.model_executor.layers.quantization.fp8 import Fp8OnlineMoEMethod
 
 
 from cosmos_rl.policy.model import WeightMapper
@@ -40,6 +38,9 @@ def simplify_process_weights_after_loading_for_linear():
     """
 
     def simplified_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
         # Warning: this is only for rowwise fp8 linear.
         qweight, weight_scale = ops.scaled_fp8_quant(
             layer.weight, scale=None, use_per_token_if_dynamic=USE_PER_TOKEN_IF_DYNAMIC
@@ -57,34 +58,23 @@ def simplify_process_weights_after_loading_for_linear():
 
 def simplify_process_weights_after_loading_for_moe():
     """
-    This function is used to simplify the process_weights_after_loading of Fp8MoEMethod in vLLM, to quantize the
+    # With vLLM 0.13.0, for online-dynamic-moe quantization, `Fp8OnlineMoEMethod` is used.
+    This function is used to simplify the process_weights_after_loading of Fp8OnlineMoEMethod in vLLM, to quantize the
     weight of MoE only in `per-tensor` mode.
-    Refer to the method `process_weights_after_loading` in `Fp8MoEMethod`:
-
+    Refer to the method `process_weights_after_loading` in `Fp8OnlineMoEMethod`:
     """
 
     def simplified_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Lazy import to avoid importing triton too early.
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            is_rocm_aiter_moe_enabled,
-        )
-
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+        # This function is simplified only for cuda device.
+        # If checkpoint is fp16, quantize in place.
+        from vllm.model_executor.utils import replace_parameter
 
         fp8_dtype = torch.float8_e4m3fn
         w13_weight = torch.empty_like(layer.w13_weight.data, dtype=fp8_dtype)
         w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)
 
-        # Re-initialize w13_scale because we directly quantize
-        # merged w13 weights and generate a single scaling factor.
-
-        # FIXME: (lms) Now is per-tensor quant for each expert.
-        layer.w13_weight_scale = torch.nn.Parameter(
-            torch.ones(
-                layer.local_num_experts, dtype=torch.float32, device=w13_weight.device
-            ),
-            requires_grad=False,
-        )
         for expert in range(layer.local_num_experts):
             w13_weight[expert, :, :], layer.w13_weight_scale[expert] = (
                 ops.scaled_fp8_quant(layer.w13_weight.data[expert, :, :])
@@ -92,10 +82,13 @@ def simplify_process_weights_after_loading_for_moe():
             w2_weight[expert, :, :], layer.w2_weight_scale[expert] = (
                 ops.scaled_fp8_quant(layer.w2_weight.data[expert, :, :])
             )
-        layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+        # Each expert will have a single scale value
+        # Shape of layer.w13_weight_scale and layer.w2_weight_scale is [num_experts]
 
-    Fp8MoEMethod.process_weights_after_loading = (
+        replace_parameter(layer, "w13_weight", w13_weight)
+        replace_parameter(layer, "w2_weight", w2_weight)
+
+    Fp8OnlineMoEMethod.process_weights_after_loading = (
         simplified_process_weights_after_loading
     )
 
@@ -123,6 +116,8 @@ def apply_fp8_linear_patch(model: torch.nn.Module):
                 act_quant_static=False,
                 act_quant_group_shape=GroupShape.PER_TOKEN,  # Using per-token quantization for activation.
             )
+        elif isinstance(quant_method, Fp8OnlineMoEMethod):
+            pass
         else:
             # We will not handle other quant methods.
             pass
@@ -139,11 +134,14 @@ def replace_weight_of_quantized_module(
     for name, module in vllm_model.named_modules():
         # Here we use the compatible name as the key, aligned with what we do in
         # `cache_weight_of_quantized_module` and `rollout_prepare_recv`.
-        compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
-            name + ".weight"
-        )
-        if compatible_name in cached_weight_map:
-            module.weight = cached_weight_map[compatible_name]
+        for parameter_name, parameter in module.named_parameters(recurse=False):
+            if parameter_name.endswith("weight"):
+                # including: weight | w13_weight | w2_weight
+                compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
+                    name + "." + parameter_name
+                )
+                if compatible_name in cached_weight_map:
+                    setattr(module, parameter_name, cached_weight_map[compatible_name])
 
 
 def cache_weight_of_quantized_module(
@@ -169,9 +167,33 @@ def cache_weight_of_quantized_module(
                 module.weight.t().to(promotion_dtype).contiguous()
             )  # hp weight has shape [out_dim, in_dim]
             hp_weight_map[compatible_name] = Parameter(hp_weight, requires_grad=False)
+        elif isinstance(quant_method, Fp8OnlineMoEMethod):
+            w13_weight_name = name + ".w13_weight"
+            w2_weight_name = name + ".w2_weight"
+            w13_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
+                w13_weight_name
+            )
+            w2_compatible_name = weight_mapper.rollout_map_local_key_to_hf_key(
+                w2_weight_name
+            )
+            original_weight_map[w13_compatible_name] = module.w13_weight
+            original_weight_map[w2_compatible_name] = module.w2_weight
+            hp_weight = module.w13_weight.to(
+                promotion_dtype
+            ).contiguous()  # hp weight has shape [out_dim, in_dim]
+            hp_weight_map[w13_compatible_name] = Parameter(
+                hp_weight, requires_grad=False
+            )
+            hp_weight = module.w2_weight.to(
+                promotion_dtype
+            ).contiguous()  # hp weight has shape [out_dim, in_dim]
+            hp_weight_map[w2_compatible_name] = Parameter(
+                hp_weight, requires_grad=False
+            )
         else:
             # We will not handle other quant methods.
             pass
+
     return hp_weight_map, original_weight_map
 
 
