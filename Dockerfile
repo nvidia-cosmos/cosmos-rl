@@ -194,4 +194,7 @@ RUN if [ -z "$COSMOS_RL_EXTRAS" ]; then \
         pip install /workspace/cosmos_rl; \
     else \
         pip install "/workspace/cosmos_rl[$COSMOS_RL_EXTRAS]"; \
+        if [[ ",$COSMOS_RL_EXTRAS," == *,vla,* ]]; then \
+            bash /workspace/cosmos_rl/tools/scripts/setup_egl.sh; \
+        fi; \
     fi && rm -rf /workspace/cosmos_rl

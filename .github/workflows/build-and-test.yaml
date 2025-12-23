@@ -27,6 +27,24 @@ jobs:
       - name: Build image
         run: |
           docker build -t ${{ steps.vars.outputs.image_tag }} .
+          docker build -t ${{ steps.vars.outputs.image_tag }}-vla --build-arg COSMOS_RL_EXTRAS=vla .
+      
+      - name: Run simulation tests
+        run: |
+          set -ex
+
+          container_id=$(docker run -t -d --rm \
+            --gpus all \
+            --shm-size=24G \
+            -v ${{ github.workspace }}/tests:/workspace/cosmos-rl/tests:ro \
+            -v /tmp/cache:/root/.cache \
+            -e PYTHONPYCACHEPREFIX=/tmp/pycache \
+            -w /workspace/cosmos-rl \
+            ${{ steps.vars.outputs.image_tag }}-vla /bin/bash)
+
+          echo "container_id=${container_id}" >> $GITHUB_OUTPUT
+          DOCKER_RUN="timeout 10m docker exec ${container_id}"
+          ${DOCKER_RUN} python tests/test_env_manager_libero.py
         
       - name: Run tests
         id: tests
@@ -47,10 +65,6 @@ jobs:
           LONG_DOCKER_RUN="timeout 15m docker exec ${container_id}"
 
           ${DOCKER_RUN} python -c "from cosmos_rl._version import version; print(version)"
-
-          ${DOCKER_RUN} /bin/bash -c "cosmos_rl/tools/scripts/setup_egl.sh"
-          ${DOCKER_RUN} /bin/bash -c "export NVIDIA_DRIVER_CAPABILITIES=all"
-          ${DOCKER_RUN} python tests/test_env_manager_libero.py
 
           # run tests
           ${DOCKER_RUN} python tests/test_apex.py
