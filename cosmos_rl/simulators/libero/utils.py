@@ -155,7 +155,7 @@ def invert_gripper_action(action: np.ndarray) -> np.ndarray:
 
 
 def save_rollout_video(
-    rollout_images, rollout_dir: str, task_name: str, step_idx: int, success: bool
+    rollout_images, rollout_dir: str, task_name: str, success: bool
 ) -> str:
     """
     Saves an MP4 replay of an episode.
@@ -185,7 +185,7 @@ def save_rollout_video(
 
     # Generate unique filename
     ran_id = random.randint(1, 10000)
-    mp4_path = f"{rollout_dir}/step={step_idx}--task={task_name}--success={success}--ran={ran_id}.mp4"
+    mp4_path = f"{rollout_dir}/task={task_name}--success={success}--ran={ran_id}.mp4"
 
     # Write video
     video_writer = imageio.get_writer(mp4_path, fps=30)
@@ -193,7 +193,6 @@ def save_rollout_video(
         video_writer.append_data(img)
     video_writer.close()
 
-    logger.debug(f"✅ Saved {len(rollout_images)} frames to: {mp4_path}")
     return mp4_path
 
 
