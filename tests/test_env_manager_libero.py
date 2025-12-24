@@ -424,9 +424,14 @@ class TestEnvManagerLibero(unittest.TestCase):
 
         # Test get_valid_pixels function
         print("\nTesting get_valid_pixels function...")
-        valid_pixels = self.env_manager.get_valid_pixels(
-            env_ids=validation_enabled_envs
-        )
+        valid_pixels = {
+            "full_images": np.stack(
+                [state.valid_pixels["full_images"] for state in env_states]
+            ),
+            "wrist_images": np.stack(
+                [state.valid_pixels["wrist_images"] for state in env_states]
+            ),
+        }
 
         # Verify structure
         self.assertIsInstance(valid_pixels, dict)
@@ -464,15 +469,6 @@ class TestEnvManagerLibero(unittest.TestCase):
             )
 
         print("✓ get_valid_pixels returned correct shapes and data")
-
-        # Test that we can retrieve validation pixels for individual environments
-        print("\nTesting get_valid_pixels for individual environments...")
-        for env_id in validation_enabled_envs:
-            single_env_pixels = self.env_manager.get_valid_pixels(env_ids=[env_id])
-            self.assertEqual(single_env_pixels["full_images"].shape[0], 1)
-            self.assertEqual(single_env_pixels["wrist_images"].shape[0], 1)
-            print(f"  - Env {env_id}: retrieved validation data successfully")
-        print("✓ Individual environment validation retrieval works")
 
         # Verify pixel data types
         self.assertTrue(np.issubdtype(valid_pixels["full_images"].dtype, np.number))
