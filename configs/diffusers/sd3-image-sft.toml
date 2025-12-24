@@ -32,6 +32,7 @@ is_diffusers = true
 model_gradient_checkpointing = true
 
 [policy.diffusers_config]
+offload = true
 is_video = false
 max_prompt_length = 300
 weighting_scheme = "logit_normal"

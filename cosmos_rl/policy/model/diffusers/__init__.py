@@ -43,6 +43,8 @@ class DiffuserModel(BaseModel, ABC):
         if lora_config is not None:
             self.is_lora = True
             self.apply_lora(lora_config)
+        else:
+            self.is_lora = False
         # Decide timesampling method
         self.weighting_scheme = self.config.weighting_scheme
         self.train_sampling_steps = self.scheduler.config.num_train_timesteps
@@ -60,8 +62,10 @@ class DiffuserModel(BaseModel, ABC):
             model_part = getattr(self.pipeline, valid_model)
             if isinstance(model_part, nn.Module) and valid_model != "transformer":
                 # Offload all torch.nn.Modules to cpu except transformers
-                model_part.to(torch.bfloat16).to("cpu")
-                self.offloaded_models.append(model_part)
+                model_part.to(torch.bfloat16)
+                if self.offload:
+                    model_part.to("cpu")
+                    self.offloaded_models.append(model_part)
             setattr(self, valid_model, model_part)
             self.model_parts.append((valid_model, model_part))
 

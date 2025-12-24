@@ -26,6 +26,7 @@ from functools import partial
 from contextlib import contextmanager
 from qwen_vl_utils import process_vision_info
 
+from cosmos_rl.policy.config import Config
 from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.trainer.llm_trainer.sft_trainer import async_safe_ce
@@ -120,14 +121,6 @@ def init_cosmos_rl_model(config, is_train=True, device="cuda"):
     return [model], pp_scheduler, parallel_dims, loss_fn
 
 
-class Config:
-    def __init__(self, config_dict):
-        for k, v in config_dict.items():
-            if isinstance(v, dict):
-                v = Config(v)
-            setattr(self, k, v)
-
-
 # ================================
 # create config
 # ================================
@@ -152,6 +145,7 @@ config_dict = {
     },
     "train": {
         "fsdp_offload": False,
+        "output_dir": "./",
         "compile": False,
         "master_dtype": "bfloat16",
         "param_dtype": "bfloat16",
@@ -186,7 +180,7 @@ class TestHFModelTP(unittest.TestCase):
         config_dict["policy"]["model_max_length"] = max_position_embeddings
 
         # Load cosmos config
-        cosmos_config = Config(config_dict)
+        cosmos_config = Config.from_dict(config_dict)
 
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -268,7 +262,6 @@ class TestHFModelTP(unittest.TestCase):
         config_dict["policy"]["model_max_length"] = max_position_embeddings
 
         # Load cosmos config
-        cosmos_config = Config(config_dict)
 
         for model_id in [
             "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -279,7 +272,8 @@ class TestHFModelTP(unittest.TestCase):
             config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
             config.max_position_embeddings = max_position_embeddings
 
-            cosmos_config.policy.model_name_or_path = model_id
+            config_dict["policy"]["model_name_or_path"] = model_id
+            cosmos_config = Config.from_dict(config_dict)
             # Remove the model type from the model registry, so that the model will run in the hfmodel path.
             if ModelRegistry.check_model_type_supported(config.model_type):
                 ModelRegistry._MODEL_REGISTRY.pop(config.model_type)
