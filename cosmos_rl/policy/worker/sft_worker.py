@@ -238,6 +238,11 @@ class SFTPolicyWorker(PolicyWorkerBase):
         if self.config.train.compile and self.config.validation.enable:
             torch._dynamo.config.cache_size_limit = 64
 
+        self.hook_fns = self.hook_fns if self.hook_fns is not None else {}
+        self.custom_logger_fns = (
+            self.custom_logger_fns if self.custom_logger_fns is not None else []
+        )
+
         # Prepare wandb
         if "wandb" in self.config.logging.logger and is_wandb_available():
             # Only initialize wandb on the first dp replicate coord and first rank for policy
