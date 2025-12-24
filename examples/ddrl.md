@@ -44,7 +44,7 @@ For fully document about diffusion RL, you can find it at the [offical document]
 - The 2B experiment from the pre-trained checkpoint is `cosmos_predict2-5_2b_720_reason_embedding_ddrl.toml`.
 - The 14B experiment from the pre-trained checkpoint is `cosmos_predict2-5_14b_720_reason_embedding_ddrl.toml`.
 
-> **Important Note**: Since the merged SFT checkpoints are not released in the huggingface, we currently use pre-trained checkpoint instead, which may cause different quality performance in training. We are striving to accelerate the process of making the merged model open source.
+> **Important Note**: Since the merged SFT checkpoints are not released in the huggingface, we use the pre-trained checkpoint instead.
 
 The DDRL parameters and explanations are listed as below. Detailed usage can be found in `cosmos_rl/policy/config/wfm/__init__.py`.
 
