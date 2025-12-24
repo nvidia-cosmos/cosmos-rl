@@ -60,16 +60,6 @@ def convert_from_value_to_role_content(sample):
     return sample
 
 
-def convert_dataset(data):
-    if isinstance(data, list):
-        if len(data) > 0 and isinstance(data[0], dict) and "from" in data[0]:
-            return convert_from_value_to_role_content(data)
-        else:
-            return [convert_from_value_to_role_content(sample) for sample in data]
-    else:
-        return convert_from_value_to_role_content(data)
-
-
 class OpenThoughtsSFTDataset(Dataset):
     def __init__(self, dataset, convert_fn=convert_from_value_to_role_content):
         self.dataset = dataset
@@ -108,7 +98,8 @@ if __name__ == "__main__":
         print(
             f"Appending split {split_name}, dataset size = {len(dataset[split_name])}"
         )
-        dataset_list.append(dataset[split_name])
+        filtered_dataset = dataset[split_name].filter(lambda x: x["domain"] == "math")
+        dataset_list.append(filtered_dataset)
     train_dataset = concatenate_datasets(dataset_list)
     launch_dispatcher(
         dataset=OpenThoughtsSFTDataset(dataset=train_dataset),
