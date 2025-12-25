@@ -131,6 +131,6 @@ joint_logprob = false  # Whether to use joint log probability
 safe_get_logprob = false
 ignore_last = false  # Whether to ignore last denoise step in training
 train_expert_only = true  # Freeze VLM, only train action expert
-discrete_state_input = true
+discrete_state_input = false  # IMPORTANT: Pi05 LIBERO uses continuous state input, not discrete!
 max_token_len = 200
 

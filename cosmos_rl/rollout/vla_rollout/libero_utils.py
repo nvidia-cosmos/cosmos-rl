@@ -87,8 +87,8 @@ def get_libero_env(task, model_family: str, resolution: int = 256):
     }
     env = OffScreenRenderEnv(**env_args)
     env.seed(
-        0
-    )  # IMPORTANT: seed affects object positions even when using fixed initial state
+        7
+    )  # IMPORTANT: seed affects object positions even when using fixed initial state (matching official_openpi default)
     return env, task_description
 
 
@@ -224,50 +224,15 @@ def obs_to_vla_input(obs: Dict, is_robotwin: bool = False) -> Dict:
         }
     else:
         # LIBERO format
-        # IMPORTANT: Resize to 224x224 to match SimpleVLA-RL's get_libero_image()
+        # For PI05: Keep original 256x256 images, let _process_input_pi05 handle resize_with_pad
+        # This matches official_openpi which does resize_with_pad directly from 256x256
         img = obs.get("agentview_image", np.zeros((256, 256, 3)))
-
-        # Resize using PIL (matches SimpleVLA-RL's resize_image function behavior)
-        if img.shape[0] != 224 or img.shape[1] != 224:
-            from PIL import Image
-            import io
-
-            # Match SimpleVLA-RL's resize_image implementation:
-            # - Encode as JPEG (as done in RLDS dataset builder)
-            # - Decode back
-            # - Resize with Lanczos (high-quality resampling)
-            # - Clip to valid range
-            pil_img = Image.fromarray(img.astype(np.uint8))
-
-            # Encode/decode as JPEG to match TF behavior
-            buffer = io.BytesIO()
-            pil_img.save(buffer, format="JPEG", quality=95)
-            buffer.seek(0)
-            pil_img = Image.open(buffer)
-
-            # Resize with Lanczos (equivalent to lanczos3)
-            pil_img = pil_img.resize((224, 224), Image.Resampling.LANCZOS)
-
-            # Convert back to numpy array
-            img = np.array(pil_img, dtype=np.uint8)
-
         out = {"full_image": img}
 
         # Provide wrist image for OpenPI-style multi-view models if available.
         wrist = obs.get("robot0_eye_in_hand_image", None)
         if wrist is not None:
             out["state"] = libero_obs_to_state(obs)
-            if wrist.shape[0] != 224 or wrist.shape[1] != 224:
-                from PIL import Image
-                import io
-
-                pil_img = Image.fromarray(wrist.astype(np.uint8))
-                buffer = io.BytesIO()
-                pil_img.save(buffer, format="JPEG", quality=95)
-                buffer.seek(0)
-                pil_img = Image.open(buffer)
-                pil_img = pil_img.resize((224, 224), Image.Resampling.LANCZOS)
-                wrist = np.array(pil_img, dtype=np.uint8)
             out["wrist_image"] = wrist
 
         return out

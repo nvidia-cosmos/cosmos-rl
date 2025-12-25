@@ -44,6 +44,7 @@ from cosmos_rl.rollout.vla_rollout.env_worker import (
 )
 
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
+from PIL import Image
 
 MAX_STEPS_MAP = {
     # LIBERO tasks
@@ -75,6 +76,28 @@ MAX_STEPS_MAP = {
     "robotwin2_place_shoe": 250,
     "robotwin2_move_pillbottle_pad": 200,
 }
+
+def _resize_with_pad_pil(image: Image.Image, height: int, width: int, method: int) -> Image.Image:
+    """Replicates tf.image.resize_with_pad for one image using PIL. Resizes an image to a target height and
+    width without distortion by padding with zeros.
+
+    Unlike the jax version, note that PIL uses [width, height, channel] ordering instead of [batch, h, w, c].
+    """
+    cur_width, cur_height = image.size
+    if cur_width == width and cur_height == height:
+        return image  # No need to resize if the image is already the correct size.
+
+    ratio = max(cur_width / width, cur_height / height)
+    resized_height = int(cur_height / ratio)
+    resized_width = int(cur_width / ratio)
+    resized_image = image.resize((resized_width, resized_height), resample=method)
+
+    zero_image = Image.new(resized_image.mode, (width, height), 0)
+    pad_height = max(0, int((height - resized_height) / 2))
+    pad_width = max(0, int((width - resized_width) / 2))
+    zero_image.paste(resized_image, (pad_width, pad_height))
+    assert zero_image.size == (width, height)
+    return zero_image
 
 
 def normalize_proprio(proprio: np.ndarray, norm_stats: Dict) -> np.ndarray:
@@ -251,9 +274,13 @@ class OpenVLARollout(RolloutBase):
         batch_size = len(inputs)
 
         def _to_pi05_img(arr: np.ndarray) -> torch.Tensor:
-            img = Image.fromarray(arr).convert("RGB")
-            t = torch.from_numpy(np.array(img)).float()  # [H, W, C]
-            return t / 127.5 - 1.0  # [-1, 1], channels-last
+            # 1. Convert to PIL Image
+            pil_img = Image.fromarray(arr.astype(np.uint8)).convert("RGB")
+            # 2. Resize with padding (matching official_openpi)
+            pil_img = _resize_with_pad_pil(pil_img, 224, 224, Image.Resampling.BILINEAR)
+            # 3. Convert to torch.Tensor and normalize to [-1, 1]
+            img = torch.from_numpy(np.array(pil_img)).float()  # [H, W, C], values in [0, 255]
+            return img / 127.5 - 1.0  # [-1, 1], channels-last
 
         base_imgs = []
         wrist_imgs = []
@@ -293,8 +320,14 @@ class OpenVLARollout(RolloutBase):
         tokenized_prompt_mask = []
         for i in range(batch_size):
             prompt = task_descriptions[i]
-            state_np = state[i].detach().float().cpu().numpy().astype(np.float32)
-            tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=state_np)
+            # If discrete_state_input=False, pass None to tokenizer (state is used as continuous input)
+            # If discrete_state_input=True, pass state to tokenizer (state is discretized into tokens)
+            if self.hf_config.discrete_state_input:
+                state_np = state[i].detach().float().cpu().numpy().astype(np.float32)
+                tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=state_np)
+            else:
+                tokens, mask = self.tokenizer.tokenize_openpi(prompt, state=None)
+            
             tokenized_prompt.append(torch.from_numpy(tokens).to(torch.long))
             tokenized_prompt_mask.append(torch.from_numpy(mask).to(torch.bool))
         tokenized_prompt = torch.stack(tokenized_prompt, dim=0).to(device)
@@ -307,19 +340,22 @@ class OpenVLARollout(RolloutBase):
             tokenized_prompt_mask=tokenized_prompt_mask,
         )
 
-    def _generate_one_step_pi05(self, observation: Any):
+    def _generate_one_step_pi05(self, observation: Any, mode: str = "train"):
         """Generate one PI05 action chunk and adapt it to the LIBERO env_worker format.
         
         Args:
             observation: PI05 observation object
+            mode: "train" or "eval"
         """
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            outputs = self.model.sample_actions(self.device, observation)
+            outputs = self.model.sample_actions(self.device, observation, mode=mode)
             actions = outputs["actions"]
 
         actions = actions[:, :self.hf_config.action_horizon, :self.hf_config.action_env_dim].to(torch.float32)
         actions_np = actions.detach().cpu().numpy()
         outputs["action"] = self._unnormalize_pi05_actions(actions_np)
+        # Clip actions to valid range (important for gripper which can slightly exceed [-1, 1])
+        outputs["action"] = np.clip(outputs["action"], -1.0, 1.0)
 
         return outputs
 
@@ -982,7 +1018,9 @@ class OpenVLARollout(RolloutBase):
 
             if self.model_type in ("pi05", "pi0"):
                 pi05_obs = self._process_input_pi05(current_inputs, current_task_descriptions)
-                vla_output = self._generate_one_step_pi05(pi05_obs)
+                vla_output = self._generate_one_step_pi05(
+                    pi05_obs, mode="eval" if is_validation else "train"
+                )
 
                 image_keys = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
                 step_data = {

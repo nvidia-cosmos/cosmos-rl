@@ -783,6 +783,7 @@ class PI05(BaseModel):
                 sample_mode,
                 self.num_steps,
             )
+            
             # Euler step - use new tensor assignment instead of in-place operation
             x_t = x_t_mean + self.sample_noise(x_t.shape, device) * x_t_std
             log_prob = self.get_logprob_norm(x_t, x_t_mean, x_t_std)
@@ -1157,7 +1158,7 @@ class PI05(BaseModel):
         with safe_open(weight_path, framework="pt", device=("cuda" if device.type == "cuda" else "cpu")) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key)
-        logger.info(f'{state_dict.keys()}')
+        # logger.info(f'{state_dict.keys()}')
         # If embed_tokens is missing in the checkpoint, mirror lm_head (official tying).
         embed_key = "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
         lm_head_key = "paligemma_with_expert.paligemma.lm_head.weight"

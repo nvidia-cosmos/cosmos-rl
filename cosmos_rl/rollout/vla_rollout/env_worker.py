@@ -170,11 +170,11 @@ def libero_env_worker(
             single_action = action[i]
 
             # Process action (normalize and invert gripper)
-            normalized_action = normalize_gripper_action(single_action, binarize=True)
-            inverted_action = invert_gripper_action(normalized_action)
+            # normalized_action = normalize_gripper_action(single_action, binarize=True)
+            # inverted_action = invert_gripper_action(normalized_action)
 
             # Step environment
-            obs, reward, done, info = env.step(inverted_action.tolist())
+            obs, reward, done, info = env.step(single_action.tolist())
 
             # IMPORTANT: Flip LIBERO images (they come upside-down and mirrored from MuJoCo)
             if "agentview_image" in obs:
