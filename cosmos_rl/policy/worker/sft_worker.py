@@ -522,7 +522,16 @@ class SFTPolicyWorker(PolicyWorkerBase):
             return None
         if self.parallel_dims.dp_replicate_coord[0] != 0:
             return
-        if self.train_step % self.config.validation.freq != 0 and not is_last_step:
+        if (
+            (self.train_step == 0 and self.config.validation.val_before_train)
+            or (
+                self.train_step != 0
+                and self.train_step % self.config.validation.freq == 0
+            )
+            or is_last_step
+        ):
+            pass
+        else:
             return None
 
         # Call pre_validation_hook
@@ -609,6 +618,8 @@ class SFTPolicyWorker(PolicyWorkerBase):
             )
 
         cur_epoch = self.start_epoch
+        # For pre-train validation
+        val_avg_loss = self.validate(current_epoch=cur_epoch, is_last_step=False)
         for _ in range(self.start_epoch, self.epoch):
             logger.info(f"Training epoch {cur_epoch + 1}/{self.epoch}")
             for global_batch in self.train_data_loader:

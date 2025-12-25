@@ -73,7 +73,7 @@ def get_dummy_validation_dataset(
         "prompt": LambdaDataset(lambda: str(uuid.uuid4()), length=32),
     }
     if is_video:
-        dict_dataset["frame"] = LambdaDataset(lambda: infernece_frame, length=32)
+        dict_dataset["frames"] = LambdaDataset(lambda: infernece_frame, length=32)
     return CombinedDictDataset(**dict_dataset)
 
 

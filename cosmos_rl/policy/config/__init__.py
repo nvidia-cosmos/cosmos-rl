@@ -92,11 +92,6 @@ class DatasetConfig(BaseModel):
         description="Size of the test set. If float, it is the ratio (between 0.0 and 1.0) of the dataset; if int, it is the absolute size of the test set.",
     )
 
-    local_dir: str = Field(
-        default="",
-        description="Local path to load dataset",
-    )
-
     @model_validator(mode="after")
     def check_params_value(self):
         if isinstance(self.split, str):

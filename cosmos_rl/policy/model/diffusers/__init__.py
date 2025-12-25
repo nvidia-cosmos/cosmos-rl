@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import List, Tuple, Optional
 
 import torch
@@ -105,7 +120,7 @@ class DiffuserModel(BaseModel, ABC):
     def trainable_parameters(self):
         # Get all trainable parameters
         return [
-            params for params in self.transformer.parameters if params.requires_grad
+            params for params in self.transformer.parameters() if params.requires_grad
         ]
 
     def load_hf_weights(
@@ -141,9 +156,12 @@ class DiffuserModel(BaseModel, ABC):
                 f"{self.model_str} have neither video_processor or image_processor, may not be a valid pipeline"
             )
 
-    def load_models_from_hf(self, model_str):
+    def load_models_from_hf(self, model_str: str):
         """
         Load all models
+
+        Args:
+            model_str (str): The name or path of the diffusers pipeline.
         """
         # Init from pipeline
         self.model_str = model_str
@@ -218,22 +236,58 @@ class DiffuserModel(BaseModel, ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def training_step(
-        self, clean_image, prompt_list, x_t=None, timestep=None, noise=None
-    ):
-        """
-        Main training_step, do visual/text embedding on the fly
-        Only support MSE loss now
-        """
-        raise NotImplementedError
-
     def get_trained_model_state_dict(self):
         if self.is_lora:
             model_state_dict = get_peft_model_state_dict(self.transformer)
         else:
             model_state_dict = self.transformer.state_dict()
         return model_state_dict
+
+    def training_sft_step(
+        self,
+        clean_image,
+        prompt_list,
+        loss_only=True,
+        x_t=None,
+        timestep=None,
+        noise=None,
+    ):
+        """
+        Main training_step, do visual/text embedding on the fly
+        Only support MSE loss now
+        """
+        latents = self.visual_embedding(clean_image)
+        # Different model may have different kind of text embedding output
+        # Key of this dict will name of the corresponding args' names
+        text_embedding_dict = self.text_embedding(prompt_list)
+        noised_latents, noise, timesteps = self.add_noise(
+            latents, timestep=timestep, noise=noise
+        )
+
+        if x_t is not None:
+            noised_latents = x_t
+
+        self.transformer.train()
+        model_output = self.transformer(
+            noised_latents.to(self.transformer.dtype),
+            timestep=timesteps,
+            return_dict=False,
+            **text_embedding_dict,
+        )[0]
+
+        # TODO (yy): Only support flow-matching now, expand later
+        target = noise - latents
+        loss = mean_flat((target - model_output) ** 2)
+        if loss_only:
+            return {"loss": loss}
+        else:
+            return {
+                "loss": loss,
+                "x_t": noised_latents,
+                "text_embedding_dict": text_embedding_dict,
+                "visual_embedding": latents,
+                "output": model_output,
+            }
 
     def inference(
         self,

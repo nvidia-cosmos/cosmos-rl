@@ -27,7 +27,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.s3_utils import upload_file_to_s3
 from cosmos_rl.policy.config import Config as CosmosConfig
-from typing import List, Callable, Union, Optional
+from typing import List, Callable, Union, Optional, Dict
 
 
 class CheckpointMananger:
@@ -123,7 +123,7 @@ class CheckpointMananger:
 
     def save_checkpoint(
         self,
-        model: Optional[torch.nn.Module],
+        model: Union[torch.nn.Module, Dict],
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         step: int,
@@ -134,7 +134,7 @@ class CheckpointMananger:
         Save the model, optimizer, scheduler state dicts and extra info to disk.
         Also upload the checkpoint to S3 if configured.
         Args:
-            model (torch.nn.Module): The model to save.
+            model (Union[torch.nn.Module, Dict]): The model or state_dict to save.
             optimizer (torch.optim.Optimizer): The optimizer to save.
             scheduler (torch.optim.lr_scheduler._LRScheduler): The scheduler to save.
             step (int): The current training step.

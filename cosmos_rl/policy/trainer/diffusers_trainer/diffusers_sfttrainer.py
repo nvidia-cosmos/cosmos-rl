@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import torch
 
@@ -45,10 +60,6 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             val_data_packer,
             **kwargs,
         )
-
-        self.is_video = config.policy.diffusers_config.is_video
-
-        self.is_lora = config.policy.lora is not None
 
     def load_model(self):
         ckpt_total_steps = 0
@@ -152,15 +163,12 @@ class Diffusers_SFTTrainer(DiffusersTrainer):
             # gradient accumulation
             raw_batch = global_batch[i : i + self.config.train.train_policy.mini_batch]
             batch = self.data_packer.sft_collate_fn(raw_batch)
-            loss_term = self.model.training_step(batch["visual"], batch["prompt"])
+            loss_term = self.model.training_sft_step(batch["visual"], batch["prompt"])
             loss_term["loss"].mean().backward()
 
         acc_loss += loss_term["loss"].detach()
-        all_params = [
-            p
-            for m in [model for model in self.model.trained_model if model is not None]
-            for p in m.parameters()
-        ]
+        all_params = self.model.trainable_parameters
+
         grad_norm = dist_util.gradient_norm_clipping(
             all_params,
             self.config.train.optm_grad_norm_clip,

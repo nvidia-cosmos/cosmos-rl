@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import torch
 import inspect
 from typing import List
@@ -63,7 +78,10 @@ class SD3Model(DiffuserModel):
             for model_tuple in self.separate_model_parts():
                 if "text" in model_tuple[0]:
                     model_tuple[1].to("cpu")
-        return prompt_embeds, pooled_prompt_embeds
+        return {
+            "encoder_hidden_states": prompt_embeds,
+            "pooled_projections": pooled_prompt_embeds,
+        }
 
     def visual_embedding(
         self, input_visual_list, height=None, width=None, device="cuda"
@@ -121,39 +139,3 @@ class SD3Model(DiffuserModel):
             sample=clean_latents, noise=noise, timestep=timesteps
         )
         return noised_latent, noise, timesteps
-
-    def training_step(
-        self, clean_image, prompt_list, x_t=None, timestep=None, noise=None
-    ):
-        """
-        Main training_step, do visual/text embedding on the fly
-        Only support MSE loss now
-        """
-        latents = self.visual_embedding(clean_image)
-        prompt_embedding, pooled_prompt_embeds = self.text_embedding(prompt_list)
-        noised_latents, noise, timesteps = self.add_noise(
-            latents, timestep=timestep, noise=noise
-        )
-
-        if x_t is not None:
-            noised_latents = x_t
-
-        self.transformer.train()
-        model_output = self.transformer(
-            hidden_states=noised_latents.to(self.transformer.dtype),
-            encoder_hidden_states=prompt_embedding,
-            pooled_projections=pooled_prompt_embeds,
-            timestep=timesteps,
-            return_dict=False,
-        )[0]
-
-        target = noise - latents
-        loss = mean_flat((target - model_output) ** 2)
-
-        return {
-            "loss": loss,
-            "x_t": noised_latents,
-            "text_embedding": prompt_embedding,
-            "visual_embedding": latents,
-            "output": model_output,
-        }

@@ -45,7 +45,7 @@ class LocalDiffusersDataset(Dataset):
         self.is_video = config.policy.diffusers_config.is_video
         self.height, self.width = config.policy.diffusers_config.inference_size
         self.train_frames = config.policy.diffusers_config.train_frames
-        self.dataset_dir = self.config.train.train_policy.dataset.local_dir
+        self.dataset_dir = self.config.train.train_policy.dataset.name
         prompt_files = glob.glob(os.path.join(self.dataset_dir, "*.json"))
         if self.is_video:
             self.suffix = "mp4"
@@ -152,7 +152,7 @@ class LocalDiffusersValDataset(Dataset):
                 "Validation is not enabled in the config. Skipping setup for MathValDataset."
             )
             return
-        local_path = config.validation.dataset.local_dir
+        local_path = config.validation.dataset.name
         self.is_video = config.policy.diffusers_config.is_video
         self.height, self.width = config.policy.diffusers_config.inference_size
         self.infernece_frame = config.policy.diffusers_config.inference_frames
