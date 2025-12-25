@@ -51,7 +51,7 @@ save_mode = "async"
 n_init_replicas = 1
 tp_size = 4
 cp_size = 1
-dp_shard_size = 2
+dp_shard_size = 1
 pp_size = 1
 dp_replicate_size = 1
 

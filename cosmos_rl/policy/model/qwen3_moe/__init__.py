@@ -212,7 +212,7 @@ class Attention(nn.Module):
         Forward pass of the attention module.
 
         Args:
-            x (torch.Tensor): Input tensor.
+            x (torch.Tensor): Input tensor, shape: [bs, seqlen, head_num * head_dim].
             position_embeddings (torch.Tensor): Position embeddings.
             cu_seqlens (torch.Tensor, optional): Cumulative sequence lengths.
             max_seqlen (int, optional): Maximum sequence length.
