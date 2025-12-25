@@ -149,7 +149,7 @@ class ColocatedRolloutControlWorker(DisaggregatedRolloutControlWorker):
             commands = self.redis_for_remote.subscribe_command(self.replica_name)
         except Exception as e:
             logger.debug(
-                f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+                f"[Rollout] Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
             )
         commands = [Command.depack(x) for x in commands]
         return commands

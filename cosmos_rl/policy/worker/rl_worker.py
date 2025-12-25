@@ -249,7 +249,9 @@ class RLPolicyWorker(PolicyWorkerBase):
                     for x in self.redis_controller.subscribe_rollout(self.replica_name)
                 ]
             except Exception as e:
-                logger.debug(f"Failed to get rollouts: {e}, wait for next round")
+                logger.debug(
+                    f"[Policy] Failed to get rollouts: {e}, wait for next round"
+                )
             for rollout in rollouts:
                 self.data_queue.put_nowait(rollout)
 
@@ -331,7 +333,7 @@ class RLPolicyWorker(PolicyWorkerBase):
         assert command.src_replica_size == self.world_size
         if not command.src_replica_name == self.replica_name:
             logger.error(
-                f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
+                f"[Policy] {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
             )
             return False
 
@@ -558,7 +560,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                     )
                 except Exception as e:
                     logger.debug(
-                        f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+                        f"[Policy] Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
                     )
                 for x in commands:
                     command = Command.depack(x)

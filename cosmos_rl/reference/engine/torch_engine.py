@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import torch
 import types
 from functools import partial
 import inspect
-from typing import Dict, Any, Callable, List, Tuple
-
+from typing import Dict, Any, Callable, List, Tuple, Union
+from cosmos_rl.utils.balance_seqlen import rearrange_mini_batches
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.policy.trainer.llm_trainer.llm_trainer import LLMTrainer
@@ -28,7 +29,7 @@ from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import (
     setup_tokenizer,
 )
-from cosmos_rl.dispatcher.data.schema import Rollout
+from cosmos_rl.dispatcher.data.schema import ConversationType, Rollout
 from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_inputs,
     pack_sequences_for_logprobs,
@@ -131,11 +132,12 @@ class TorchEngine(LLMTrainer):
             )
         # For iteration control
         self.batch_size = self.config.distillation.batch_size_per_replica
-        self.max_length = self.config.distillation.model_max_length
+        self.max_length = self.config.policy.model_max_length
 
         # Setup tokenizer for teacher and student
-        self.tokenizer = setup_tokenizer(self.config.distillation.model_name_or_path)
         self.student_tokenizer = student_tokenizer
+        self.student_data_packer = copy.deepcopy(self.data_packer)
+        self.tokenizer = setup_tokenizer(self.config.distillation.model_name_or_path)
         self.data_packer.tokenizer = self.tokenizer
 
     def step_training(self):
@@ -148,11 +150,13 @@ class TorchEngine(LLMTrainer):
         if hasattr(self, "tokenizer_mapping_cache"):
             return self.tokenizer_mapping_cache
         self.tokenizer_mapping_cache = {}
-        student_vocab = dict(self.student_tokenizer.vocab)
-        vocab = dict(self.tokenizer.vocab)
-        for key, value in student_vocab.items():
-            if key in vocab:
-                self.tokenizer_mapping_cache[value] = vocab[key]
+        self.student_vocab = dict(self.student_tokenizer.vocab)
+        self.vocab = dict(self.tokenizer.vocab)
+        self.max_valid_token_id = max(self.vocab.values())
+        self.max_valid_student_token_id = max(self.student_vocab.values())
+        for key, value in self.student_vocab.items():
+            if key in self.vocab:
+                self.tokenizer_mapping_cache[value] = self.vocab[key]
             else:
                 logger.warning(f"[Reference] Token {key} not found in tokenizer")
         return self.tokenizer_mapping_cache
@@ -163,20 +167,33 @@ class TorchEngine(LLMTrainer):
         new_tokens = []
         for token in tokens:
             if token not in self.tokenizer_mapping():
-                logger.warning(f"Token {token} not found in tokenizer")
-                raise RuntimeError(f"Token {token} not found in tokenizer")
+                logger.warning(f"[Reference] Token {token} not found in tokenizer")
+                assert (
+                    token > self.max_valid_token_id
+                ), f"Token {token} is less than max valid token id {self.max_valid_token_id}"
+                new_tokens.append(token)
             else:
                 new_tokens.append(self.tokenizer_mapping()[token])
         return new_tokens
 
     def map_student_text_to_tokenizer_student_token_ids_and_check(
-        self, text: str
+        self, input_content: Union[str, ConversationType]
     ) -> List[int]:
-        input_ids = self.student_tokenizer(
-            text, add_special_tokens=False
-        ).input_ids  # not padded yet
+        processed_student_input = self.student_data_packer.get_policy_input(
+            input_content, ""
+        )
+        input_ids = (
+            processed_student_input.input_ids
+            if hasattr(processed_student_input, "input_ids")
+            else processed_student_input["input_ids"]
+        )
         input_ids_mapped = self.map_student_token_ids_to_tokenizer_token_ids(input_ids)
-        input_ids_new = self.tokenizer(text, add_special_tokens=False).input_ids
+        processed_input = self.data_packer.get_policy_input(input_content, "")
+        input_ids_new = (
+            processed_input.input_ids
+            if hasattr(processed_input, "input_ids")
+            else processed_input["input_ids"]
+        )
         assert (
             input_ids_mapped == input_ids_new
         ), f"Input ids mapped: {input_ids_mapped} != input ids new: {input_ids_new}"
@@ -247,239 +264,340 @@ class TorchEngine(LLMTrainer):
             )
             for i in range(len(samples))
         ]
+
+        # Set all logprob masks to 1 to compute logprobs for all tokens in the sequence
         for i in range(len(processed_samples)):
             if hasattr(processed_samples[i], "logprob_masks"):
                 processed_samples[i].logprob_masks = [
                     1 for _ in range(len(processed_samples[i].logprob_masks))
                 ]
+                processed_samples[i].logprob_masks[-1] = 0  # exclude the last token
             else:
                 processed_samples[i]["logprob_masks"] = [
                     1 for _ in range(len(processed_samples[i]["logprob_masks"]))
                 ]
+                processed_samples[i]["logprob_masks"][-1] = 0  # exclude the last token
 
         batch_size = len(rollouts)
-        mini_batch_size = batch_size
+        mini_batch_size = min(self.config.distillation.mini_batch, batch_size)
         # Validate the PP parallelism configuration
         if self.parallel_dims.pp_enabled:
             n_microbatches = (
-                batch_size // self.config.policy.parallelism.pp_micro_batch_size
+                batch_size // self.config.distillation.parallelism.pp_micro_batch_size
             )
             assert (
                 n_microbatches % self.parallel_dims.pp == 0
             ), f"n_microbatches {n_microbatches} should be divided evenly by pp size of {self.parallel_dims.pp}"
 
-        data = []
         with torch.set_grad_enabled(False):
             with torch.cuda.stream(self.train_stream):
-                # TODO(jiaxin): support variable length in PP
-                computed_max_len = (
-                    self.config.policy.model_max_length
-                    if self.parallel_dims.pp_enabled
-                    else self.data_packer.policy_compute_max_len(processed_samples)
-                )
-                computed_max_len = (
-                    (computed_max_len + self.seq_len_multiple - 1)
-                    // self.seq_len_multiple
-                    * self.seq_len_multiple
-                )
-                user_mini_batch: Dict[str, Any] = self.data_packer.policy_collate_fn(
-                    processed_samples,
-                    computed_max_len=computed_max_len,
-                )
-                packing_seq = self.config.train.sequence_packing
-                if packing_seq:
-                    if self.parallel_dims.pp_enabled:
-                        packing_seq = False
-                        logger.debug(
-                            "[Policy] Packing sequence is disabled due to incompatible dimensions."
-                        )
-                    elif (
-                        hasattr(
-                            self.model,
-                            "check_sequence_packing_compatible",
-                        )
-                        and not self.model.check_sequence_packing_compatible()
-                    ):
-                        packing_seq = False
-                        logger.debug(
-                            "[Policy] Packing sequence is disabled due to unsupported model."
-                        )
-
-                # TP/CP will shard the sequence dimension into n-ranks.
-                # The interested_tokens will be unevenly distributed across ranks.
-                # So do not enable interested_tokens in TP.
                 if (
-                    self.parallel_dims.dp_shard_coord[1]
-                    == self.parallel_dims.world_size
+                    self.config.distillation.max_token_len_per_mini_batch is not None
+                    and self.config.distillation.max_token_len_per_mini_batch > 0
                 ):
-                    user_mini_batch["interested_tokens"] = user_mini_batch[
-                        "logprob_masks"
+                    minibatch_seq_len = [
+                        self.data_packer.policy_compute_max_len([sample])
+                        for sample in processed_samples
                     ]
-
-                # Move all tensor to device
-                for k in user_mini_batch.keys():
-                    v = user_mini_batch[k]
-                    if isinstance(v, torch.Tensor) and v.device != self.device:
-                        user_mini_batch[k] = v.to(self.device)
-
-                # input_ids are different across ranks in dp_shard_cp
-                position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
-                    **user_mini_batch
-                )
-
-                if packing_seq:
-                    # Prepare for the sequence packing information.
-                    packed_args = pack_sequences_info_collect(
-                        input_ids,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                        seq_len_multiple=self.seq_len_multiple,
-                    )
-                    user_mini_batch.update(packed_args)
-                    packed_args = pack_sequences_for_masks(
-                        user_mini_batch["valid_input_len"],
-                        user_mini_batch["valid_input_len"],
-                    )
-                    user_mini_batch.update(packed_args)
-                    packed_args = pack_sequences_for_logprobs(
-                        user_mini_batch["logprob_masks"],
-                        user_mini_batch["valid_input_len"],
-                        advantages=None,
-                    )
-                    user_mini_batch.update(packed_args)
-                user_mini_batch["position_ids"] = position_ids
-                padding_mask = user_mini_batch.get("padding_mask", None)
-
-                input_ids_before_cp = user_mini_batch["input_ids"]
-                position_ids_before_cp = user_mini_batch["position_ids"]
-                padding_mask_before_cp = padding_mask
-                # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
-                delay_cp_slice_inputs = getattr(
-                    self.model, "delay_cp_slice_inputs", False
-                )
-                if (
-                    self.parallel_dims.cp_enabled
-                    and not packing_seq
-                    and not delay_cp_slice_inputs
-                ):
-                    [input_ids, position_ids, padding_mask] = slice_inputs_for_ulysses(
-                        [input_ids, position_ids, padding_mask],
-                        self.parallel_dims.mesh["cp"],
-                        seq_dims=[1, pos_seq_dim, 1],
-                    )
-                    user_mini_batch["position_ids"] = position_ids
-                    user_mini_batch["input_ids"] = input_ids
-                    if padding_mask is not None:
-                        user_mini_batch["padding_mask"] = padding_mask
-                if self.parallel_dims.cp_enabled:
-                    # Slice for cp after embedding generation and sequence packing in the model forward later.
-                    user_mini_batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
-
-                if self.parallel_dims.pp_enabled:
-                    # [mini_batch_size, 1]: indicating the index of mini-batch
-                    micro_batch_ids_list = []
-                    for i in range(mini_batch_size):
-                        micro_batch_ids_list.append(
-                            [i // self.config.policy.parallelism.pp_micro_batch_size]
-                        )
-                    micro_batch_ids_cpu = torch.Tensor(micro_batch_ids_list).int()
-                    pp_first_stage = self.parallel_dims.pp_coord[0] == 0
-                    # Pipeline Parallel forward / backward inside step() call
-                    losses = [] if pp_last_stage else None
-                    self.pp_data = []
-                    if pp_last_stage:
-                        # Inject the `mini-batch` and `micro-batch` ids to the input so that the last stage can know which microbatch it is processing
-                        user_mini_batch["micro_batch_ids"] = micro_batch_ids_cpu
-                    if pp_first_stage or pp_last_stage:
-                        # First/Last stage: pass all inputs
-                        kwargs = {}
-                        if self.parallel_dims.cp_enabled:
-                            # This is for recover these two tensors after ulysses
-                            kwargs["input_ids_before_cp"] = input_ids_before_cp
-                            kwargs["position_ids_before_cp"] = position_ids_before_cp
-
-                        self.pp_scheduler.step(
-                            **user_mini_batch,
-                            advantages=None,
-                            losses=losses,
-                            target=torch.empty(
-                                [mini_batch_size, 1], device=self.device
-                            ),
-                            **kwargs,
-                        )
-                    else:
-                        # Middle stages: forward data from previous stage
-                        self.pp_scheduler.step(position_ids=position_ids)
-
-                    if (
-                        pp_last_stage
-                        and self.parallel_dims.tp_coord[0] == 0
-                        and self.parallel_dims.cp_coord[0] == 0
-                    ):
-                        data = []
-                        for i, item in enumerate(self.pp_data):
-                            item.update(
-                                {"teacher_result_uuid": rollouts[i].teacher_result_uuid}
-                            )
-                            data.append(item)
-                            logger.debug(
-                                f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])}"
-                            )
-                else:
-                    with self.act_offloading_ctx_manager:
-                        raw_logits = self.model(**user_mini_batch)
-
+                    # split batch into mini_batches with sequence parallelism
                     if self.parallel_dims.cp_enabled:
-                        # reset the position ids and input ids
-                        user_mini_batch["position_ids"] = position_ids_before_cp
-                        user_mini_batch["input_ids"] = input_ids_before_cp
-                        if padding_mask_before_cp is not None:
-                            user_mini_batch["padding_mask"] = padding_mask_before_cp
-
-                    if self.config.train.train_policy.temperature > 1e-6:
-                        raw_logits = (
-                            raw_logits / self.config.train.train_policy.temperature
+                        cp_size = self.parallel_dims.mesh["cp"].size()
+                    else:
+                        cp_size = 1
+                    max_token_len = (
+                        self.config.distillation.max_token_len_per_mini_batch * cp_size
+                    )
+                    # dynamic rearrange mini batches
+                    mini_batches, mini_batch_index = rearrange_mini_batches(
+                        batch=processed_samples,
+                        seq_len_effective=minibatch_seq_len,
+                        max_token_len=max_token_len,
+                        ddp_comm=inter_policy_nccl,
+                    )
+                else:
+                    # split batch into mini_batches
+                    mini_batches = [
+                        processed_samples[i : i + mini_batch_size]
+                        for i in range(
+                            0,
+                            len(processed_samples),
+                            mini_batch_size,
                         )
-                    # returned shape:
-                    # current_per_token_logprobs: [n_tokens_of_logprobs]
-                    # cu_seqlens: [batch_size + 1]
+                    ]
+                    mini_batch_index = [
+                        list(
+                            range(
+                                i,
+                                min(
+                                    i + mini_batch_size,
+                                    len(processed_samples),
+                                ),
+                            )
+                        )
+                        for i in range(
+                            0,
+                            len(processed_samples),
+                            mini_batch_size,
+                        )
+                    ]
+                data = []
+                for (
+                    minibatched_processed_samples,
+                    mini_batch_indices,
+                ) in zip(mini_batches, mini_batch_index):
+                    # TODO(jiaxin): support variable length in PP
+                    computed_max_len = (
+                        self.config.policy.model_max_length
+                        if self.parallel_dims.pp_enabled
+                        else self.data_packer.policy_compute_max_len(
+                            minibatched_processed_samples
+                        )
+                    )
+                    computed_max_len = (
+                        (computed_max_len + self.seq_len_multiple - 1)
+                        // self.seq_len_multiple
+                        * self.seq_len_multiple
+                    )
+                    user_mini_batch: Dict[str, Any] = (
+                        self.data_packer.policy_collate_fn(
+                            minibatched_processed_samples,
+                            computed_max_len=computed_max_len,
+                        )
+                    )
+                    packing_seq = self.config.distillation.sequence_packing
                     if packing_seq:
-                        # Pack sequences for inputs to match the logits from model forward.
-                        packed_args = pack_sequences_for_inputs(
-                            user_mini_batch["input_ids"],
+                        if self.parallel_dims.pp_enabled:
+                            packing_seq = False
+                            logger.debug(
+                                "[Reference] Packing sequence is disabled due to incompatible dimensions."
+                            )
+                        elif (
+                            hasattr(
+                                self.model,
+                                "check_sequence_packing_compatible",
+                            )
+                            and not self.model.check_sequence_packing_compatible()
+                        ):
+                            packing_seq = False
+                            logger.debug(
+                                "[Reference] Packing sequence is disabled due to unsupported model."
+                            )
+
+                    # TP/CP will shard the sequence dimension into n-ranks.
+                    # The interested_tokens will be unevenly distributed across ranks.
+                    # So do not enable interested_tokens in TP.
+                    if (
+                        self.parallel_dims.dp_shard_coord[1]
+                        == self.parallel_dims.world_size
+                    ):
+                        user_mini_batch["interested_tokens"] = user_mini_batch[
+                            "logprob_masks"
+                        ]
+
+                    # Move all tensor to device
+                    for k in user_mini_batch.keys():
+                        v = user_mini_batch[k]
+                        if isinstance(v, torch.Tensor) and v.device != self.device:
+                            user_mini_batch[k] = v.to(self.device)
+
+                    # input_ids are different across ranks in dp_shard_cp
+                    position_ids, input_ids, pos_seq_dim = self.model.get_position_ids(
+                        **user_mini_batch
+                    )
+
+                    if packing_seq:
+                        # Prepare for the sequence packing information.
+                        packed_args = pack_sequences_info_collect(
+                            input_ids,
+                            pad_token_id=self.tokenizer.pad_token_id,
+                            seq_len_multiple=self.seq_len_multiple,
+                        )
+                        user_mini_batch.update(packed_args)
+                        packed_args = pack_sequences_for_masks(
+                            user_mini_batch["valid_input_len"],
                             user_mini_batch["valid_input_len"],
                         )
-                        user_mini_batch["input_ids"] = packed_args["inputs"]
+                        user_mini_batch.update(packed_args)
+                        packed_args = pack_sequences_for_logprobs(
+                            user_mini_batch["logprob_masks"],
+                            user_mini_batch["valid_input_len"],
+                        )
+                        user_mini_batch.update(packed_args)
+                    user_mini_batch["position_ids"] = position_ids
+                    padding_mask = user_mini_batch.get("padding_mask", None)
 
-                    (
-                        current_per_token_logprobs,
-                        cu_seqlens,
-                        metrics,
-                    ) = self.compute_logprobs(
-                        user_mini_batch,
-                        logits=raw_logits,
-                        is_full_logits=True if raw_logits.ndim == 3 else False,
+                    input_ids_before_cp = user_mini_batch["input_ids"]
+                    position_ids_before_cp = user_mini_batch["position_ids"]
+                    padding_mask_before_cp = padding_mask
+                    # For VLMs, we need to delay the slice of inputs for CP until after the embedding generation in the model forward.
+                    delay_cp_slice_inputs = getattr(
+                        self.model, "delay_cp_slice_inputs", False
                     )
-                    data = []
-                    if self.parallel_dims.tp_coord[0] == 0:
-                        current_per_token_logprobs = current_per_token_logprobs.cpu()
-                        cu_seqlens = cu_seqlens.cpu()
-                        assert (
-                            len(current_per_token_logprobs) == cu_seqlens[-1]
-                        ), f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens}"
-                        for i in range(len(cu_seqlens) - 1):
-                            data.append(
-                                {
-                                    "teacher_logprobs": current_per_token_logprobs[
+                    if (
+                        self.parallel_dims.cp_enabled
+                        and not packing_seq
+                        and not delay_cp_slice_inputs
+                    ):
+                        [input_ids, position_ids, padding_mask] = (
+                            slice_inputs_for_ulysses(
+                                [input_ids, position_ids, padding_mask],
+                                self.parallel_dims.mesh["cp"],
+                                seq_dims=[1, pos_seq_dim, 1],
+                            )
+                        )
+                        user_mini_batch["position_ids"] = position_ids
+                        user_mini_batch["input_ids"] = input_ids
+                        if padding_mask is not None:
+                            user_mini_batch["padding_mask"] = padding_mask
+                    if self.parallel_dims.cp_enabled:
+                        # Slice for cp after embedding generation and sequence packing in the model forward later.
+                        user_mini_batch["cp_mesh"] = self.parallel_dims.mesh["cp"]
+                    logger.debug(
+                        f"[Reference] Processing mini-batch of size {len(minibatched_processed_samples)} with uuids {[rollouts[i].teacher_result_uuid for i in mini_batch_indices]} and inputs shape {user_mini_batch['input_ids'].shape}"
+                    )
+                    if self.parallel_dims.pp_enabled:
+                        # [mini_batch_size, 1]: indicating the index of mini-batch
+                        micro_batch_ids_list = []
+                        for i in range(mini_batch_size):
+                            micro_batch_ids_list.append(
+                                [
+                                    i
+                                    // self.config.distillation.parallelism.pp_micro_batch_size
+                                ]
+                            )
+                        micro_batch_ids_cpu = torch.Tensor(micro_batch_ids_list).int()
+                        pp_first_stage = self.parallel_dims.pp_coord[0] == 0
+                        # Pipeline Parallel forward / backward inside step() call
+                        losses = [] if pp_last_stage else None
+                        self.pp_data = []
+                        if pp_last_stage:
+                            # Inject the `mini-batch` and `micro-batch` ids to the input so that the last stage can know which microbatch it is processing
+                            user_mini_batch["micro_batch_ids"] = micro_batch_ids_cpu
+                        if pp_first_stage or pp_last_stage:
+                            # First/Last stage: pass all inputs
+                            kwargs = {}
+                            if self.parallel_dims.cp_enabled:
+                                # This is for recover these two tensors after ulysses
+                                kwargs["input_ids_before_cp"] = input_ids_before_cp
+                                kwargs["position_ids_before_cp"] = (
+                                    position_ids_before_cp
+                                )
+
+                            self.pp_scheduler.step(
+                                **user_mini_batch,
+                                advantages=None,
+                                losses=losses,
+                                target=torch.empty(
+                                    [mini_batch_size, 1], device=self.device
+                                ),
+                                **kwargs,
+                            )
+                        else:
+                            # Middle stages: forward data from previous stage
+                            self.pp_scheduler.step(position_ids=position_ids)
+
+                        if (
+                            pp_last_stage
+                            and self.parallel_dims.tp_coord[0] == 0
+                            and self.parallel_dims.cp_coord[0] == 0
+                        ):
+                            assert len(self.pp_data) == len(mini_batch_indices)
+                            for item, i in zip(self.pp_data, mini_batch_indices):
+                                item.update(
+                                    {
+                                        "teacher_result_uuid": rollouts[
+                                            i
+                                        ].teacher_result_uuid
+                                    }
+                                )
+                                data.append(item)
+                                logger.debug(
+                                    f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])}"
+                                )
+                    else:
+                        with self.act_offloading_ctx_manager:
+                            raw_logits = self.model(**user_mini_batch)
+
+                        if self.parallel_dims.cp_enabled:
+                            # reset the position ids and input ids
+                            user_mini_batch["position_ids"] = position_ids_before_cp
+                            user_mini_batch["input_ids"] = input_ids_before_cp
+                            if padding_mask_before_cp is not None:
+                                user_mini_batch["padding_mask"] = padding_mask_before_cp
+
+                        # returned shape:
+                        # current_per_token_logprobs: [n_tokens_of_logprobs]
+                        # cu_seqlens: [batch_size + 1]
+                        if packing_seq:
+                            # Pack sequences for inputs to match the logits from model forward.
+                            packed_args = pack_sequences_for_inputs(
+                                user_mini_batch["input_ids"],
+                                user_mini_batch["valid_input_len"],
+                            )
+                            user_mini_batch["input_ids"] = packed_args["inputs"]
+
+                        (
+                            current_per_token_logprobs,
+                            cu_seqlens,
+                            metrics,
+                        ) = self.compute_logprobs(
+                            user_mini_batch,
+                            logits=raw_logits,
+                            is_full_logits=True if raw_logits.ndim == 3 else False,
+                        )
+                        logger.debug(
+                            f"[Reference] Computed current_per_token_logprobs of shape {current_per_token_logprobs.shape} for mini-batch size {len(minibatched_processed_samples)}"
+                        )
+                        if self.parallel_dims.tp_coord[0] == 0:
+                            current_per_token_logprobs = (
+                                current_per_token_logprobs.cpu()
+                            )
+                            cu_seqlens = cu_seqlens.cpu()
+                            assert (
+                                len(current_per_token_logprobs) == cu_seqlens[-1]
+                            ), f"current_per_token_logprobs.shape: {current_per_token_logprobs.shape}, cu_seqlens.shape: {cu_seqlens}"
+                            for i in range(len(cu_seqlens) - 1):
+                                if packing_seq:
+                                    # Need to unpack the logprobs according to the original sequence lengths.
+                                    valid_seq_len_list = user_mini_batch[
+                                        "valid_input_len"
+                                    ].tolist()
+                                    packed_logprobs = current_per_token_logprobs[
                                         cu_seqlens[i] : cu_seqlens[i + 1]
-                                    ].tolist(),
-                                    "teacher_result_uuid": rollouts[
-                                        i
-                                    ].teacher_result_uuid,
-                                }
-                            )
-                            logger.debug(
-                                f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])}"
-                            )
+                                    ].tolist()
+                                    accum_len = 0
+                                    for index, valid_seq_len in enumerate(
+                                        valid_seq_len_list
+                                    ):
+                                        data.append(
+                                            {
+                                                "teacher_logprobs": packed_logprobs[
+                                                    accum_len : accum_len
+                                                    + valid_seq_len
+                                                ],
+                                                "teacher_result_uuid": rollouts[
+                                                    mini_batch_indices[index]
+                                                ].teacher_result_uuid,
+                                            }
+                                        )
+                                        logger.debug(
+                                            f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])} for uuid {data[-1]['teacher_result_uuid']}"
+                                        )
+                                        accum_len += valid_seq_len
+                                else:
+                                    data.append(
+                                        {
+                                            "teacher_logprobs": current_per_token_logprobs[
+                                                cu_seqlens[i] : cu_seqlens[i + 1]
+                                            ].tolist(),
+                                            "teacher_result_uuid": rollouts[
+                                                mini_batch_indices[i]
+                                            ].teacher_result_uuid,
+                                        }
+                                    )
+                                logger.debug(
+                                    f"[Reference] Teacher topk logprobs: {len(data[-1]['teacher_logprobs'])} for uuid {data[-1]['teacher_result_uuid']}"
+                                )
         return data
 
     def compute_logprobs(
@@ -509,7 +627,7 @@ class TorchEngine(LLMTrainer):
         return logprobs_computing(
             minibatch["input_ids"],
             minibatch["logprob_masks"],
-            logits.to(dtype=str2torch_dtype(self.config.train.logprob_dtype)),
+            logits.to(dtype=str2torch_dtype(self.config.distillation.logprob_dtype)),
             is_full_logits=is_full_logits,
             label_packing_mask=minibatch.get("label_packing_mask", None),
             input_packing_mask=minibatch.get("input_packing_mask", None),

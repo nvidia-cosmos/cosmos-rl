@@ -176,6 +176,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             val_data_packer=kwargs.get("val_data_packer"),
             val_reward_fns=kwargs.get("val_reward_fns"),
         )
+        self.non_trainable_params_received = False
 
     def setup(
         self,
@@ -899,9 +900,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
 
         if not hasattr(self, "policy_to_rollout_recv_insts"):
-            assert (
-                not command.trainable_only
-            ), "all params must be transferred at the first time P2R"
             logger.info(
                 "[Rollout] Fetching policy_to_rollout_recv_insts from controller ..."
             )
@@ -949,7 +947,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 copy_stream.wait_event(recv_ready)
                 with torch.cuda.stream(copy_stream):
                     logger.debug(
-                        f"Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024}"
+                        f"[Rollout] Flushing {len(pending_completions)} completions, {pending_bytes[0] // 1024 // 1024} MB"
                     )
                     for completion in pending_completions:
                         completion()
@@ -1025,6 +1023,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             )
 
             if command.trainable_only:
+                assert self.non_trainable_params_received, "[Rollout] Non-trainable params must be received before trainable-only P2R."
                 if not hasattr(self, "p2r_synced_trainable_params_cnt"):
                     self.p2r_synced_trainable_params_cnt = transferred_groups_cnt
                 assert (
@@ -1032,6 +1031,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 ), f"Count of trainable unsplitted params which have been synced in P2R {transferred_groups_cnt} must match the synced_trainable_params attribute {self.p2r_synced_trainable_params_cnt}."
 
             self.state.set_weight_synced()
+        if not command.trainable_only:
+            self.non_trainable_params_received = True
 
     @RolloutWorkerBase.register_rollout_command_handler(
         RolloutToRolloutBroadcastCommand
@@ -1055,7 +1056,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             self.prepare_trainable_params()
             skipped_params_cnt = 0
             transferred_params_cnt = 0
-            logger.info("Starting broadcasting of parameters to all replicas.")
+            logger.info(
+                "[Rollout] Starting broadcasting of parameters to all replicas."
+            )
             # Only do broadcast if there are more than one rollout replicas.
             with torch.cuda.stream(self.inference_stream):
                 assert (
@@ -1099,7 +1102,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             logger.info(
                 f"[Rollout] Finished broadcasting of parameters to all replicas. While {skipped_params_cnt} unsplitted non-trainable params skipped and {transferred_params_cnt} unsplitted params transferred."
             )
+            if not broadcast_command.trainable_only:
+                self.non_trainable_params_received = True
+
             if broadcast_command.trainable_only:
+                assert self.non_trainable_params_received, "[Rollout] Non-trainable params must be received before trainable-only R2R."
                 if not hasattr(self, "r2r_synced_trainable_params_cnt"):
                     self.r2r_synced_trainable_params_cnt = transferred_params_cnt
                 if hasattr(self, "p2r_synced_trainable_params_cnt"):

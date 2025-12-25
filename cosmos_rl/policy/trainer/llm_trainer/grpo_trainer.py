@@ -44,6 +44,7 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_logprobs,
     pack_sequences_info_collect,
     pack_sequences_for_masks,
+    pack_sequences_for_teacher_logprobs,
 )
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
@@ -388,7 +389,10 @@ def _swizzle_pp_grpo_forward(
     if "position_ids_before_cp" in kwargs:
         user_input["position_ids"] = kwargs["position_ids_before_cp"]
 
-    if config.train.train_policy.temperature > 1e-6:
+    if (
+        config.train.train_policy.temperature > 1e-6
+        and config.train.train_policy.temperature != 1.0
+    ):
         raw_logits = raw_logits / config.train.train_policy.temperature
     # [n_tokens, n_vocab]
     current_per_token_logprobs, cu_seqlens, metrics = trainer.compute_logprobs(
@@ -573,9 +577,7 @@ class GRPOTrainer(LLMTrainer):
             ):
                 sampled_completion_logprobs = rollouts[i].completion_logprobs
                 sampled_prompt_logprobs = rollouts[i].prompt_logprobs
-                sampled_logprobs = (
-                    sampled_prompt_logprobs + sampled_completion_logprobs + [0]
-                )
+                sampled_logprobs = sampled_prompt_logprobs + sampled_completion_logprobs
                 assert (
                     len(sampled_logprobs) == len(teacher_logprobs)
                 ), f"sampled_logprobs: {len(sampled_logprobs)} != teacher_logprobs: {len(teacher_logprobs)}"
@@ -593,16 +595,28 @@ class GRPOTrainer(LLMTrainer):
                     processed_samples[i]["logprob_masks"] = [
                         0 for _ in processed_samples[i]["logprob_masks"]
                     ]
-
-            teacher_logprobs = teacher_logprobs[:-1] + [0]
+            teacher_logprobs = teacher_logprobs + [0]
             teacher_logprobs_list.append(teacher_logprobs)
+            if self.config.distillation.include_prompt:
+                if hasattr(processed_samples[i], "logprob_masks"):
+                    processed_samples[i].logprob_masks = [
+                        1 for _ in range(len(processed_samples[i].logprob_masks))
+                    ]
+                    processed_samples[i].logprob_masks[-1] = 0  # exclude the last token
+                else:
+                    processed_samples[i]["logprob_masks"] = [
+                        1 for _ in range(len(processed_samples[i]["logprob_masks"]))
+                    ]
+                    processed_samples[i]["logprob_masks"][-1] = (
+                        0  # exclude the last token
+                    )
 
         return torch.tensor(
             [
                 x[:computed_max_len] + [0] * (max(0, computed_max_len - len(x)))
                 for x in teacher_logprobs_list
             ]
-        ).to(self.device)
+        )
 
     def compute_teacher_kl_advantages(
         self,
@@ -638,15 +652,18 @@ class GRPOTrainer(LLMTrainer):
         assert (
             cu_seqlens[-1] == kl_advantages.shape[0]
         ), f"cu_seqlens[-1]: {cu_seqlens[-1]} != kl_advantages.shape[0]: {kl_advantages.shape[0]}"
-        for i in range(cu_seqlens.shape[0] - 1):
-            start_idx = cu_seqlens[i]
-            end_idx = cu_seqlens[i + 1]
-            kl_advantages_discounted = discounted_future_sum_loop(
-                kl_advantages[start_idx:end_idx].tolist(), kl_discount_factor
-            )
-            kl_advantages[start_idx:end_idx] = torch.tensor(
-                kl_advantages_discounted
-            ).to(self.device)
+        if kl_discount_factor != 0.0:
+            # Compute discounted future sum of kl_advantages for each sequence
+            # Only needed when kl_discount_factor != 0.0
+            for i in range(cu_seqlens.shape[0] - 1):
+                start_idx = cu_seqlens[i]
+                end_idx = cu_seqlens[i + 1]
+                kl_advantages_discounted = discounted_future_sum_loop(
+                    kl_advantages[start_idx:end_idx].tolist(), kl_discount_factor
+                )
+                kl_advantages[start_idx:end_idx] = torch.tensor(
+                    kl_advantages_discounted
+                ).to(self.device)
         advantages = current_advantages + kl_advantages
         metrics.update(
             {
@@ -918,6 +935,16 @@ class GRPOTrainer(LLMTrainer):
                                 )
 
                                 if self.config.distillation.enable:
+                                    if all(
+                                        [
+                                            rollouts[i].teacher_logprobs is None
+                                            for i in mini_batch_indices
+                                        ]
+                                    ):
+                                        logger.warning(
+                                            "[Policy] All teacher logprobs are None for current mini-batch, skipping distillation loss calculation."
+                                        )
+                                        continue
                                     minibatched_teacher_logprobs = self.collate_teacher_logprobs(
                                         rollouts=[
                                             rollouts[i] for i in mini_batch_indices
@@ -1201,6 +1228,8 @@ class GRPOTrainer(LLMTrainer):
                                     if (
                                         self.config.train.train_policy.temperature
                                         > 1e-6
+                                        and self.config.train.train_policy.temperature
+                                        != 1.0
                                     ):
                                         raw_logits = (
                                             raw_logits
@@ -1235,10 +1264,21 @@ class GRPOTrainer(LLMTrainer):
                                         logprob_masks * minibatched_advantages
                                     )
                                     if self.config.distillation.enable:
+                                        if packing_seq:
+                                            minibatched_teacher_logprobs = (
+                                                pack_sequences_for_teacher_logprobs(
+                                                    minibatched_teacher_logprobs.to(
+                                                        self.device
+                                                    ),
+                                                    user_mini_batch["valid_input_len"],
+                                                )
+                                            )
                                         current_advantages, teacher_metrics = (
                                             self.compute_teacher_kl_advantages(
                                                 current_logprobs=current_per_token_logprobs,
-                                                teacher_logprobs=minibatched_teacher_logprobs,
+                                                teacher_logprobs=minibatched_teacher_logprobs.to(
+                                                    self.device
+                                                ),
                                                 current_advantages=current_advantages,
                                                 logprob_masks=logprob_masks,
                                                 cu_seqlens=cu_seqlens,
@@ -1599,17 +1639,17 @@ class GRPOTrainer(LLMTrainer):
             except Exception as e:
                 if isinstance(e, FileNotFoundError):
                     logger.info(
-                        f"Fail to resume from {self.config.train.resume} because the checkpoint file does not exist, trying to load from HuggingFace..."
+                        f"[Policy] Fail to resume from {self.config.train.resume} because the checkpoint file does not exist, trying to load from HuggingFace..."
                     )
                 else:
                     logger.error(
-                        f"Cannot resume from {self.config.train.resume} {e}. Trying to load from HuggingFace..."
+                        f"[Policy] Cannot resume from {self.config.train.resume} {e}. Trying to load from HuggingFace..."
                     )
                 if not model_loaded:
                     self.model_load_from_hf()
                     model_loaded = True
         elif not model_loaded:
-            logger.info("Resume not set. Trying to load from HuggingFace...")
+            logger.info("[Policy] Resume not set. Trying to load from HuggingFace...")
             self.model_load_from_hf()
             model_loaded = True
 

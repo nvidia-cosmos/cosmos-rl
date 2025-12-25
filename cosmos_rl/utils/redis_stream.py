@@ -38,9 +38,11 @@ class RedisOpType(enum.Enum):
     SET = "set"
     GET = "get"
     DELETE = "delete"
+    GETDEL = "getdel"
     XGROUP_CREATE = "xgroup_create"
     XREADGROUP = "xreadgroup"
     XACK = "xack"
+    XDEL = "xdel"
 
 
 class RedisStreamHandler:
@@ -82,14 +84,14 @@ class RedisStreamHandler:
             )
             return True
         except Exception as e:
-            logger.error(f"Failed to write to Redis stream {key}: {e}")
+            logger.error(f"[Redis] Failed to write to Redis stream {key}: {e}")
             return False
 
-    def get_key_value(self, key: str):
+    def get_key_value(self, key: str, op: RedisOpType = RedisOpType.GET) -> str:
         try:
             value = make_request_with_retry(
                 self.requests_for_alternative_clients(
-                    RedisOpType.GET,
+                    op,
                     key,
                 ),
                 response_parser=None,
@@ -97,7 +99,7 @@ class RedisStreamHandler:
             )
             return value
         except Exception as e:
-            logger.info(f"Failed to read from Redis key {key}: {e}")
+            logger.info(f"[Redis] Failed to read from Redis key {key}: {e}")
             return None
 
     def remove_key(self, key: str):
@@ -118,7 +120,7 @@ class RedisStreamHandler:
             )
             return deleted_count
         except Exception as e:
-            logger.error(f"Failed to delete key {key} from Redis: {e}")
+            logger.error(f"[Redis] Failed to delete key {key} from Redis: {e}")
             return 0
 
     def publish_command(self, data, stream_name: str):
@@ -145,7 +147,9 @@ class RedisStreamHandler:
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
         except Exception as e:
-            logger.error(f"Failed to write to Redis stream {stream_name}_command: {e}")
+            logger.error(
+                f"[Redis] Failed to write to Redis stream {stream_name}_command: {e}"
+            )
             raise e
 
     def subscribe_command(self, stream_name: str) -> List[Dict]:
@@ -170,7 +174,9 @@ class RedisStreamHandler:
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
         except Exception as e:
-            logger.error(f"Failed to read from Redis stream {stream_name}_command: {e}")
+            logger.error(
+                f"[Redis] Failed to read from Redis stream {stream_name}_command: {e}"
+            )
             raise e
         commands = []
         if messages:
@@ -204,7 +210,9 @@ class RedisStreamHandler:
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
         except Exception as e:
-            logger.error(f"Failed to write to Redis stream {stream_name}_rollout: {e}")
+            logger.error(
+                f"[Redis] Failed to write to Redis stream {stream_name}_rollout: {e}"
+            )
             raise e
 
     def subscribe_rollout(self, stream_name: str, count: int = -1) -> List[Dict]:
@@ -232,7 +240,9 @@ class RedisStreamHandler:
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
         except Exception as e:
-            logger.error(f"Failed to read from Redis stream {stream_name}_rollout: {e}")
+            logger.error(
+                f"[Redis] Failed to read from Redis stream {stream_name}_rollout: {e}"
+            )
         rollouts = []
         if messages:
             for _, message_list in messages:
@@ -263,7 +273,9 @@ class RedisStreamHandler:
             )
             self.teacher_request_group_created = True
         except Exception as e:
-            logger.error(f"Failed to write to Redis stream teacher_request: {e}")
+            logger.error(
+                f"[Redis] Failed to write to Redis stream teacher_request: {e}"
+            )
             raise e
 
     def publish_teacher_request(self, data: Dict, replica_name: str) -> List[str]:
@@ -286,11 +298,11 @@ class RedisStreamHandler:
             "teacher_request": msgpack.packb(data),
             "timestamp": datetime.now().isoformat(),
         }
-        logger.debug(
-            f"Publishing teacher request to Redis stream {self.teacher_request_group}: {message}"
-        )
         self.create_teacher_request_group()
         # Add message to stream
+        logger.debug(
+            f"[Redis] Publishing teacher request to Redis stream {self.teacher_request_group}: token lengths {[len(tokens) for tokens in data['completion_token_ids']]} for uuids {uuid_values}"
+        )
         try:
             make_request_with_retry(
                 self.requests_for_alternative_clients(
@@ -303,11 +315,13 @@ class RedisStreamHandler:
                 max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
             )
         except Exception as e:
-            logger.error(f"Failed to write to Redis stream teacher_request: {e}")
+            logger.error(
+                f"[Redis] Failed to write to Redis stream teacher_request: {e}"
+            )
             # return if failed to write to Redis stream for fault tolerance
             # raise e
         logger.debug(
-            f"Published teacher request to Redis stream {self.teacher_request_stream}: {uuid_values}"
+            f"[Redis] Published teacher request to Redis stream {self.teacher_request_stream}: {uuid_values}"
         )
         return uuid_values
 
@@ -342,18 +356,29 @@ class RedisStreamHandler:
             )
         except Exception as e:
             messages = []  # return empty list if failed to read from Redis stream
-            logger.error(f"Failed to read from Redis stream teacher_request: {e}")
+            logger.error(
+                f"[Redis] Failed to read from Redis stream teacher_request: {e}"
+            )
         teacher_requests = []
         if messages:
             for _, message_list in messages:
                 for message_id, message_data in message_list:
                     teacher_request = msgpack.unpackb(message_data[b"teacher_request"])
                     try:
+                        # messages = make_request_with_retry(
+                        #     self.requests_for_alternative_clients(
+                        #         RedisOpType.XACK,
+                        #         self.teacher_request_stream,
+                        #         self.teacher_request_group,
+                        #         message_id,
+                        #     ),
+                        #     response_parser=None,
+                        #     max_retries=COSMOS_HTTP_RETRY_CONFIG.max_retries,
+                        # )
                         messages = make_request_with_retry(
                             self.requests_for_alternative_clients(
-                                RedisOpType.XACK,
+                                RedisOpType.XDEL,
                                 self.teacher_request_stream,
-                                self.teacher_request_group,
                                 message_id,
                             ),
                             response_parser=None,
@@ -361,7 +386,7 @@ class RedisStreamHandler:
                         )
                     except Exception as e:
                         logger.error(
-                            f"Failed to acknowledge message {message_id} from Redis stream teacher_request: {e}"
+                            f"[Redis] Failed to acknowledge message {message_id} from Redis stream teacher_request: {e}"
                         )
                     teacher_requests.append(teacher_request)
         return teacher_requests
@@ -412,12 +437,14 @@ class RedisStreamHandler:
         """
         start_time = time.time()
         while time.time() - start_time < float(timeout):
-            value = self.get_key_value(uuid_value)
+            value = self.get_key_value(uuid_value, op=RedisOpType.GETDEL)
             if value is not None:
                 break
             time.sleep(constant.COSMOS_TEACHER_RESULT_RETRY_TIMEOUT_INTERVAL)
         if value is None:
-            logger.error(f"Failed to get teacher result from Redis key {uuid_value}")
+            logger.error(
+                f"[Redis] Failed to get teacher result from Redis key {uuid_value}"
+            )
             return None
         return msgpack.unpackb(value)
 
@@ -509,6 +536,24 @@ class RedisStreamHandler:
                         **kwargs,
                     )
                 )
+        elif op == RedisOpType.XDEL:
+            for redis_client in self.redis_clients:
+                calls.append(
+                    partial(
+                        redis_client.xdel,
+                        *args,
+                        **kwargs,
+                    )
+                )
+        elif op == RedisOpType.GETDEL:
+            for redis_client in self.redis_clients:
+                calls.append(
+                    partial(
+                        redis_client.getdel,
+                        *args,
+                        **kwargs,
+                    )
+                )
         else:
             raise ValueError(f"Unsupported operation type: {op}")
         return calls
@@ -522,5 +567,5 @@ class RedisStreamHandler:
                 max_retries=COSMOS_HTTP_LONG_WAIT_MAX_RETRY,
             )
         except Exception as e:
-            logger.error(f"Failed to ping Redis when init Redis: {e}")
+            logger.error(f"[Redis] Failed to ping Redis when init Redis: {e}")
             raise e
