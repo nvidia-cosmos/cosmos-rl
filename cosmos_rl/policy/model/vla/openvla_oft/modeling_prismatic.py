@@ -1879,6 +1879,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
             predicted_action_token_ids = reponse_ids.cpu().numpy()
 
+            logprobs = None
         else:
             assert temperature > 0
             # org
