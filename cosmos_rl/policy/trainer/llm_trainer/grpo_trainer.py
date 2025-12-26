@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import time
 import torch
 import types
 from functools import partial
@@ -21,7 +22,7 @@ import inspect
 import numpy as np
 import enum
 from functools import cached_property
-from typing import Optional, Dict, Any, Callable, List, Tuple
+from typing import Optional, Dict, Any, Callable, List, Tuple, Set
 
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
@@ -52,6 +53,7 @@ from cosmos_rl.utils.ulysses import (
 from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
 import cosmos_rl.utils.distributed as dist_util
+import torch.distributed as dist
 
 
 class TrainerPhase(enum.Enum):
@@ -558,6 +560,10 @@ class GRPOTrainer(LLMTrainer):
 
         self.tokenizer = setup_tokenizer(self.config.policy.model_name_or_path)
 
+        # For teacher model interaction
+        self.teacher_interact_results: Dict[str, Any] = {}
+        self.fetched_teacher_uuids: Set[str] = set()
+
     def collate_teacher_logprobs(
         self,
         rollouts: List[Rollout],
@@ -672,6 +678,45 @@ class GRPOTrainer(LLMTrainer):
             }
         )
         return advantages, metrics
+
+    def fetch_teacher_logprobs(
+        self,
+        rollouts: List[Rollout],
+        mini_batch_indices: List[int],
+    ):
+        all_uuids = [rollouts[i].teacher_result_uuid for i in mini_batch_indices]
+        all_rank_uuids = dist_util.all_gather_object_cpu(all_uuids)
+        scattered_teacher_logprobs = [[] for _ in range(self.world_size)]
+        teacher_logprobs = [[]]
+        if self.global_rank == 0:
+            for index, rank_uuids in enumerate(all_rank_uuids):
+                teacher_logprobs_needed = []
+                for id in rank_uuids:
+                    while id not in self.teacher_interact_results:
+                        time.sleep(0.01)
+                    self.fetched_teacher_uuids.add(id)
+                    teacher_logprobs_needed.append(self.teacher_interact_results[id])
+                scattered_teacher_logprobs[index] = teacher_logprobs_needed
+        dist.scatter_object_list(
+            teacher_logprobs,
+            scattered_teacher_logprobs,
+            src=0,
+        )
+        all_teacher_logprobs = teacher_logprobs[0]
+        assert (
+            len(all_teacher_logprobs) == len(mini_batch_indices)
+        ), f"Length of all_teacher_logprobs {len(all_teacher_logprobs)} should be equal to length of mini_batch_indices {len(mini_batch_indices)}"
+        for teacher_logprobs, idx in zip(all_teacher_logprobs, mini_batch_indices):
+            rollouts[idx].teacher_logprobs = teacher_logprobs
+
+    def clear_teacher_result_cache(self):
+        # Clear the cached teacher interaction results to save memory
+        for id in self.fetched_teacher_uuids:
+            assert (
+                id in self.teacher_interact_results
+            ), f"Teacher result uuid {id} not found in teacher_interact_results"
+            del self.teacher_interact_results[id]
+        self.fetched_teacher_uuids.clear()
 
     def step_training(
         self,
@@ -935,6 +980,10 @@ class GRPOTrainer(LLMTrainer):
                                 )
 
                                 if self.config.distillation.enable:
+                                    self.fetch_teacher_logprobs(
+                                        rollouts=rollouts,
+                                        mini_batch_indices=mini_batch_indices,
+                                    )
                                     if all(
                                         [
                                             rollouts[i].teacher_logprobs is None
@@ -1519,6 +1568,7 @@ class GRPOTrainer(LLMTrainer):
 
         self.reference_reset(current_step)
 
+        self.clear_teacher_result_cache()
         return report_data
 
     def reference_reset(self, current_step: int):
