@@ -15,6 +15,7 @@
 
 import time
 import threading
+import uuid
 import torch
 import atexit
 
@@ -129,6 +130,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         else:
             self.val_batch_size = None
         self.background_thread: threading.Thread | None = None
+        self.teacher_interact_thread: threading.Thread | None = None
+        self.teacher_interact_queue: Queue = Queue()
 
         # For Polocy to Rollout weight mapping
         hf_config = util.retry(AutoConfig.from_pretrained)(
@@ -300,7 +303,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if self.background_thread is not None:
                 self.background_thread.join()
                 self.background_thread = None
-
+            if self.teacher_interact_thread is not None:
+                self.teacher_interact_thread.join()
+                self.teacher_interact_thread = None
             if self.heartbeat_thread is not None:
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
@@ -1174,6 +1179,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 logger.debug(f"[Rollout] Received command: {command.command_type}")
                 self._command_queue.put(command)
 
+    def teacher_interact_loop(self):
+        """Background task to interact with teacher model for distillation"""
+        while not self.shutdown_signal.is_set():
+            if not self.teacher_interact_queue.empty():
+                data = self.teacher_interact_queue.get_nowait()
+                self.redis_controller.publish_teacher_request(data, self.replica_name)
+            time.sleep(0.01)
+
     def request_new_prompts(self, batch_size: int, prompt_queue: Queue, **kwargs):
         """
         Request new prompts from the controller for both training and validation.
@@ -1593,10 +1606,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 "prompt_idx": payload.prompt_idx,
                 "completion_token_ids": payload.completion_token_ids,
             }
-            uuids = self.redis_controller.publish_teacher_request(
-                data, self.replica_name
-            )
-            payload.teacher_result_uuids = uuids
+            uuid_values = []
+            for _ in payload.completion_token_ids:
+                uuid_value = str(uuid.uuid4())
+                uuid_values.append(uuid_value)
+            data["teacher_result_uuid"] = uuid_values
+            self.teacher_interact_queue.put_nowait(data)
+            payload.teacher_result_uuids = uuid_values
         return payloads
 
     def work(self):
@@ -1607,6 +1623,12 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 target=self.query_command_from_controller, daemon=True
             )
             self.background_thread.start()
+        if self.config.distillation.enable:
+            # create a thread to interact with teacher model
+            self.teacher_interact_thread = threading.Thread(
+                target=self.teacher_interact_loop, daemon=True
+            )
+            self.teacher_interact_thread.start()
 
         self.main_loop()
         self.inference_stream.synchronize()

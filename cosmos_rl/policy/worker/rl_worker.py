@@ -242,7 +242,7 @@ class RLPolicyWorker(PolicyWorkerBase):
     async def fetch_rollouts(self):
         assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
         while not self.shutdown_signal.is_set():
-            rollouts = []
+            rollouts: List[Rollout] = []
             try:
                 rollouts = [
                     Rollout.model_validate(msgpack.unpackb(x))
@@ -253,6 +253,26 @@ class RLPolicyWorker(PolicyWorkerBase):
                     f"[Policy] Failed to get rollouts: {e}, wait for next round"
                 )
             for rollout in rollouts:
+                if rollout.teacher_result_uuid:
+                    logger.debug(
+                        f"[Policy] Getting teacher result {rollout.teacher_result_uuid} from Redis"
+                    )
+                    # Interactive with teacher if the teacher result uuid is not empty
+                    teacher_result = self.redis_controller.get_teacher_result(
+                        rollout.teacher_result_uuid
+                    )
+                    if teacher_result is None:
+                        rollout.teacher_logprobs = None
+                        logger.error(
+                            f"[Policy] Failed to get teacher result {rollout.teacher_result_uuid} from Redis"
+                        )
+                    else:
+                        rollout.teacher_logprobs = teacher_result.get(
+                            "teacher_logprobs", None
+                        )
+                    logger.debug(
+                        f"[Policy] Teacher result: {len(rollout.teacher_logprobs) if rollout.teacher_logprobs is not None else 0} items"
+                    )
                 self.data_queue.put_nowait(rollout)
 
     def pre_P2R_collect_parameters(self):
@@ -633,26 +653,6 @@ class RLPolicyWorker(PolicyWorkerBase):
                     rollouts[i].conversation = self.data_fetcher.get_payload_by_index(
                         rollouts[i].prompt_idx,
                         attr="conversation",
-                    )
-                if rollouts[i].teacher_result_uuid:
-                    logger.debug(
-                        f"[Policy] Getting teacher result {rollouts[i].teacher_result_uuid} from Redis"
-                    )
-                    # Interactive with teacher if the teacher result uuid is not empty
-                    teacher_result = self.redis_controller.get_teacher_result(
-                        rollouts[i].teacher_result_uuid
-                    )
-                    if teacher_result is None:
-                        rollouts[i].teacher_logprobs = None
-                        logger.error(
-                            f"[Policy] Failed to get teacher result {rollouts[i].teacher_result_uuid} from Redis"
-                        )
-                    else:
-                        rollouts[i].teacher_logprobs = teacher_result.get(
-                            "teacher_logprobs", None
-                        )
-                    logger.debug(
-                        f"[Policy] Teacher result: {len(rollouts[i].teacher_logprobs) if rollouts[i].teacher_logprobs is not None else 0} items"
                     )
             return rollouts
 

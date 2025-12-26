@@ -289,11 +289,17 @@ class RedisStreamHandler:
         Returns:
             List[str]: The UUIDs of the teacher result.
         """
-        uuid_values = []
-        for _ in data["completion_token_ids"]:
-            uuid_value = str(uuid.uuid4())
-            uuid_values.append(uuid_value)
-        data.update({"teacher_result_uuid": uuid_values, "replica_name": replica_name})
+        if "teacher_result_uuid" in data:
+            uuid_values = data["teacher_result_uuid"]
+            data.update({"replica_name": replica_name})
+        else:
+            uuid_values = []
+            for _ in data["completion_token_ids"]:
+                uuid_value = str(uuid.uuid4())
+                uuid_values.append(uuid_value)
+            data.update(
+                {"teacher_result_uuid": uuid_values, "replica_name": replica_name}
+            )
         message = {
             "teacher_request": msgpack.packb(data),
             "timestamp": datetime.now().isoformat(),

@@ -166,5 +166,78 @@ class TestTeacherModel(unittest.TestCase):
             ), f"Process failed with code: {process.returncode}"
 
 
+class TestDistillationFlow(unittest.TestCase):
+    def test_distillation_flow(self):
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+        port = util.find_available_port(8123)
+        config_path = os.path.join(
+            cur_dir,
+            "..",
+            "configs",
+            "qwen3",
+            "qwen3-8b-distill.toml",
+        )
+        with open(config_path, "r") as f:
+            config = toml.load(f)
+
+        config["train"]["epoch"] = 1
+        config["rollout"]["parallelism"]["tp_size"] = 2
+        config["rollout"]["parallelism"]["dp_shard_size"] = 1
+        config["policy"]["parallelism"]["tp_size"] = 1
+        config["policy"]["parallelism"]["dp_shard_size"] = 2
+        config["rollout"]["parallelism"]["n_init_replicas"] = 1
+        config["policy"]["parallelism"]["n_init_replicas"] = 1
+        config["distillation"]["parallelism"]["n_init_replicas"] = 2
+        config["distillation"]["parallelism"]["dp_shard_size"] = 2
+        config["validation"]["freq"] = 1
+        config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
+            cur_dir, "data_fixtures", "test_dataset"
+        )
+        config["train"]["train_policy"]["prompt_column_name"] = "prompt"
+        config["train"]["train_policy"]["response_column_name"] = "result"
+        config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
+            cur_dir, "data_fixtures", "test_dataset"
+        )
+        config["train"]["train_policy"]["dataset"]["subset"] = ""
+        config["validation"]["dataset"]["name"] = os.path.join(
+            cur_dir, "data_fixtures", "test_dataset"
+        )
+        config["validation"]["dataset"]["subset"] = ""
+        config["validation"]["dataset"]["split"] = "train"
+        config["train"]["ckpt"]["enable_checkpoint"] = False
+        config["rollout"]["n_generation"] = 2
+        config["train"]["train_batch_per_replica"] = 16
+
+        if "logging" not in config:
+            config["logging"] = {}
+        config["logging"]["logger"] = ["console"]
+
+        with tempfile.NamedTemporaryFile(
+            mode="w+", suffix=".toml", delete=False
+        ) as tmpfile:
+            toml.dump(config, tmpfile)
+            tmpfile_toml = tmpfile.name
+
+        controller_cmd = f"cosmos-rl --config {tmpfile_toml}"
+        controller_cmd += f" --port {port}"
+        env_dict = os.environ.copy()
+        controller_process = subprocess.Popen(
+            controller_cmd,
+            shell=True,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            env=env_dict,
+        )
+        processes = [controller_process]
+
+        # Wait for process to complete
+        for process in processes:
+            stdout, stderr = process.communicate()
+            # Check if process completed successfully
+            assert (
+                process.returncode == 0
+            ), f"Process failed with code: {process.returncode}"
+
+
 if __name__ == "__main__":
     unittest.main()
