@@ -133,6 +133,10 @@ class RLPolicyWorker(PolicyWorkerBase):
         self.is_master_replica = True
         self.prepare_shard_infos_for_weight_sync_insts()
 
+        # For teacher model interaction
+        self.teacher_interact_queue = Queue()
+        self.teacher_interact_thread: Optional[threading.Thread] = None
+
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
@@ -217,6 +221,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                 self.fetch_command_thread.join()
                 self.fetch_command_thread = None
 
+            if self.teacher_interact_thread is not None:
+                self.teacher_interact_thread.join()
+                self.teacher_interact_thread = None
+
             if hasattr(self, "heartbeat_thread") and self.heartbeat_thread is not None:
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
@@ -254,25 +262,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                 )
             for rollout in rollouts:
                 if rollout.teacher_result_uuid:
-                    logger.debug(
-                        f"[Policy] Getting teacher result {rollout.teacher_result_uuid} from Redis"
-                    )
-                    # Interactive with teacher if the teacher result uuid is not empty
-                    teacher_result = self.redis_controller.get_teacher_result(
-                        rollout.teacher_result_uuid
-                    )
-                    if teacher_result is None:
-                        rollout.teacher_logprobs = None
-                        logger.error(
-                            f"[Policy] Failed to get teacher result {rollout.teacher_result_uuid} from Redis"
-                        )
-                    else:
-                        rollout.teacher_logprobs = teacher_result.get(
-                            "teacher_logprobs", None
-                        )
-                    logger.debug(
-                        f"[Policy] Teacher result: {len(rollout.teacher_logprobs) if rollout.teacher_logprobs is not None else 0} items"
-                    )
+                    self.teacher_interact_queue.put_nowait(rollout.teacher_result_uuid)
                 self.data_queue.put_nowait(rollout)
 
     def pre_P2R_collect_parameters(self):
@@ -691,6 +681,36 @@ class RLPolicyWorker(PolicyWorkerBase):
         )
         return preprocess_rollouts(rollouts[0])
 
+    def teacher_interact_loop(self):
+        """Background task to interact with teacher model for distillation"""
+        assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
+        while not self.shutdown_signal.is_set():
+            if not self.teacher_interact_queue.empty():
+                teacher_result_uuid = self.teacher_interact_queue.get_nowait()
+                logger.debug(
+                    f"[Policy] Getting teacher result {teacher_result_uuid} from Redis"
+                )
+                # Interactive with teacher if the teacher result uuid is not empty
+                teacher_result = self.redis_controller.get_teacher_result(
+                    teacher_result_uuid
+                )
+                if teacher_result is None:
+                    teacher_logprobs = None
+                    logger.error(
+                        f"[Policy] Failed to get teacher result {teacher_result_uuid} from Redis"
+                    )
+                else:
+                    teacher_logprobs = teacher_result.get("teacher_logprobs", None)
+                logger.debug(
+                    f"[Policy] Teacher result: {len(teacher_logprobs) if teacher_logprobs is not None else 0} items"
+                )
+                if not hasattr(self.trainer, "teacher_interact_results"):
+                    self.trainer.teacher_interact_results = {}
+                self.trainer.teacher_interact_results[teacher_result_uuid] = (
+                    teacher_logprobs
+                )
+            time.sleep(0.01)
+
     def main_loop(self):
         def fetch_command_helper(trainer: GRPOTrainer):
             new_loop = asyncio.new_event_loop()
@@ -724,6 +744,11 @@ class RLPolicyWorker(PolicyWorkerBase):
                 args=(self,),
                 daemon=True,
                 name="fetch_rollouts_thread",
+            ).start()
+            self.teacher_interact_thread = threading.Thread(
+                target=self.teacher_interact_loop,
+                daemon=True,
+                name="teacher_interact_thread",
             ).start()
 
         abort = False
