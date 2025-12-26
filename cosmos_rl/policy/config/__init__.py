@@ -979,6 +979,17 @@ class MultiTurnRolloutConfig(BaseModel):
         return self
 
 
+class RolloutAsyncConfig(BaseModel):
+    enable: bool = Field(
+        default=False,
+        description="Whether to enable async rollout.",
+    )
+    max_concurrent_requests: int = Field(
+        default=10,
+        description="Maximum number of concurrent requests for rollout engine.",
+    )
+
+
 class ValidationConfig(BaseModel):
     enable: bool = Field(
         default=False,
@@ -1084,8 +1095,8 @@ class RolloutConfig(BaseModel):
 
     backend: str = Field(
         default="vllm",
-        description="Backend for rollout. Currently support `vllm` and `trtllm`, and other custom backends.",
-        choices=["vllm", "trtllm"],
+        description="Backend for rollout. Currently support `vllm`, `vllm_async` and `trtllm`, and other custom backends.",
+        choices=["vllm", "vllm_async", "trtllm"],
     )
 
     multi_turn_config: MultiTurnRolloutConfig = Field(
@@ -1093,12 +1104,17 @@ class RolloutConfig(BaseModel):
         description="Configuration for multi-turn rollout.",
     )
 
+    async_config: RolloutAsyncConfig = Field(
+        default_factory=RolloutAsyncConfig,
+        description="Configuration for async rollout.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         if isinstance(self.parallelism, dict):
             self.parallelism = RolloutParallelismConfig(**self.parallelism)
 
-        backends_to_check = ["vllm", "trtllm"]
+        backends_to_check = ["vllm", "trtllm", "vllm_async"]
         if self.backend in backends_to_check:
             _fields_no_need_to_check = ["n_init_replicas", "tp_size", "pp_size"]
             for field_name, field_info in RolloutParallelismConfig.model_fields.items():
