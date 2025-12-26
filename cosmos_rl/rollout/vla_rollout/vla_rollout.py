@@ -302,7 +302,7 @@ class OpenVLARollout(RolloutBase):
         images = {
             "base_0_rgb": base_imgs_t,
             "left_wrist_0_rgb": wrist_imgs_t,
-            "right_wrist_0_rgb": torch.zeros_like(base_imgs_t),
+            "right_wrist_0_rgb": torch.full_like(base_imgs_t, -1.0),
         }
         image_masks = {
             "base_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),
@@ -355,7 +355,7 @@ class OpenVLARollout(RolloutBase):
         actions_np = actions.detach().cpu().numpy()
         outputs["action"] = self._unnormalize_pi05_actions(actions_np)
         # Clip actions to valid range (important for gripper which can slightly exceed [-1, 1])
-        outputs["action"] = np.clip(outputs["action"], -1.0, 1.0)
+        # outputs["action"] = np.clip(outputs["action"], -1.0, 1.0)
 
         return outputs
 
