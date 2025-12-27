@@ -151,12 +151,111 @@ class TestTeacherModel(unittest.TestCase):
         for uuid in uuids:
             teacher_result = redis_controller.get_teacher_result(uuid)
             assert (
-                len(teacher_result["teacher_logprobs"])
+                len(teacher_result["teacher_logprobs"]) + 1
                 == len(tokenizer_prompt) + len(tokenizer_reference_answer)
-            ), f"Teacher logprobs must be the same length as the prompt and reference answer, got {len(teacher_result['teacher_logprobs'])} != {len(tokenizer_prompt) + len(tokenizer_reference_answer)}"
+            ), f"Teacher logprobs + 1 must be the same length as the prompt and reference answer, got {len(teacher_result['teacher_logprobs'])} != {len(tokenizer_prompt) + len(tokenizer_reference_answer)}"
 
         data["is_end"] = True
         redis_controller.publish_teacher_request(data, "test_client")
+        # Wait for process to complete
+        for process in processes:
+            stdout, stderr = process.communicate()
+            # Check if process completed successfully
+            assert (
+                process.returncode == 0
+            ), f"Process failed with code: {process.returncode}"
+
+
+class TestDistillationFlow(unittest.TestCase):
+    def test_distillation_flow(self):
+        cur_dir = os.path.dirname(os.path.abspath(__file__))
+        port = util.find_available_port(8123)
+        config_path = os.path.join(
+            cur_dir,
+            "configs",
+            "test_simple_grpo.toml",
+        )
+        with open(config_path, "r") as f:
+            config = toml.load(f)
+
+        config["train"]["epoch"] = 1
+        config["rollout"]["parallelism"]["tp_size"] = 2
+        config["rollout"]["parallelism"]["dp_shard_size"] = 1
+        config["policy"]["parallelism"]["tp_size"] = 1
+        config["policy"]["parallelism"]["dp_shard_size"] = 2
+        config["rollout"]["parallelism"]["n_init_replicas"] = 1
+        config["policy"]["parallelism"]["n_init_replicas"] = 1
+        config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
+            cur_dir, "data_fixtures", "test_dataset"
+        )
+        config["train"]["train_policy"]["dataset"]["name"] = os.path.join(
+            cur_dir, "data_fixtures", "test_dataset"
+        )
+        config["train"]["train_policy"]["dataset"]["subset"] = ""
+        config["rollout"]["n_generation"] = 2
+        config["train"]["train_batch_per_replica"] = 16
+        config["rollout"]["max_response_length"] = 128
+
+        if "logging" not in config:
+            config["logging"] = {}
+        config["logging"]["logger"] = ["console"]
+
+        add_config = f"""
+[validation]
+temperature = 0.0
+max_response_length = 2048
+dataset.name = "{os.path.join(
+            cur_dir, "data_fixtures", "test_dataset"
+        )}"
+dataset.subset = ""
+dataset.split = "train"
+enable = true
+freq = 1
+batch_size = 8
+
+[distillation]
+enable = true
+model_name_or_path = "Qwen/Qwen3-8B"
+model_max_length = 1024
+compile = true
+master_dtype = "float32"
+param_dtype = "bfloat16"
+logprob_dtype = "float32"
+fsdp_reduce_dtype = "float32"
+fsdp_offload = false
+fsdp_reshard_after_forward = "default"
+batch_size_per_replica = 16
+
+[distillation.parallelism]
+n_init_replicas = 2
+tp_size = 1
+cp_size = 1
+dp_shard_size = 2
+pp_size = 1
+dp_replicate_size = 1
+        """
+
+        with tempfile.NamedTemporaryFile(
+            mode="w+", suffix=".toml", delete=False
+        ) as tmpfile:
+            toml.dump(config, tmpfile)
+            tmpfile_toml = tmpfile.name
+
+        with open(tmpfile_toml, "a") as f:
+            f.write(add_config)
+
+        controller_cmd = f"cosmos-rl --config {tmpfile_toml}"
+        controller_cmd += f" --port {port}"
+        env_dict = os.environ.copy()
+        controller_process = subprocess.Popen(
+            controller_cmd,
+            shell=True,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            env=env_dict,
+        )
+        processes = [controller_process]
+
         # Wait for process to complete
         for process in processes:
             stdout, stderr = process.communicate()

@@ -356,14 +356,44 @@ def pack_sequences_for_logprobs(
         )
         args_dict["logprob_masks"] = packed_logprob_masks
         valid_input_len = valid_input_len.tolist()
-        concatenated_advantages = [
-            adv
-            for idx, adv in enumerate(advantages)
-            for _ in range(valid_input_len[idx])
-        ]
-        advantages = torch.tensor(
-            [concatenated_advantages],
-            dtype=torch.float32,
-        ).to(device)
-        args_dict["advantages"] = advantages
+        if advantages is not None:
+            concatenated_advantages = [
+                adv
+                for idx, adv in enumerate(advantages)
+                for _ in range(valid_input_len[idx])
+            ]
+            advantages = torch.tensor(
+                [concatenated_advantages],
+                dtype=torch.float32,
+            ).to(device)
+            args_dict["advantages"] = advantages
     return args_dict
+
+
+def pack_sequences_for_teacher_logprobs(
+    teacher_logprobs: torch.Tensor,
+    valid_input_len: torch.Tensor,
+    logprobs_seq_dim: int = 1,
+    logprobs_batch_dim: int = 0,
+):
+    """
+    Generate packed teacher log probabilities to pack from different batches into one used for distillation loss calculation.
+    teacher_logprobs: the teacher log probabilities of shape [batch, seq_len] for each sequence in the batch.
+    valid_input_len: the valid input lengths of shape [batch] for each sequence in the batch.
+    logprobs_seq_dim: the sequence dimension of the log probabilities tensor.
+    logprobs_batch_dim: the batch dimension of the log probabilities tensor.
+    Return:
+    The packed teacher log probabilities after sequence packing.
+    It will be used with the packed model outputs to get the loss in distillation.
+    """
+    with torch.no_grad():
+        valid_input_mask = generate_mask(
+            valid_input_len, teacher_logprobs, logprobs_seq_dim, logprobs_batch_dim
+        )
+        packed_teacher_logprobs = recover_dims(
+            teacher_logprobs[valid_input_mask],
+            teacher_logprobs,
+            logprobs_seq_dim,
+            logprobs_batch_dim,
+        )
+        return packed_teacher_logprobs

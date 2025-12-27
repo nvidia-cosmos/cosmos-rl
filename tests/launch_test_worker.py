@@ -416,6 +416,7 @@ class TestRollout:
         self.temp_recv_tensor_queue = Queue()
         self.prepare_trainable_params()
         self.validation_flag = threading.Event()
+        self.non_trainable_params_received = True
 
     def get_underlying_model(self):
         return None
@@ -1005,6 +1006,9 @@ def run_dummy_policy(args: argparse.Namespace):
         current_step: int,
         total_steps: int,
         remain_samples_num: int,
+        do_save_checkpoint: bool,
+        inter_policy_nccl: Any,
+        is_master_replica: bool,
     ):
         return {}
 
@@ -1041,6 +1045,7 @@ def run_dummy_rollout(args: argparse.Namespace):
         self.state.set_weight_synced()
 
     def dummy_rollout2rollout_broadcast(self, broadcast_command):
+        self.current_weight_version = broadcast_command.weight_step
         if broadcast_command.replica_should_stop():
             self.shutdown_signal.set()
             self.shutdown_mp_signal.set()
@@ -1090,7 +1095,10 @@ def run_dummy_rollout(args: argparse.Namespace):
             **kwargs,
         ) -> List[RolloutResult]:
             completions_per_prompt = [
-                RolloutResult(prompt=payload.prompt, completions=[payload.prompt])
+                RolloutResult(
+                    prompt=payload.prompt,
+                    completions=[payload.prompt] * config.rollout.n_generation,
+                )
                 for payload in payloads
             ]
             return completions_per_prompt
