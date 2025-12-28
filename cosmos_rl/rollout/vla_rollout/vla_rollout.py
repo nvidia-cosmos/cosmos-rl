@@ -77,6 +77,37 @@ MAX_STEPS_MAP = {
     "robotwin2_move_pillbottle_pad": 200,
 }
 
+def convert_to_uint8(img: np.ndarray) -> np.ndarray:
+    """Converts an image to uint8 if it is a float image.
+
+    This is important for reducing the size of the image when sending it over the network.
+    """
+    if np.issubdtype(img.dtype, np.floating):
+        img = (255 * img).astype(np.uint8)
+    return img
+
+def resize_with_pad(images: np.ndarray, height: int, width: int, method=Image.BILINEAR) -> np.ndarray:
+    """Replicates tf.image.resize_with_pad for multiple images using PIL. Resizes a batch of images to a target height.
+
+    Args:
+        images: A batch of images in [..., height, width, channel] format.
+        height: The target height of the image.
+        width: The target width of the image.
+        method: The interpolation method to use. Default is bilinear.
+
+    Returns:
+        The resized images in [..., height, width, channel].
+    """
+    # If the images are already the correct size, return them as is.
+    if images.shape[-3:-1] == (height, width):
+        return images
+
+    original_shape = images.shape
+
+    images = images.reshape(-1, *original_shape[-3:])
+    resized = np.stack([_resize_with_pad_pil(Image.fromarray(im), height, width, method=method) for im in images])
+    return resized.reshape(*original_shape[:-3], *resized.shape[-3:])
+
 def _resize_with_pad_pil(image: Image.Image, height: int, width: int, method: int) -> Image.Image:
     """Replicates tf.image.resize_with_pad for one image using PIL. Resizes an image to a target height and
     width without distortion by padding with zeros.
@@ -275,12 +306,11 @@ class OpenVLARollout(RolloutBase):
 
         def _to_pi05_img(arr: np.ndarray) -> torch.Tensor:
             # 1. Convert to PIL Image
-            pil_img = Image.fromarray(arr.astype(np.uint8)).convert("RGB")
+            pil_img = np.ascontiguousarray(arr)
             # 2. Resize with padding (matching official_openpi)
-            pil_img = _resize_with_pad_pil(pil_img, 224, 224, Image.Resampling.BILINEAR)
-            # 3. Convert to torch.Tensor and normalize to [-1, 1]
-            img = torch.from_numpy(np.array(pil_img)).float()  # [H, W, C], values in [0, 255]
-            return img / 127.5 - 1.0  # [-1, 1], channels-last
+            pil_img = convert_to_uint8(resize_with_pad(pil_img, 224, 224))
+            # 3. Convert to torch.Tensor
+            return torch.from_numpy(pil_img)  # [H, W, C], values in [0, 255]
 
         base_imgs = []
         wrist_imgs = []
@@ -302,7 +332,7 @@ class OpenVLARollout(RolloutBase):
         images = {
             "base_0_rgb": base_imgs_t,
             "left_wrist_0_rgb": wrist_imgs_t,
-            "right_wrist_0_rgb": torch.full_like(base_imgs_t, -1.0),
+            "right_wrist_0_rgb": torch.zeros_like(base_imgs_t),
         }
         image_masks = {
             "base_0_rgb": torch.ones(batch_size, dtype=torch.bool, device=device),

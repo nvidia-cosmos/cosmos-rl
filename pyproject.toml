@@ -34,7 +34,7 @@ dependencies = [
     "liger_kernel",
     "accelerate",
     "kernels",
-    # "flash-attn>=2.8.3",
+    "flash-attn>=2.8.3",
 ]
 
 [build-system]
