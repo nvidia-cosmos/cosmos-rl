@@ -719,14 +719,48 @@ class PI05(BaseModel):
         Returns:
             dict with 'actions', 'chains', 'denoise_inds'
         """
-        bsize = observation.state.shape[0]
-        if noise is None:
-            actions_shape = (bsize, self.action_horizon, self.action_dim)
-            noise = self.sample_noise(actions_shape, device)
-
-        images, img_masks, lang_tokens, lang_masks, state = (
-            self._preprocess_observation(observation, train=False)
-        )
+        fp = os.path.expanduser("~/pi05_first_input.pt")
+        dbg = str(os.getenv("DEBUG", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+        fixed = torch.load(fp, map_location="cpu", weights_only=False) if (dbg and os.path.exists(fp)) else None
+        if isinstance(fixed, dict) and all(k in fixed for k in ("images", "img_masks", "lang_tokens", "lang_masks", "state")):
+            images = [x.to(device=device) for x in fixed["images"]]
+            img_masks = [x.to(device=device) for x in fixed["img_masks"]]
+            lang_tokens = fixed["lang_tokens"].to(device=device)
+            lang_masks = fixed["lang_masks"].to(device=device)
+            state = fixed["state"].to(device=device)
+            bsize = int(state.shape[0])
+            if noise is None:
+                noise = fixed.get("noise_init", None)
+                if torch.is_tensor(noise):
+                    noise = noise.to(device=device)
+            if noise is None:
+                actions_shape = (bsize, self.action_horizon, self.action_dim)
+                noise = self.sample_noise(actions_shape, device)
+        else:
+            bsize = observation.state.shape[0]
+            if noise is None:
+                actions_shape = (bsize, self.action_horizon, self.action_dim)
+                noise = self.sample_noise(actions_shape, device)
+            images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+            if (
+                str(os.getenv("SAVE_FIRST_INPUT", os.getenv("save_first_input", "0"))).strip().lower()
+                in {"1", "true", "yes", "y", "on"}
+                and int(os.getenv("RANK", os.getenv("LOCAL_RANK", "0")) or 0) == 0
+                and not getattr(self, "_pi05_first_input_saved", False)
+            ):
+                if not os.path.exists(fp):
+                    torch.save(
+                        {
+                            "images": [x.detach().cpu() for x in images],
+                            "img_masks": [x.detach().cpu() for x in img_masks],
+                            "lang_tokens": lang_tokens.detach().cpu(),
+                            "lang_masks": lang_masks.detach().cpu(),
+                            "state": state.detach().cpu(),
+                            "noise_init": noise.detach().cpu() if torch.is_tensor(noise) else None,
+                        },
+                        fp,
+                    )
+                setattr(self, "_pi05_first_input_saved", True)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks

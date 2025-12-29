@@ -14,6 +14,7 @@
 # limitations under the License.
 """PyTorch Siglip model."""
 
+import os
 import math
 import warnings
 from dataclasses import dataclass
@@ -787,6 +788,29 @@ class SiglipVisionTransformer(nn.Module):
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
         pooler_output = self.head(last_hidden_state) if self.use_head else None
+
+        if (
+            os.getenv("DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+            and int(os.getenv("RANK", os.getenv("LOCAL_RANK", "0")) or 0) == 0
+            and not getattr(self, "_cosmos_siglip_io_dumped", False)
+        ):
+            try:  # pragma: no cover
+                import torch._dynamo as _dynamo
+
+                _dynamo.graph_break()
+            except Exception:
+                pass
+            p = os.path.expanduser("~/siglip_io.cosmos.pt")
+            os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+            torch.save(
+                {
+                    "siglip.pixel_values": pixel_values.detach().cpu(),
+                    "siglip.last_hidden_state": last_hidden_state.detach().cpu(),
+                    "siglip.pooler_output": None if pooler_output is None else pooler_output.detach().cpu(),
+                },
+                p,
+            )
+            setattr(self, "_cosmos_siglip_io_dumped", True)
 
         return BaseModelOutputWithPooling(
             last_hidden_state=last_hidden_state,
