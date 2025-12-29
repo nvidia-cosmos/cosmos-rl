@@ -64,6 +64,11 @@ def preprocess_observation_pytorch(
             # Convert [B, C, H, W] to [B, H, W, C] for processing
             image = image.permute(0, 2, 3, 1)
 
+        # Align with OpenPI Observation.from_dict(): if image is uint8 in [0,255],
+        # convert to float32 in [-1, 1] before any resizing/augmentations.
+        if image.dtype == torch.uint8:
+            image = image.to(torch.float32) / 255.0 * 2.0 - 1.0
+
         if image.shape[1:3] != image_resolution:
             logging.info(
                 f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}"
@@ -731,7 +736,7 @@ class PI05(BaseModel):
 
         # Compute image and language key value cache
         prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
-        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+        # self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
 
         _, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,

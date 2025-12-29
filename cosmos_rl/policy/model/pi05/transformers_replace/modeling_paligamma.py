@@ -31,7 +31,7 @@ from transformers.utils import ModelOutput, auto_docstring, can_return_tuple, is
 
 # Import local implementations
 from cosmos_rl.policy.model.pi05.transformers_replace.configuration_paligemma import PaliGemmaConfig
-from cosmos_rl.policy.model.pi05.transformers_replace.modeling_gamma import GemmaModel
+from cosmos_rl.policy.model.pi05.transformers_replace.modeling_gemma import GemmaModel
 from cosmos_rl.policy.model.pi05.transformers_replace.modeling_siglip import SiglipVisionModel
 
 

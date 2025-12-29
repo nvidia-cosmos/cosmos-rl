@@ -2,8 +2,8 @@
 
 from .configuration_gemma import GemmaConfig
 from .configuration_paligemma import PaliGemmaConfig
-from .modeling_gamma import *
+from .modeling_gemma import *
 from .modeling_paligamma import PaliGemmaForConditionalGeneration
 
-from . import modeling_gamma as modeling_gemma
+from . import modeling_gemma as modeling_gemma
 
