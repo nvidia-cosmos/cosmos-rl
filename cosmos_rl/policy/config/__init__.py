@@ -993,10 +993,6 @@ class MultiTurnRolloutConfig(BaseModel):
 
 
 class RolloutAsyncConfig(BaseModel):
-    enable: bool = Field(
-        default=False,
-        description="Whether to enable async rollout.",
-    )
     max_concurrent_requests: int = Field(
         default=10,
         description="Maximum number of concurrent requests for rollout engine.",
@@ -1115,6 +1111,12 @@ class RolloutConfig(BaseModel):
     multi_turn_config: MultiTurnRolloutConfig = Field(
         default_factory=MultiTurnRolloutConfig,
         description="Configuration for multi-turn rollout.",
+    )
+
+    mode: str = Field(
+        default="sync",
+        description="Rollout mode, could be 'sync' or 'async'.",
+        choices=["sync", "async"],
     )
 
     async_config: RolloutAsyncConfig = Field(

@@ -68,7 +68,7 @@ class MockAPIClient(APIClient):
             val_dataset=None,
             is_rl=True,
         )
-        self.max_iter = 2
+        self.max_iter = 3
         self.cur_iter = 0
 
         # rollout_completion_payloads cache 1 batch of payloads for testing
@@ -150,7 +150,7 @@ def getMockConfig():
         config_dict = toml.load(f)
 
     config = CosmosConfig.from_dict(config_dict)
-    config.rollout.async_config.enable = True
+    config.rollout.mode = "async"
     config.rollout.async_config.max_concurrent_requests = 10
     config.rollout.backend = "vllm_async"
     return config
@@ -265,8 +265,8 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
         parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
 
-        from cosmos_rl.rollout.worker.asynchronous.rollout_control import (
-            AsyncDisaggregatedRolloutControlWorker,
+        from cosmos_rl.rollout.worker.rollout_control import (
+            DisaggregatedRolloutControlWorker,
         )
 
         # here dummy some functions to make the worker work
@@ -283,10 +283,10 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         def dummy(self):
             pass
 
-        AsyncDisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
-        AsyncDisaggregatedRolloutControlWorker.init_redis = dummy
+        DisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
+        DisaggregatedRolloutControlWorker.init_redis = dummy
 
-        worker = AsyncDisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
+        worker = DisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
         worker.query_command_from_controller = functools.partial(dummy, worker)
         worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()
@@ -316,8 +316,8 @@ class TestAsyncRolloutWorker(unittest.TestCase):
 
         parallel_dims = ParallelDims.from_config(cosmos_config.rollout.parallelism)
         parallel_dims.mesh = MockDeviceMesh(mesh=[1], mesh_dim_names=["dp"])
-        from cosmos_rl.rollout.worker.asynchronous.rollout_control import (
-            AsyncDisaggregatedRolloutControlWorker,
+        from cosmos_rl.rollout.worker.rollout_control import (
+            DisaggregatedRolloutControlWorker,
         )
 
         # here dummy some functions to make the worker work
@@ -334,10 +334,10 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         def dummy(self):
             pass
 
-        AsyncDisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
-        AsyncDisaggregatedRolloutControlWorker.init_redis = dummy
+        DisaggregatedRolloutControlWorker.init_comm = dummy_init_comm
+        DisaggregatedRolloutControlWorker.init_redis = dummy
 
-        worker = AsyncDisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
+        worker = DisaggregatedRolloutControlWorker(cosmos_config, parallel_dims)
         worker.query_command_from_controller = functools.partial(dummy, worker)
         worker.replica_name = str(uuid.uuid4())
         worker.shutdown_signal = threading.Event()
@@ -345,19 +345,15 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         worker.heartbeat_thread = None
         # Skip weight sync preparation in test since we don't need it
         worker.state.set_weight_synced()
-        worker.init_scheduler()
 
-        async def test_helper():
+        try:
+            worker.start_async_rollout_scheduler()
             worker.current_step = 1
-            worker.lazy_initialize_rollout_engine(load_format="auto")
-            try:
-                await worker.scheduler.start_async()
-                await worker.do_validation()
-            finally:
-                await worker.scheduler.stop_async()
-                worker.handle_shutdown()
+            # worker.lazy_initialize_rollout_engine(load_format="auto")
+            worker.do_validation()
+        finally:
+            worker.handle_shutdown()
 
-        asyncio.run(test_helper())
         self.assertEqual(
             len(worker.api_client.validation_completion_payloads),
             cosmos_config.validation.batch_size * worker.api_client.max_iter,

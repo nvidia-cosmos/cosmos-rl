@@ -15,6 +15,7 @@
 import asyncio
 import torch
 import copy
+import threading
 from typing import List, Optional, Dict, Any
 from vllm.v1.engine.async_llm import AsyncLLM as AsyncLLMEngine, AsyncEngineArgs
 from vllm.sampling_params import SamplingParams, RequestOutputKind
@@ -85,6 +86,11 @@ class vLLMRolloutAsync(vLLMRollout):
         # override the post_init_hook method in vLLMRollout
         super().post_init_hook(**kwargs)
 
+        # override the type of _engine_initialized to threading.Event() to avoid race condition when checking the engine initialized status in multiple threads.
+        # TODO(zjx): refactor the RolloutBase class to use threading.Event() instead of boolean flag.
+        self._engine_initialized = threading.Event()
+        self._engine_initialized.clear()
+
         self.underlying_model: Optional[ModuleLike] = None
 
         # for vllm.AsyncLLMEngine, we should only process the final output.
@@ -99,7 +105,7 @@ class vLLMRolloutAsync(vLLMRollout):
         **kwargs,
     ):
         # override the init_engine method in vLLMRollout
-        if not self._engine_initialized:
+        if not self._engine_initialized.is_set():
             trust_remote_code = True  # set trust remote code default to True.
 
             model_path = self.config.policy.model_name_or_path
@@ -163,7 +169,7 @@ class vLLMRolloutAsync(vLLMRollout):
             )
 
             self.rollout_engine = AsyncLLMEngine.from_engine_args(engine_args)
-            self._engine_initialized = True
+            self._engine_initialized.set()
             logger.info("[Rollout] Engine initialized.")
             # initialization done.
 
@@ -184,9 +190,13 @@ class vLLMRolloutAsync(vLLMRollout):
         # override the post_init_engine_hook method in vLLMRollout
         pass
 
+    def is_engine_initialized(self):
+        """override the method in RolloutBase to return the engine initialized status."""
+        return self._engine_initialized.is_set()
+
     def shutdown(self):
-        if self._engine_initialized:
-            self._engine_initialized = False
+        if self._engine_initialized.is_set():
+            self._engine_initialized.clear()
             self.rollout_engine.shutdown()
 
     def _get_request_id(self, prompt_idx: int, child_idx: int = 0):
@@ -211,7 +221,7 @@ class vLLMRolloutAsync(vLLMRollout):
         data_fetcher: DataFetcherBase,
         is_validation: bool = False,
     ) -> List[RolloutResult]:
-        if not self._engine_initialized:
+        if not self._engine_initialized.is_set():
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )
@@ -290,7 +300,7 @@ class vLLMRolloutAsync(vLLMRollout):
         """
         Get the underlying parallelized model in vLLM internal.
         """
-        if not self._engine_initialized:
+        if not self._engine_initialized.is_set():
             raise RuntimeError(
                 "[Rollout] Engine is not initialized, please call init_engine first."
             )

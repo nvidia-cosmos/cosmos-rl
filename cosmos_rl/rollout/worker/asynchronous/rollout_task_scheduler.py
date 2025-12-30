@@ -16,7 +16,7 @@
 import asyncio
 import torch
 import threading
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Callable
 from queue import Queue
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -374,7 +374,21 @@ class RolloutTaskScheduler:
 
         logger.info("[RolloutTaskScheduler] Worker loop stopped")
 
-    def _run_event_loop(self):
+    def _try_shutdown_rollout_engine(self):
+        """
+        Try to shutdown the rollout engine to release the resources.
+        """
+
+        if not self.rollout_engine.is_engine_initialized():
+            logger.warning(
+                "[RolloutTaskScheduler] Rollout engine is not initialized, skipping shutdown"
+            )
+            return
+
+        # rollout engine in async mode usually has a child thread to run the generation, to avoid blocking the main thread exit, we need to call the shutdown method to release the resources.
+        self.rollout_engine.shutdown()
+
+    def _run_event_loop(self, init_engine_hook: Callable):
         """
         Run the asyncio event loop in a separate thread.
 
@@ -390,11 +404,15 @@ class RolloutTaskScheduler:
         asyncio.set_event_loop(self._loop)
 
         try:
+            # we must initialize the rollout engine in the worker thread to avoid binding event_loop to the main thread's event_loop.
+            assert not self.rollout_engine.is_engine_initialized(), "Rollout engine should not be initialized before starting the scheduler worker loop"
+            init_engine_hook(self.rollout_engine)
+
             self._loop.run_until_complete(self._worker_loop())
         finally:
             self._loop.close()
 
-    def start(self):
+    def start(self, init_engine_hook: Callable):
         """
         Start the background worker thread with its own event loop.
 
@@ -402,6 +420,9 @@ class RolloutTaskScheduler:
         The worker thread monitors the task_queue and manages concurrent task execution.
 
         Note: Cannot be used together with start_async() - only one mode can be active at a time.
+
+        Args:
+            init_engine_hook: A hook function to initialize the rollout engine. The function should take the rollout engine as an argument and initialize it.
 
         Thread Safety:
             Uses threading.Event() for _running flag to ensure thread-safe state management.
@@ -419,7 +440,10 @@ class RolloutTaskScheduler:
 
         self._running.set()
         self._worker_thread = threading.Thread(
-            target=self._run_event_loop, daemon=True, name="RolloutTaskSchedulerWorker"
+            target=self._run_event_loop,
+            daemon=True,
+            name="RolloutTaskSchedulerWorker",
+            args=(init_engine_hook,),
         )
         self._worker_thread.start()
 
@@ -453,9 +477,10 @@ class RolloutTaskScheduler:
         if wait and self._worker_thread:
             self._worker_thread.join(timeout=10)
 
+        self._try_shutdown_rollout_engine()
         logger.info("[RolloutTaskScheduler] Background worker stopped")
 
-    async def start_async(self):
+    async def start_async(self, init_engine_hook: Callable):
         """
         Start the scheduler worker loop asynchronously in the current event loop.
 
@@ -479,6 +504,8 @@ class RolloutTaskScheduler:
         if self._running.is_set():
             logger.warning("[RolloutTaskScheduler] Scheduler is already running")
             return
+
+        init_engine_hook(self.rollout_engine)
 
         self._running.set()
         self._worker_task = asyncio.create_task(self._worker_loop())
@@ -508,6 +535,8 @@ class RolloutTaskScheduler:
         self._running.clear()
         if wait and self._worker_task:
             await self._worker_task
+
+        self._try_shutdown_rollout_engine()
         logger.info("[RolloutTaskScheduler] Background worker stopped")
 
     def pause(self):
