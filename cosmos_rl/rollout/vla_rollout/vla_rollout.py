@@ -36,41 +36,11 @@ from cosmos_rl.simulators.libero.utils import (
     normalize_gripper_action,
     invert_gripper_action,
     obs_to_vla_input,
+    LIBERO_MAX_STEPS_MAP,
 )
 from cosmos_rl.simulators.env_manager import EnvManager
 from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
-
-MAX_STEPS_MAP = {
-    # LIBERO tasks
-    "libero_spatial": 512,
-    "libero_object": 512,
-    "libero_goal": 512,
-    "libero_10": 512,
-    "libero_90": 512,
-    # RoboTwin 2.0 tasks
-    "robotwin2_click_bell": 200,
-    "robotwin2_move_can_pot": 200,
-    "robotwin2_place_phone_stand": 200,
-    "robotwin2_place_a2b_left": 200,
-    "robotwin2_place_a2b_right": 200,
-    "robotwin2_handover_mic": 200,
-    "robotwin2_pick_dual_bottles": 100,
-    "robotwin2_lift_pot": 200,
-    "robotwin2_put_bottles_dustbin": 800,
-    "robotwin2_stack_blocks_two": 400,
-    "robotwin2_stack_bowls_two": 400,
-    "robotwin2_handover_block": 400,
-    "robotwin2_place_empty_cup": 200,
-    "robotwin2_shake_bottle": 75,
-    "robotwin2_move_stapler_pad": 200,
-    "robotwin2_place_container_plate": 150,
-    "robotwin2_blocks_ranking_rgb": 600,
-    "robotwin2_beat_block_hammer": 200,
-    "robotwin2_place_mouse_pad": 200,
-    "robotwin2_place_shoe": 250,
-    "robotwin2_move_pillbottle_pad": 200,
-}
 
 
 def normalize_proprio(proprio: np.ndarray, norm_stats: Dict) -> np.ndarray:
@@ -123,7 +93,7 @@ def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
 def extract_simulator_config(config: Config):
     cfg = SimpleNamespace()
     cfg.task_suite_name = config.validation.dataset.subset
-    cfg.max_steps = MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
+    cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
     cfg.num_envs = config.rollout.n_generation
     return cfg
 

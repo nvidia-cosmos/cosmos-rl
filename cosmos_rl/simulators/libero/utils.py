@@ -13,13 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import math
 import numpy as np
 import libero.libero.benchmark as benchmark
 from typing import Dict
 
-from cosmos_rl.utils.logging import logger
+
+LIBERO_MAX_STEPS_MAP = {
+    # LIBERO tasks
+    "libero_spatial": 512,
+    "libero_object": 512,
+    "libero_goal": 512,
+    "libero_10": 512,
+    "libero_90": 512,
+    "libero_all": 512,
+}
 
 
 def get_libero_dummy_action(num_envs: int) -> list:
@@ -152,48 +160,6 @@ def invert_gripper_action(action: np.ndarray) -> np.ndarray:
     inverted_action[..., -1] = inverted_action[..., -1] * -1.0
 
     return inverted_action
-
-
-def save_rollout_video(
-    rollout_images, rollout_dir: str, task_name: str, success: bool
-) -> str:
-    """
-    Saves an MP4 replay of an episode.
-
-    Args:
-        rollout_images: List of images (numpy arrays) to save as video
-        exp_name: Experiment name for organizing videos
-        task_name: Task identifier
-        step_idx: Current training step index
-        success: Whether the episode was successful
-
-    Returns:
-        str: Path to the saved video file
-    """
-    import random
-
-    try:
-        import imageio
-    except ImportError:
-        logger.warning(
-            "imageio not installed, cannot save rollout videos. Install with: pip install imageio imageio-ffmpeg"
-        )
-        return ""
-
-    # Create rollout directory
-    os.makedirs(rollout_dir, exist_ok=True)
-
-    # Generate unique filename
-    ran_id = random.randint(1, 10000)
-    mp4_path = f"{rollout_dir}/task={task_name}--success={success}--ran={ran_id}.mp4"
-
-    # Write video
-    video_writer = imageio.get_writer(mp4_path, fps=30)
-    for img in rollout_images:
-        video_writer.append_data(img)
-    video_writer.close()
-
-    return mp4_path
 
 
 def obs_to_vla_input(obs: Dict, is_robotwin: bool = False) -> Dict:
