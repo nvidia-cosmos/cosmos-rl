@@ -47,6 +47,19 @@ wandb_run = None
 
 
 def init_wandb(config: Union[CosmosConfig, CosmosVisionGenConfig]):
+    # In this repo we can have multiple processes per job (policy/rollout/controller, plus
+    # multiple replicas). If more than one process calls `wandb.init()` with the same
+    # (dir, id), W&B can race on creating the same `run-*.wandb` sync file and crash with
+    # `FileExistsError`.
+    #
+    # Our launch scripts set `COSMOS_ROLE` to one of: Controller/Policy/Rollout/Reference.
+    # Only the controller should initialize W&B; other processes should just emit logs to
+    # stdout and report metrics to the controller.
+    role = os.getenv("COSMOS_ROLE", "").strip()
+    if role and role.lower() != "controller":
+        logger.info(f"Skip wandb init on COSMOS_ROLE={role} (controller-only).")
+        return
+
     # Avoid duplicate initialization of wandb
     if wandb.run is not None:
         logger.warning("Wandb is already initialized. Skipping initialization.")

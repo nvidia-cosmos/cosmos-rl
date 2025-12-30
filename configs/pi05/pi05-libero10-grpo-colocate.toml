@@ -21,19 +21,19 @@ master_dtype = "float32"
 transfer_dtype = "float32"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 512  # actor.micro_batch_size
+train_batch_per_replica = 32
 sync_weight_interval = 1
 non_text = true  # Required for VLA models
 
 [policy]
-model_name_or_path = "sunshk/pi05_libero_pytorch"
+model_name_or_path = "/root/RLinf-Pi05-LIBERO-SFT"
 model_max_length = 4096
 model_gradient_checkpointing = false
 
 [logging]
 logger = ['console', 'wandb']
-project_name = "cosmos-rl-pi05"  # runner.logger.project_name: "rlinf"
-experiment_name = "pi05-libero10-grpo-4p4r"  # runner.logger.experiment_name: "test_openpi"
+project_name = "cosmos-rl-pi05"
+experiment_name = "pi05-libero10-grpo-colocated"
 
 [train.train_policy]
 type = "grpo"
@@ -57,10 +57,11 @@ kl_beta = 0.0
 mu_iterations = 1
 mini_batch = 4
 min_filter_prefix_tokens = 1
+allowed_outdated_steps = 1
 
 [train.ckpt]
 enable_checkpoint = true
-save_freq = 40
+save_freq = 80
 save_mode = "async"
 max_keep = 5
 export_safetensors = true
@@ -69,14 +70,14 @@ export_safetensors = true
 backend = "vla"
 gpu_memory_utilization = 0.7
 enable_chunked_prefill = true
-n_generation = 8  # algorithm.group_size
+n_generation = 8
 batch_size = 4
 quantization = "none"
 max_response_length = 1024
 enforce_eager = false
 
 [policy.parallelism]
-n_init_replicas = 1
+n_init_replicas = 8
 tp_size = 1  # PI05 does not support tensor parallelism
 cp_size = 1  # PI05 does not support context parallelism
 dp_shard_size = 1  # FSDP sharding (auto-detect based on GPUs)
@@ -85,7 +86,7 @@ dp_replicate_size = 1
 cp_rotate_method = "allgather"
 
 [rollout.parallelism]
-n_init_replicas = 1
+n_init_replicas = 8
 tp_size = 1
 cp_size = 1
 dp_shard_size = 1
@@ -99,9 +100,9 @@ top_k = 50  # algorithm.sampling_params.top_k
 
 [validation]
 enable = true
-freq = 16  # Adjust based on runner.val_check_interval
-val_before_train = true
-batch_size = 8
+freq = 20
+val_before_train = false
+batch_size = 64
 dataset.name = "libero"
 dataset.subset = "libero_10"
 dataset.split = "val"

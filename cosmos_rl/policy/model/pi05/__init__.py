@@ -505,6 +505,16 @@ class PI05(BaseModel):
 
         # Process images
         for img, img_mask in zip(images, img_masks, strict=True):
+            # NOTE: SigLIP vision tower expects NCHW (B, 3, H, W).
+            # Online rollout path usually goes through `_preprocess_observation()` which already converts,
+            # but GRPO replay/data-packer path can pass NHWC tensors here.
+            if torch.is_tensor(img):
+                if img.dtype == torch.uint8:
+                    img = img.to(torch.float32) / 255.0 * 2.0 - 1.0
+                if img.ndim == 4 and img.shape[-1] == 3 and img.shape[1] != 3:
+                    img = img.permute(0, 3, 1, 2).contiguous()
+                elif img.ndim == 3 and img.shape[-1] == 3 and img.shape[0] != 3:
+                    img = img.permute(2, 0, 1).unsqueeze(0).contiguous()
 
             def image_embed_func(img):
                 return self.paligemma_with_expert.embed_image(img)
@@ -1137,6 +1147,9 @@ class PI05(BaseModel):
         return parallelize, self
 
     def post_to_empty_hook(self, cosmos_config):
+        # Apply training-time freezing policy here (requested): if `train_expert_only=True`,
+        # freeze the VLM (PaliGemma) so optimizer won't include it.
+        self.freeze_vlm()
         return
 
     def apply_pipeline_split(self, pp_rank, pp_size):

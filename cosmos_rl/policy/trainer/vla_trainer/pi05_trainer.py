@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, List
 
 import torch
@@ -47,6 +48,7 @@ class PI05GRPOTrainer(GRPOTrainer):
         logger.info(
             f"[PI05 Train] Starting PI05 training for step {current_step}/{total_steps}"
         )
+        wall_t0 = time.time()
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
@@ -167,6 +169,17 @@ class PI05GRPOTrainer(GRPOTrainer):
                     loss = pg_loss / len(policy_inputs)
                     loss.backward()
 
+                    # Optional debug: synchronize to surface the *real* CUDA error at the first
+                    # failing kernel, instead of later at an unrelated call (e.g., cuda events).
+                    if str(os.getenv("COSMOS_CUDA_SYNC_DEBUG", "0")).strip().lower() in {
+                        "1",
+                        "true",
+                        "yes",
+                        "y",
+                        "on",
+                    }:
+                        torch.cuda.synchronize()
+
                     total_loss += loss.item()
                     max_loss = max(max_loss, loss.item())
                     logger.info(
@@ -181,8 +194,26 @@ class PI05GRPOTrainer(GRPOTrainer):
         grad_norm = self.all_reduce_states(inter_policy_nccl)
 
         end_event.record()
+        # NOTE: `CUDA error: device not ready` (or similar) here usually means an earlier CUDA
+        # kernel/NCCL error was raised asynchronously and only surfaced at this sync point.
+        # We explicitly synchronize so failures point here consistently, and we can fall back
+        # to wall-clock timing if event timing fails.
+        iter_time_s: float
+        try:
+            torch.cuda.synchronize()
+            iter_time_s = start_event.elapsed_time(end_event) / 1000.0
+        except Exception as e:
+            # Keep a useful log message; re-raise because the CUDA context is likely unhealthy.
+            logger.error(
+                "[PI05 Train] CUDA failure surfaced during end-of-step synchronization/timing. "
+                "This usually indicates an earlier asynchronous CUDA kernel/NCCL error. "
+                "Re-run with `CUDA_LAUNCH_BLOCKING=1` (and optionally `COSMOS_CUDA_SYNC_DEBUG=1`) "
+                "to pinpoint the first failing op."
+            )
+            logger.exception(e)
+            raise
         logger.info(
-            f"[PI05 Train] Step {current_step} training time: {start_event.elapsed_time(end_event)/1000.0:.2f}s"
+            f"[PI05 Train] Step {current_step} training time: {iter_time_s:.2f}s (wall={time.time()-wall_t0:.2f}s)"
         )
         logger.info(
             f"[PI05 Train] {len(policy_inputs)} episodes, current lr: {current_lr:.6f}, grad norm: {grad_norm:.6f}"
