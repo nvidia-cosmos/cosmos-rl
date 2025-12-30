@@ -23,8 +23,6 @@ from cosmos_rl.dispatcher.data.schema import Rollout
 from cosmos_rl.policy.trainer.base import TrainerRegistry
 from cosmos_rl.utils.distributed import HighAvailabilitylNccl
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.simulators.libero.utils import LIBERO_MAX_STEPS_MAP
-from cosmos_rl.dispatcher.data.packer.vla_data_packer import _get_vla_constants
 
 
 @TrainerRegistry.register(trainer_type="grpo_vla")
@@ -83,6 +81,10 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
         policy_inputs = [
             self.data_packer.get_policy_input(r, self.device) for r in rollouts
         ]
+
+        from cosmos_rl.simulators.libero.utils import LIBERO_MAX_STEPS_MAP
+        from cosmos_rl.dispatcher.data.packer.vla_data_packer import _get_vla_constants
+
         _, ACTION_DIM, _ = _get_vla_constants()
         max_chunks = (
             LIBERO_MAX_STEPS_MAP.get(self.config.train.dataset.subset, 512)
