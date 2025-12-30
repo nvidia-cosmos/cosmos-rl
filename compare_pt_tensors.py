@@ -68,7 +68,7 @@ def _cmp(
 
     if a is None or b is None:
         if a is b:
-            equal.append(f"{p} (None)" if a is None else p)
+            equal.append(p)
         else:
             not_equal.append(DiffItem(p, "one is None", a=repr(a), b=repr(b)))
         return

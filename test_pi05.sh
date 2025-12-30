@@ -8,7 +8,7 @@ export NUMEXPR_NUM_THREADS=1
 
 export TOKENIZERS_PARALLELISM=0
 
-export DEBUG=true
+# export DEBUG=true
 # export SAVE_FIRST_INPUT=1
 
 # CONFIG=configs/pi05/pi05-libero10-grpo.toml

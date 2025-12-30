@@ -1204,7 +1204,7 @@ class PI05(BaseModel):
         if embed_key not in state_dict and lm_head_key in state_dict:
             state_dict[embed_key] = state_dict[lm_head_key]
 
-        missing, unexpected = self.load_state_dict(state_dict, strict=False)
+        missing, unexpected = self.load_state_dict(state_dict, strict=True)
         if missing:
             logger.warning(f"PI05 relaxed load: {len(missing)} missing keys. First 10: {missing[:10]}")
         if unexpected:

@@ -1,4 +1,5 @@
 redis = "12800"
+mode = "colocated"
 
 [train]
 resume = false
@@ -100,7 +101,7 @@ top_k = 50  # algorithm.sampling_params.top_k
 enable = true
 freq = 16  # Adjust based on runner.val_check_interval
 val_before_train = true
-batch_size = 1
+batch_size = 8
 dataset.name = "libero"
 dataset.subset = "libero_10"
 dataset.split = "val"
