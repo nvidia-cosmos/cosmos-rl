@@ -15,7 +15,6 @@
 
 import os
 import random
-import imageio
 
 from cosmos_rl.utils.logging import logger
 
@@ -36,7 +35,6 @@ def save_rollout_video(
     Returns:
         str: Path to the saved video file
     """
-    import random
 
     try:
         import imageio

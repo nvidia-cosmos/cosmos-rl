@@ -16,30 +16,21 @@
 import json
 import yaml
 import os
-import cv2
 import gymnasium as gym
 import numpy as np
 import torch
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
-from av.container import Container
-from av.stream import Stream
 
 # Disable torch compilation to avoid typing_extensions compatibility issues
 # This must be done before importing omnigibson
 torch._dynamo.config.disable = True
 import torch._dynamo
+
 torch._dynamo.reset()
 
 import omnigibson as og
 from omnigibson.envs import VectorEnvironment
-from omnigibson.learning.utils.eval_utils import (
-    TASK_INDICES_TO_NAMES,
-)
-from omnigibson.learning.utils.obs_utils import (
-    create_video_writer,
-    write_video,
-)
 from omnigibson.macros import gm
 
 gm.HEADLESS = True
@@ -48,7 +39,6 @@ gm.USE_GPU_DYNAMICS = False
 gm.ENABLE_TRANSITION_RULES = True
 
 from cosmos_rl.simulators.utils import save_rollout_video
-from cosmos_rl.utils.util import logger
 
 
 @dataclass
@@ -69,11 +59,9 @@ class B1KEnvWrapper(gym.Env):
         self.cfg = cfg
         self._init_env()
         self.env_states = [EnvStates(env_idx=i) for i in range(self.cfg.num_envs)]
-    
+
     def _init_env(self):
-        og_cfg_file = os.path.join(
-            og.example_config_path, "r1pro_behavior.yaml"
-        )
+        og_cfg_file = os.path.join(og.example_config_path, "r1pro_behavior.yaml")
         with open(og_cfg_file, "r") as f:
             self.og_cfg = yaml.load(f, Loader=yaml.FullLoader)
 
@@ -89,12 +77,15 @@ class B1KEnvWrapper(gym.Env):
             for i in range(len(task_description))
         }
         self.task_description = self.task_description_map[self.cfg.task_name]
-        self.og_cfg['task']['activity_name'] = self.cfg.task_name
-        self.og_cfg['robots'][0]['sensor_config']['VisionSensor']['sensor_kwargs']['image_height'] = 768
-        self.og_cfg['robots'][0]['sensor_config']['VisionSensor']['sensor_kwargs']['image_width'] = 768
+        self.og_cfg["task"]["activity_name"] = self.cfg.task_name
+        self.og_cfg["robots"][0]["sensor_config"]["VisionSensor"]["sensor_kwargs"][
+            "image_height"
+        ] = 768
+        self.og_cfg["robots"][0]["sensor_config"]["VisionSensor"]["sensor_kwargs"][
+            "image_width"
+        ] = 768
         self.env = VectorEnvironment(num_envs=self.cfg.num_envs, config=self.og_cfg)
 
-    
     def _extract_image_and_state(self, obs_list):
         full_images = []
         wrist_images = []
@@ -108,10 +99,10 @@ class B1KEnvWrapper(gym.Env):
                         right_image = v["rgb"]
                     elif "zed_link:Camera:0" in k:
                         zed_image = v["rgb"]
-            
+
             full_images.append(zed_image)
             wrist_images.append(torch.stack([left_image, right_image], axis=0))
-                
+
         # full_images: [N_ENV, H, W, C]
         # wrist_images: [N_ENV, N_IMG, H, W, C]
         return {
@@ -119,7 +110,6 @@ class B1KEnvWrapper(gym.Env):
             "wrist_images": np.stack(wrist_images, axis=0),
         }
 
-    
     def reset(self, do_validation: bool = False):
         raw_obs, _ = self.env.reset()
 
@@ -137,7 +127,7 @@ class B1KEnvWrapper(gym.Env):
             self.env_states[i].complete = False
             self.env_states[i].step = 0
             self.env_states[i].do_validation = do_validation
-            
+
             # Initialize validation pixels if needed
             if do_validation:
                 self.env_states[i].valid_pixels = {
@@ -146,14 +136,13 @@ class B1KEnvWrapper(gym.Env):
                 }
             else:
                 self.env_states[i].valid_pixels = None
-                
+
         return images_and_states, task_descriptions
-    
 
     def step(self, action):
         raw_obs, rewards, terminations, truncations, infos = self.env.step(action)
         images_and_states = self._extract_image_and_state(raw_obs)
-        
+
         # Update all environment states
         for i in range(self.cfg.num_envs):
             # Store individual observation for each env
@@ -162,19 +151,19 @@ class B1KEnvWrapper(gym.Env):
                 "wrist_images": images_and_states["wrist_images"][i],
             }
             self.env_states[i].step += 1
-            
+
             # Check for completion
             if terminations[i] or truncations[i]:
                 self.env_states[i].complete = True
                 self.env_states[i].active = False
-            
+
             # Collect validation pixels if enabled
             if self.env_states[i].do_validation:
                 for img_key in ["full_images", "wrist_images"]:
                     self.env_states[i].valid_pixels[img_key].append(
                         images_and_states[img_key][i]
                     )
-        
+
         # Prepare return values for all environments
         env_ids = list(range(self.cfg.num_envs))
         completes = np.array([self.env_states[env_id].complete for env_id in env_ids])
@@ -187,7 +176,6 @@ class B1KEnvWrapper(gym.Env):
             "active": active,
             "finish_step": finish_steps,
         }
-    
 
     def chunk_step(self, actions: torch.Tensor):
         if isinstance(actions, torch.Tensor):
@@ -206,32 +194,30 @@ class B1KEnvWrapper(gym.Env):
             state = self.env_states[env_id]
             if not state.do_validation:
                 continue
-            task_name = (
-                f"{self.cfg.task_name}"
-            )
+            task_name = f"{self.cfg.task_name}"
             save_rollout_video(
                 state.valid_pixels["full_images"],
                 rollout_dir,
                 task_name,
                 state.complete,
             )
-    
+
     def close(self):
         """Clean up the environment."""
         try:
-            if hasattr(self, 'env') and self.env is not None:
+            if hasattr(self, "env") and self.env is not None:
                 # Stop the simulator
                 if og.sim is not None:
                     og.sim.stop()
                 # Clear environments
-                if hasattr(self.env, 'envs'):
+                if hasattr(self.env, "envs"):
                     for env in self.env.envs:
-                        if hasattr(env, 'scene') and env.scene is not None:
+                        if hasattr(env, "scene") and env.scene is not None:
                             env.scene.clear()
                 self.env = None
         except Exception as e:
             print(f"Warning: Error during environment cleanup: {e}")
-    
+
     def __del__(self):
         """Destructor to ensure cleanup."""
         self.close()

@@ -50,7 +50,6 @@ import torch
 from dataclasses import dataclass
 import os
 import tempfile
-import shutil
 import atexit
 
 # Disable torch compilation before importing B1K wrapper to avoid typing_extensions issues
@@ -74,7 +73,9 @@ class TestB1KEnvWrapper(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures before each test method."""
         self.config = MockB1KConfig()
-        print(f"\nInitializing B1K environment with {self.config.num_envs} environments...")
+        print(
+            f"\nInitializing B1K environment with {self.config.num_envs} environments..."
+        )
         print(f"Task: {self.config.task_name}")
         self.env = B1KEnvWrapper(cfg=self.config)
         self.temp_dir = tempfile.mkdtemp()
@@ -89,7 +90,7 @@ class TestB1KEnvWrapper(unittest.TestCase):
                 print(f"Warning during env.close(): {e}")
             finally:
                 self.env = None
-        
+
         # if hasattr(self, "temp_dir") and os.path.exists(self.temp_dir):
         #     try:
         #         shutil.rmtree(self.temp_dir)
@@ -109,7 +110,9 @@ class TestB1KEnvWrapper(unittest.TestCase):
         # Verify environment states were initialized
         env_states = self.env.get_env_states(list(range(self.config.num_envs)))
         self.assertEqual(len(env_states), self.config.num_envs)
-        print(f"✓ Environment states initialized for {self.config.num_envs} environments")
+        print(
+            f"✓ Environment states initialized for {self.config.num_envs} environments"
+        )
 
         # Verify each environment state is properly initialized
         for i, state in enumerate(env_states):
@@ -140,8 +143,12 @@ class TestB1KEnvWrapper(unittest.TestCase):
         print("✓ Reset returned expected data structure")
 
         # Verify shapes
-        self.assertEqual(images_and_states["full_images"].shape[0], self.config.num_envs)
-        self.assertEqual(images_and_states["wrist_images"].shape[0], self.config.num_envs)
+        self.assertEqual(
+            images_and_states["full_images"].shape[0], self.config.num_envs
+        )
+        self.assertEqual(
+            images_and_states["wrist_images"].shape[0], self.config.num_envs
+        )
         print(f"✓ Observation shapes correct for {self.config.num_envs} environments")
 
         # Verify image dimensions (should be 4D: [num_envs, height, width, channels])
@@ -223,7 +230,9 @@ class TestB1KEnvWrapper(unittest.TestCase):
         # Step a few more times to verify consistency
         print("\nStepping 5 more times...")
         for step_num in range(5):
-            actions = np.random.randn(self.config.num_envs, action_dim).astype(np.float32)
+            actions = np.random.randn(self.config.num_envs, action_dim).astype(
+                np.float32
+            )
             actions = np.clip(actions, -1, 1)
             result = self.env.step(actions)
             print(f"  - Step {step_num + 2} completed")
@@ -319,10 +328,14 @@ class TestB1KEnvWrapper(unittest.TestCase):
         # Step multiple times to collect validation data
         num_steps = 16
         action_dim = 23
-        print(f"\nStepping all environments {num_steps} times to collect validation data...")
+        print(
+            f"\nStepping all environments {num_steps} times to collect validation data..."
+        )
 
         for step_num in range(num_steps):
-            actions = np.random.randn(self.config.num_envs, action_dim).astype(np.float32)
+            actions = np.random.randn(self.config.num_envs, action_dim).astype(
+                np.float32
+            )
             actions = np.clip(actions, -1, 1)
             self.env.step(actions)
             print(f"  - Step {step_num + 1}/{num_steps} completed")
@@ -344,15 +357,15 @@ class TestB1KEnvWrapper(unittest.TestCase):
         # Test video saving
         print("\nTesting video saving functionality...")
         env_ids = list(range(self.config.num_envs))
-        
+
         try:
             self.env.save_validation_videos(self.temp_dir, env_ids)
-            print(f"✓ save_validation_videos completed without errors")
-            
+            print("✓ save_validation_videos completed without errors")
+
             # Check if video files were created
             video_files = [f for f in os.listdir(self.temp_dir) if f.endswith(".mp4")]
             print(f"  - Created {len(video_files)} video file(s) in {self.temp_dir}")
-            
+
             # We expect at least one video file per environment
             # (though it depends on implementation details)
             if len(video_files) > 0:
@@ -371,7 +384,9 @@ class TestB1KEnvWrapper(unittest.TestCase):
         print("=" * 80)
 
         # Reset without validation
-        print(f"Resetting all {self.config.num_envs} environments without validation...")
+        print(
+            f"Resetting all {self.config.num_envs} environments without validation..."
+        )
         images_and_states, task_descriptions = self.env.reset(do_validation=False)
         print("✓ All environments reset without validation")
 
@@ -387,7 +402,9 @@ class TestB1KEnvWrapper(unittest.TestCase):
         print(f"\nStepping {num_steps} times...")
 
         for step_num in range(num_steps):
-            actions = np.random.randn(self.config.num_envs, action_dim).astype(np.float32)
+            actions = np.random.randn(self.config.num_envs, action_dim).astype(
+                np.float32
+            )
             actions = np.clip(actions, -1, 1)
             self.env.step(actions)
 
@@ -402,7 +419,7 @@ class TestB1KEnvWrapper(unittest.TestCase):
 
 def cleanup_omnigibson():
     """Cleanup function to properly shutdown OmniGibson.
-    
+
     Note: You may see AttributeError/RuntimeError messages during shutdown.
     These are benign - they occur because UI/viewport components try to
     access cameras after the scene has been cleared. Safe to ignore.
@@ -428,4 +445,3 @@ if __name__ == "__main__":
     unittest.main(verbosity=2, exit=False)
     # Explicitly call cleanup after tests
     cleanup_omnigibson()
-
