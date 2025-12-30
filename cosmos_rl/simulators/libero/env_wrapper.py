@@ -26,8 +26,8 @@ from cosmos_rl.simulators.libero.utils import (
     get_benchmark_overridden,
     get_libero_dummy_action,
     quat2axisangle,
-    save_rollout_video,
 )
+from cosmos_rl.simulators.utils import save_rollout_video
 
 
 @dataclass
