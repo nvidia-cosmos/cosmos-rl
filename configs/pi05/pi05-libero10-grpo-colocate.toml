@@ -21,7 +21,7 @@ master_dtype = "float32"
 transfer_dtype = "float32"
 fsdp_offload = false
 fsdp_reshard_after_forward = "default"
-train_batch_per_replica = 32
+train_batch_per_replica = 128
 sync_weight_interval = 1
 non_text = true  # Required for VLA models
 
@@ -55,7 +55,7 @@ clip_ratio_c = 3.0  # algorithm.clip_ratio_c (dual-clip)
 lower_bound_ratio = 10.0
 kl_beta = 0.0
 mu_iterations = 1
-mini_batch = 4
+mini_batch = 128
 min_filter_prefix_tokens = 1
 allowed_outdated_steps = 1
 

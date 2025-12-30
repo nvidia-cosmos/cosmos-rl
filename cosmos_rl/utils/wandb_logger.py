@@ -53,11 +53,14 @@ def init_wandb(config: Union[CosmosConfig, CosmosVisionGenConfig]):
     # `FileExistsError`.
     #
     # Our launch scripts set `COSMOS_ROLE` to one of: Controller/Policy/Rollout/Reference.
-    # Only the controller should initialize W&B; other processes should just emit logs to
-    # stdout and report metrics to the controller.
-    role = os.getenv("COSMOS_ROLE", "").strip()
-    if role and role.lower() != "controller":
-        logger.info(f"Skip wandb init on COSMOS_ROLE={role} (controller-only).")
+    # We enforce: only the controller initializes W&B. If COSMOS_ROLE is missing/empty
+    # (e.g., user runs scripts directly), we default to *not* initializing W&B to avoid
+    # multi-process collisions.
+    role = os.getenv("COSMOS_ROLE", "").strip().lower()
+    if role != "controller":
+        logger.info(
+            f"Skip wandb init on COSMOS_ROLE={role or '<unset>'} (controller-only)."
+        )
         return
 
     # Avoid duplicate initialization of wandb
