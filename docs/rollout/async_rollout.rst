@@ -13,7 +13,7 @@ To enable asynchronous rollout, you need to set the fields of ``rollout`` sectio
 
     [rollout]
     backend = "vllm_async"
-    async_config.enable = true
+    mode = "async"
     async_config.max_concurrent_requests = 20
 
 

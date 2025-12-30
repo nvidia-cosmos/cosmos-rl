@@ -25,9 +25,6 @@ from cosmos_rl.utils.async_utils import unsafe_enable_nest_asyncio
 from cosmos_rl.rollout.worker.rollout_control import (
     DisaggregatedRolloutControlWorker,
 )
-from cosmos_rl.rollout.worker.asynchronous.rollout_control import (
-    AsyncDisaggregatedRolloutControlWorker,
-)
 
 
 class LLMRolloutWorker(WorkerBase):
@@ -82,16 +79,12 @@ class LLMRolloutWorker(WorkerBase):
             )
             init_distributed()
             parallel_dims.build_mesh(device_type="cuda")
-            if self.config.rollout.async_config.enable:
+            if self.config.rollout.mode == "async":
                 # In this case, we should enable nest_asyncio to allow call asyncio.run from a running event loop.
                 unsafe_enable_nest_asyncio()
-                self.rollout_worker = AsyncDisaggregatedRolloutControlWorker(
-                    self.config, parallel_dims, **kwargs
-                )
-            else:
-                self.rollout_worker = DisaggregatedRolloutControlWorker(
-                    self.config, parallel_dims, **kwargs
-                )
+            self.rollout_worker = DisaggregatedRolloutControlWorker(
+                self.config, parallel_dims, **kwargs
+            )
         elif rollout_backend == "trtllm":
             try:
                 from cosmos_rl.rollout.trtllm_rollout.trtllm_rollout_wrapper import (
