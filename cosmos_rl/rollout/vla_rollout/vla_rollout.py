@@ -254,15 +254,13 @@ class OpenVLARollout(RolloutBase):
                         active_indices.append(i)
                     else:
                         finished_env_ids.append(env_id)
-                        payload_idx = payload_env_mapping[env_id]
-                        task_records[payload_idx]["complete"] = step_results[
-                            "complete"
-                        ][i]
-                        task_records[payload_idx]["active"] = step_results["active"][i]
-                        task_records[payload_idx]["finish_step"] = step_results[
+                        task_idx = payload_env_mapping[env_id]
+                        task_records[task_idx]["complete"] = step_results["complete"][i]
+                        task_records[task_idx]["active"] = step_results["active"][i]
+                        task_records[task_idx]["finish_step"] = step_results[
                             "finish_step"
                         ][i]
-                        task_records[payload_idx]["end_time"] = time.time()
+                        task_records[task_idx]["end_time"] = time.time()
                         payload_env_mapping[env_id] = -1
                 active_env_ids = [active_env_ids[i] for i in active_indices]
                 finished_payloads += len(finished_env_ids)
@@ -303,11 +301,11 @@ class OpenVLARollout(RolloutBase):
             for env_id in available_env_ids:
                 payload_idx = payload_indices[enqueued_payloads]
                 payload = payloads[payload_idx]
-                payload_env_mapping[env_id] = payload_idx
+                payload_env_mapping[env_id] = enqueued_payloads
                 enqueue_payload_list.append(payload)
                 # Record start time and env_id for this task
-                task_records[payload_idx]["start_time"] = time.time()
-                task_records[payload_idx]["env_id"] = env_id
+                task_records[enqueued_payloads]["start_time"] = time.time()
+                task_records[enqueued_payloads]["env_id"] = env_id
                 enqueued_payloads += 1
 
             logger.debug(
@@ -336,11 +334,11 @@ class OpenVLARollout(RolloutBase):
                 i for i, pidx in enumerate(payload_env_mapping) if pidx != -1
             ]
             for env_id in active_env_ids:
-                payload_idx = payload_env_mapping[env_id]
+                task_idx = payload_env_mapping[env_id]
                 for key in vla_input_keys:
-                    task_records[payload_idx][key].append(vla_input[key][env_id])
+                    task_records[task_idx][key].append(vla_input[key][env_id])
                 for key in vla_output_keys:
-                    task_records[payload_idx][key].append(vla_output[key][env_id])
+                    task_records[task_idx][key].append(vla_output[key][env_id])
             actions = vla_output["action"][active_env_ids]
 
         return task_records
@@ -544,9 +542,6 @@ class OpenVLARollout(RolloutBase):
             logger.info(
                 f"Dumped {len(merged_events)} task traces from {world_size} rank(s) to: {tracing_path}"
             )
-            logger.info("  View in Chrome: chrome://tracing (Load button)")
-            logger.info("  Or online: https://ui.perfetto.dev/ (Open trace file)")
-            logger.info("  Visualization: Each rank is a process, each env is a thread")
 
         # Clear accumulated data after dumping
         self.accumulated_task_records = []
@@ -804,7 +799,7 @@ class OpenVLARollout(RolloutBase):
                 [f"{rate * 100:.2f}%" for rate in success_rates]
             )
             logger.info(
-                f"Rollout {n_payloads}x{n_generation} avg success rate: {avg_success_rate:.2f}%, success rates: [{formatted_rates}]"
+                f"Rollout {n_payloads}x{n_generation} success rates: [{formatted_rates}], avg {avg_success_rate:.2f}%"
             )
 
         pack_keys = ["pixel_values", "responses"]
@@ -828,13 +823,7 @@ class OpenVLARollout(RolloutBase):
                     ),
                 }
                 for key in pack_keys:
-                    try:
-                        traj[key] = torch.stack(task_records[start_idx + i][key], dim=0)
-                    except Exception as e:
-                        logger.error(
-                            f"Error packing trajectory {start_idx + i} {key}: {e}"
-                        )
-                        exit(0)
+                    traj[key] = torch.stack(task_records[start_idx + i][key], dim=0)
 
                 trajectory_id = save_trajectory_to_buffer(
                     traj,
