@@ -67,8 +67,6 @@ class OpenVLA(BaseModel):
             from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import (
                 PrismaticProcessor,
             )
-
-            logger.info("Using OpenVLA-OFT direct implementation")
         else:  # openvla (default)
             from cosmos_rl.policy.model.vla.openvla.modeling_prismatic import (
                 OpenVLAForActionPrediction,
@@ -76,8 +74,6 @@ class OpenVLA(BaseModel):
             from cosmos_rl.policy.model.vla.openvla.processing_prismatic import (
                 PrismaticProcessor,
             )
-
-            logger.info("Using OpenVLA direct implementation")
 
         with torch.device("cpu"):
             self.processor = PrismaticProcessor.from_pretrained(

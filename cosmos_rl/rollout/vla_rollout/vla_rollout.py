@@ -14,6 +14,9 @@
 # limitations under the License.
 
 import os
+import json
+import time
+from datetime import datetime
 from types import SimpleNamespace
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -94,7 +97,7 @@ def extract_simulator_config(config: Config):
     cfg = SimpleNamespace()
     cfg.task_suite_name = config.validation.dataset.subset
     cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
-    cfg.num_envs = config.rollout.n_generation
+    cfg.num_envs = config.vla.num_envs
     return cfg
 
 
@@ -108,6 +111,7 @@ class OpenVLARollout(RolloutBase):
         **kwargs,
     ):
         super().__init__(config, parallel_dims, device, **kwargs)
+        self.num_envs = config.vla.num_envs
 
     def post_init_hook(self, **kwargs):
         self.model_type = self.config.vla.vla_type
@@ -127,6 +131,16 @@ class OpenVLARollout(RolloutBase):
         )
         self.env_manager.start_simulator()
 
+        # Initialize task timing accumulator
+        self.accumulated_task_records = []
+        self.rollout_call_count = 0
+        self.last_dump_time = time.time()
+        self.dump_dir = os.path.join(self.config.train.output_dir, "task_timing_logs")
+        os.makedirs(self.dump_dir, exist_ok=True)
+
+        # Configuration for periodic dumping
+        self.dump_every_n_seconds = 120
+
     def get_underlying_model(self) -> torch.nn.Module:
         return self.model
 
@@ -140,127 +154,40 @@ class OpenVLARollout(RolloutBase):
         load_format: str = "dummy",
         **kwargs,
     ):
-        if not self._engine_initialized:
-            model_path = self.config.policy.model_name_or_path
+        if self._engine_initialized:
+            return
 
-            if self.model_type == "openvla-oft":
-                from cosmos_rl.policy.model.vla.openvla_oft.processing_prismatic import (
-                    PrismaticProcessor,
-                )
-            elif self.model_type == "openvla":
-                from cosmos_rl.policy.model.vla.openvla.processing_prismatic import (
-                    PrismaticProcessor,
-                )
-            else:
-                raise ValueError(f"Unsupported vla model type: {self.model_type}")
+        self.model = ModelRegistry.build_model(self.config)
+        self.processor = self.model.processor
+        self.tokenizer = self.model.tokenizer
+        self.pad_token_id = getattr(self.tokenizer, "pad_token_id", 0)
 
-            self.processor = PrismaticProcessor.from_pretrained(
-                model_path, trust_remote_code=True
+        pfn, _ = self.model.parallelize_fn
+        pfn(self.model, self.parallel_dims, self.config)
+
+        if self.config.mode != "colocated":
+            self.model.load_hf_weights(
+                self.config.policy.model_name_or_path,
+                self.parallel_dims,
+                torch.device("cuda"),
             )
-            self.tokenizer = self.processor.tokenizer
-            self.pad_token_id = getattr(self.tokenizer, "pad_token_id", 0)
+        self.model.eval()
+        self._engine_initialized = True
+        logger.info("[Rollout] Engine initialized.")
 
-            self.model = ModelRegistry.build_model(self.config)
-
-            pfn, _ = self.model.parallelize_fn
-            pfn(self.model, self.parallel_dims, self.config)
-
-            self.model.eval()
-
-            if self.config.mode != "colocated":
-                self.model.load_hf_weights(
-                    self.config.policy.model_name_or_path,
-                    self.parallel_dims,
-                    torch.device("cuda"),
-                )
-            self._engine_initialized = True
-            logger.info("[Rollout] Engine initialized.")
-
-    def rollout_generation(
-        self,
-        payloads: List[RLPayload],
-        stream: torch.cuda.Stream,
-        data_packer: BaseDataPacker,
-        data_fetcher: DataFetcherBase,
-        is_validation: bool = False,
-        **kwargs,
-    ):
-        self.model._set_fsdp_reshard_after_forward("never")
-
-        if is_validation:
-            results = self._rollout_validation(
-                payloads, stream, data_packer, data_fetcher, **kwargs
-            )
-        else:
-            results = self._rollout_collection(
-                payloads, stream, data_packer, data_fetcher, **kwargs
-            )
-
-        self.model._set_fsdp_reshard_after_forward(
-            self.config.train.fsdp_reshard_after_forward
+    def _prepare_payload_list(
+        self, payloads: List[RLPayload], is_validation: bool
+    ) -> List[RLPayload]:
+        self.n_generation = (
+            max(1, self.config.rollout.n_generation) if not is_validation else 1
         )
+        return np.array(
+            [[idx for _ in range(self.n_generation)] for idx in range(len(payloads))]
+        ).flatten()
 
-        return results
-
-    def _rollout_collection(
-        self,
-        payloads: List[RLPayload],
-        stream: torch.cuda.Stream,
-        data_packer: BaseDataPacker,
-        data_fetcher: DataFetcherBase,
-        **kwargs,
+    def _setup_parallel_envs(
+        self, payloads: List[RLPayload], env_ids: List[int], is_validation: bool
     ):
-        n_generation = max(1, self.config.rollout.n_generation)
-        num_batches = len(payloads)
-        collected_results = []
-        for i in range(num_batches):
-            try:
-                group_results = self._generate_minibatch(
-                    payloads=[payloads[i]] * n_generation,
-                    is_validation=False,
-                )
-                collected_results.extend(group_results)
-            except Exception as e:
-                logger.warning(
-                    f"[Rollout Collection] Prompt failed likely due to sim timeout, prompt dropped...: {e}"
-                )
-                self._destroy_parallel_envs()
-                collected_results.append(RolloutResult(completions=[]))
-        return collected_results
-
-    def _rollout_validation(
-        self,
-        payloads: List[RLPayload],
-        stream: torch.cuda.Stream,
-        data_packer: BaseDataPacker,
-        data_fetcher: DataFetcherBase,
-        **kwargs,
-    ):
-        batch_size = max(1, self.config.validation.batch_size)
-        num_batches = (len(payloads) + batch_size - 1) // batch_size
-        valid_results = []
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, len(payloads))
-            payload_batch = payloads[start_idx:end_idx]
-            while True:
-                try:
-                    group_results = self._generate_minibatch(
-                        payloads=payload_batch,
-                        is_validation=True,
-                    )
-                    break
-                except Exception as e:
-                    logger.warning(
-                        f"[Rollout Validation] Batch failed likely due to sim timeout, retrying...: {e}"
-                    )
-                    self._destroy_parallel_envs()
-                    continue
-            valid_results.extend(group_results)
-        return valid_results
-
-    def _setup_parallel_envs(self, payloads: List[RLPayload], is_validation: bool):
-        env_ids = list(range(len(payloads)))
         task_ids = []
         trial_ids = []
         for payload in payloads:
@@ -276,47 +203,407 @@ class OpenVLARollout(RolloutBase):
             "task_descriptions": task_descriptions,
         }
 
-    def _destroy_parallel_envs(self):
+    @torch.no_grad()
+    def _do_rollout(
+        self,
+        payloads: List[RLPayload],
+        payload_indices: np.ndarray,
+        is_validation: bool,
+        continuous: bool = False,
+    ):
+        actions = None
+        enqueued_payloads = 0
+        finished_payloads = 0
+
+        obs_keys = ["full_images", "wrist_images", "states"]
+        sim_results = {k: None for k in obs_keys}
+        sim_results["task_descriptions"] = [""] * self.num_envs
+
+        vla_input_keys = ["input_ids", "attention_mask", "pixel_values"]
+        vla_output_keys = ["responses", "action"]
+        if not is_validation:
+            vla_output_keys.append("old_log_probs")
+        vla_history_keys = vla_input_keys + vla_output_keys
+
+        payload_env_mapping = np.full(self.num_envs, -1)
+
+        task_records = [{} for _ in range(len(payload_indices))]
+        for i in range(len(payload_indices)):
+            payload = payloads[payload_indices[i]]
+            task_records[i] = {
+                "task_id": payload.prompt.get("task_id", 0),
+                "trial_id": payload.prompt.get("trial_id", 0),
+                "task_suite_name": payload.prompt.get("task_suite_name", ""),
+                "complete": False,
+                "finish_step": -1,
+                "start_time": None,
+                "end_time": None,
+                "env_id": None,
+            }
+            for key in vla_history_keys:
+                task_records[i][key] = []
+
+        active_env_ids = []
+        while finished_payloads < len(payload_indices):
+            # Step 1: Advance active environments
+            if active_env_ids:
+                step_results = self.env_manager.chunk_step(active_env_ids, actions)
+                active_indices, finished_env_ids = [], []
+                for i, env_id in enumerate(active_env_ids):
+                    if step_results["active"][i]:
+                        active_indices.append(i)
+                    else:
+                        finished_env_ids.append(env_id)
+                        payload_idx = payload_env_mapping[env_id]
+                        task_records[payload_idx]["complete"] = step_results[
+                            "complete"
+                        ][i]
+                        task_records[payload_idx]["active"] = step_results["active"][i]
+                        task_records[payload_idx]["finish_step"] = step_results[
+                            "finish_step"
+                        ][i]
+                        task_records[payload_idx]["end_time"] = time.time()
+                        payload_env_mapping[env_id] = -1
+                active_env_ids = [active_env_ids[i] for i in active_indices]
+                finished_payloads += len(finished_env_ids)
+                for key in obs_keys:
+                    data_shape = (
+                        self.num_envs,
+                        *step_results[key][active_indices].shape[1:],
+                    )
+                    sim_results[key] = np.zeros(
+                        data_shape, dtype=step_results[key][active_indices].dtype
+                    )
+                    sim_results[key][active_env_ids] = step_results[key][
+                        active_indices
+                    ].copy()
+
+                if is_validation and self.config.vla.save_video:
+                    rollout_dir = os.path.join(
+                        self.config.train.output_dir, "vla_rollouts"
+                    )
+                    self.env_manager.save_validation_videos(
+                        rollout_dir, finished_env_ids
+                    )
+
+            # Step 2: Enqueue new payloads if envs become available
+            enqueue_payload_list = []
+            left_payloads = len(payload_indices) - enqueued_payloads
+            if continuous and np.any(payload_env_mapping == -1):
+                # continuous rollout, enqueue new payloads if any env becomes available
+                available_env_ids = [
+                    i for i, pidx in enumerate(payload_env_mapping) if pidx == -1
+                ][:left_payloads]
+            elif np.all(payload_env_mapping == -1):
+                # all envs are idle, enqueue new payloads to all envs
+                available_env_ids = list(range(self.num_envs))[:left_payloads]
+            else:
+                available_env_ids = []
+
+            for env_id in available_env_ids:
+                payload_idx = payload_indices[enqueued_payloads]
+                payload = payloads[payload_idx]
+                payload_env_mapping[env_id] = payload_idx
+                enqueue_payload_list.append(payload)
+                # Record start time and env_id for this task
+                task_records[payload_idx]["start_time"] = time.time()
+                task_records[payload_idx]["env_id"] = env_id
+                enqueued_payloads += 1
+
+            logger.debug(
+                f"payload_env_mapping: {payload_env_mapping}, "
+                f"finished_payloads: {finished_payloads}/{len(payload_indices)}, "
+                f"enqueued_payloads: {enqueued_payloads}/{len(payload_indices)}."
+            )
+            if available_env_ids:
+                init_results = self._setup_parallel_envs(
+                    enqueue_payload_list, available_env_ids, is_validation
+                )
+                for key in obs_keys:
+                    if sim_results[key] is None:
+                        sim_results[key] = init_results[key].copy()
+                    else:
+                        sim_results[key][available_env_ids] = init_results[key].copy()
+                for i, env_id in enumerate(available_env_ids):
+                    sim_results["task_descriptions"][env_id] = init_results[
+                        "task_descriptions"
+                    ][i]
+
+            # Step 3: Generate VLA output
+            vla_input = self._process_input(sim_results)
+            vla_output = self._generate_one_step_oft(vla_input)
+            active_env_ids = [
+                i for i, pidx in enumerate(payload_env_mapping) if pidx != -1
+            ]
+            for env_id in active_env_ids:
+                payload_idx = payload_env_mapping[env_id]
+                for key in vla_input_keys:
+                    task_records[payload_idx][key].append(vla_input[key][env_id])
+                for key in vla_output_keys:
+                    task_records[payload_idx][key].append(vla_output[key][env_id])
+            actions = vla_output["action"][active_env_ids]
+
+        return task_records
+
+    def _extract_timing_info(self, task_records: List[Dict], rank: int) -> List[Dict]:
         """
-        Cleanly destroy parallel environment workers and reset simulation pool
+        Extract timing and environment information from task records.
+        Converts to Chrome tracing format for visualization in chrome://tracing.
 
-        Side Effects:
-            - Terminates processes in self.sim_processes
-            - Resets all self.sim_* member variables to empty
+        Args:
+            task_records: List of task record dictionaries
+            rank: Rank ID to use as process ID in tracing
+
+        Returns:
+            List of Chrome tracing event dictionaries (JSON serializable)
         """
-        if not self.sim_processes:
-            return  # Nothing to clean up
+        tracing_events = []
 
-        logger.debug(f"Destroying {len(self.sim_processes)} simulation processes...")
+        for idx, task in enumerate(task_records):
+            start_time = task.get("start_time")
+            end_time = task.get("end_time")
 
-        # Send termination signal to all workers
-        for q in self.sim_input_queues:
-            try:
-                q.put(None, timeout=1)
-            except Exception:
-                pass  # Ignore errors, process termination will handle stuck workers
+            if start_time is None or end_time is None:
+                continue
 
-        # Wait for processes to finish, terminate if hung
-        for p in self.sim_processes:
-            p.join(timeout=20)
-            if p.is_alive():
-                p.terminate()
-                p.join(timeout=5)  # Wait again after terminate
-                if p.is_alive():
-                    p.kill()
-                    p.join(timeout=2)  # Final wait after kill
+            # Convert to microseconds (Chrome tracing format requirement)
+            ts_us = int(start_time * 1_000_000)
+            dur_us = int((end_time - start_time) * 1_000_000)
 
-        # Reset simulation pool state
-        num_destroyed = len(self.sim_processes)
-        self.sim_processes = []
-        self.sim_input_queues = []
-        self.sim_output_queues = []
+            # Convert numpy types to native Python types for JSON serialization
+            task_id = int(task.get("task_id", -1))
+            trial_id = int(task.get("trial_id", -1))
+            env_id = int(task.get("env_id", -1))
+            complete = bool(task.get("complete", False))
+            finish_step = int(task.get("finish_step", -1))
 
-        logger.debug(f"Destroyed {num_destroyed} simulation processes, pool reset")
+            task_name = f"Task_{task_id}.{trial_id}"
 
-    def _process_input(
-        self, inputs: Dict[str, Any], task_descriptions: List[str]
-    ) -> Dict[str, torch.Tensor]:
+            # Chrome tracing duration event (ph: "X")
+            # Use rank as process ID (pid) and env_id as thread ID (tid)
+            # Color: green for complete, red for incomplete
+            event = {
+                "name": task_name,
+                "cat": "task_execution",
+                "ph": "X",  # Complete event (duration)
+                "ts": ts_us,
+                "dur": dur_us,
+                "pid": rank,  # Rank as process ID
+                "tid": env_id,  # Environment as thread ID within the rank
+                "cname": "good"
+                if complete
+                else "bad",  # Green for complete, red for incomplete
+                "args": {
+                    "rank": rank,
+                    "task_id": task_id,
+                    "trial_id": trial_id,
+                    "task_suite_name": str(task.get("task_suite_name", "")),
+                    "env_id": env_id,
+                    "complete": complete,
+                    "finish_step": finish_step,
+                    "status": "success" if complete else "failed",
+                },
+            }
+            tracing_events.append(event)
+
+        return tracing_events
+
+    def _should_dump_timing_data(self) -> bool:
+        """
+        Check if timing data should be dumped based on count or time threshold.
+
+        Returns:
+            True if data should be dumped, False otherwise
+        """
+        # Check time-based trigger
+        time_since_last_dump = time.time() - self.last_dump_time
+        if (
+            self.dump_every_n_seconds > 0
+            and time_since_last_dump >= self.dump_every_n_seconds
+        ):
+            return True
+
+        return False
+
+    def _dump_timing_data(self):
+        """
+        Dump accumulated task timing data in Chrome tracing format.
+        Gathers data from all ranks and merges into a single trace file.
+        Can be visualized in chrome://tracing or https://ui.perfetto.dev/
+        """
+        if not self.accumulated_task_records:
+            logger.debug("No timing data to dump")
+            return
+
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        world_size = (
+            torch.distributed.get_world_size()
+            if torch.distributed.is_initialized()
+            else 1
+        )
+
+        # Prepare metadata for this rank
+        local_metadata = {
+            "rank": int(rank),
+            "num_tasks": len(self.accumulated_task_records),
+            "rollout_calls": int(self.rollout_call_count),
+        }
+
+        # Gather data from all ranks to rank 0
+        if world_size > 1:
+            # Gather all events to rank 0
+            all_events = [None] * world_size
+            all_metadata = [None] * world_size
+
+            torch.distributed.gather_object(
+                self.accumulated_task_records, all_events if rank == 0 else None, dst=0
+            )
+
+            torch.distributed.gather_object(
+                local_metadata, all_metadata if rank == 0 else None, dst=0
+            )
+
+            if rank == 0:
+                # Merge all events from all ranks
+                merged_events = []
+                for rank_events in all_events:
+                    if rank_events:
+                        merged_events.extend(rank_events)
+
+                # Create combined metadata
+                total_tasks = sum(m["num_tasks"] for m in all_metadata if m)
+                combined_metadata = {
+                    "dump_timestamp": datetime.now().isoformat(),
+                    "world_size": world_size,
+                    "total_tasks": total_tasks,
+                    "per_rank_info": all_metadata,
+                }
+            else:
+                # Non-rank-0 processes just clear and return
+                self.accumulated_task_records = []
+                self.last_dump_time = time.time()
+                return
+        else:
+            # Single rank case
+            merged_events = self.accumulated_task_records
+            combined_metadata = {
+                "dump_timestamp": datetime.now().isoformat(),
+                "world_size": 1,
+                "total_tasks": len(self.accumulated_task_records),
+                "per_rank_info": [local_metadata],
+            }
+
+        # Only rank 0 writes the combined trace file
+        if rank == 0:
+            tracing_path = os.path.join(
+                self.dump_dir, f"trace_all_ranks_{timestamp_str}.json"
+            )
+
+            # Add process and thread name metadata events for better visualization
+            metadata_events = []
+
+            # Add process names for each rank
+            for r in range(world_size):
+                metadata_events.append(
+                    {
+                        "name": "process_name",
+                        "ph": "M",  # Metadata event
+                        "pid": r,
+                        "args": {"name": f"Rank {r}"},
+                    }
+                )
+
+            # Add thread names for each environment ID
+            # Extract unique (pid, tid) pairs from events
+            seen_threads = set()
+            for event in merged_events:
+                thread_key = (event["pid"], event["tid"])
+                if thread_key not in seen_threads:
+                    seen_threads.add(thread_key)
+                    metadata_events.append(
+                        {
+                            "name": "thread_name",
+                            "ph": "M",  # Metadata event
+                            "pid": event["pid"],
+                            "tid": event["tid"],
+                            "args": {"name": f"Env {event['tid']}"},
+                        }
+                    )
+
+            # Chrome tracing format requires a specific structure
+            tracing_data = {
+                "traceEvents": metadata_events + merged_events,
+                "displayTimeUnit": "ms",
+                "metadata": combined_metadata,
+            }
+
+            with open(tracing_path, "w") as f:
+                json.dump(tracing_data, f, indent=2)
+
+            logger.info(
+                f"Dumped {len(merged_events)} task traces from {world_size} rank(s) to: {tracing_path}"
+            )
+            logger.info("  View in Chrome: chrome://tracing (Load button)")
+            logger.info("  Or online: https://ui.perfetto.dev/ (Open trace file)")
+            logger.info("  Visualization: Each rank is a process, each env is a thread")
+
+        # Clear accumulated data after dumping
+        self.accumulated_task_records = []
+        self.last_dump_time = time.time()
+
+    def flush_timing_data(self):
+        """
+        Force dump of any remaining timing data.
+        Should be called at the end of training or on shutdown.
+        """
+        if self.accumulated_task_records:
+            logger.info(
+                f"Flushing remaining {len(self.accumulated_task_records)} task records"
+            )
+            self._dump_timing_data()
+        else:
+            logger.debug("No remaining timing data to flush")
+
+    def rollout_generation(
+        self,
+        payloads: List[RLPayload],
+        stream: torch.cuda.Stream,
+        data_packer: BaseDataPacker,
+        data_fetcher: DataFetcherBase,
+        is_validation: bool = False,
+        **kwargs,
+    ):
+        self.model._set_fsdp_reshard_after_forward("never")
+
+        payload_indices = self._prepare_payload_list(payloads, is_validation)
+        task_records = self._do_rollout(
+            payloads,
+            payload_indices,
+            is_validation,
+            self.config.vla.continuous,
+        )
+
+        # Accumulate timing information
+        self.rollout_call_count += 1
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        timing_info = self._extract_timing_info(task_records, rank)
+        self.accumulated_task_records.extend(timing_info)
+
+        # Periodically dump timing data
+        if self._should_dump_timing_data():
+            self._dump_timing_data()
+
+        results = self._pack_grpo_results(
+            self.n_generation, payload_indices, task_records, is_validation
+        )
+
+        self.model._set_fsdp_reshard_after_forward(
+            self.config.train.fsdp_reshard_after_forward
+        )
+        return results
+
+    def _process_input(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """
         Process inputs for VLA model (matching SimpleVLA-RL's process_input)
 
@@ -329,6 +616,7 @@ class OpenVLARollout(RolloutBase):
         """
         full_images = inputs["full_images"]
         wrist_images = inputs["wrist_images"]
+        task_descriptions = inputs["task_descriptions"]
 
         vla_type = self.config.vla.vla_type
 
@@ -479,181 +767,89 @@ class OpenVLARollout(RolloutBase):
 
     def _pack_grpo_results(
         self,
-        vla_history: List[Dict],
+        n_generation: int,
+        payload_indices: List[int],
         task_records: List[Dict],
-        group_size: int,
         is_validation: bool,
     ):
         """
-        Pack GRPO results: apply filtering, compute old_log_probs, create RolloutResults
-
-        This function:
-        1. Checks GRPO filtering criteria (if enabled)
-        2. If group is invalid, returns None (skips expensive log prob computation)
-        3. If group is valid, extracts trajectories and computes old_log_probs
-        4. Creates and returns RolloutResult objects
+        Pack GRPO results and create RolloutResults
 
         Args:
-            vla_history: List of step_data dicts from _parallel_inference_and_sim
+            n_generation: Number of generations per payload
+            payload_indices: List of payload indices
             task_records: List of task metadata dicts
-            group_size: Number of episodes in the group (n_generation)
-            enable_filtering: Whether to apply GRPO filtering
+            is_validation: Whether to save validation videos
 
         Returns:
             List of RolloutResult objects if valid, None if filtered out
         """
-        n_success = sum([task_records[i]["complete"] for i in range(group_size)])
-        if not is_validation:
-            task_id = task_records[0]["task_id"]
-            trial_id = task_records[0]["trial_id"]
-            logger.info(
-                f"[Rollout] task_id: {task_id}, trial_id: {trial_id}, success rate: {n_success}/{group_size}"
-            )
-        else:
-            logger.info(f"[Validation] success rate: {n_success}/{group_size}")
 
-        trajectories = [
-            {
-                "input_ids": pad_sequence(
-                    vla_history[i]["input_ids"],
-                    batch_first=True,
-                    padding_value=self.pad_token_id,
-                ),
-                "attention_mask": pad_sequence(
-                    vla_history[i]["attention_mask"],
-                    batch_first=True,
-                    padding_value=0,
-                ),
-            }
-            for i in range(group_size)
-        ]
-        pack_keys = ["pixel_values", "responses"] + (
-            ["old_log_probs"] if not is_validation else []
-        )
+        n_payloads = len(payload_indices) // n_generation
+        successes = [0] * n_payloads
+        for i in range(n_payloads):
+            for j in range(n_generation):
+                payload_idx = i * n_generation + j
+                if task_records[payload_idx]["complete"]:
+                    successes[i] += 1
+        success_rates = [successes[i] / n_generation for i in range(n_payloads)]
+        avg_success_rate = sum(success_rates) / n_payloads * 100
 
-        for episode_idx in range(group_size):
-            for key in pack_keys:
-                trajectories[episode_idx][key] = torch.stack(
-                    vla_history[episode_idx][key], dim=0
-                )
-
-        # Compute old_log_probs for each episode by replaying trajectory
-        completions = []
-        for episode_idx in range(group_size):
-            traj = trajectories[episode_idx]
-            trajectory_id = save_trajectory_to_buffer(
-                traj,
-                buffer_dir=os.path.join(self.config.train.output_dir, "replay_buffer"),
-            )
-            completions.append(
-                {
-                    "complete": bool(task_records[episode_idx]["complete"]),
-                    "finish_step": int(task_records[episode_idx]["finish_step"]),
-                    "trajectory_id": trajectory_id,
-                }
-            )
         if is_validation:
-            return [RolloutResult(completions=[c]) for c in completions]
-        else:
-            return [RolloutResult(completions=completions)]
-
-    @torch.no_grad()
-    def _generate_minibatch(
-        self, payloads: List[RLPayload], is_validation: bool = False
-    ):
-        """
-        Run parallel VLA inference and simulation for a minibatch
-
-        Uses separate processes for each environment to avoid shared OpenGL/MuJoCo state.
-
-        Args:
-            payloads: List of RLPayload objects containing task information
-            is_validation: Whether to save validation videos
-
-        Returns:
-            Tuple of (vla_history, task_records)
-        """
-        env_ids = list(range(len(payloads)))
-        gen_indices = (
-            [0] * len(payloads) if is_validation else [i for i in range(len(payloads))]
-        )
-
-        torch.cuda.synchronize()  # Wait for all CUDA operations to complete
-        torch.cuda.empty_cache()  # Free up cached GPU memory
-        logger.debug(
-            f"Released GPU resources before spawning {len(payloads)} sim workers"
-        )
-
-        # Setup parallel environments (populates self.sim_processes, self.sim_input_queues, self.sim_output_queues)
-        initial_data = self._setup_parallel_envs(payloads, is_validation)
-
-        # Unpack initial data
-        task_descriptions = initial_data["task_descriptions"]
-
-        # Episode execution loop
-        step = 0
-        vla_history = []
-        env_states = self.env_manager.get_env_states(env_ids)
-        task_records = [{} for _ in range(len(payloads))]
-        for i in range(len(payloads)):
-            task_records[i] = {
-                "task_id": payloads[i].prompt.get("task_id", 0),
-                "trial_id": payloads[i].prompt.get("trial_id", 0),
-                "gen_idx": gen_indices[i],
-                "task_suite_name": payloads[i].prompt.get("task_suite_name", ""),
-                "active": env_states[i].active,
-                "complete": env_states[i].complete,
-                "finish_step": env_states[i].step,
-            }
-
-        from cosmos_rl.policy.model.vla.openvla_oft.constants import NUM_ACTIONS_CHUNK
-
-        vla_input_keys = ["input_ids", "attention_mask", "pixel_values"]
-        vla_output_keys = ["responses", "action"]
-        if not is_validation:
-            vla_output_keys.append("old_log_probs")
-        vla_history_keys = vla_input_keys + vla_output_keys
-        vla_history = [
-            {key: [] for key in vla_history_keys} for _ in range(len(payloads))
-        ]
-
-        active_indices = active_env_ids = env_ids
-        current_inputs = {
-            "full_images": initial_data["full_images"],
-            "wrist_images": initial_data["wrist_images"],
-            "states": initial_data["states"],
-        }
-        while True:
-            if not active_indices:
-                break
-            vla_input = self._process_input(current_inputs, task_descriptions)
-            vla_output = self._generate_one_step_oft(vla_input, is_validation)
-            step_results = self.env_manager.chunk_step(
-                active_env_ids, vla_output["action"]
+            logger.info(
+                f"Validation {n_payloads} avg success rate: {avg_success_rate:.2f}%"
             )
-            for i, env_id in enumerate(active_env_ids):
-                for key in vla_input_keys:
-                    vla_history[env_id][key].append(vla_input[key][i])
-                for key in vla_output_keys:
-                    vla_history[env_id][key].append(vla_output[key][i])
-                for key in ["active", "complete", "finish_step"]:
-                    task_records[env_id][key] = step_results[key][i]
+        else:
+            formatted_rates = ", ".join(
+                [f"{rate * 100:.2f}%" for rate in success_rates]
+            )
+            logger.info(
+                f"Rollout {n_payloads}x{n_generation} avg success rate: {avg_success_rate:.2f}%, success rates: [{formatted_rates}]"
+            )
 
-            # update active indices, prepare data for next chunk
-            active_indices = [
-                i
-                for i, env_id in enumerate(active_env_ids)
-                if task_records[env_id]["active"]
-            ]
-            active_env_ids = [active_env_ids[i] for i in active_indices]
-            for key in ["full_images", "wrist_images", "states"]:
-                current_inputs[key] = step_results[key][active_indices].copy()
-            step += NUM_ACTIONS_CHUNK
+        pack_keys = ["pixel_values", "responses"]
+        if not is_validation:
+            pack_keys.append("old_log_probs")
 
-        if is_validation and self.config.vla.save_video:
-            rollout_dir = os.path.join(self.config.train.output_dir, "vla_rollouts")
-            self.env_manager.save_validation_videos(rollout_dir, env_ids)
+        def pack_trajectory(payload_idx: int):
+            start_idx = payload_idx * n_generation
+            completions = []
+            for i in range(n_generation):
+                traj = {
+                    "input_ids": pad_sequence(
+                        task_records[start_idx + i]["input_ids"],
+                        batch_first=True,
+                        padding_value=self.pad_token_id,
+                    ),
+                    "attention_mask": pad_sequence(
+                        task_records[start_idx + i]["attention_mask"],
+                        batch_first=True,
+                        padding_value=0,
+                    ),
+                }
+                for key in pack_keys:
+                    try:
+                        traj[key] = torch.stack(task_records[start_idx + i][key], dim=0)
+                    except Exception as e:
+                        logger.error(
+                            f"Error packing trajectory {start_idx + i} {key}: {e}"
+                        )
+                        exit(0)
 
-        return self._pack_grpo_results(
-            vla_history, task_records, len(payloads), is_validation
-        )
+                trajectory_id = save_trajectory_to_buffer(
+                    traj,
+                    buffer_dir=os.path.join(
+                        self.config.train.output_dir, "replay_buffer"
+                    ),
+                )
+                completions.append(
+                    {
+                        "complete": bool(task_records[start_idx + i]["complete"]),
+                        "finish_step": int(task_records[start_idx + i]["finish_step"]),
+                        "trajectory_id": trajectory_id,
+                    }
+                )
+            return RolloutResult(completions=completions)
+
+        results = [pack_trajectory(i) for i in range(n_payloads)]
+        return results
