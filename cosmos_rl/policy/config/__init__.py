@@ -467,6 +467,11 @@ class GrpoConfig(BaseModel):
         description="Whether to collect logprobs for rollouts instead of text. This can save logprob calculation time during rollout generation.",
     )
 
+    use_rollout_logprobs_for_loss: bool = Field(
+        default=False,
+        description="Whether to use collected logprobs from rollouts for loss calculation. This is an alternative to calculating logprobs during training as old logprobs for importance sampling.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert self.variant in [
@@ -497,6 +502,14 @@ class GrpoConfig(BaseModel):
             logger.warning(
                 "Decoupled loss is enabled, so rollout_as_token_ids is set to True."
             )
+        if self.use_rollout_logprobs_for_loss:
+            self.collect_rollout_logprobs = True
+            logger.warning(
+                "use_rollout_logprobs_for_loss is enabled, so collect_rollout_logprobs is set to True."
+            )
+        assert not (
+            self.use_rollout_logprobs_for_loss and self.use_decoupled_loss
+        ), "Cannot use both use_rollout_logprobs_for_loss and use_decoupled_loss at the same time."
 
         return self
 
