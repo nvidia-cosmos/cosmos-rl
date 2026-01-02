@@ -1021,6 +1021,7 @@ class PolicyStatusManager:
             return
 
         arrived_replicas = self.get_all_atoms_arrived_replicas()
+        logger.info(f"[Controller] steps: {self.current_step}/{self.total_steps}, {self.total_pending_rollouts()} pending rollouts, need {self.config.train.train_batch_per_replica} rollouts for triggering data fetch and training for {len(self.get_all_atoms_arrived_replicas())} replicas")
         # no replicas arrived, do nothing
         if len(arrived_replicas) == 0:
             return
