@@ -14,9 +14,7 @@
 # limitations under the License.
 
 import os
-import json
 import time
-from datetime import datetime
 from types import SimpleNamespace
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -44,6 +42,7 @@ from cosmos_rl.simulators.libero.utils import (
 from cosmos_rl.simulators.env_manager import EnvManager
 from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
+from cosmos_rl.rollout.vla_rollout.trace_utils import create_tracing_manager
 
 
 def normalize_proprio(proprio: np.ndarray, norm_stats: Dict) -> np.ndarray:
@@ -131,15 +130,18 @@ class OpenVLARollout(RolloutBase):
         )
         self.env_manager.start_simulator()
 
-        # Initialize task timing accumulator
-        self.accumulated_task_records = []
-        self.rollout_call_count = 0
-        self.last_dump_time = time.time()
-        self.dump_dir = os.path.join(self.config.train.output_dir, "task_timing_logs")
-        os.makedirs(self.dump_dir, exist_ok=True)
-
-        # Configuration for periodic dumping
-        self.dump_every_n_seconds = 120
+        # Initialize tracing system (if enabled via config)
+        trace_verbosity = getattr(self.config.vla, 'trace_verbosity', 0)
+        self.tracing_manager = create_tracing_manager(
+            rank=torch.distributed.get_rank(),
+            output_dir=self.config.train.output_dir,
+            trace_verbosity=trace_verbosity,
+        )
+        
+        # TODO: Implement async environment initialization to improve throughput
+        # Currently environment reset is synchronous and blocks the main loop.
+        # Future implementation could use ThreadPoolExecutor or async/await to
+        # overlap environment initialization with inference/stepping of other envs.
 
     def get_underlying_model(self) -> torch.nn.Module:
         return self.model
@@ -245,7 +247,8 @@ class OpenVLARollout(RolloutBase):
         while finished_payloads < len(payload_indices):
             # Step 1: Advance active environments
             if active_env_ids:
-                step_results = self.env_manager.chunk_step(active_env_ids, actions)
+                with self.tracing_manager.trace("sim_step", env_ids=active_env_ids):
+                    step_results = self.env_manager.chunk_step(active_env_ids, actions)
                 active_indices, finished_env_ids = [], []
                 for i, env_id in enumerate(active_env_ids):
                     if step_results["active"][i]:
@@ -318,9 +321,10 @@ class OpenVLARollout(RolloutBase):
                 f"enqueued_payloads: {enqueued_payloads}/{len(payload_indices)}."
             )
             if available_env_ids:
-                init_results = self._setup_parallel_envs(
-                    enqueue_payload_list, available_env_ids, is_validation
-                )
+                with self.tracing_manager.trace("env_reset", env_ids=available_env_ids):
+                    init_results = self._setup_parallel_envs(
+                        enqueue_payload_list, available_env_ids, is_validation
+                    )
                 for key in obs_keys:
                     if sim_results[key] is None:
                         data_shape = (
@@ -345,8 +349,13 @@ class OpenVLARollout(RolloutBase):
                 )
 
             # Step 3: Generate VLA output
-            vla_input = self._process_input(active_sim_results)
-            vla_output = self._generate_one_step_oft(vla_input)
+            with self.tracing_manager.trace(
+                "inference",
+                env_ids=active_env_ids,
+                batch_size=len(active_env_ids)
+            ):
+                vla_input = self._process_input(active_sim_results)
+                vla_output = self._generate_one_step_oft(vla_input)
             for i, env_id in enumerate(active_env_ids):
                 task_idx = payload_env_mapping[env_id]
                 for key in vla_input_keys:
@@ -356,223 +365,6 @@ class OpenVLARollout(RolloutBase):
 
             actions = vla_output["action"]
         return task_records
-
-    def _extract_timing_info(self, task_records: List[Dict], rank: int) -> List[Dict]:
-        """
-        Extract timing and environment information from task records.
-        Converts to Chrome tracing format for visualization in chrome://tracing.
-
-        Args:
-            task_records: List of task record dictionaries
-            rank: Rank ID to use as process ID in tracing
-
-        Returns:
-            List of Chrome tracing event dictionaries (JSON serializable)
-        """
-        tracing_events = []
-
-        for idx, task in enumerate(task_records):
-            start_time = task.get("start_time")
-            end_time = task.get("end_time")
-
-            if start_time is None or end_time is None:
-                continue
-
-            # Convert to microseconds (Chrome tracing format requirement)
-            ts_us = int(start_time * 1_000_000)
-            dur_us = int((end_time - start_time) * 1_000_000)
-
-            # Convert numpy types to native Python types for JSON serialization
-            task_id = int(task.get("task_id", -1))
-            trial_id = int(task.get("trial_id", -1))
-            env_id = int(task.get("env_id", -1))
-            complete = bool(task.get("complete", False))
-            finish_step = int(task.get("finish_step", -1))
-
-            task_name = f"Task_{task_id}.{trial_id}"
-
-            # Chrome tracing duration event (ph: "X")
-            # Use rank as process ID (pid) and env_id as thread ID (tid)
-            # Color: green for complete, red for incomplete
-            event = {
-                "name": task_name,
-                "cat": "task_execution",
-                "ph": "X",  # Complete event (duration)
-                "ts": ts_us,
-                "dur": dur_us,
-                "pid": rank,  # Rank as process ID
-                "tid": env_id,  # Environment as thread ID within the rank
-                "cname": "good"
-                if complete
-                else "bad",  # Green for complete, red for incomplete
-                "args": {
-                    "rank": rank,
-                    "task_id": task_id,
-                    "trial_id": trial_id,
-                    "task_suite_name": str(task.get("task_suite_name", "")),
-                    "env_id": env_id,
-                    "complete": complete,
-                    "finish_step": finish_step,
-                    "status": "success" if complete else "failed",
-                },
-            }
-            tracing_events.append(event)
-
-        return tracing_events
-
-    def _should_dump_timing_data(self) -> bool:
-        """
-        Check if timing data should be dumped based on count or time threshold.
-
-        Returns:
-            True if data should be dumped, False otherwise
-        """
-        # Check time-based trigger
-        time_since_last_dump = time.time() - self.last_dump_time
-        if (
-            self.dump_every_n_seconds > 0
-            and time_since_last_dump >= self.dump_every_n_seconds
-        ):
-            return True
-
-        return False
-
-    def _dump_timing_data(self):
-        """
-        Dump accumulated task timing data in Chrome tracing format.
-        Gathers data from all ranks and merges into a single trace file.
-        Can be visualized in chrome://tracing or https://ui.perfetto.dev/
-        """
-        if not self.accumulated_task_records:
-            logger.debug("No timing data to dump")
-            return
-
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        world_size = (
-            torch.distributed.get_world_size()
-            if torch.distributed.is_initialized()
-            else 1
-        )
-
-        # Prepare metadata for this rank
-        local_metadata = {
-            "rank": int(rank),
-            "num_tasks": len(self.accumulated_task_records),
-            "rollout_calls": int(self.rollout_call_count),
-        }
-
-        # Gather data from all ranks to rank 0
-        if world_size > 1:
-            # Gather all events to rank 0
-            all_events = [None] * world_size
-            all_metadata = [None] * world_size
-
-            torch.distributed.gather_object(
-                self.accumulated_task_records, all_events if rank == 0 else None, dst=0
-            )
-
-            torch.distributed.gather_object(
-                local_metadata, all_metadata if rank == 0 else None, dst=0
-            )
-
-            if rank == 0:
-                # Merge all events from all ranks
-                merged_events = []
-                for rank_events in all_events:
-                    if rank_events:
-                        merged_events.extend(rank_events)
-
-                # Create combined metadata
-                total_tasks = sum(m["num_tasks"] for m in all_metadata if m)
-                combined_metadata = {
-                    "dump_timestamp": datetime.now().isoformat(),
-                    "world_size": world_size,
-                    "total_tasks": total_tasks,
-                    "per_rank_info": all_metadata,
-                }
-            else:
-                # Non-rank-0 processes just clear and return
-                self.accumulated_task_records = []
-                self.last_dump_time = time.time()
-                return
-        else:
-            # Single rank case
-            merged_events = self.accumulated_task_records
-            combined_metadata = {
-                "dump_timestamp": datetime.now().isoformat(),
-                "world_size": 1,
-                "total_tasks": len(self.accumulated_task_records),
-                "per_rank_info": [local_metadata],
-            }
-
-        # Only rank 0 writes the combined trace file
-        if rank == 0:
-            tracing_path = os.path.join(
-                self.dump_dir, f"trace_all_ranks_{timestamp_str}.json"
-            )
-
-            # Add process and thread name metadata events for better visualization
-            metadata_events = []
-
-            # Add process names for each rank
-            for r in range(world_size):
-                metadata_events.append(
-                    {
-                        "name": "process_name",
-                        "ph": "M",  # Metadata event
-                        "pid": r,
-                        "args": {"name": f"Rank {r}"},
-                    }
-                )
-
-            # Add thread names for each environment ID
-            # Extract unique (pid, tid) pairs from events
-            seen_threads = set()
-            for event in merged_events:
-                thread_key = (event["pid"], event["tid"])
-                if thread_key not in seen_threads:
-                    seen_threads.add(thread_key)
-                    metadata_events.append(
-                        {
-                            "name": "thread_name",
-                            "ph": "M",  # Metadata event
-                            "pid": event["pid"],
-                            "tid": event["tid"],
-                            "args": {"name": f"Env {event['tid']}"},
-                        }
-                    )
-
-            # Chrome tracing format requires a specific structure
-            tracing_data = {
-                "traceEvents": metadata_events + merged_events,
-                "displayTimeUnit": "ms",
-                "metadata": combined_metadata,
-            }
-
-            with open(tracing_path, "w") as f:
-                json.dump(tracing_data, f, indent=2)
-
-            logger.info(
-                f"Dumped {len(merged_events)} task traces from {world_size} rank(s) to: {tracing_path}"
-            )
-
-        # Clear accumulated data after dumping
-        self.accumulated_task_records = []
-        self.last_dump_time = time.time()
-
-    def flush_timing_data(self):
-        """
-        Force dump of any remaining timing data.
-        Should be called at the end of training or on shutdown.
-        """
-        if self.accumulated_task_records:
-            logger.info(
-                f"Flushing remaining {len(self.accumulated_task_records)} task records"
-            )
-            self._dump_timing_data()
-        else:
-            logger.debug("No remaining timing data to flush")
 
     def rollout_generation(
         self,
@@ -585,38 +377,39 @@ class OpenVLARollout(RolloutBase):
     ):
         self.model._set_fsdp_reshard_after_forward("never")
 
+        # Start a new rollout trace (sets validation state)
+        self.tracing_manager.start_rollout(is_validation)
+        
         payload_indices = self._prepare_payload_list(payloads, is_validation)
 
-        # Track time for FPS calculation
-        rollout_start_time = time.time()
+        # Track time for rollout
+        rollout_start = time.time()
         task_records = self._do_rollout(
             payloads,
             payload_indices,
             is_validation,
             self.config.vla.continuous,
         )
-        rollout_end_time = time.time()
-
+        rollout_end = time.time()
+        
         # Calculate simulation FPS
         total_sim_frames = sum(task.get("finish_step", 0) for task in task_records)
-        rollout_duration = rollout_end_time - rollout_start_time
+        rollout_duration = rollout_end - rollout_start
         sim_fps = total_sim_frames / rollout_duration if rollout_duration > 0 else 0.0
-
+        
         logger.info(
             f"Rollout generation complete: "
             f"{len(task_records)} tasks, {total_sim_frames} sim frames, "
             f"{rollout_duration:.2f}s, {sim_fps:.2f} sim FPS"
         )
 
-        # Accumulate timing information
-        self.rollout_call_count += 1
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        timing_info = self._extract_timing_info(task_records, rank)
-        self.accumulated_task_records.extend(timing_info)
-
-        # Periodically dump timing data
-        if self._should_dump_timing_data():
-            self._dump_timing_data()
+        # Finalize rollout (adds task events, rollout-level trace event, and dumps trace file)
+        self.tracing_manager.finalize_rollout(
+            task_records=task_records,
+            rollout_start_time=rollout_start,
+            rollout_end_time=rollout_end,
+            continuous=self.config.vla.continuous,
+        )
 
         results = self._pack_grpo_results(
             self.n_generation, payload_indices, task_records, is_validation

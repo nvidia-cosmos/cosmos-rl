@@ -103,7 +103,7 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                 max_chunks + TRAINING_CHUNK_SIZE - 1
             ) // TRAINING_CHUNK_SIZE
 
-            logger.info(
+            logger.debug(
                 f"[VLA Train] Task {task_id}_{trial_id}, "
                 f"finished @ {policy_input.finish_step}, "
                 f"weight version: {weight_version}"
@@ -154,7 +154,7 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                     total_loss += loss.item()
                     max_loss = max(max_loss, loss.item())
                     # Logging
-                    logger.info(
+                    logger.debug(
                         f"[VLA Train] Task {task_id}_{trial_id} Chunk {chunk_idx + 1}/{num_training_chunks}: "
                         f"loss={loss.item()}, ratio [{ratio.min().item()},{ratio.max().item()}], "
                         f"clipfrac={pg_clipfrac.item()}, ppo_kl={ppo_kl.item()}, "
@@ -166,11 +166,8 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
         grad_norm = self.all_reduce_states(inter_policy_nccl)
 
         end_event.record()
-        logger.info(
+        logger.debug(
             f"[VLA Train] Step {current_step} training time: {start_event.elapsed_time(end_event) / 1000.0:.2f}s"
-        )
-        logger.info(
-            f"[VLA Train] {len(policy_inputs)} episodes, current lr: {current_lr:.6f}, grad norm: {grad_norm:.6f}"
         )
 
         report_data = {}
