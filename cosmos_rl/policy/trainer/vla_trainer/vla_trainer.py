@@ -154,14 +154,13 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
                     total_loss += loss.item()
                     max_loss = max(max_loss, loss.item())
                     # Logging
-                    if torch.distributed.get_rank() == 0:
-                        logger.info(
-                            f"[VLA Train] Task {task_id}_{trial_id} Chunk {chunk_idx + 1}/{num_training_chunks}: "
-                            f"loss={loss.item()}, ratio [{ratio.min().item()},{ratio.max().item()}], "
-                            f"clipfrac={pg_clipfrac.item()}, ppo_kl={ppo_kl.item()}, "
-                            f"mask_sum={chunk_valid_responses.item():.0f}"
-                            + (" [PADDED]" if chunk_valid_responses == 0 else "")
-                        )
+                    logger.info(
+                        f"[VLA Train] Task {task_id}_{trial_id} Chunk {chunk_idx + 1}/{num_training_chunks}: "
+                        f"loss={loss.item()}, ratio [{ratio.min().item()},{ratio.max().item()}], "
+                        f"clipfrac={pg_clipfrac.item()}, ppo_kl={ppo_kl.item()}, "
+                        f"mask_sum={chunk_valid_responses.item():.0f}"
+                        + (" [PADDED]" if chunk_valid_responses == 0 else "")
+                    )
         self.lr_schedulers.step()
         current_lr = self.lr_schedulers.get_last_lr()[0]
         grad_norm = self.all_reduce_states(inter_policy_nccl)

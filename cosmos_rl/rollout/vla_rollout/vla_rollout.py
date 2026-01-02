@@ -220,10 +220,8 @@ class OpenVLARollout(RolloutBase):
         sim_results["task_descriptions"] = [""] * self.num_envs
 
         vla_input_keys = ["input_ids", "attention_mask", "pixel_values"]
-        vla_output_keys = ["responses", "action"]
-        if not is_validation:
-            vla_output_keys.append("old_log_probs")
-        vla_history_keys = vla_input_keys + vla_output_keys
+        vla_output_keys = ["responses", "old_log_probs"]
+        vla_train_keys = vla_input_keys + vla_output_keys
 
         payload_env_mapping = np.full(self.num_envs, -1)
 
@@ -240,7 +238,7 @@ class OpenVLARollout(RolloutBase):
                 "end_time": None,
                 "env_id": None,
             }
-            for key in vla_history_keys:
+            for key in vla_train_keys:
                 task_records[i][key] = []
 
         active_env_ids = []
@@ -308,6 +306,12 @@ class OpenVLARollout(RolloutBase):
                 task_records[enqueued_payloads]["env_id"] = env_id
                 enqueued_payloads += 1
 
+            active_env_ids = [
+                i for i, pidx in enumerate(payload_env_mapping) if pidx != -1
+            ]
+            if not active_env_ids:
+                break
+
             logger.debug(
                 f"payload_env_mapping: {payload_env_mapping}, "
                 f"finished_payloads: {finished_payloads}/{len(payload_indices)}, "
@@ -319,28 +323,38 @@ class OpenVLARollout(RolloutBase):
                 )
                 for key in obs_keys:
                     if sim_results[key] is None:
-                        sim_results[key] = init_results[key].copy()
-                    else:
-                        sim_results[key][available_env_ids] = init_results[key].copy()
+                        data_shape = (
+                            self.num_envs,
+                            *init_results[key].shape[1:],
+                        )
+                        sim_results[key] = np.zeros(
+                            data_shape, dtype=init_results[key].dtype
+                        )
+                    sim_results[key][available_env_ids] = init_results[key].copy()
                 for i, env_id in enumerate(available_env_ids):
                     sim_results["task_descriptions"][env_id] = init_results[
                         "task_descriptions"
                     ][i]
 
-            # Step 3: Generate VLA output
-            vla_input = self._process_input(sim_results)
-            vla_output = self._generate_one_step_oft(vla_input)
-            active_env_ids = [
-                i for i, pidx in enumerate(payload_env_mapping) if pidx != -1
-            ]
+            active_sim_results = {"task_descriptions": []}
+            for k in obs_keys:
+                active_sim_results[k] = sim_results[k][active_env_ids]
             for env_id in active_env_ids:
+                active_sim_results["task_descriptions"].append(
+                    sim_results["task_descriptions"][env_id]
+                )
+
+            # Step 3: Generate VLA output
+            vla_input = self._process_input(active_sim_results)
+            vla_output = self._generate_one_step_oft(vla_input)
+            for i, env_id in enumerate(active_env_ids):
                 task_idx = payload_env_mapping[env_id]
                 for key in vla_input_keys:
-                    task_records[task_idx][key].append(vla_input[key][env_id])
+                    task_records[task_idx][key].append(vla_input[key][i])
                 for key in vla_output_keys:
-                    task_records[task_idx][key].append(vla_output[key][env_id])
-            actions = vla_output["action"][active_env_ids]
+                    task_records[task_idx][key].append(vla_output[key][i])
 
+            actions = vla_output["action"]
         return task_records
 
     def _extract_timing_info(self, task_records: List[Dict], rank: int) -> List[Dict]:
@@ -572,11 +586,26 @@ class OpenVLARollout(RolloutBase):
         self.model._set_fsdp_reshard_after_forward("never")
 
         payload_indices = self._prepare_payload_list(payloads, is_validation)
+
+        # Track time for FPS calculation
+        rollout_start_time = time.time()
         task_records = self._do_rollout(
             payloads,
             payload_indices,
             is_validation,
             self.config.vla.continuous,
+        )
+        rollout_end_time = time.time()
+
+        # Calculate simulation FPS
+        total_sim_frames = sum(task.get("finish_step", 0) for task in task_records)
+        rollout_duration = rollout_end_time - rollout_start_time
+        sim_fps = total_sim_frames / rollout_duration if rollout_duration > 0 else 0.0
+
+        logger.info(
+            f"Rollout generation complete: "
+            f"{len(task_records)} tasks, {total_sim_frames} sim frames, "
+            f"{rollout_duration:.2f}s, {sim_fps:.2f} sim FPS"
         )
 
         # Accumulate timing information
@@ -802,34 +831,50 @@ class OpenVLARollout(RolloutBase):
                 f"Rollout {n_payloads}x{n_generation} success rates: [{formatted_rates}], avg {avg_success_rate:.2f}%"
             )
 
-        pack_keys = ["pixel_values", "responses"]
-        if not is_validation:
-            pack_keys.append("old_log_probs")
+        def _trim_input_ids(
+            input_ids: List[torch.Tensor], attention_mask: List[torch.Tensor]
+        ):
+            """Remove padding tokens from input_ids using attention_mask."""
+            trimmed_input_ids, trimmed_attention_mask = [], []
+            for step_input_ids, step_attention_mask in zip(input_ids, attention_mask):
+                # Convert to CPU for indexing if needed, then create boolean mask
+                valid_mask = step_attention_mask.bool()
+                trimmed_step_input_ids = step_input_ids[valid_mask]
+                trimmed_step_attention_mask = torch.ones_like(trimmed_step_input_ids)
+                trimmed_input_ids.append(trimmed_step_input_ids)
+                trimmed_attention_mask.append(trimmed_step_attention_mask)
+            return trimmed_input_ids, trimmed_attention_mask
 
         def pack_trajectory(payload_idx: int):
             start_idx = payload_idx * n_generation
             completions = []
-            for i in range(n_generation):
-                traj = {
-                    "input_ids": pad_sequence(
-                        task_records[start_idx + i]["input_ids"],
-                        batch_first=True,
-                        padding_value=self.pad_token_id,
-                    ),
-                    "attention_mask": pad_sequence(
-                        task_records[start_idx + i]["attention_mask"],
-                        batch_first=True,
-                        padding_value=0,
-                    ),
-                }
-                for key in pack_keys:
-                    traj[key] = torch.stack(task_records[start_idx + i][key], dim=0)
+            sr = success_rates[payload_idx]
+            filter = sr == 0 or sr == 1
 
-                trajectory_id = save_trajectory_to_buffer(
-                    traj,
-                    buffer_dir=os.path.join(
-                        self.config.train.output_dir, "replay_buffer"
-                    ),
+            for i in range(n_generation):
+                record = task_records[start_idx + i]
+                traj = {}
+                record["input_ids"], record["attention_mask"] = _trim_input_ids(
+                    record["input_ids"], record["attention_mask"]
+                )
+                for key in [
+                    "input_ids",
+                    "attention_mask",
+                    "pixel_values",
+                    "responses",
+                    "old_log_probs",
+                ]:
+                    traj[key] = torch.stack(record[key], dim=0)
+
+                trajectory_id = (
+                    save_trajectory_to_buffer(
+                        traj,
+                        buffer_dir=os.path.join(
+                            self.config.train.output_dir, "replay_buffer"
+                        ),
+                    )
+                    if not filter
+                    else ""
                 )
                 completions.append(
                     {

@@ -1881,7 +1881,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
             logprobs = None
         else:
-            assert temperature > 0
+            # assert temperature > 0
             # org
             # action_logits  = language_model_output.logits[
             #         :,
@@ -1903,11 +1903,16 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
             # padding + only get last 256 token
             action_logits_last256 = action_logits[..., -256 - 64 : -64]
-            scaled_logits = action_logits_last256 / temperature
+            scaled_logits = action_logits_last256 / (
+                temperature if temperature > 0 else 1
+            )
             probs = torch.softmax(scaled_logits, dim=-1)
             assert probs.shape[-1] == 256
             probs_flat = probs.reshape(-1, probs.shape[-1])
-            sampled_indices_flat = torch.multinomial(probs_flat, num_samples=1)
+            if temperature > 0:
+                sampled_indices_flat = torch.multinomial(probs_flat, num_samples=1)
+            else:
+                sampled_indices_flat = torch.argmax(action_logits_last256, dim=-1)
             original_ids_flat = sampled_indices_flat + (self.vocab_size - 256)
             reponse_ids = original_ids_flat.view(action_logits.shape[0], -1)
             logp = torch.log_softmax(scaled_logits, dim=-1).reshape(-1, probs.shape[-1])
