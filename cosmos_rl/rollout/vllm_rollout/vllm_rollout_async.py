@@ -61,6 +61,12 @@ class VLLMColocateWorkerExtension:
         # we also mark whether the weight tensor is also a parameter.
         param_keys = [name for name, _ in self._get_model().named_parameters()]
 
+        # To compatible to DisaggregatedRolloutControlWorker, we need add those checks here.
+        # 1. check the module, and make sure it isn't a FSDPModule.
+        for module in self._get_model().modules():
+            if isinstance(module, torch.distributed.fsdp.FSDPModule):
+                raise ValueError("FSDPModule is not supported in async rollout.")
+
         not_parameter_names = set(state_dict.keys()) - set(param_keys)
         return named_tensors_to_serialize(state_dict), not_parameter_names
 

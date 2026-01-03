@@ -164,3 +164,13 @@ class ModuleLike:
                 continue
             submodule_prefix = prefix + ("." if prefix else "") + name
             yield from module.named_modules(submodule_prefix, *args, **kwargs)
+
+    def modules(self) -> Iterator[torch.nn.Module]:
+        """
+        Get the modules of the module.
+        """
+        yield self
+        for module in self._modules.values():
+            if module is None:
+                continue
+            yield from module.modules()

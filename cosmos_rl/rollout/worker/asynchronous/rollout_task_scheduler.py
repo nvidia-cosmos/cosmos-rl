@@ -408,11 +408,14 @@ class RolloutTaskScheduler:
             assert not self.rollout_engine.is_engine_initialized(), "Rollout engine should not be initialized before starting the scheduler worker loop"
             init_engine_hook(self.rollout_engine)
 
+            # mark the scheduler as running after the rollout engine is initialized.
+            self._running.set()
             self._loop.run_until_complete(self._worker_loop())
         finally:
+            self._running.clear()
             self._loop.close()
 
-    def start(self, init_engine_hook: Callable):
+    def start(self, init_engine_hook: Callable, wait_initialized: bool = False):
         """
         Start the background worker thread with its own event loop.
 
@@ -423,6 +426,7 @@ class RolloutTaskScheduler:
 
         Args:
             init_engine_hook: A hook function to initialize the rollout engine. The function should take the rollout engine as an argument and initialize it.
+            wait_initialized: Whether to wait for the rollout engine to be initialized before returning.
 
         Thread Safety:
             Uses threading.Event() for _running flag to ensure thread-safe state management.
@@ -438,7 +442,6 @@ class RolloutTaskScheduler:
             logger.warning("[RolloutTaskScheduler] Scheduler is already running")
             return
 
-        self._running.set()
         self._worker_thread = threading.Thread(
             target=self._run_event_loop,
             daemon=True,
@@ -446,6 +449,9 @@ class RolloutTaskScheduler:
             args=(init_engine_hook,),
         )
         self._worker_thread.start()
+
+        if wait_initialized:
+            self._running.wait()
 
         logger.info("[RolloutTaskScheduler] Background worker started")
 
@@ -507,6 +513,7 @@ class RolloutTaskScheduler:
 
         init_engine_hook(self.rollout_engine)
 
+        # mark the scheduler as running after the rollout engine is initialized.
         self._running.set()
         self._worker_task = asyncio.create_task(self._worker_loop())
         logger.info("[RolloutTaskScheduler] Background worker started")

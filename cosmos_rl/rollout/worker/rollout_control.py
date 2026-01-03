@@ -908,13 +908,42 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     self.reward_dispatcher.dequeue_rewards_cal()
                 )
 
+    def _start_async_rollout_scheduler(self, load_format):
+        """
+        Start the async rollout scheduler.
+        """
+        assert (
+            self.config.rollout.mode == "async"
+        ), "Async rollout scheduler is not enabled"
+
+        if self.scheduler.is_running():
+            logger.info("[Rollout] Async rollout scheduler is already running")
+            return
+
+        def init_engine_hook(rollout_engine: RolloutBase):
+            """
+            This hook function is used to initialize the rollout engine in the async rollout scheduler.
+            """
+            rollout_engine.init_engine(
+                quantization=self.quantization_type,
+                seed=self.config.rollout.seed,
+                load_format=load_format,
+            )
+            rollout_engine.post_init_engine_hook(
+                self.consume_command,
+                self.report_rollouts,
+                self.validation_flag,
+            )
+
+        self.scheduler.start(init_engine_hook, wait_initialized=True)
+        logger.info("[Rollout] Async rollout scheduler started")
+
     def lazy_initialize_rollout_engine(self, load_format):
         # lazy initialization of the rollout engine.
         if not self.rollout.is_engine_initialized():
             if self._is_async_rollout:
                 # wait the scheduler thread to initialize the rollout engine.
-                while not self.rollout.is_engine_initialized():
-                    time.sleep(0.1)
+                self._start_async_rollout_scheduler(load_format)
             else:
                 self.rollout.init_engine(
                     quantization=self.quantization_type,
@@ -1809,33 +1838,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             payload.teacher_result_uuids = uuid_values
         return payloads
 
-    def start_async_rollout_scheduler(self):
-        """
-        Start the async rollout scheduler.
-        """
-        assert (
-            self.config.rollout.mode == "async"
-        ), "Async rollout scheduler is not enabled"
-
-        def init_engine_hook(rollout_engine: RolloutBase):
-            """
-            This hook function is used to initialize the rollout engine in the async rollout scheduler.
-            """
-            rollout_engine.init_engine(
-                quantization=self.quantization_type,
-                seed=self.config.rollout.seed,
-                # TODO(zjx): use "auto" may influence the rollout engine in async mode. need more investigation.
-                load_format="auto",
-            )
-            rollout_engine.post_init_engine_hook(
-                self.consume_command,
-                self.report_rollouts,
-                self.validation_flag,
-            )
-
-        self.scheduler.start(init_engine_hook)
-        logger.info("[Rollout] Async rollout scheduler started")
-
     def work(self):
         # Start the thread with daemon=True, so it will exit when the main program exits.
         if self.global_rank == 0:
@@ -1850,9 +1852,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 target=self.teacher_interact_loop, daemon=True
             )
             self.teacher_interact_thread.start()
-
-        if self._is_async_rollout:
-            self.start_async_rollout_scheduler()
 
         self.main_loop()
         self.inference_stream.synchronize()

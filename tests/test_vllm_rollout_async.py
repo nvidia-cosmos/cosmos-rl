@@ -294,15 +294,18 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         worker.heartbeat_thread = None
         # Skip weight sync preparation in test since we don't need it
         worker.state.set_weight_synced()
-        worker.work()
 
-        self.assertEqual(
-            len(worker.api_client.rollout_completion_payloads),
-            cosmos_config.rollout.batch_size * worker.api_client.max_iter,
-        )
+        try:
+            worker._start_async_rollout_scheduler("auto")
+            worker.work()
 
-        # clean the test environment
-        worker.handle_shutdown()
+            self.assertEqual(
+                len(worker.api_client.rollout_completion_payloads),
+                cosmos_config.rollout.batch_size * worker.api_client.max_iter,
+            )
+        finally:
+            # clean the test environment
+            worker.handle_shutdown()
 
     def test_async_rollout_worker_validation(self):
         """Test async rollout worker validation."""
@@ -347,20 +350,17 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         worker.state.set_weight_synced()
 
         try:
-            worker.start_async_rollout_scheduler()
+            worker._start_async_rollout_scheduler("auto")
             worker.current_step = 1
-            # worker.lazy_initialize_rollout_engine(load_format="auto")
             worker.do_validation()
+
+            self.assertEqual(
+                len(worker.api_client.validation_completion_payloads),
+                cosmos_config.validation.batch_size * worker.api_client.max_iter,
+            )
         finally:
+            # clean the test environment
             worker.handle_shutdown()
-
-        self.assertEqual(
-            len(worker.api_client.validation_completion_payloads),
-            cosmos_config.validation.batch_size * worker.api_client.max_iter,
-        )
-
-        # clean the test environment
-        worker.handle_shutdown()
 
 
 if __name__ == "__main__":
