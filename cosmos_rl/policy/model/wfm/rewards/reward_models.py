@@ -163,6 +163,7 @@ class RemoteReward(BaseRewardModel):
                     "Content-Type": "application/octet-stream",
                     "Authorization": f"Bearer {self.token}",
                 },
+                timeout=10.0,
             ),
             [self.enqueue_url],
         )

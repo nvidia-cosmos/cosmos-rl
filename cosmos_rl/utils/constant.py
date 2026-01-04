@@ -70,7 +70,6 @@ class CosmosHttpRetryConfig:
     initial_delay: float = 1.0
     max_delay: float = 60.0
     backoff_factor: float = 2.0
-    timeout: float = 10.0
 
 
 COSMOS_HTTP_RETRY_CONFIG = CosmosHttpRetryConfig()
