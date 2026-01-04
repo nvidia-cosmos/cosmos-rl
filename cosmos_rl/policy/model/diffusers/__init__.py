@@ -349,7 +349,9 @@ class DiffuserModel(BaseModel, ABC):
             init_lora_weights=lora_config.init_lora_weights,
             target_modules=lora_config.target_modules,
         )
-        self.transformer.add_adapter(adapter_config=transformer_lora_config, adapter_name=lora_config.lora_name)
+        self.transformer.add_adapter(
+            adapter_config=transformer_lora_config, adapter_name=lora_config.lora_name
+        )
 
     @property
     def trained_model(self):
