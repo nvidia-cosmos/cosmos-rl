@@ -34,7 +34,7 @@ dependencies = [
     "liger_kernel",
     "accelerate",
     "kernels",
-    "diffuers>=0.33.1",
+    "diffuers",
     "peft",
     "flash-attn>=2.8.3",
     "robosuite==1.4",
