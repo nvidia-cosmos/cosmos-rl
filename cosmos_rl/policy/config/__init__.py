@@ -782,9 +782,9 @@ class TrainingConfig(BaseModel):
         choices=[2, 3],
     )
     moe_backend: str = Field(
-        default="deepep",
-        description="MoE backend to use. Currently support `default` and `deepep`.",
-        choices=["default", "deepep"],
+        default="third",
+        description="MoE backend to use. Currently support `native`(for-lopp style Expert computation), `third`(Using grouped_gemm from third party) and `torch`(Using torch._grouped_gemm)",
+        choices=["native", "third", "torch"],
     )
 
     seed: Optional[int] = Field(
