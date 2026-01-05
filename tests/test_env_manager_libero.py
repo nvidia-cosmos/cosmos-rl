@@ -533,7 +533,7 @@ class TestEnvManagerLibero(unittest.TestCase):
         for step_num in range(num_concurrent_steps):
             actions = np.random.rand(len(step_env_ids), 7).astype(np.float32)
             actions[:, -1] = np.sign(actions[:, -1] - 0.5)
-            result = self.env_manager.step(env_ids=step_env_ids, action=actions)
+            self.env_manager.step(env_ids=step_env_ids, action=actions)
             print(f"  - Step {step_num + 1}/{num_concurrent_steps} completed")
 
         step_duration = time.time() - step_start_time
