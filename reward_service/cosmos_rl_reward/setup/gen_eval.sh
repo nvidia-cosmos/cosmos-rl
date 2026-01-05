@@ -65,10 +65,11 @@ echo "[gen_eval setup] Installing Python dependencies into venv..."
 "${PYTHON_BIN}" -m pip install -U pip setuptools wheel
 
 "${PYTHON_BIN}" -c "import torch, torchvision" >/dev/null 2>&1 || \
-"${PYTHON_BIN}" -m pip install torch torchvision 
+"${PYTHON_BIN}" -m pip install torch torchvision
 "${PYTHON_BIN}" -m pip install redis msgpack
 
 "${PYTHON_BIN}" -m pip install -U openmim
+"${PYTHON_BIN}" -m pip install -U pip setuptools # openmim will downgrade setuptools to make mim install failed weith Python3.12
 "${PYTHON_BIN}" -m mim install mmengine open-clip-torch clip-benchmark
 
 cd "${DOWNLOAD_PATH}"
@@ -80,9 +81,10 @@ if [ ! -d "${DOWNLOAD_PATH}/mmcv" ]; then
 fi
 cd mmcv
 git fetch --all
-git checkout 1.x
+git checkout v1.7.2
 rm -rf build dist *.egg-info
 "${PYTHON_BIN}" -m pip install ninja
+MAX_JOBS=$(nproc) MMCV_WITH_OPS=1 FORCE_CUDA=1 "${PYTHON_BIN}" setup.py build_ext --inplace
 MAX_JOBS=$(nproc) MMCV_WITH_OPS=1 FORCE_CUDA=1 "${PYTHON_BIN}" setup.py develop
 cd "${DOWNLOAD_PATH}"
 

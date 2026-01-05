@@ -246,3 +246,4 @@ onelogger.log
 
 # Version file of cosmos-rl
 cosmos_rl/_version.py
+reward_service/cosmos_rl_reward/_version.py

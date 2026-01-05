@@ -40,7 +40,7 @@ fi
 "$PIP_BIN" install torch torchvision
 
 echo "INFO: Installing ImageReward dependencies into $VENV_DIR ..."
-"$PIP_BIN" install redis msgpack requests diffusers==0.33.1 transformers==4.40.0 tokenizers==0.19.1
+"$PIP_BIN" install redis msgpack requests diffusers==0.33.1 transformers==4.40.0 tokenizers==0.19.1 peft==0.10.0
 "$PIP_BIN" install image-reward
 "$PIP_BIN" install git+https://github.com/openai/CLIP.git
 
