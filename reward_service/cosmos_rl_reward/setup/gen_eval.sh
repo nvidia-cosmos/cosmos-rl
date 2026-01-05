@@ -65,7 +65,7 @@ echo "[gen_eval setup] Installing Python dependencies into venv..."
 "${PYTHON_BIN}" -m pip install -U pip setuptools wheel
 
 "${PYTHON_BIN}" -c "import torch, torchvision" >/dev/null 2>&1 || \
-"${PYTHON_BIN}" -m pip install torch==2.6.0 torchvision==0.21.0
+"${PYTHON_BIN}" -m pip install torch torchvision
 "${PYTHON_BIN}" -m pip install redis msgpack
 
 "${PYTHON_BIN}" -m pip install -U openmim
