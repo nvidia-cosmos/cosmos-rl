@@ -34,7 +34,7 @@ Event Categories:
 Thread ID Convention:
     - thread_id = env_id: Environment-specific events (0 to num_envs-1)
     - thread_id = 0: Rollout-level aggregated events
-    
+
 Available Colors:
     - "good": Green (success/positive)
     - "bad": Red (failure/negative)
@@ -58,21 +58,27 @@ EVENT_CONFIGS = {
     "env_reset": ("Env_Reset", "init", "rail_idle"),
     "inference": ("Inference", "inference", "rail_response"),
     "rollout_generation": ("Rollout_Generation", "rollout", "thread_state_runnable"),
-    "task_execution": ("Task", "task_execution", None),  # Color depends on success/failure
+    "task_execution": (
+        "Task",
+        "task_execution",
+        None,
+    ),  # Color depends on success/failure
 }
 
 
 class TracingManager:
     """
     Manager for Chrome tracing format event recording.
-    
+
     Each rollout_generation call produces one trace file when enabled.
     """
-    
+
     class TraceEventContext:
         """Context manager for trace events that automatically captures timing."""
-        
-        def __init__(self, manager, name, category, thread_id, color, env_ids, **metadata):
+
+        def __init__(
+            self, manager, name, category, thread_id, color, env_ids, **metadata
+        ):
             self.manager = manager
             self.name = name
             self.category = category
@@ -82,14 +88,14 @@ class TracingManager:
             self.metadata = metadata
             self.start_time = None
             self.end_time = None
-        
+
         def __enter__(self):
             self.start_time = time.time()
             return self
-        
+
         def __exit__(self, exc_type, exc_val, exc_tb):
             self.end_time = time.time()
-            
+
             # If env_ids provided, record event for each env
             if self.env_ids:
                 for env_id in self.env_ids:
@@ -101,7 +107,7 @@ class TracingManager:
                         thread_id=env_id,
                         color=self.color,
                         is_validation=self.manager._current_is_validation,
-                        **self.metadata
+                        **self.metadata,
                     )
             else:
                 # Otherwise, record single event with specified thread_id
@@ -113,15 +119,15 @@ class TracingManager:
                     thread_id=self.thread_id,
                     color=self.color,
                     is_validation=self.manager._current_is_validation,
-                    **self.metadata
+                    **self.metadata,
                 )
             return False  # Don't suppress exceptions
-        
+
         def add_sibling_event(self, name=None, thread_id=None, **override_metadata):
             """
             Add a sibling event with the same timing but different name/thread_id.
             Useful for recording the same operation for multiple environments.
-            
+
             Args:
                 name: Override name (defaults to original name)
                 thread_id: Override thread_id (defaults to original thread_id)
@@ -136,9 +142,9 @@ class TracingManager:
                 thread_id=thread_id if thread_id is not None else self.thread_id,
                 color=self.color,
                 is_validation=self.manager._current_is_validation,
-                **combined_metadata
+                **combined_metadata,
             )
-    
+
     def __init__(
         self,
         rank: int,
@@ -147,7 +153,7 @@ class TracingManager:
     ):
         """
         Initialize the tracing manager.
-        
+
         Args:
             rank: Process rank for multi-process training
             output_dir: Directory to save trace files
@@ -155,40 +161,40 @@ class TracingManager:
         """
         self.rank = rank
         self.verbosity = verbosity
-        
+
         if self.verbosity > 0:
             self.dump_dir = os.path.join(output_dir, "task_timing_logs")
             os.makedirs(self.dump_dir, exist_ok=True)
-            
+
             self.current_rollout_events = []  # Events for current rollout call
             self.rollout_call_count = 0
-        
+
         self._current_is_validation = False
-    
+
     def should_trace(self, is_validation: bool = None) -> bool:
         """
         Check if tracing should be enabled for this rollout.
-        
+
         Args:
             is_validation: Whether this is a validation rollout (defaults to self._current_is_validation)
-            
+
         Returns:
             True if tracing should be enabled, False otherwise
         """
         if is_validation is None:
             is_validation = self._current_is_validation
-            
+
         if self.verbosity == 0:
             return False
         elif self.verbosity == 1:
             return is_validation
         else:  # verbosity >= 2
             return True
-    
+
     def start_rollout(self, is_validation: bool):
         """
         Start a new rollout call, clearing current events and setting validation state.
-        
+
         Args:
             is_validation: Whether this is a validation rollout
         """
@@ -196,7 +202,7 @@ class TracingManager:
         if self.should_trace():
             self.current_rollout_events = []
             self.rollout_call_count += 1
-    
+
     def add_event(
         self,
         name: str,
@@ -207,11 +213,11 @@ class TracingManager:
         thread_id: int = 0,
         color: Optional[str] = None,
         is_validation: bool = False,
-        **metadata
+        **metadata,
     ):
         """
         Add a trace event in Chrome tracing format.
-        
+
         Args:
             name: Event name (e.g., "Inference", "Simulation")
             category: Event category (e.g., "inference", "simulation", "init")
@@ -225,7 +231,7 @@ class TracingManager:
         """
         if not self.should_trace(is_validation):
             return
-        
+
         # Calculate duration
         if end_time is not None:
             dur_seconds = end_time - start_time
@@ -233,11 +239,11 @@ class TracingManager:
             dur_seconds = duration
         else:
             raise ValueError("Either end_time or duration must be provided")
-        
+
         # Convert to microseconds for Chrome tracing format
         ts_us = int(start_time * 1_000_000)
         dur_us = int(dur_seconds * 1_000_000)
-        
+
         # Create Chrome tracing event
         event = {
             "name": name,
@@ -252,39 +258,39 @@ class TracingManager:
                 **{k: self._serialize_value(v) for k, v in metadata.items()},
             },
         }
-        
+
         if color:
             event["cname"] = color
-        
+
         self.current_rollout_events.append(event)
-    
+
     def trace(
         self,
         event_type: str,
         thread_id: int = 0,
         env_ids: Optional[List[int]] = None,
-        **metadata
+        **metadata,
     ):
         """
         Create a context manager for tracing a predefined event type.
         Uses EVENT_CONFIGS for name/category/color configuration.
-        
+
         Usage:
             # Simple usage for single event
             with manager.trace("inference", thread_id=0, batch_size=8):
                 result = model.generate()
-            
+
             # For batch operations affecting multiple envs
             with manager.trace("sim_step", env_ids=active_env_ids):
                 step_results = env.step(actions)
-        
+
         Args:
-            event_type: Event type key from EVENT_CONFIGS 
+            event_type: Event type key from EVENT_CONFIGS
                        ("sim_step", "env_reset", "inference", "rollout_generation")
             thread_id: Thread ID for tracing (e.g., env_id) - used only if env_ids is None
             env_ids: Optional list of environment IDs to record events for (one per env)
             **metadata: Additional metadata
-            
+
         Returns:
             Context manager that captures timing automatically
         """
@@ -293,9 +299,9 @@ class TracingManager:
                 f"Unknown event_type '{event_type}'. "
                 f"Valid types: {list(EVENT_CONFIGS.keys())}"
             )
-        
+
         name, category, color = EVENT_CONFIGS[event_type]
-        
+
         return self.TraceEventContext(
             manager=self,
             name=name,
@@ -303,19 +309,19 @@ class TracingManager:
             thread_id=thread_id,
             color=color,
             env_ids=env_ids,
-            **metadata
+            **metadata,
         )
-    
+
     def add_task_execution_events(self, task_records: List[Dict[str, Any]]):
         """
         Extract timing information from task records and add task execution events.
-        
+
         Args:
             task_records: List of task record dictionaries
         """
         if not self.should_trace():
             return
-        
+
         for task in task_records:
             start_time = task.get("start_time")
             end_time = task.get("end_time")
@@ -330,7 +336,7 @@ class TracingManager:
             finish_step = int(task.get("finish_step", -1))
 
             task_name = f"Task_{task_id}.{trial_id}"
-            
+
             # Add task execution event
             self.add_event(
                 name=task_name,
@@ -348,7 +354,7 @@ class TracingManager:
                 finish_step=finish_step,
                 status="success" if complete else "failed",
             )
-    
+
     def finalize_rollout(
         self,
         task_records: List[Dict[str, Any]],
@@ -359,7 +365,7 @@ class TracingManager:
         """
         Finalize the current rollout, record rollout-level event, and dump trace file.
         Uses the validation state set by set_validation_state().
-        
+
         Args:
             task_records: List of task record dictionaries from rollout
             rollout_start_time: Start time of the rollout (from time.time())
@@ -368,15 +374,15 @@ class TracingManager:
         """
         if not self.should_trace():
             return
-        
+
         # Add task execution events
         self.add_task_execution_events(task_records)
-        
+
         # Calculate rollout-level metrics
         total_sim_frames = sum(task.get("finish_step", 0) for task in task_records)
         rollout_duration = rollout_end_time - rollout_start_time
         sim_fps = total_sim_frames / rollout_duration if rollout_duration > 0 else 0.0
-        
+
         # Add rollout-level trace event
         name, category, color = EVENT_CONFIGS["rollout_generation"]
         self.add_event(
@@ -392,10 +398,10 @@ class TracingManager:
             total_sim_frames=total_sim_frames,
             sim_fps=sim_fps,
         )
-        
+
         # Dump traces for this rollout immediately
         self.dump_traces()
-    
+
     def dump_traces(self):
         """
         Dump current rollout trace events to disk in Chrome tracing format.
@@ -404,48 +410,50 @@ class TracingManager:
         """
         if not self.should_trace():
             return
-        
+
         if not self.current_rollout_events:
             return
-        
+
         from cosmos_rl.utils.logging import logger
-        
+
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         phase = "validation" if self._current_is_validation else "rollout"
-        
+
         # Prepare metadata for this rank
         local_metadata = {
             "rank": int(self.rank),
             "num_events": len(self.current_rollout_events),
             "rollout_call_count": int(self.rollout_call_count),
         }
-        
+
         # Check if distributed training is initialized
         world_size = (
             torch.distributed.get_world_size()
             if torch.distributed.is_initialized()
             else 1
         )
-        
+
         # Gather data from all ranks to rank 0
         if world_size > 1:
             all_events = [None] * world_size
             all_metadata = [None] * world_size
-            
+
             torch.distributed.gather_object(
-                self.current_rollout_events, all_events if self.rank == 0 else None, dst=0
+                self.current_rollout_events,
+                all_events if self.rank == 0 else None,
+                dst=0,
             )
             torch.distributed.gather_object(
                 local_metadata, all_metadata if self.rank == 0 else None, dst=0
             )
-            
+
             if self.rank == 0:
                 # Merge events from all ranks
                 merged_events = []
                 for rank_events in all_events:
                     if rank_events:
                         merged_events.extend(rank_events)
-                
+
                 combined_metadata = {
                     "dump_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "world_size": world_size,
@@ -471,14 +479,14 @@ class TracingManager:
                 "rollout_call_count": self.rollout_call_count,
                 "is_validation": self._current_is_validation,
             }
-        
+
         # Only rank 0 writes the merged trace file
         if self.rank == 0 or world_size == 1:
             trace_file = os.path.join(
                 self.dump_dir,
-                f"trace_{phase}_r{self.rollout_call_count}_{timestamp}.json"
+                f"trace_{phase}_r{self.rollout_call_count}_{timestamp}.json",
             )
-            
+
             # Add process and thread name metadata events for better visualization
             metadata_events = []
             for r in range(world_size):
@@ -490,7 +498,7 @@ class TracingManager:
                         "args": {"name": f"Rank {r}"},
                     }
                 )
-            
+
             # Add thread names for environment IDs
             seen_threads = set()
             for event in merged_events:
@@ -506,32 +514,32 @@ class TracingManager:
                             "args": {"name": f"Env {event['tid']}"},
                         }
                     )
-            
+
             # Write in Chrome tracing format
             trace_data = {
                 "traceEvents": metadata_events + merged_events,
                 "displayTimeUnit": "ms",
                 "metadata": combined_metadata,
             }
-            
+
             with open(trace_file, "w") as f:
                 json.dump(trace_data, f, indent=2)
-            
+
             logger.info(
                 f"Dumped {len(merged_events)} trace events for {phase} "
                 f"rollout {self.rollout_call_count} from {world_size} rank(s) to: {trace_file}"
             )
-        
+
         # Clear events after dumping
         self.current_rollout_events = []
-    
+
     def _serialize_value(self, value: Any) -> Any:
         """
         Convert non-JSON-serializable types to serializable format.
-        
+
         Args:
             value: Value to serialize
-            
+
         Returns:
             JSON-serializable value
         """
@@ -541,7 +549,7 @@ class TracingManager:
             return value.tolist()
         elif isinstance(value, (np.integer, np.floating)):
             return value.item()
-        elif hasattr(value, '__dict__'):
+        elif hasattr(value, "__dict__"):
             return str(value)
         return value
 
@@ -553,7 +561,7 @@ def create_tracing_manager(
 ) -> TracingManager:
     """
     Factory function to create a tracing manager based on configuration.
-    
+
     Args:
         rank: Process rank
         output_dir: Output directory for traces
@@ -561,7 +569,7 @@ def create_tracing_manager(
             - 0: Disabled
             - 1: Validation phase only
             - 2: All rollouts (validation + training)
-        
+
     Returns:
         TracingManager instance
     """
@@ -570,4 +578,3 @@ def create_tracing_manager(
         output_dir=output_dir,
         verbosity=trace_verbosity,
     )
-

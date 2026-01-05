@@ -112,6 +112,11 @@ class OpenVLARollout(RolloutBase):
         super().__init__(config, parallel_dims, device, **kwargs)
         self.num_envs = config.vla.num_envs
 
+        self.obs_keys = ["full_images", "wrist_images", "states"]
+        self.vla_input_keys = ["input_ids", "attention_mask", "pixel_values"]
+        self.vla_output_keys = ["responses", "old_log_probs"]
+        self.vla_train_keys = self.vla_input_keys + self.vla_output_keys
+
     def post_init_hook(self, **kwargs):
         self.model_type = self.config.vla.vla_type
 
@@ -131,17 +136,12 @@ class OpenVLARollout(RolloutBase):
         self.env_manager.start_simulator()
 
         # Initialize tracing system (if enabled via config)
-        trace_verbosity = getattr(self.config.vla, 'trace_verbosity', 0)
+        trace_verbosity = getattr(self.config.vla, "trace_verbosity", 0)
         self.tracing_manager = create_tracing_manager(
             rank=torch.distributed.get_rank(),
             output_dir=self.config.train.output_dir,
             trace_verbosity=trace_verbosity,
         )
-        
-        # TODO: Implement async environment initialization to improve throughput
-        # Currently environment reset is synchronous and blocks the main loop.
-        # Future implementation could use ThreadPoolExecutor or async/await to
-        # overlap environment initialization with inference/stepping of other envs.
 
     def get_underlying_model(self) -> torch.nn.Module:
         return self.model
@@ -205,6 +205,71 @@ class OpenVLARollout(RolloutBase):
             "task_descriptions": task_descriptions,
         }
 
+    def _setup_parallel_envs_async(
+        self, payloads: List[RLPayload], env_ids: List[int], is_validation: bool
+    ):
+        task_ids = []
+        trial_ids = []
+        for payload in payloads:
+            task_ids.append(payload.prompt.get("task_id", 0))
+            trial_ids.append(payload.prompt.get("trial_id", 0))
+        self.env_manager.reset_async(
+            env_ids, task_ids, trial_ids, [is_validation] * len(env_ids)
+        )
+
+    def _get_init_results(
+        self,
+        sim_results: Dict[str, Any],
+        available_env_ids: List[int],
+        enqueue_payload_list: List[RLPayload],
+        is_validation: bool,
+    ):
+        with self.tracing_manager.trace("env_reset", env_ids=available_env_ids):
+            init_results = self._setup_parallel_envs(
+                enqueue_payload_list, available_env_ids, is_validation
+            )
+        for key in self.obs_keys:
+            if sim_results[key] is None:
+                data_shape = (
+                    self.num_envs,
+                    *init_results[key].shape[1:],
+                )
+                sim_results[key] = np.zeros(data_shape, dtype=init_results[key].dtype)
+            sim_results[key][available_env_ids] = init_results[key].copy()
+        for i, env_id in enumerate(available_env_ids):
+            sim_results["task_descriptions"][env_id] = init_results[
+                "task_descriptions"
+            ][i]
+
+    def _wait_init_results(
+        self, sim_results: Dict[str, Any], async_wait_envs: List[int]
+    ):
+        wait_env_ids = []
+        for env_id in range(len(async_wait_envs)):
+            if async_wait_envs[env_id] == 0:
+                wait_env_ids.append(env_id)
+            elif async_wait_envs[env_id] > 0:
+                async_wait_envs[env_id] -= 1
+
+        if wait_env_ids:
+            images_and_states, task_descriptions = self.env_manager.reset_wait(
+                wait_env_ids
+            )
+            for key in self.obs_keys:
+                if sim_results[key] is None:
+                    data_shape = (
+                        self.num_envs,
+                        *images_and_states[key].shape[1:],
+                    )
+                    sim_results[key] = np.zeros(
+                        data_shape, dtype=images_and_states[key].dtype
+                    )
+            sim_results[key][wait_env_ids] = images_and_states[key].copy()
+            for i, env_id in enumerate(wait_env_ids):
+                sim_results["task_descriptions"][env_id] = task_descriptions[i]
+            for env_id in wait_env_ids:
+                async_wait_envs[env_id] = -1
+
     @torch.no_grad()
     def _do_rollout(
         self,
@@ -217,13 +282,8 @@ class OpenVLARollout(RolloutBase):
         enqueued_payloads = 0
         finished_payloads = 0
 
-        obs_keys = ["full_images", "wrist_images", "states"]
-        sim_results = {k: None for k in obs_keys}
+        sim_results = {k: None for k in self.obs_keys}
         sim_results["task_descriptions"] = [""] * self.num_envs
-
-        vla_input_keys = ["input_ids", "attention_mask", "pixel_values"]
-        vla_output_keys = ["responses", "old_log_probs"]
-        vla_train_keys = vla_input_keys + vla_output_keys
 
         payload_env_mapping = np.full(self.num_envs, -1)
 
@@ -236,12 +296,12 @@ class OpenVLARollout(RolloutBase):
                 "task_suite_name": payload.prompt.get("task_suite_name", ""),
                 "complete": False,
                 "finish_step": -1,
-                "start_time": None,
-                "end_time": None,
-                "env_id": None,
             }
-            for key in vla_train_keys:
+            for key in self.vla_train_keys:
                 task_records[i][key] = []
+
+        rollout_step = 0
+        async_wait_envs = [-1 for _ in range(self.num_envs)]
 
         active_env_ids = []
         while finished_payloads < len(payload_indices):
@@ -265,7 +325,7 @@ class OpenVLARollout(RolloutBase):
                         payload_env_mapping[env_id] = -1
                 active_env_ids = [active_env_ids[i] for i in active_indices]
                 finished_payloads += len(finished_env_ids)
-                for key in obs_keys:
+                for key in self.obs_keys:
                     data_shape = (
                         self.num_envs,
                         *step_results[key][active_indices].shape[1:],
@@ -304,44 +364,36 @@ class OpenVLARollout(RolloutBase):
                 payload = payloads[payload_idx]
                 payload_env_mapping[env_id] = enqueued_payloads
                 enqueue_payload_list.append(payload)
-                # Record start time and env_id for this task
-                task_records[enqueued_payloads]["start_time"] = time.time()
-                task_records[enqueued_payloads]["env_id"] = env_id
                 enqueued_payloads += 1
 
-            active_env_ids = [
-                i for i, pidx in enumerate(payload_env_mapping) if pidx != -1
-            ]
-            if not active_env_ids:
-                break
+            self._wait_init_results(sim_results, async_wait_envs)
+            if available_env_ids:
+                # self._get_init_results(sim_results, available_env_ids, enqueue_payload_list, is_validation)
+                self._setup_parallel_envs_async(
+                    enqueue_payload_list, available_env_ids, is_validation
+                )
+                for env_id in available_env_ids:
+                    async_wait_envs[env_id] = 10
 
+            active_env_ids = [
+                i
+                for i, pidx in enumerate(payload_env_mapping)
+                if pidx != -1 and async_wait_envs[i] == -1
+            ]
             logger.debug(
                 f"payload_env_mapping: {payload_env_mapping}, "
                 f"finished_payloads: {finished_payloads}/{len(payload_indices)}, "
-                f"enqueued_payloads: {enqueued_payloads}/{len(payload_indices)}."
+                f"enqueued_payloads: {enqueued_payloads}/{len(payload_indices)}, "
+                f"waiting_envs_left_steps: {async_wait_envs}, active_env_ids: {active_env_ids}"
             )
-            if available_env_ids:
-                with self.tracing_manager.trace("env_reset", env_ids=available_env_ids):
-                    init_results = self._setup_parallel_envs(
-                        enqueue_payload_list, available_env_ids, is_validation
-                    )
-                for key in obs_keys:
-                    if sim_results[key] is None:
-                        data_shape = (
-                            self.num_envs,
-                            *init_results[key].shape[1:],
-                        )
-                        sim_results[key] = np.zeros(
-                            data_shape, dtype=init_results[key].dtype
-                        )
-                    sim_results[key][available_env_ids] = init_results[key].copy()
-                for i, env_id in enumerate(available_env_ids):
-                    sim_results["task_descriptions"][env_id] = init_results[
-                        "task_descriptions"
-                    ][i]
+            if not active_env_ids:
+                continue
+
+            # if torch.distributed.get_rank() == 0:
+            #     logger.info(sim_results)
 
             active_sim_results = {"task_descriptions": []}
-            for k in obs_keys:
+            for k in self.obs_keys:
                 active_sim_results[k] = sim_results[k][active_env_ids]
             for env_id in active_env_ids:
                 active_sim_results["task_descriptions"].append(
@@ -350,20 +402,19 @@ class OpenVLARollout(RolloutBase):
 
             # Step 3: Generate VLA output
             with self.tracing_manager.trace(
-                "inference",
-                env_ids=active_env_ids,
-                batch_size=len(active_env_ids)
+                "inference", env_ids=active_env_ids, batch_size=len(active_env_ids)
             ):
                 vla_input = self._process_input(active_sim_results)
                 vla_output = self._generate_one_step_oft(vla_input)
             for i, env_id in enumerate(active_env_ids):
                 task_idx = payload_env_mapping[env_id]
-                for key in vla_input_keys:
+                for key in self.vla_input_keys:
                     task_records[task_idx][key].append(vla_input[key][i])
-                for key in vla_output_keys:
+                for key in self.vla_output_keys:
                     task_records[task_idx][key].append(vla_output[key][i])
 
             actions = vla_output["action"]
+            rollout_step += 1
         return task_records
 
     def rollout_generation(
@@ -379,7 +430,7 @@ class OpenVLARollout(RolloutBase):
 
         # Start a new rollout trace (sets validation state)
         self.tracing_manager.start_rollout(is_validation)
-        
+
         payload_indices = self._prepare_payload_list(payloads, is_validation)
 
         # Track time for rollout
@@ -391,12 +442,12 @@ class OpenVLARollout(RolloutBase):
             self.config.vla.continuous,
         )
         rollout_end = time.time()
-        
+
         # Calculate simulation FPS
         total_sim_frames = sum(task.get("finish_step", 0) for task in task_records)
         rollout_duration = rollout_end - rollout_start
         sim_fps = total_sim_frames / rollout_duration if rollout_duration > 0 else 0.0
-        
+
         logger.info(
             f"Rollout generation complete: "
             f"{len(task_records)} tasks, {total_sim_frames} sim frames, "

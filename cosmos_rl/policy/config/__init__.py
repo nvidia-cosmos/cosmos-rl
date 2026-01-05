@@ -1189,7 +1189,8 @@ class VLAConfig(BaseModel):
     )
 
     trace_verbosity: int = Field(
-        default=1, description="Verbosity level for tracing. 0=disabled, 1=validation only, 2=all."
+        default=1,
+        description="Verbosity level for tracing. 0=disabled, 1=validation only, 2=all.",
     )
 
     @model_validator(mode="after")

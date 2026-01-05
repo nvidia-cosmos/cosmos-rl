@@ -179,7 +179,27 @@ class ReconfigureSubprocEnv(SubprocVectorEnv):
         # Send all reconfigure commands asynchronously
         for j, i in enumerate(id):
             self.workers[i].parent_remote.send(["reconfigure", env_fns[j]])
-        
+
+        # Wait for all responses
+        for i in id:
+            self.workers[i].parent_remote.recv()
+
+    def reconfigure_env_fns_async(self, env_fns, id=None):
+        self._assert_is_not_closed()
+        id = self._wrap_id(id)
+        if self.is_async:
+            self._assert_id(id)
+
+        # Send all reconfigure commands asynchronously
+        for j, i in enumerate(id):
+            self.workers[i].parent_remote.send(["reconfigure", env_fns[j]])
+
+    def wait_for_reconfigure(self, id=None):
+        self._assert_is_not_closed()
+        id = self._wrap_id(id)
+        if self.is_async:
+            self._assert_id(id)
+
         # Wait for all responses
         for i in id:
             self.workers[i].parent_remote.recv()

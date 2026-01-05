@@ -166,7 +166,7 @@ class OpenVLAGRPOTrainer(GRPOTrainer):
         grad_norm = self.all_reduce_states(inter_policy_nccl)
 
         end_event.record()
-        logger.debug(
+        logger.info(
             f"[VLA Train] Step {current_step} training time: {start_event.elapsed_time(end_event) / 1000.0:.2f}s"
         )
 
