@@ -42,7 +42,6 @@ from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
     MoEConfig,
     MoEFlexTokenDispatcher,
 )
-from cosmos_rl.utils.logging import logger
 
 from transformers.activations import ACT2FN
 
@@ -868,18 +867,16 @@ class MoE(nn.Module):
             self.gate = Gate(args)
 
         if is_deepep_supported():
-            if args.moe_backend == "third":
+            if args.moe_backend == "grouped_gemm":
                 self.experts = GroupedExpertsDeepEP(args)
-                logger.info("Using grouped_gemm from third party as the MoE backend.")
             elif args.moe_backend == "torch":
                 self.experts = GroupedExpertsTorch(args)
-                logger.info("Using torch._grouped_gemm as the MoE backend.")
             else:
                 raise ValueError(
                     f"Invalid moe backend: {args.moe_backend} for DeepEP as the token dispatcher."
                 )
         else:
-            # Respect user choice about moe computing backend.
+            # Using native backend as the default MoE backend.
             # Use allgather dispatcher
             # TODO(huik): support all2all dispatcher for common use cases
             self.experts = GroupedExperts(args)
