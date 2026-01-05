@@ -226,6 +226,8 @@ class RolloutTaskScheduler:
         self._worker_task = (
             None  # asyncio.Task when running in async mode (start_async())
         )
+        # share engine thread's event loop to the worker thread.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Track active tasks
         self.active_tasks: Set[asyncio.Task] = set()
@@ -514,6 +516,7 @@ class RolloutTaskScheduler:
         init_engine_hook(self.rollout_engine)
 
         # mark the scheduler as running after the rollout engine is initialized.
+        self._loop = asyncio.get_event_loop()
         self._running.set()
         self._worker_task = asyncio.create_task(self._worker_loop())
         logger.info("[RolloutTaskScheduler] Background worker started")
@@ -545,6 +548,28 @@ class RolloutTaskScheduler:
 
         self._try_shutdown_rollout_engine()
         logger.info("[RolloutTaskScheduler] Background worker stopped")
+
+    def get_event_loop(self) -> asyncio.AbstractEventLoop:
+        """
+        Get the event loop for the rollout engine.
+
+        If the rollout engine runnning in a seperated thread, it will use the different event loop from main thread.
+        Any asyncio operations invoked in main thread will be blocked because of the async task never run in rollout engine thread.
+        In this case, we must submit the async task to the rollout engine thread's event loop.
+
+        For example
+        ```python
+        # main thread
+        _f = asyncio.run_coroutine_threadsafe(asyncio.sleep(1), scheduler.get_event_loop())
+        _f.result()
+        ```
+        """
+        if not self._running.is_set():
+            raise RuntimeError("[RolloutTaskScheduler] Scheduler is not running")
+
+        if self._loop is None:
+            raise RuntimeError("[RolloutTaskScheduler] Event loop is not initialized")
+        return self._loop
 
     def pause(self):
         """

@@ -150,6 +150,8 @@ def getMockConfig():
         config_dict = toml.load(f)
 
     config = CosmosConfig.from_dict(config_dict)
+    # make the test faster
+    config.rollout.max_response_length = 256
     config.rollout.mode = "async"
     config.rollout.async_config.max_concurrent_requests = 10
     config.rollout.backend = "vllm_async"
@@ -178,7 +180,7 @@ class TestAsyncVLLMRollout(unittest.TestCase):
         rollout_engine = vLLMRolloutAsync(
             config, parallel_dims=parallel_dims, device=torch.device("cuda")
         )
-        rollout_engine.init_engine(quantization="none", seed=42, load_format="auto")
+        rollout_engine.init_engine(quantization=None, seed=42, load_format="auto")
 
         # create data packer
         data_packer = DecoderOnlyLLMDataPacker()
@@ -196,7 +198,7 @@ class TestAsyncVLLMRollout(unittest.TestCase):
             results = asyncio.run(
                 rollout_engine.rollout_engine.collective_rpc("get_state_dict_ipc")
             )
-            rollout_engine.get_engine().shutdown()
+            rollout_engine.shutdown()
             return results
 
         results = asyncio.run(test_helper())
@@ -225,7 +227,7 @@ class TestAsyncVLLMRollout(unittest.TestCase):
                 data_fetcher=None,
                 is_validation=False,
             )
-            rollout_engine.get_engine().shutdown()
+            rollout_engine.shutdown()
             return results
 
         results = asyncio.run(test_helper())
@@ -296,7 +298,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         worker.state.set_weight_synced()
 
         try:
-            worker._start_async_rollout_scheduler("auto")
+            worker.lazy_initialize_rollout_engine("auto")
             worker.work()
 
             self.assertEqual(

@@ -92,6 +92,9 @@ class vLLMRolloutAsync(vLLMRollout):
         # override the post_init_hook method in vLLMRollout
         super().post_init_hook(**kwargs)
 
+        # the event loop of the rollout engine thread.
+        self._engine_event_loop: Optional[asyncio.AbstractEventLoop] = None
+
         # override the type of _engine_initialized to threading.Event() to avoid race condition when checking the engine initialized status in multiple threads.
         # TODO(zjx): refactor the RolloutBase class to use threading.Event() instead of boolean flag.
         self._engine_initialized = threading.Event()
@@ -176,6 +179,9 @@ class vLLMRolloutAsync(vLLMRollout):
 
             self.rollout_engine = AsyncLLMEngine.from_engine_args(engine_args)
             self._engine_initialized.set()
+            # record the event loop of the rollout engine thread.
+            self._engine_event_loop = asyncio.get_event_loop()
+
             logger.info("[Rollout] Engine initialized.")
             # initialization done.
 
@@ -316,9 +322,10 @@ class vLLMRolloutAsync(vLLMRollout):
         # Note: state dict rather than serialize the whole model, have two benefits:
         # 1. Avoid unexpected object behavior when serializing the whole model.
         # 2. Avoid call `forward()` in the worker process, which is not safe.
-        rpc_results = asyncio.run(
-            self.rollout_engine.collective_rpc("get_state_dict_ipc")
-        )
+        rpc_results = asyncio.run_coroutine_threadsafe(
+            self.rollout_engine.collective_rpc("get_state_dict_ipc"),
+            self._engine_event_loop,
+        ).result(timeout=None)
         # vllm backend may have multiple workers, we use the first worker's state dict to initialize the underlying model.
         sd_ipc_worker0, not_parameter_names = rpc_results[0]
         state_dict = named_tensors_from_serialize(sd_ipc_worker0)

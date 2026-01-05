@@ -84,7 +84,7 @@ def unsafe_enable_nest_asyncio():
         return
 
     warnings.warn(
-        "nest_asyncio is enabled, this may cause unexpected issues, "
+        "nest_asyncio is enabled, if you find any unexpected issues, "
         "you can set the environment variable DISABLE_NEST_ASYNCIO to 1 or True to disable it.",
     )
 
