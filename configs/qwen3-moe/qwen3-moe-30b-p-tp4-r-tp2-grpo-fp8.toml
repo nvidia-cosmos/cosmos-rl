@@ -21,6 +21,7 @@ fsdp_offload = false
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 2
 sync_weight_interval = 1
+moe_backend = "torch"
 
 # [train.fp8]
 # enable_fp8 = true

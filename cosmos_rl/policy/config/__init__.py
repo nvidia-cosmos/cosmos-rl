@@ -920,9 +920,9 @@ class TrainingConfig(BaseModel):
         choices=[2, 3],
     )
     moe_backend: str = Field(
-        default="third",
-        description="MoE backend to use. Currently support `native`(for-lopp style Expert computation), `third`(Using grouped_gemm from third party) and `torch`(Using torch._grouped_gemm)",
-        choices=["native", "third", "torch"],
+        default="grouped_gemm",
+        description="MoE backend to use. Currently support `native`(for-lopp style Expert computation), `grouped_gemm`(Using grouped_gemm from third party) and `torch`(Using torch._grouped_gemm)",
+        choices=["native", "grouped_gemm", "torch"],
     )
 
     seed: Optional[int] = Field(
@@ -1010,6 +1010,17 @@ class TrainingConfig(BaseModel):
             assert "global" in self.optm_lr, (
                 "optm_lr dict must contain a 'global' key for default learning rate"
             )
+
+        # For FP8 MoE
+        if self.fp8.enable_fp8:
+            original_moe_backend = self.moe_backend
+            if original_moe_backend != "torch":
+                logger.warning(
+                    f"For FP8 MoE, moe_backend must be set to `torch`. Got {original_moe_backend}, will change to `torch`."
+                )
+                self.moe_backend = "torch"
+
+        logger.info(f"If MoE existed, using {self.moe_backend} as the MoE backend.")
 
         return self
 
