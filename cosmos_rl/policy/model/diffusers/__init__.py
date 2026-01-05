@@ -54,6 +54,9 @@ class DiffuserModel(BaseModel, ABC):
         super().__init__()
         self.config = config
         self.offload = self.config.offload
+        self.onload_multistream = self.config.onload_multistream
+        if self.onload_multistream:
+            self.onload_stream = torch.Stream(device="cuda")
         self.load_models_from_hf(model_str)
         if lora_config is not None:
             self.is_lora = True
@@ -66,6 +69,9 @@ class DiffuserModel(BaseModel, ABC):
         self.init_output_process()
 
     def register_models(self):
+        """
+        Register all parts to be used for diffusion pipeline
+        """
         self.valid_models = [
             k
             for k, v in self.pipeline._internal_dict.items()
@@ -79,7 +85,9 @@ class DiffuserModel(BaseModel, ABC):
                 # Offload all torch.nn.Modules to cpu except transformers
                 model_part.to(torch.bfloat16)
                 if self.offload:
-                    model_part.to("cpu")
+                    self.move_model_to_cpu(model_part)
+                    if self.onload_multistream:
+                        self.apply_onload_hook(model_part)
                     self.offloaded_models.append(model_part)
             setattr(self, valid_model, model_part)
             self.model_parts.append((valid_model, model_part))
@@ -190,30 +198,63 @@ class DiffuserModel(BaseModel, ABC):
         # TODO (yy): Support nparams and flops calculation
         pass
 
-    @abstractmethod
-    def text_embedding(self, prompt_list: List[str], device="cuda"):
+    def apply_onload_hook(self, model):
         """
-        Text embedding of list of prompts
+        Apply multistream onload forward_pre_hook to trigger onload/compute overlapping
         """
-        raise NotImplementedError
 
-    @abstractmethod
-    def set_scheduler_timestep(self, timestep: int):
-        """
-        Set scheduler's timestep for nosie addition and noise removal process
-        """
-        raise NotImplementedError
+        def onload_hook(module, input):
+            for name, parameter in module.named_parameters(recurse=False):
+                with torch.cuda.stream(module.onload_stream):
+                    if parameter.data.untyped_storage().size() == 0:
+                        assert hasattr(
+                            parameter, "cpu_data"
+                        ), "To use this onload hook, make sure call move_model_to_cpu first to create cpu copy for each parameters"
+                        parameter.data = parameter.cpu_data.to(
+                            "cuda", non_blocking=True
+                        )
 
-    @abstractmethod
-    def visual_embedding(
-        self, input_visual_list, height=None, width=None, device="cuda"
-    ):
+            copy_event = module.onload_stream.record_event()
+            torch.cuda.current_stream().wait_event(copy_event)
+
+        # Setup onload stream and forward_prehook
+        for name, module in model.named_modules():
+            module.onload_stream = self.onload_stream
+            module.register_forward_pre_hook(onload_hook)
+
+    def move_model_to_cpu(self, model):
         """
-        Text embedding of list of preprocessed image tensor
+        Instead of directly moving parameters to cpu, init pinned cpu_memory for each parameter to hold data on cpu.
+        Clean underlying GPU memory by Tensor.untyped_storage().resize_(0)
         """
-        # whether usiong resolution bins is a pipeline specific feature, findout how to solve it after
-        # Ignore resolution bin now
-        raise NotImplementedError
+        for name, parameters in model.named_parameters():
+            if hasattr(parameters, "cpu_data"):
+                # cpu_data created, just zero out original storage on gpu
+                parameters.data.untyped_storage().resize_(0)
+            else:
+                # cpu_data not created, create here
+                parameters.cpu_data = torch.empty_like(
+                    parameters.data, device="cpu", pin_memory=True
+                )
+                parameters.cpu_data.copy_(parameters.data)
+                # zero out original gpu data
+                parameters.data.untyped_storage().resize_(0)
+
+    def move_model_to_cuda(self, model):
+        """
+        Onload parameters when onload_multistream is not used
+        """
+        for name, parameters in model.named_parameters():
+            if hasattr(parameters, "cpu_data"):
+                # cpu_data created, just zero out original storage on gpu
+                parameters.data = parameters.cpu_data.to("cuda", non_blocking=True)
+            else:
+                raise ValueError(
+                    "To use this onload function, make sure call move_model_to_cpu first to create cpu copy for each parameters"
+                )
+
+        # Call synchronize to wait onloading finish, maybe not needed
+        torch.cuda.synchronize()
 
     def sample_timestep_indice(self, bsz, device):
         """
@@ -229,11 +270,80 @@ class DiffuserModel(BaseModel, ABC):
         timesteps_indices = (u * self.train_sampling_steps).long().to(device)
         return timesteps_indices
 
-    @abstractmethod
+    def text_embedding(self, prompt_list: List[str], device="cuda"):
+        """
+        Text embedding of list of prompts
+        """
+        if self.offload and (not self.onload_multistream):
+            for model_tuple in self.separate_model_parts():
+                if "text" in model_tuple[0]:
+                    self.move_model_to_cuda(model_tuple[1])
+        output = self._text_embedding(prompt_list, device)
+
+        if self.offload:
+            for model_tuple in self.separate_model_parts():
+                if "text" in model_tuple[0]:
+                    self.move_model_to_cpu(model_tuple[1])
+        return output
+
+    def set_scheduler_timestep(self, timestep: int):
+        """
+        Set scheduler's timestep for nosie addition and noise removal process
+        """
+        self._set_scheduler_timestep(timestep)
+
     def add_noise(self, clean_latents, timestep=None, noise=None):
         """
         Add random noise by random sampling timestep index
         """
+        return self._add_noise(clean_latents, timestep, noise)
+
+    def visual_embedding(
+        self, input_visual_list, height=None, width=None, device="cuda"
+    ):
+        """
+        Text embedding of list of preprocessed image tensor
+        """
+        if self.offload and (not self.onload_multistream):
+            self.move_model_to_cuda(self.vae)
+            torch.cuda.synchronize()
+
+        output = self._visual_embedding(input_visual_list, height, width, device)
+
+        if self.offload:
+            self.move_model_to_cpu(self.vae)
+        return output
+
+    @abstractmethod
+    def _add_noise(self, clean_latents, timestep=None, noise=None):
+        """
+        (Inner function) Add random noise by random sampling timestep index
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _text_embedding(self, prompt_list: List[str], device="cuda"):
+        """
+        (Inner function) Text embedding of list of prompts
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _set_scheduler_timestep(self, timestep: int):
+        """
+        (Inner function) Set scheduler's timestep for nosie addition and noise removal process
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _visual_embedding(
+        self, input_visual_list, height=None, width=None, device="cuda"
+    ):
+        """
+        (Inner function) Text embedding of list of preprocessed image tensor
+        """
+        # whether usiong resolution bins is a pipeline specific feature, findout how to solve it after
+        # Ignore resolution bin now
         raise NotImplementedError
 
     def get_trained_model_state_dict(self):
@@ -309,9 +419,9 @@ class DiffuserModel(BaseModel, ABC):
         if self.is_video:
             kwargs["frames"] = frames
 
-        if self.offload:
+        if self.offload and (not self.onload_multistream):
             for model in self.offloaded_models:
-                model.to("cuda")
+                self.move_model_to_cuda(model)
         with torch.no_grad():
             visual_output = self.pipeline(
                 prompt=prompt_list,
@@ -328,7 +438,7 @@ class DiffuserModel(BaseModel, ABC):
         self.set_scheduler_timestep(self.train_sampling_steps)
         if self.offload:
             for model in self.offloaded_models:
-                model.to("cpu")
+                self.move_model_to_cpu(model)
 
         return visual_output
 

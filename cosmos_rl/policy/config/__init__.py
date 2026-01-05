@@ -845,6 +845,10 @@ class DiffusersConfig(BaseModel):
         default=True,
         description="Whether to dynamic offload model parts from cuda to cpu",
     )
+    onload_multistream: bool = Field(
+        default=False,
+        description="Whether to use multistream to overlapping parameter onload and compute",
+    )
     logit_mean: float = Field(
         default=0.0,
         description="random sampling timestep logits mean for noise addition",
