@@ -27,9 +27,15 @@ import torch
 from cosmos_rl.dispatcher.data.schema import RLPayload
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 from cosmos_rl.policy.config import Config
-from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1VAEInterface
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.network_util import make_request_with_retry
+
+try:
+    from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1VAEInterface
+except ImportError:
+    logger.warning(
+        "[RemoteRewardCalculator] Failed to import Wan2pt1VAEInterface. Make sure you have installed the required dependencies for cosmos-rl[wfm]."
+    )
 
 
 class RemoteRewardCalculator:
