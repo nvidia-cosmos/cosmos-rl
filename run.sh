@@ -19,11 +19,8 @@ export TOKENIZERS_PARALLELISM=0
 #         --rollout 4 \
 #         cosmos_rl/tools/dataset/libero_grpo.py
 
-export COSMOS_CUDA_SYNC_DEBUG=1
-export CUDA_LAUNCH_BLOCKING=1
-
 CONFIG=configs/pi05/pi05-libero10-grpo-colocate.toml
 
 ROBOT_PLATFORM=LIBERO PYTHONPATH=../LIBERO \
-uv run cosmos-rl --config $CONFIG \
+uv run cosmos-rl --config $CONFIG --policy 8 --rollout 8 \
         cosmos_rl/tools/dataset/libero_grpo.py
