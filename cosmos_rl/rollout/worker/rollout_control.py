@@ -1711,7 +1711,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         batch_size: int,
         prompt_queue: Queue,
         validation_step: Optional[int] = None,
-    ) -> int:
+    ) -> Tuple[int, bool]:
         """
         Perform one step of stream rollout generation.
         feed the prompts to the rollout_scheduler and collect the rollout results, report the rollout results to the controller.
@@ -1724,16 +1724,31 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             validation_step (Optional[int]): the validation step, if None, means no validation.
 
         Return:
-            fetched_prompts (int): the number of prompts fetched
+            feed_prompts_count (int): the number of prompts fed to the scheduler
             is_end (bool): whether there is no more prompts to fetch
         """
         if self.scheduler.pending_tasks() > self.scheduler.max_concurrent_requests:
             # skip fetching new prompts if the scheduler is busy
             return 0, False
 
+        # skip fetching new prompts if the prompt queue is too large
+        if prompt_queue.qsize() > self.scheduler.max_concurrent_requests:
+            return 0, False
+
         is_end = self.request_new_prompts(
             batch_size, prompt_queue, validation_step=validation_step
         )
+
+        is_validation = validation_step is not None
+
+        # Check if the prompt is valid for the current weight version
+        if not is_validation and not self._prompt_queue.empty():
+            first_payload: RLPayload = self._prompt_queue.queue[0][0]
+            is_valid_prompt_for_current_weight_version = (
+                first_payload.weight_version <= self.current_weight_version
+            )
+            if not is_valid_prompt_for_current_weight_version:
+                return 0, False
 
         # try to get the prompts from the prompt queue, even if the prompt queue is empty.
         try:
