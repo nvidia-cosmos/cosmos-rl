@@ -179,11 +179,11 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
         # initialize variable for async rollout.
         self._is_async_rollout = False
+        self.scheduler: Optional[RolloutTaskScheduler] = None
         if self.config.rollout.mode == "async":
             assert (
                 config.rollout.backend in self.SUPPORT_ASYNC_BACKEND
             ), f"DisaggregatedRolloutControlWorker async mode only supports {self.SUPPORT_ASYNC_BACKEND} backends, but got {config.rollout.backend}"
-            self.scheduler: Optional[RolloutTaskScheduler] = None
             self._is_async_rollout = True
 
         self.setup(
