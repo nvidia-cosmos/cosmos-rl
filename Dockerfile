@@ -105,7 +105,7 @@ RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 pip install -v --no-build-isolation git+https
 ###################################################
 
 # Install nvshmem grouped_gemm and DeepEP for MoE
-RUN pip install nvidia-nvshmem-cu12
+RUN pip install nvidia-nvshmem-cu12==3.4.5
 RUN TORCH_CUDA_ARCH_LIST="8.0 9.0+PTX" pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4 --no-build-isolation
 RUN apt-get update && apt-get install -y  libibverbs-dev
 RUN git clone https://github.com/deepseek-ai/DeepEP.git /tmp/deepep \
