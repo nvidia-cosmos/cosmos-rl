@@ -650,31 +650,29 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
 
                             # check weight sync
                             if do_weight_sync_check:
-                                # FIXME: (lms) Disable weight sync check for FP8 weights temporarily. Qwen3-MoE weight won't match.
-                                pass
                                 # allclose doesn't support fp8, promote it.
-                                # bf16_underlying_native_weight = (
-                                #     underlying_native_weight.to(torch.bfloat16)
-                                # )
-                                # bf16_quantized_weight = quantized_weight.to(
-                                #     torch.bfloat16
-                                # )
-                                # if not torch.allclose(
-                                #     bf16_underlying_native_weight, bf16_quantized_weight
-                                # ):
-                                #     # for expert in range(
-                                #     #     bf16_underlying_native_weight.shape[0]
-                                #     # ):
-                                #     #     allclose = torch.allclose(
-                                #     #         bf16_underlying_native_weight[expert],
-                                #     #         bf16_quantized_weight[expert],
-                                #     #     )
-                                #     #     logger.info(
-                                #     #         f"expert {expert} close: {allclose}, flatten_underlying_native_weight: {bf16_underlying_native_weight[expert].flatten()[0:10]}, flatten_quantized_weight: {bf16_quantized_weight[expert].flatten()[0:10]}"
-                                #     #     )
-                                #     raise ValueError(
-                                #         f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
-                                #     )
+                                bf16_underlying_native_weight = (
+                                    underlying_native_weight.to(torch.bfloat16)
+                                )
+                                bf16_quantized_weight = quantized_weight.to(
+                                    torch.bfloat16
+                                )
+                                if not torch.allclose(
+                                    bf16_underlying_native_weight, bf16_quantized_weight
+                                ):
+                                    # for expert in range(
+                                    #     bf16_underlying_native_weight.shape[0]
+                                    # ):
+                                    #     allclose = torch.allclose(
+                                    #         bf16_underlying_native_weight[expert],
+                                    #         bf16_quantized_weight[expert],
+                                    #     )
+                                    #     logger.info(
+                                    #         f"expert {expert} close: {allclose}, flatten_underlying_native_weight: {bf16_underlying_native_weight[expert].flatten()[0:10]}, flatten_quantized_weight: {bf16_quantized_weight[expert].flatten()[0:10]}"
+                                    #     )
+                                    raise ValueError(
+                                        f"FP8 weight doesn't match after weight sync and dynamic quantization for full weight name: {inst_group_full_weight_name}."
+                                    )
                             underlying_native_weight.copy_(quantized_weight)
                             # get the scale key.
                             scale_key = inst_group_full_weight_name.replace(

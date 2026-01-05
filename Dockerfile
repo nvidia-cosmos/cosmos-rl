@@ -20,6 +20,7 @@ ARG AWS_OFI_NCCL_VERSION=v1.16.0
 # NCCL version, should be found at https://developer.download.nvidia.cn/compute/cuda/repos/ubuntu2204/x86_64/
 ARG NCCL_VERSION=2.26.2-1+cuda12.8
 ARG FLASH_ATTN_VERSION=2.8.3
+#FIXME: (lms) update vLLM to 0.14.0 when released, it contains a fix about fp8 moe.
 ARG VLLM_VERSION=0.13.0
 ARG PYTHON_VERSION=3.12
 

@@ -65,28 +65,37 @@ def simplify_process_weights_after_loading_for_moe():
     """
 
     def simplified_process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-        # This function is simplified only for cuda device.
-        # If checkpoint is fp16, quantize in place.
+        from vllm.platforms import current_platform
         from vllm.model_executor.utils import replace_parameter
 
-        fp8_dtype = torch.float8_e4m3fn
-        w13_weight = torch.empty_like(layer.w13_weight.data, dtype=fp8_dtype)
-        w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        # If checkpoint is fp16, quantize in place.
+        fp8_dtype = current_platform.fp8_dtype()
+        w13_weight = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
+        w2_weight = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
 
         for expert in range(layer.local_num_experts):
             w13_weight[expert, :, :], layer.w13_weight_scale[expert] = (
-                ops.scaled_fp8_quant(layer.w13_weight.data[expert, :, :])
+                ops.scaled_fp8_quant(layer.w13_weight[expert, :, :])
             )
             w2_weight[expert, :, :], layer.w2_weight_scale[expert] = (
-                ops.scaled_fp8_quant(layer.w2_weight.data[expert, :, :])
+                ops.scaled_fp8_quant(layer.w2_weight[expert, :, :])
             )
         # Each expert will have a single scale value
         # Shape of layer.w13_weight_scale and layer.w2_weight_scale is [num_experts]
 
         replace_parameter(layer, "w13_weight", w13_weight)
         replace_parameter(layer, "w2_weight", w2_weight)
+
+        # Shuffle weights into the runtime format.
+        self._convert_weights_to_kernel_format(
+            layer, w13_weight, w2_weight, layer.w13_weight_scale, layer.w2_weight_scale
+        )
+
+        # Setup modular kernel for TP case.
+        self._setup_kernel(layer)
 
     Fp8OnlineMoEMethod.process_weights_after_loading = (
         simplified_process_weights_after_loading
