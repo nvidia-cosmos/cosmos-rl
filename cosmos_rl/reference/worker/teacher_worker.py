@@ -29,6 +29,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
 from cosmos_rl.reference.engine.torch_engine import TorchEngine
 import atexit
 import asyncio
@@ -130,7 +131,6 @@ class TeacherWorker(PolicyWorkerBase):
             config.distillation.fsdp_reshard_after_forward
         )
         config.policy.model_name_or_path = config.distillation.model_name_or_path
-        config.policy.model_max_length = config.distillation.model_max_length
         config.policy.model_revision = config.distillation.model_revision
         config.policy.parallelism = config.distillation.parallelism
         return config
@@ -175,12 +175,18 @@ class TeacherWorker(PolicyWorkerBase):
         running = True
         while running:
             teacher_requests = []
+            logger.debug("[Reference] Fetching rollouts from redis")
             try:
                 teacher_requests = self.redis_controller.subscribe_teacher_request(
                     self.replica_name, count=self.engine.batch_size
                 )
+                logger.debug(
+                    f"[Reference] Fetched {len(teacher_requests)} rollouts from redis"
+                )
             except Exception as e:
-                logger.debug(f"Failed to get rollouts: {e}, wait for next round")
+                logger.debug(
+                    f"[Reference] Failed to get rollouts: {e}, wait for next round"
+                )
             for rollout in teacher_requests:
                 assert (
                     len(rollout["teacher_result_uuid"])
@@ -189,6 +195,9 @@ class TeacherWorker(PolicyWorkerBase):
                 for tokens, uuid in zip(
                     rollout["completion_token_ids"], rollout["teacher_result_uuid"]
                 ):
+                    logger.debug(
+                        f"[Reference] Putting rollout with uuid {uuid} into data queue"
+                    )
                     rollout_item = copy.deepcopy(rollout)
                     rollout_item["completion_token_ids"] = tokens
                     rollout_item["teacher_result_uuid"] = uuid
@@ -221,8 +230,26 @@ class TeacherWorker(PolicyWorkerBase):
         rollouts = [[]]
         scattered_rollouts = [[] for _ in range(self.world_size)]
         if self.global_rank == 0:
-            batch_for_this_step = self.engine.batch_size
-            assert batch_for_this_step % self.dp_world_size == 0
+            batch_for_this_step = None
+            assert (
+                self.engine.batch_size
+                >= self.dp_world_size * self.config.distillation.mini_batch
+            ), (
+                f"Batch size {self.engine.batch_size} must be greater than or equal to "
+                f"dp_world_size {self.dp_world_size} * mini_batch {self.config.distillation.mini_batch}"
+            )
+            while batch_for_this_step is None or batch_for_this_step <= 0:
+                time.sleep(0.1)
+                current_queue_size = self.data_queue.qsize()
+                if current_queue_size >= self.engine.batch_size:
+                    batch_for_this_step = self.engine.batch_size
+                else:
+                    batch_for_this_step = current_queue_size - (
+                        current_queue_size
+                        % (self.dp_world_size * self.config.distillation.mini_batch)
+                    )
+                    if batch_for_this_step <= 0 and current_queue_size > 0:
+                        batch_for_this_step = current_queue_size
             dp_id = 0
             for _ in range(batch_for_this_step):
                 try:
@@ -244,6 +271,13 @@ class TeacherWorker(PolicyWorkerBase):
                 dp_id += 1
                 if dp_id >= self.dp_world_size:
                     dp_id = 0
+            # Pad rollouts to mini_batch size
+            for i in range(self.world_size):
+                if len(scattered_rollouts[i]) < self.config.distillation.mini_batch:
+                    for _ in range(
+                        self.config.distillation.mini_batch - len(scattered_rollouts[i])
+                    ):
+                        scattered_rollouts[i].append(scattered_rollouts[0][0])
             for i in range(self.world_size):
                 assert (
                     len(scattered_rollouts[i]) == len(scattered_rollouts[0])
@@ -289,15 +323,14 @@ class TeacherWorker(PolicyWorkerBase):
             if len(rollouts) == 0:
                 continue
             data = self.engine.step_forward(rollouts)
-            logger.debug(
-                f"[Reference] Step forward uuids: {[item['teacher_result_uuid'] for item in data]}"
-            )
             for item in data:
                 id = item.pop("teacher_result_uuid")
+                logger.debug(f"[Reference] Setting teacher result for uuid {id}")
                 if not self.redis_controller.set_teacher_result(
                     id, item, self.replica_name
                 ):
                     logger.error(f"[Reference] Failed to set teacher result {id}")
+                logger.debug(f"[Reference] Teacher result set for uuid {id}")
         logger.info(
             "[Reference] Main loop finished. Shutdown background task event set."
         )

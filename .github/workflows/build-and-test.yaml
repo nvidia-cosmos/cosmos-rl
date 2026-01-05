@@ -97,6 +97,7 @@ jobs:
           ${DOCKER_RUN} python tests/test_policy_variant.py
           ${DOCKER_RUN} python tests/test_deepep.py
           ${DOCKER_RUN} python tests/test_colocated.py
+          ${DOCKER_RUN} python tests/test_teacher_model.py
           ${LONG_DOCKER_RUN} /bin/bash -c "torchrun --nproc_per_node=4 tests/test_qwen3_vl_moe.py"
 
       - name: Cleanup

@@ -133,6 +133,10 @@ class RLPolicyWorker(PolicyWorkerBase):
         self.is_master_replica = True
         self.prepare_shard_infos_for_weight_sync_insts()
 
+        # For teacher model interaction
+        self.teacher_interact_queue = Queue()
+        self.teacher_interact_thread: Optional[threading.Thread] = None
+
     def setup(
         self,
         dataset: Optional[Union[Dataset, Callable[[CosmosConfig], Dataset]]] = None,
@@ -217,6 +221,10 @@ class RLPolicyWorker(PolicyWorkerBase):
                 self.fetch_command_thread.join()
                 self.fetch_command_thread = None
 
+            if self.teacher_interact_thread is not None:
+                self.teacher_interact_thread.join()
+                self.teacher_interact_thread = None
+
             if hasattr(self, "heartbeat_thread") and self.heartbeat_thread is not None:
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
@@ -242,15 +250,19 @@ class RLPolicyWorker(PolicyWorkerBase):
     async def fetch_rollouts(self):
         assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
         while not self.shutdown_signal.is_set():
-            rollouts = []
+            rollouts: List[Rollout] = []
             try:
                 rollouts = [
                     Rollout.model_validate(msgpack.unpackb(x))
                     for x in self.redis_controller.subscribe_rollout(self.replica_name)
                 ]
             except Exception as e:
-                logger.debug(f"Failed to get rollouts: {e}, wait for next round")
+                logger.debug(
+                    f"[Policy] Failed to get rollouts: {e}, wait for next round"
+                )
             for rollout in rollouts:
+                if rollout.teacher_result_uuid:
+                    self.teacher_interact_queue.put_nowait(rollout.teacher_result_uuid)
                 self.data_queue.put_nowait(rollout)
 
     def pre_P2R_collect_parameters(self):
@@ -331,7 +343,7 @@ class RLPolicyWorker(PolicyWorkerBase):
         assert command.src_replica_size == self.world_size
         if not command.src_replica_name == self.replica_name:
             logger.error(
-                f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
+                f"[Policy] {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
             )
             return False
 
@@ -558,7 +570,7 @@ class RLPolicyWorker(PolicyWorkerBase):
                     )
                 except Exception as e:
                     logger.debug(
-                        f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+                        f"[Policy] Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
                     )
                 for x in commands:
                     command = Command.depack(x)
@@ -632,26 +644,6 @@ class RLPolicyWorker(PolicyWorkerBase):
                         rollouts[i].prompt_idx,
                         attr="conversation",
                     )
-                if rollouts[i].teacher_result_uuid:
-                    logger.debug(
-                        f"[Policy] Getting teacher result {rollouts[i].teacher_result_uuid} from Redis"
-                    )
-                    # Interactive with teacher if the teacher result uuid is not empty
-                    teacher_result = self.redis_controller.get_teacher_result(
-                        rollouts[i].teacher_result_uuid
-                    )
-                    if teacher_result is None:
-                        rollouts[i].teacher_logprobs = None
-                        logger.error(
-                            f"[Policy] Failed to get teacher result {rollouts[i].teacher_result_uuid} from Redis"
-                        )
-                    else:
-                        rollouts[i].teacher_logprobs = teacher_result.get(
-                            "teacher_logprobs", None
-                        )
-                    logger.debug(
-                        f"[Policy] Teacher result: {len(rollouts[i].teacher_logprobs) if rollouts[i].teacher_logprobs is not None else 0} items"
-                    )
             return rollouts
 
         rollouts = [[]]
@@ -689,6 +681,36 @@ class RLPolicyWorker(PolicyWorkerBase):
         )
         return preprocess_rollouts(rollouts[0])
 
+    def teacher_interact_loop(self):
+        """Background task to interact with teacher model for distillation"""
+        assert self.global_rank == 0, "Only rank 0 can fetch rollouts"
+        while not self.shutdown_signal.is_set():
+            if not self.teacher_interact_queue.empty():
+                teacher_result_uuid = self.teacher_interact_queue.get_nowait()
+                logger.debug(
+                    f"[Policy] Getting teacher result {teacher_result_uuid} from Redis"
+                )
+                # Interactive with teacher if the teacher result uuid is not empty
+                teacher_result = self.redis_controller.get_teacher_result(
+                    teacher_result_uuid
+                )
+                if teacher_result is None:
+                    teacher_logprobs = None
+                    logger.error(
+                        f"[Policy] Failed to get teacher result {teacher_result_uuid} from Redis"
+                    )
+                else:
+                    teacher_logprobs = teacher_result.get("teacher_logprobs", None)
+                logger.debug(
+                    f"[Policy] Teacher result: {len(teacher_logprobs) if teacher_logprobs is not None else 0} items"
+                )
+                if not hasattr(self.trainer, "teacher_interact_results"):
+                    self.trainer.teacher_interact_results = {}
+                self.trainer.teacher_interact_results[teacher_result_uuid] = (
+                    teacher_logprobs
+                )
+            time.sleep(0.01)
+
     def main_loop(self):
         def fetch_command_helper(trainer: GRPOTrainer):
             new_loop = asyncio.new_event_loop()
@@ -722,6 +744,11 @@ class RLPolicyWorker(PolicyWorkerBase):
                 args=(self,),
                 daemon=True,
                 name="fetch_rollouts_thread",
+            ).start()
+            self.teacher_interact_thread = threading.Thread(
+                target=self.teacher_interact_loop,
+                daemon=True,
+                name="teacher_interact_thread",
             ).start()
 
         abort = False

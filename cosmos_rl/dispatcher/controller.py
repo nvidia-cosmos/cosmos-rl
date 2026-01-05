@@ -140,7 +140,7 @@ class Controller:
         )
 
         custom_config = """
-maxmemory 1G
+maxmemory 500G
 maxmemory-policy allkeys-lfu
 """
         redis_cfg_path = util.write_redis_config(
@@ -305,7 +305,6 @@ maxmemory-policy allkeys-lfu
 
         if (
             (not is_validation)
-            and self.config.train.train_policy.on_policy
             and len(self.rollout_status_manager.replica_scaling_log) == 0
             and not self.config.mode == "colocated"
         ):

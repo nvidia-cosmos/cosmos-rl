@@ -56,7 +56,7 @@ class ColocatedPolicyControlWorker(RLPolicyWorker):
             commands = self.redis_for_remote.subscribe_command(self.replica_name)
         except Exception as e:
             logger.debug(
-                f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+                f"[Policy] Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
             )
         commands = [Command.depack(x) for x in commands]
         return commands
@@ -68,7 +68,7 @@ class ColocatedPolicyControlWorker(RLPolicyWorker):
         assert command.src_replica_size == self.world_size
         if not command.src_replica_name == self.replica_name:
             logger.error(
-                f"Policy {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
+                f"[Policy] {self.replica_name} received P2R command from {command.src_replica_name}, but it is not the source replica."
             )
             return False
         return False
@@ -85,7 +85,7 @@ class ColocatedPolicyControlWorker(RLPolicyWorker):
                 commands = self.redis_controller.subscribe_command(self.replica_name)
             except Exception as e:
                 logger.debug(
-                    f"Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
+                    f"[Policy] Failed to get commands : {e} at replica {self.replica_name}, wait for next round"
                 )
             for x in commands:
                 command = Command.depack(x)
