@@ -75,6 +75,8 @@ class Qwen3MoeArgs:
     gate_bias_update_factor: float = 0.0
     aux_loss_coeff: float = 0.0
     hf_config: AutoConfig = None
+    # moe_backend: "default" or "deepep"
+    moe_backend: str = "deepep"
 
 
 class RotaryEmbedding(nn.Module):
@@ -422,6 +424,7 @@ class Qwen3MoE(BaseModel):
             enable_router_bias=False,
             dim=model_args.dim,
             moe_inter_dim=model_args.ffn_dim,
+            moe_backend=model_args.moe_backend,
         )
 
         self.layers = torch.nn.ModuleDict()
@@ -790,6 +793,7 @@ class Qwen3MoE(BaseModel):
     @classmethod
     def from_pretrained(
         cls,
+        cosmos_config: CosmosConfig,
         hf_config: AutoConfig,
         model_name_or_path: str,
         max_position_embeddings: Optional[int] = None,
@@ -844,6 +848,7 @@ class Qwen3MoE(BaseModel):
                     rope_type=rope_type,
                     biases=bias_list,
                     hf_config=hf_config,
+                    moe_backend=cosmos_config.train.moe_backend,
                 )
             )
 

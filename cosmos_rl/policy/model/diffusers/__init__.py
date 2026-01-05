@@ -188,7 +188,7 @@ class DiffuserModel(BaseModel, ABC):
         cls, config: CosmosConfig, model_str: str, model_revision: str = "main"
     ):
         """
-        Model initialize entrypoiny
+        Model initialize entrypoint.
         """
         return cls(
             config.policy.diffusers,

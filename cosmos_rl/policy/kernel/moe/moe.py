@@ -87,10 +87,13 @@ class MoEArgs:
     enable_router_bias: bool = False
     enable_glu: bool = True
     act_fn: Optional[str] = None
+    # moe_backend: "default" or "deepep"
+    moe_backend: str = "deepep"
 
     def __post_init__(self):
         if self.shared_inter_dim is None:
             self.shared_inter_dim = self.moe_inter_dim * self.n_shared_experts
+
 
 
 class MLP(nn.Module):
@@ -802,9 +805,10 @@ class MoE(nn.Module):
         else:
             self.gate = Gate(args)
 
-        if is_deepep_supported():
+        if is_deepep_supported() and args.moe_backend == "deepep":
             self.experts = GroupedExpertsDeepEP(args)
         else:
+            # if specified backend is not deepep, use default backend. Respect user choice.
             # Use allgather dispatcher
             # TODO(huik): support all2all dispatcher for common use cases
             self.experts = GroupedExperts(args)

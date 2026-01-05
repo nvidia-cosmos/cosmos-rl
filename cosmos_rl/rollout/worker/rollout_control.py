@@ -1680,12 +1680,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.prompt_logprobs = result.prompt_logprobs
                 old_payload.prompt_token_ids = result.prompt_token_ids
                 old_payload.weight_version = self.current_weight_version
-                # FIXME: (lms) cumulative_logprob is all NaN when Qwen3-MoE is set to FP8 mode. Just temporarily reset it to zero.
-                # old_payload.cumulative_logprob = result.cumulative_logprob
-                old_payload.cumulative_logprob = [0.0] * len(result.completions)
-                logger.info(f"cumulative_logprob: {old_payload.cumulative_logprob}")
+                old_payload.cumulative_logprob = result.cumulative_logprob
                 old_payload.extra_info = result.extra_info
-
                 if self.config.rollout.multi_turn_config.enable:
                     old_payload.completed_conversations = result.completed_conversations
                 if self.config.train.local_dataset:

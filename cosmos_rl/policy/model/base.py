@@ -444,6 +444,7 @@ class BaseModel(torch.nn.Module, ABC):
     @abstractmethod
     def from_pretrained(
         cls,
+        cosmos_config: CosmosConfig,
         hf_config: AutoConfig,
         model_name_or_path: str,
         max_position_embeddings: Optional[int] = None,
@@ -495,7 +496,7 @@ class ModelRegistry:
 
     @classmethod
     def register(
-        x,
+        cls,
         default_weight_mapper_cls,
         *,
         allow_override: bool = False,
@@ -594,7 +595,8 @@ class ModelRegistry:
         def _load_model_with_config(model_cls, hf_config, model_name_or_path, config):
             """Load model and apply post-processing configurations."""
             model = model_cls.from_pretrained(
-                hf_config,
+                config,  # cosmos config
+                hf_config,  # hf config
                 model_name_or_path,
                 max_position_embeddings=config.policy.model_max_length,
             )

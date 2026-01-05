@@ -781,6 +781,11 @@ class TrainingConfig(BaseModel):
         description="FlashAttention version to use. If None, will use the default version.",
         choices=[2, 3],
     )
+    moe_backend: str = Field(
+        default="deepep",
+        description="MoE backend to use. Currently support `default` and `deepep`.",
+        choices=["default", "deepep"],
+    )
 
     seed: Optional[int] = Field(
         default=None,
