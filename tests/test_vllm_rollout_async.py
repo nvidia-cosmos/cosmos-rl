@@ -352,7 +352,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
         worker.state.set_weight_synced()
 
         try:
-            worker._start_async_rollout_scheduler("auto")
+            worker.lazy_initialize_rollout_engine("auto")
             worker.current_step = 1
             worker.do_validation()
 

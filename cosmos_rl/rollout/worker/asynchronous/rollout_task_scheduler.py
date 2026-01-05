@@ -415,7 +415,26 @@ class RolloutTaskScheduler:
             self._loop.run_until_complete(self._worker_loop())
         finally:
             self._running.clear()
-            self._loop.close()
+
+            # Cancel all remaining tasks before closing the loop to prevent "Task was destroyed but it is pending" errors
+            try:
+                pending = asyncio.all_tasks(self._loop)
+                if pending:
+                    logger.debug(
+                        f"[RolloutTaskScheduler] Cancelling {len(pending)} pending tasks before closing event loop"
+                    )
+                    for task in pending:
+                        task.cancel()
+                    # Wait for all tasks to be cancelled
+                    self._loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[RolloutTaskScheduler] Error while cancelling pending tasks: {e}"
+                )
+            finally:
+                self._loop.close()
 
     def start(self, init_engine_hook: Callable, wait_initialized: bool = False):
         """
