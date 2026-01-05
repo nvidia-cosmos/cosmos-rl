@@ -38,6 +38,7 @@ class EnvStates:
     active: bool = True
     complete: bool = False
     step: int = 0
+    language: str = ""
 
     current_obs: Optional[Any] = None
     do_validation: bool = False
@@ -141,6 +142,23 @@ class LiberoEnvWrapper(gym.Env):
             }
         return images_and_states, task_descriptions
 
+    def _reconfigure_async(
+        self, env_ids: List[int], task_ids: List[int], trial_ids: List[int]
+    ):
+        env_fn_params = [None for _ in range(len(env_ids))]
+
+        for i, env_id in enumerate(env_ids):
+            desp, fn_params = self._get_fn_params(task_ids[i])
+            env_fn_params[i] = fn_params
+            # Store state for reset_wait to use
+            self.env_states[env_id] = EnvStates(
+                env_idx=env_id,
+                task_id=task_ids[i],
+                trial_id=trial_ids[i],
+                language=desp,
+            )
+        self.env.reconfigure_env_fns_async(env_fn_params, env_ids)
+
     def reset(
         self,
         env_ids: Union[int, List[int]],
@@ -169,6 +187,57 @@ class LiberoEnvWrapper(gym.Env):
                 }
 
         return images_and_states, task_descriptions
+
+    def reset_async(
+        self,
+        env_ids: Union[int, List[int]],
+        task_ids: Union[int, List[int]],
+        trial_ids: Union[int, List[int]],
+        do_validataion: Union[bool, List[bool]],
+    ):
+        if isinstance(env_ids, int):
+            env_ids = [env_ids]
+        if isinstance(task_ids, int):
+            task_ids = [task_ids]
+        if isinstance(trial_ids, int):
+            trial_ids = [trial_ids]
+        if isinstance(do_validataion, bool):
+            do_validataion = [do_validataion]
+        self._reconfigure_async(env_ids, task_ids, trial_ids)
+
+        for i, env_id in enumerate(env_ids):
+            self.env_states[env_id].do_validation = do_validataion[i]
+            if do_validataion[i]:
+                self.env_states[env_id].valid_pixels = {
+                    "full_images": [],
+                    "wrist_images": [],
+                }
+
+    def reset_wait(self, env_ids: List[int]):
+        self.env.wait_for_reconfigure(env_ids)
+        init_state = [None for _ in range(len(env_ids))]
+        for i, env_id in enumerate(env_ids):
+            n_trial_ids = len(
+                self.task_suite.get_task_init_states(self.env_states[env_id].task_id)
+            )
+            init_state[i] = self.task_suite.get_task_init_states(
+                self.env_states[env_id].task_id
+            )[self.env_states[env_id].trial_id % n_trial_ids]
+        self.env.set_init_state(init_state, env_ids)
+
+        dummy_actions = get_libero_dummy_action(len(env_ids))
+        for _ in range(15):
+            obs, _, _, _ = self.env.step(dummy_actions, env_ids)
+
+        images_and_states = self._extract_image_and_state(obs)
+        for i, env_id in enumerate(env_ids):
+            self.env_states[env_id].current_obs = {
+                "full_images": images_and_states["full_images"][i],
+                "wrist_images": images_and_states["wrist_images"][i],
+                "states": images_and_states["states"][i],
+            }
+        descriptions = [self.env_states[env_id].language for env_id in env_ids]
+        return images_and_states, descriptions
 
     def step(self, env_ids: List[int], action):
         if isinstance(action, torch.Tensor):

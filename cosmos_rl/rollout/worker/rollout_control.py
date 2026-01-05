@@ -1243,16 +1243,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 #     len(prompts) % self.parallel_dims.mesh["dp"].size() == 0
                 # ), f"Number of prompts {len(prompts)} must be divisible by data parallel size {self.parallel_dims.mesh['dp'].size()}"
                 ranks_to_scatter = self.parallel_dims.mesh["dp"].size()
-                prompts_per_rank = (
-                    len(prompts) + ranks_to_scatter - 1
-                ) // ranks_to_scatter
+
+                # Distribute prompts in an interleaved (round-robin) fashion
+                # Rank 0 gets indices [0, N, 2N, ...], Rank 1 gets [1, N+1, 2N+1, ...], etc.
                 scattered_prompts_and_is_end = []
                 for rank in range(ranks_to_scatter):
-                    start_idx = rank * prompts_per_rank
-                    end_idx = min(start_idx + prompts_per_rank, len(prompts))
+                    rank_prompts = prompts[rank::ranks_to_scatter]
                     scattered_prompts_and_is_end.append(
                         (
-                            prompts[start_idx:end_idx],
+                            rank_prompts,
                             is_end,
                         )
                     )

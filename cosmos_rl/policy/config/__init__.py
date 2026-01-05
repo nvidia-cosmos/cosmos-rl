@@ -1162,6 +1162,8 @@ class VLAConfig(BaseModel):
         choices=["openvla-oft", "openvla"],
     )
 
+    num_envs: int = Field(default=1, description="Number of environments to rollout.")
+
     use_proprio: bool = Field(
         default=False, description="Whether to use proprioceptive information."
     )
@@ -1180,6 +1182,15 @@ class VLAConfig(BaseModel):
 
     save_video: bool = Field(
         default=False, description="Whether to save video of validation rollout."
+    )
+
+    continuous: bool = Field(
+        default=False, description="Whether to enable continuous simulation + rollout."
+    )
+
+    trace_verbosity: int = Field(
+        default=1,
+        description="Verbosity level for tracing. 0=disabled, 1=validation only, 2=all.",
     )
 
     @model_validator(mode="after")

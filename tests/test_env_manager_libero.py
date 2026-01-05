@@ -43,6 +43,7 @@ Tests:
     3. test_step_subset_envs: Test stepping a subset of environments
     4. test_chunk_step_subset_envs: Test chunk stepping a subset of environments
     5. test_validation_subset_and_get_valid_pixels: Test validation in subset and get_valid_pixels
+    6. test_concurrent_reset_and_step: Test async reset while stepping other environments
 """
 
 import unittest
@@ -474,6 +475,162 @@ class TestEnvManagerLibero(unittest.TestCase):
         self.assertTrue(np.issubdtype(valid_pixels["full_images"].dtype, np.number))
         self.assertTrue(np.issubdtype(valid_pixels["wrist_images"].dtype, np.number))
         print("✓ Validation pixels have correct data type")
+
+    def test_concurrent_reset_and_step(self):
+        """Test 6: Concurrent async reset and step operations."""
+        print("\n" + "=" * 80)
+        print("TEST 6: Concurrent async reset and step operations")
+        print("=" * 80)
+
+        # First, initialize all environments
+        all_env_ids = list(range(self.config.num_envs))
+        task_ids = [0] * self.config.num_envs
+        trial_ids = list(range(self.config.num_envs))
+        do_validation = [False] * self.config.num_envs
+
+        print(f"Initial reset of all {self.config.num_envs} environments...")
+        self.env_manager.reset(
+            env_ids=all_env_ids,
+            task_ids=task_ids,
+            trial_ids=trial_ids,
+            do_validataion=do_validation,
+        )
+        print("✓ All environments initialized")
+
+        # Define split: reset envs 0,1 asynchronously while stepping envs 2,3
+        reset_env_ids = [0, 1]
+        step_env_ids = [2, 3]
+
+        # Task 1: Start async reset for envs 0,1 to new tasks
+        reset_task_ids = [1, 1]  # Different task from initial
+        reset_trial_ids = [10, 11]  # Different trials
+        reset_do_validation = [False, False]
+
+        print(f"\nStarting async reset for envs {reset_env_ids}...")
+        print(f"  - New task IDs: {reset_task_ids}")
+        print(f"  - New trial IDs: {reset_trial_ids}")
+
+        import time
+
+        start_time = time.time()
+
+        self.env_manager.reset_async(
+            env_ids=reset_env_ids,
+            task_ids=reset_task_ids,
+            trial_ids=reset_trial_ids,
+            do_validataion=reset_do_validation,
+        )
+        async_start_time = time.time() - start_time
+        print(
+            f"✓ Async reset initiated in {async_start_time*1000:.2f}ms (non-blocking)"
+        )
+
+        # Task 2: While reset is happening, step the other environments multiple times
+        print(f"\nStepping envs {step_env_ids} while reset is in progress...")
+        num_concurrent_steps = 5
+        step_start_time = time.time()
+
+        for step_num in range(num_concurrent_steps):
+            actions = np.random.rand(len(step_env_ids), 7).astype(np.float32)
+            actions[:, -1] = np.sign(actions[:, -1] - 0.5)
+            self.env_manager.step(env_ids=step_env_ids, action=actions)
+            print(f"  - Step {step_num + 1}/{num_concurrent_steps} completed")
+
+        step_duration = time.time() - step_start_time
+        print(f"✓ Completed {num_concurrent_steps} steps in {step_duration*1000:.2f}ms")
+
+        # Verify stepped environments advanced
+        step_env_states = self.env_manager.get_env_states(step_env_ids)
+        for i, env_id in enumerate(step_env_ids):
+            state = step_env_states[i]
+            self.assertGreaterEqual(state.step, num_concurrent_steps)
+            print(f"  - Env {env_id}: at step {state.step}")
+        print("✓ Stepped environments advanced correctly")
+
+        # Task 3: Wait for async reset to complete
+        print(f"\nWaiting for async reset of envs {reset_env_ids}...")
+        wait_start_time = time.time()
+
+        images_and_states, task_descriptions = self.env_manager.reset_wait(
+            env_ids=reset_env_ids
+        )
+        wait_duration = time.time() - wait_start_time
+        print(f"✓ Async reset completed in {wait_duration*1000:.2f}ms (wait time)")
+
+        # Verify reset results structure
+        self.assertIsInstance(images_and_states, dict)
+        self.assertIn("full_images", images_and_states)
+        self.assertIn("wrist_images", images_and_states)
+        self.assertIn("states", images_and_states)
+        print("✓ Reset wait returned expected data structure")
+
+        # Verify shapes match reset envs
+        self.assertEqual(images_and_states["full_images"].shape[0], len(reset_env_ids))
+        self.assertEqual(images_and_states["wrist_images"].shape[0], len(reset_env_ids))
+        self.assertEqual(images_and_states["states"].shape[0], len(reset_env_ids))
+        self.assertEqual(len(task_descriptions), len(reset_env_ids))
+        print(f"✓ Reset data shapes correct for {len(reset_env_ids)} environments")
+
+        # Verify reset environments are at step 0 with new task/trial IDs
+        reset_env_states = self.env_manager.get_env_states(reset_env_ids)
+        for i, env_id in enumerate(reset_env_ids):
+            state = reset_env_states[i]
+            self.assertEqual(
+                state.step, 0, f"Env {env_id} should be at step 0 after reset"
+            )
+            self.assertEqual(
+                state.task_id,
+                reset_task_ids[i],
+                f"Env {env_id} should have new task_id {reset_task_ids[i]}",
+            )
+            self.assertEqual(
+                state.trial_id,
+                reset_trial_ids[i],
+                f"Env {env_id} should have new trial_id {reset_trial_ids[i]}",
+            )
+            print(
+                f"  - Env {env_id}: step={state.step}, "
+                f"task_id={state.task_id}, trial_id={state.trial_id}"
+            )
+        print("✓ Reset environments have correct state after async reset")
+
+        # Verify stepped environments were not affected by reset
+        step_env_states_after = self.env_manager.get_env_states(step_env_ids)
+        for i, env_id in enumerate(step_env_ids):
+            state_before = step_env_states[i]
+            state_after = step_env_states_after[i]
+            self.assertEqual(
+                state_after.step,
+                state_before.step,
+                f"Env {env_id} step count should not change during reset_wait",
+            )
+            self.assertEqual(
+                state_after.task_id,
+                task_ids[env_id],
+                f"Env {env_id} should still have original task_id",
+            )
+        print("✓ Stepped environments unaffected by async reset operations")
+
+        # Performance summary
+        print("\n" + "-" * 80)
+        print("PERFORMANCE SUMMARY:")
+        print(
+            f"  - Async reset initiation: {async_start_time*1000:.2f}ms (non-blocking)"
+        )
+        print(
+            f"  - Concurrent stepping ({num_concurrent_steps} steps): "
+            f"{step_duration*1000:.2f}ms"
+        )
+        print(f"  - Reset wait time: {wait_duration*1000:.2f}ms")
+        print(
+            f"  - Total time: "
+            f"{(async_start_time + step_duration + wait_duration)*1000:.2f}ms"
+        )
+        print(
+            "  - Note: Steps executed concurrently with environment "
+            "reconfiguration in subprocesses"
+        )
+        print("-" * 80)
 
 
 if __name__ == "__main__":
