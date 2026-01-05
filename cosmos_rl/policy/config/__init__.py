@@ -1165,14 +1165,8 @@ class VLAConfig(BaseModel):
         default=16, description="Number of chunks to train in one iteration."
     )
 
-    filter_lower_bound: float = Field(
-        default=0.1,
-        description="Lower success rate bound for filtering the rollout generation groups.",
-    )
-
-    filter_upper_bound: float = Field(
-        default=0.9,
-        description="Upper success rate bound for filtering the rollout generation groups.",
+    save_video: bool = Field(
+        default=False, description="Whether to save video of validation rollout."
     )
 
     @model_validator(mode="after")

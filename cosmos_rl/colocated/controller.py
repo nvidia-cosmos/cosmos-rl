@@ -18,10 +18,6 @@ from cosmos_rl.dispatcher.controller import Controller
 from cosmos_rl.dispatcher.replica import Replica
 from cosmos_rl.dispatcher.protocol import Role, RolloutRequest
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.wandb_logger import (
-    is_wandb_available,
-    init_wandb,
-)
 from cosmos_rl.utils.util import is_master_rank
 import cosmos_rl.utils.network_util as network_util
 import torch
@@ -126,13 +122,6 @@ class ColocatedController(Controller):
         self.policy_to_rollout_shard_mapper = ParallelizedShardMapper.get_instance(
             config
         )
-
-        if "wandb" in config.logging.logger and is_wandb_available():
-            init_wandb(config)
-        else:
-            logger.warning(
-                "Wandb is not available. Please install it to use wandb logging features."
-            )
 
         self.is_rl = task_type != "sft"
         self.weight_version_to_prompt_num = {}  # Only for on-policy.

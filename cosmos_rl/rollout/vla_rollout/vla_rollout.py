@@ -36,42 +36,11 @@ from cosmos_rl.simulators.libero.utils import (
     normalize_gripper_action,
     invert_gripper_action,
     obs_to_vla_input,
-    save_rollout_video,
+    LIBERO_MAX_STEPS_MAP,
 )
 from cosmos_rl.simulators.env_manager import EnvManager
 from cosmos_rl.simulators.libero.env_wrapper import LiberoEnvWrapper
 from cosmos_rl.utils.replay_buffer import save_trajectory_to_buffer
-
-MAX_STEPS_MAP = {
-    # LIBERO tasks
-    "libero_spatial": 512,
-    "libero_object": 512,
-    "libero_goal": 512,
-    "libero_10": 512,
-    "libero_90": 512,
-    # RoboTwin 2.0 tasks
-    "robotwin2_click_bell": 200,
-    "robotwin2_move_can_pot": 200,
-    "robotwin2_place_phone_stand": 200,
-    "robotwin2_place_a2b_left": 200,
-    "robotwin2_place_a2b_right": 200,
-    "robotwin2_handover_mic": 200,
-    "robotwin2_pick_dual_bottles": 100,
-    "robotwin2_lift_pot": 200,
-    "robotwin2_put_bottles_dustbin": 800,
-    "robotwin2_stack_blocks_two": 400,
-    "robotwin2_stack_bowls_two": 400,
-    "robotwin2_handover_block": 400,
-    "robotwin2_place_empty_cup": 200,
-    "robotwin2_shake_bottle": 75,
-    "robotwin2_move_stapler_pad": 200,
-    "robotwin2_place_container_plate": 150,
-    "robotwin2_blocks_ranking_rgb": 600,
-    "robotwin2_beat_block_hammer": 200,
-    "robotwin2_place_mouse_pad": 200,
-    "robotwin2_place_shoe": 250,
-    "robotwin2_move_pillbottle_pad": 200,
-}
 
 
 def normalize_proprio(proprio: np.ndarray, norm_stats: Dict) -> np.ndarray:
@@ -124,7 +93,7 @@ def center_crop_image(image: Image.Image, crop_size: int = 256) -> Image.Image:
 def extract_simulator_config(config: Config):
     cfg = SimpleNamespace()
     cfg.task_suite_name = config.validation.dataset.subset
-    cfg.max_steps = MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
+    cfg.max_steps = LIBERO_MAX_STEPS_MAP.get(cfg.task_suite_name, 512)
     cfg.num_envs = config.rollout.n_generation
     return cfg
 
@@ -189,6 +158,7 @@ class OpenVLARollout(RolloutBase):
                 model_path, trust_remote_code=True
             )
             self.tokenizer = self.processor.tokenizer
+            self.pad_token_id = getattr(self.tokenizer, "pad_token_id", 0)
 
             self.model = ModelRegistry.build_model(self.config)
 
@@ -433,10 +403,11 @@ class OpenVLARollout(RolloutBase):
                 x.transpose(0, 1) for x in batchdata["attention_mask"]
             ]
 
-            pad_token_id = getattr(self.processor.tokenizer, "pad_token_id", 0)
             batchdata["input_ids"] = (
                 pad_sequence(
-                    batchdata["input_ids"], batch_first=True, padding_value=pad_token_id
+                    batchdata["input_ids"],
+                    batch_first=True,
+                    padding_value=self.pad_token_id,
                 )
                 .squeeze(-1)
                 .to(device)
@@ -450,7 +421,7 @@ class OpenVLARollout(RolloutBase):
             )
 
             # Handle padding and sorting (matching SimpleVLA-RL)
-            padding_mask = batchdata["input_ids"].ne(pad_token_id)
+            padding_mask = batchdata["input_ids"].ne(self.pad_token_id)
             padding_mask = ~padding_mask
             padding_mask = padding_mask.int()
             sorted_indices = torch.argsort(
@@ -491,27 +462,18 @@ class OpenVLARollout(RolloutBase):
                 pixel_values=pixel_values,
                 proprio=proprio,
                 attention_mask=attention_mask,
-                padding_idx=getattr(self.processor.tokenizer, "pad_token_id", 0),
+                padding_idx=self.pad_token_id,
                 do_sample=not is_valid,
                 unnorm_key=getattr(self.config, "unnorm_key", "libero_10_no_noops"),
                 temperature=temperature,
             )
 
-            # Convert actions to numpy if needed (might already be numpy from _unnormalize_actions)
-            if isinstance(actions, torch.Tensor):
-                actions_np = actions.cpu().numpy()
-            else:
-                actions_np = actions
-
-            actions_np = normalize_gripper_action(actions_np)
-            actions_np = invert_gripper_action(actions_np)
+            actions = normalize_gripper_action(actions)
+            actions = invert_gripper_action(actions)
 
             return {
-                "action": actions_np,
+                "action": actions,
                 "responses": responses,
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "pixel_values": pixel_values,
                 "old_log_probs": logprobs,
             }
 
@@ -550,19 +512,29 @@ class OpenVLARollout(RolloutBase):
         else:
             logger.info(f"[Validation] success rate: {n_success}/{group_size}")
 
-        # Check GRPO filtering criteria first (before expensive log prob computation)
-        trajectories = [{} for _ in range(group_size)]
+        trajectories = [
+            {
+                "input_ids": pad_sequence(
+                    vla_history[i]["input_ids"],
+                    batch_first=True,
+                    padding_value=self.pad_token_id,
+                ),
+                "attention_mask": pad_sequence(
+                    vla_history[i]["attention_mask"],
+                    batch_first=True,
+                    padding_value=0,
+                ),
+            }
+            for i in range(group_size)
+        ]
+        pack_keys = ["pixel_values", "responses"] + (
+            ["old_log_probs"] if not is_validation else []
+        )
+
         for episode_idx in range(group_size):
-            for key in [
-                "input_ids",
-                "attention_mask",
-                "pixel_values",
-                "responses",
-                "old_log_probs",
-            ]:
+            for key in pack_keys:
                 trajectories[episode_idx][key] = torch.stack(
-                    vla_history[episode_idx][key],
-                    dim=0,
+                    vla_history[episode_idx][key], dim=0
                 )
 
         # Compute old_log_probs for each episode by replaying trajectory
@@ -636,19 +608,13 @@ class OpenVLARollout(RolloutBase):
 
         from cosmos_rl.policy.model.vla.openvla_oft.constants import NUM_ACTIONS_CHUNK
 
+        vla_input_keys = ["input_ids", "attention_mask", "pixel_values"]
+        vla_output_keys = ["responses", "action"]
+        if not is_validation:
+            vla_output_keys.append("old_log_probs")
+        vla_history_keys = vla_input_keys + vla_output_keys
         vla_history = [
-            {
-                key: []
-                for key in [
-                    "input_ids",
-                    "attention_mask",
-                    "pixel_values",
-                    "responses",
-                    "action",
-                    "old_log_probs",
-                ]
-            }
-            for _ in range(len(payloads))
+            {key: [] for key in vla_history_keys} for _ in range(len(payloads))
         ]
 
         active_indices = active_env_ids = env_ids
@@ -666,9 +632,9 @@ class OpenVLARollout(RolloutBase):
                 active_env_ids, vla_output["action"]
             )
             for i, env_id in enumerate(active_env_ids):
-                for key in ["input_ids", "attention_mask", "pixel_values"]:
+                for key in vla_input_keys:
                     vla_history[env_id][key].append(vla_input[key][i])
-                for key in ["responses", "action", "old_log_probs"]:
+                for key in vla_output_keys:
                     vla_history[env_id][key].append(vla_output[key][i])
                 for key in ["active", "complete", "finish_step"]:
                     task_records[env_id][key] = step_results[key][i]
@@ -684,24 +650,9 @@ class OpenVLARollout(RolloutBase):
                 current_inputs[key] = step_results[key][active_indices].copy()
             step += NUM_ACTIONS_CHUNK
 
-        if is_validation:
-            valid_pixels = self.env_manager.get_valid_pixels(env_ids)["full_images"]
-            task_file_name = f"{task_records[i]['task_suite_name']}_task_{task_records[i]['task_id']}_trial_{task_records[i]['trial_id']}"
+        if is_validation and self.config.vla.save_video:
             rollout_dir = os.path.join(self.config.train.output_dir, "vla_rollouts")
-            for i in range(len(payloads)):
-                try:
-                    save_rollout_video(
-                        valid_pixels[i],
-                        rollout_dir,
-                        task_file_name,
-                        0,
-                        task_records[i]["complete"],
-                    )
-                except Exception as e:
-                    logger.warning(f"  ⚠️  Failed to save {task_file_name}: {e}")
-                    import traceback
-
-                    traceback.print_exc()
+            self.env_manager.save_validation_videos(rollout_dir, env_ids)
 
         return self._pack_grpo_results(
             vla_history, task_records, len(payloads), is_validation

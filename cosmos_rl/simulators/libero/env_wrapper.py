@@ -27,6 +27,7 @@ from cosmos_rl.simulators.libero.utils import (
     get_libero_dummy_action,
     quat2axisangle,
 )
+from cosmos_rl.simulators.utils import save_rollout_video
 
 
 @dataclass
@@ -226,10 +227,17 @@ class LiberoEnvWrapper(gym.Env):
     def get_env_states(self, env_ids: List[int]):
         return [self.env_states[env_id] for env_id in env_ids]
 
-    def get_valid_pixels(self, env_ids: List[int]):
-        results = {}
-        for keys in ["full_images", "wrist_images"]:
-            results[keys] = np.stack(
-                [self.env_states[env_id].valid_pixels[keys] for env_id in env_ids]
+    def save_validation_videos(self, rollout_dir: str, env_ids: List[int]):
+        for env_id in env_ids:
+            state = self.env_states[env_id]
+            if not state.do_validation:
+                continue
+            task_name = (
+                f"{self.task_suite_name}_task_{state.task_id}_trial_{state.trial_id}"
             )
-        return results
+            save_rollout_video(
+                state.valid_pixels["full_images"],
+                rollout_dir,
+                task_name,
+                state.complete,
+            )
