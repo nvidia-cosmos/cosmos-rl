@@ -42,6 +42,8 @@ from cosmos_rl.policy.kernel.megatron_moe.token_dispatcher import (
     MoEConfig,
     MoEFlexTokenDispatcher,
 )
+from cosmos_rl.utils.logging import logger
+
 from transformers.activations import ACT2FN
 
 _shared_experts_stream: Optional[torch.cuda.Stream] = None
@@ -429,6 +431,66 @@ class GroupedExpertsDeepEP(nn.Module):
         return y
 
 
+class GroupedExpertsTorch(GroupedExpertsDeepEP):
+    """
+    Sparse MoE implementation using torch._grouped_gemm.
+    """
+
+    def __init__(self, args: MoEArgs):
+        super().__init__(args)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> torch.Tensor:
+        assert not isinstance(x, DTensor)
+
+        indices = indices.masked_fill(~token_mask.unsqueeze(-1), -1)
+
+        # permuted_local_hidden_states: [total_dispatched_num_tokens, hidden_size]: tokens that dispatched to current EP rank, grouped by the selected experts, split by `tokens_per_expert`.
+        # tokens_per_expert: [num_local_experts]: number of tokens dispatched to each expert.
+        #   The sum of tokens_per_expert is equal to the total number of tokens dispatched to the current EP rank, i.e., total_dispatched_num_tokens.
+        # permuted_probs: [total_dispatched_num_tokens, topk]: probabilities of the selected expert for each dispatched token.
+        (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = (
+            self.token_dispatcher.token_permutation2(
+                hidden_states=x,
+                num_local_tokens=x.size(0),
+                token_probs=weights,
+                token_indices=indices,
+            )
+        )
+        permuted_probs = permuted_probs.unsqueeze(-1)
+        if torch.count_nonzero(tokens_per_expert) > 0:
+            offsets = torch.cumsum(tokens_per_expert, dim=0, dtype=torch.int32).to(
+                permuted_local_hidden_states.device
+            )
+            output1 = torch._grouped_mm(
+                permuted_local_hidden_states,
+                self.gate_and_up_projs.to_local().transpose(-2, -1),
+                offs=offsets,
+            )  # [total_dispatched_num_tokens, moe_inter_dim * 2]
+            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+            output2 = torch._grouped_mm(
+                output1_,
+                self.down_projs.to_local().transpose(-2, -1),
+                offs=offsets,
+            )  # [total_dispatched_num_tokens, hidden_size]
+        else:
+            # No tokens dispatched to the current EP rank
+            output1 = torch.matmul(
+                x[0] * 0, self.gate_and_up_projs.to_local()[0].t()
+            )  # [hidden_size] @ [hidden_size, moe_inter_dim * 2] = [moe_inter_dim * 2]
+            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+            output2 = torch.matmul(output1_, self.down_projs.to_local()[0].t())
+
+        y = self.token_dispatcher.token_unpermutation(output2)
+
+        return y
+
+
 class FakeBalancedGate(nn.Module):
     """
     Load balanced gate implementation, spreads tokens uniformly across all experts.
@@ -805,10 +867,19 @@ class MoE(nn.Module):
         else:
             self.gate = Gate(args)
 
-        if is_deepep_supported() and args.moe_backend == "deepep":
-            self.experts = GroupedExpertsDeepEP(args)
+        if is_deepep_supported():
+            if args.moe_backend == "third":
+                self.experts = GroupedExpertsDeepEP(args)
+                logger.info("Using grouped_gemm from third party as the MoE backend.")
+            elif args.moe_backend == "torch":
+                self.experts = GroupedExpertsTorch(args)
+                logger.info("Using torch._grouped_gemm as the MoE backend.")
+            else:
+                raise ValueError(
+                    f"Invalid moe backend: {args.moe_backend} for DeepEP as the token dispatcher."
+                )
         else:
-            # if specified backend is not deepep, use default backend. Respect user choice.
+            # Respect user choice about moe computing backend.
             # Use allgather dispatcher
             # TODO(huik): support all2all dispatcher for common use cases
             self.experts = GroupedExperts(args)
