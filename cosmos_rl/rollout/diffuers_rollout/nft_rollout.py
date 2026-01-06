@@ -131,6 +131,7 @@ class DiffusionNFTRollout(RolloutBase):
                     completion_logprobs=None,
                     completion_token_ids=None,
                     extra_info={
+                        "modality": "video" if self.model.is_video else "image",
                         "prompt_ids": prompt_ids,
                         "prompt_metadatas": metadatas,
                         "prompt_embeds": prompt_embeds,

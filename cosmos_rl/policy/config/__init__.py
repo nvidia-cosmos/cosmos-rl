@@ -249,7 +249,10 @@ class RemoteRewardConfig(BaseModel):
     enabled: bool = True
     score_key: str = "overall_reward"
     scale: float = 1.0
-    reward_fn: str = "dance_grpo"
+    reward_fns: Dict[str, float] = Field(
+        default_factory=lambda: {"dance_grpo": 1.0},
+        description="Dictionary of reward functions and their weights for remote reward calculation.",
+    )
     reward_clip_min: float = -5.0
     reward_clip_max: float = 5.0
 

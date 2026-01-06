@@ -33,8 +33,6 @@ def populate_for_none_fields(payload: RLPayload):
         payload.completions = [None] * len_of_rewards
     if payload.completed_conversations is None:
         payload.completed_conversations = [None] * len_of_rewards
-    if payload.extra_info is None:
-        payload.extra_info = [{} for _ in range(len_of_rewards)]
 
 
 def extract_rollouts(
@@ -97,7 +95,10 @@ def extract_rollouts(
             )
         ]
         # Extract the item from extra_info dict to single rollout's extra_info
-        if payload.extra_info is not None:
+        if payload.extra_info is None:
+            for rollout in rollouts:
+                rollout.extra_info = {}
+        else:
             for idx, rollout in enumerate(rollouts):
                 rollout.extra_info = {}
                 for key, value in payload.extra_info.items():

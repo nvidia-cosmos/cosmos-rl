@@ -112,11 +112,11 @@ class RemoteRewardCalculator:
             "[RemoteRewardCalculator] Remote validation reward computation is not implemented yet."
         )
 
-    def enqueue_request(self, tensor, data):
+    def enqueue_request(self, mm_tensor, data):
         """Enqueue the request and return UUID."""
 
         buffer = io.BytesIO()
-        np.save(buffer, tensor)
+        np.save(buffer, mm_tensor, allow_pickle=False)
         buffer.seek(0)
 
         # Combine JSON + binary data
@@ -164,28 +164,37 @@ class RemoteRewardCalculator:
         if is_validation:
             return self.compute_validation_rewards(payloads, step)
 
+        # Only support batch-level image/video reward calculation for now.
+        modality = payloads[0].extra_info.get("modality", "image")
+
         payload = payloads[0]
         mm_datas = payload.completions
         prompts = [payload.prompt] * len(mm_datas)
-        latents = self.tokenizer.encode(mm_datas)
-
-        tensor = latents.cpu().numpy()
-
-        # Create video info for entire batch (assuming 16 FPS as default)
-        video_infos = []
-        for _ in range(latents.shape[0]):
-            video_infos.append({"video_fps": 16.0})
-
         data = {
             "prompts": prompts,
-            "reward_fn": {
-                f"{self.reward_fn}": 1.0,
-            },
-            "video_infos": video_infos,
+            "reward_fn": self.config.reward_fns,
         }
 
+        if modality == "video":
+            # Acquire fps info from extra_info
+            video_fps = payload.extra_info.get("video_fps", 16.0)
+            # Encode video data
+            latents = self.tokenizer.encode(mm_datas)
+            mm_tensor = latents.cpu().numpy()
+            # Create video info for entire batch (assuming 16 FPS as default)
+            video_infos = []
+            for _ in range(latents.shape[0]):
+                video_infos.append({"video_fps": video_fps})
+            data["video_infos"] = video_infos
+            data["media_type"] = "video"
+        else:  # image
+            data["media_type"] = "image"
+            mm_tensor = (
+                mm_datas.permute(0, 2, 3, 1).cpu().numpy()
+            )  # B,C,H,W  -> B,H,W,C
+
         # Enqueue request (single call for entire batch)
-        uuid = self.enqueue_request(tensor, data)
+        uuid = self.enqueue_request(mm_tensor, data)
         self.uuid2payload[uuid] = payload
 
         return uuid
