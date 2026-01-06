@@ -107,7 +107,7 @@ class DecodeHandler:
             model_path (str): The path to the tokenizer model for decoding.
             device (str): The device to run the tokenizer on.
         """
-        from cosmos_rl.vision_gen.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
+        from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
         self.latent_decoder = Wan2pt1TokenizerHelper(
             chunk_duration=chunk_duration,
             load_mean_std=load_mean_std,
@@ -172,7 +172,7 @@ class DecodeHandler:
         fields = json.loads(fields)
         logger.info(f"[{cls.name}] Setting latent attributes: {fields}")
         controller = cls.get_instance()
-        from cosmos_rl.vision_gen.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
+        from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
         controller.latent_decoder = Wan2pt1TokenizerHelper(
             chunk_duration=fields.get("chunk_duration", 81),
             load_mean_std=fields.get("load_mean_std", False),
