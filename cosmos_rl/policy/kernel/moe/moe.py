@@ -161,6 +161,7 @@ class GroupedExperts(nn.Module):
             self.down_projs = nn.Parameter(
                 torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
             )
+        self.args = args
 
     def forward(
         self,
