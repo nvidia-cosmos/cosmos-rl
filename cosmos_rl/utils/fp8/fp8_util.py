@@ -27,7 +27,10 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.util import is_cuda_compatible, torch_version_at_least
 from cosmos_rl.utils.logging import logger
-from cosmos_rl.utils.model_converter import ModelConverter
+from cosmos_rl.utils.model_converter import (
+    QuantizationConverter,
+    register_quantization_converter_class,
+)
 
 MIN_TORCH_VERSION_FOR_FP8 = "2.7.0"
 IS_TORCH_COMPATIBLE_WITH_FP8 = torch_version_at_least(MIN_TORCH_VERSION_FOR_FP8)
@@ -87,7 +90,8 @@ def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
-class FP8ModelConverter(ModelConverter):
+@register_quantization_converter_class("linear", "fp8")
+class FP8LinearQuantizationConverter(QuantizationConverter):
     def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
         super().__init__(config, parallel_dims)
         if not IS_TORCH_COMPATIBLE_WITH_FP8:
@@ -97,12 +101,14 @@ class FP8ModelConverter(ModelConverter):
             raise RuntimeError(
                 "FP8 is only supported for device that has compute capability 8.9 or higher"
             )
-        self.fp8_config = config.train.fp8
+        self.fp8_config = (
+            config.train.quantization.linear_quantization_config.fp_linear_config
+        )
 
         assert is_valid_fp8_quant_recipe(self.fp8_config.quant_recipe)
-        assert is_valid_fp8_recipe(self.fp8_config.fp8_recipe)
+        assert is_valid_fp8_recipe(self.fp8_config.scaling_recipe)
 
-        if self.fp8_config.fp8_recipe == FP8Recipe.DELAYED_SCALING:
+        if self.fp8_config.scaling_recipe == FP8Recipe.DELAYED_SCALING:
             raise NotImplementedError("[FP8] Delayed scaling is not supported yet.")
 
         self.precompute_scale = False
@@ -140,7 +146,7 @@ class FP8ModelConverter(ModelConverter):
         if not IS_TORCH_COMPATIBLE_WITH_FP8:
             return
 
-        if not self.fp8_config.enable_fp8:
+        if not self.fp8_config.enable:
             return
 
         convert_to_float8_training(
@@ -155,7 +161,7 @@ class FP8ModelConverter(ModelConverter):
         if not IS_TORCH_COMPATIBLE_WITH_FP8:
             return
 
-        if not self.fp8_config.enable_fp8:
+        if not self.fp8_config.enable:
             return
 
         if not self.precompute_scale:

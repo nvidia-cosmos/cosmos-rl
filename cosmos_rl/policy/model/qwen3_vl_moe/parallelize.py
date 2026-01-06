@@ -31,7 +31,11 @@ from torch.distributed.tensor.parallel import (
     ParallelStyle,
 )
 from cosmos_rl.utils.distributed import ReplicateParallel
-from cosmos_rl.utils.parallelism import ParallelDims, pre_parallelize_sanity_check
+from cosmos_rl.utils.parallelism import (
+    ParallelDims,
+    pre_parallelize_sanity_check,
+    is_tensorwise_tp_enabled,
+)
 from cosmos_rl.utils.logging import logger
 from cosmos_rl.utils.util import str2torch_dtype
 from cosmos_rl.policy.config import Config as CosmosConfig
@@ -67,8 +71,7 @@ def parallelize(
         apply_tp_ep(
             model,
             world_mesh["tp"],
-            enable_float8_tensorwise_tp=config.train.fp8.enable_fp8
-            and config.train.fp8.quant_recipe == "tensorwise",
+            enable_float8_tensorwise_tp=is_tensorwise_tp_enabled(config),
             enable_async_tp=config.train.async_tp_enabled,
             parallel_dims=parallel_dims,
         )
