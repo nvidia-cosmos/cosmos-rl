@@ -1065,6 +1065,68 @@ def compute_logprobs(
     return logps, cu_seqlens, metrics_dict
 
 
+def compute_logprobs_for_top_k_indices(
+    input_ids_batch: torch.Tensor,  # [batch_size, max_len, top_k]
+    logprob_masks: torch.Tensor,  # [batch_size, max_len],
+    logits: torch.Tensor,  # [batch_size, max_len, vocab_size] or [n_logprob_tokens, vocab_size] if is_full_logits is False
+    is_full_logits: bool = False,
+    label_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
+    input_packing_mask: Optional[torch.Tensor] = None,  # [batch_size, max_len]
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute the log probabilities considering top-k tokens at each position.
+
+    Args:
+        input_ids_batch: the top_k input_ids of the model at each position [batch_size, max_len, top_k]
+        logprob_masks: the logprob_masks of the model [batch_size, max_len]
+        logits: the logits of the model [batch_size, max_len, vocab_size] or [n_logprob_tokens, vocab_size]
+        is_full_logits: whether the logits are full logits or have been index-selected for memory efficiency
+        label_packing_mask: the packing mask for the labels, if using packed sequences
+        input_packing_mask: the packing mask for the inputs, if using packed sequences
+
+    Returns:
+        logps: the log probabilities for the top-k tokens
+        cu_seqlens: the cumulative sequence lengths of the logps
+    """
+    # Shift token_ids
+    if label_packing_mask is not None:
+        assert (
+            input_packing_mask is not None
+        ), "input_packing_mask must be provided if label_packing_mask is used"
+        shifted_input_ids = torch.zeros_like(input_ids_batch)
+        shifted_input_ids[input_packing_mask] = input_ids_batch[label_packing_mask]
+    else:
+        shifted_input_ids = torch.empty_like(input_ids_batch)
+        shifted_input_ids[:, :-1] = input_ids_batch[:, 1:]
+        shifted_input_ids[:, -1] = 0
+
+    if is_full_logits:
+        assert (
+            logits.shape[:2] == shifted_input_ids.shape[:2]
+        ), f"Logits shape {logits.shape} does not match input_ids shape {shifted_input_ids.shape}"
+        effective_logits = logits[logprob_masks]
+    else:
+        effective_logits = logits
+    bsz = input_ids_batch.shape[0]
+
+    effective_input_ids = shifted_input_ids[logprob_masks]  # [n_logprob_tokens, top_k]
+
+    masked_seqlens = logprob_masks.sum(dim=-1)  # [bsz,]
+    cu_seqlens = torch.zeros(
+        bsz + 1, dtype=torch.int32, device=logits.device
+    )  # [bsz + 1,]
+    cu_seqlens[1:] = torch.cumsum(masked_seqlens, dim=0)
+    per_token_logps = []
+    for row_logits, row_labels in zip(
+        effective_logits, effective_input_ids
+    ):  # loop to reduce peak mem consumption
+        row_logps = F.log_softmax(row_logits, dim=-1)
+        row_per_token_logps = row_logps.gather(dim=-1, index=row_labels)
+        per_token_logps.append(row_per_token_logps)
+    per_token_logps = torch.stack(per_token_logps)
+    return per_token_logps, cu_seqlens
+
+
 def dynamic_import_module(path: str, attr: Optional[str] = None) -> Dict[str, Any]:
     """
     Dynamically import either:
