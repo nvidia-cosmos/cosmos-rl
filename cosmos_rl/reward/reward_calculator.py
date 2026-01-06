@@ -369,7 +369,7 @@ class RewardCalculator:
                 rollout_tokens = []
             else:
                 rollout_tokens = [
-                    rollout.completion_token_ids
+                    [t[0] for t in rollout.completion_token_ids]
                     if self.config.train.train_policy.rollout_as_token_ids
                     else self.tokenizer(
                         rollout.completion, add_special_tokens=False

@@ -303,6 +303,8 @@ class vLLMRollout(RolloutBase):
                 quantization=self.quantization,
                 seed=seed,
                 load_format=load_format,
+                # Set max_logprobs for distillation, default is 20
+                max_logprobs=max(self.config.distillation.top_k, 20),
             )
             self._engine_initialized = True
             logger.info("[Rollout] Engine initialized.")
@@ -407,7 +409,10 @@ class vLLMRollout(RolloutBase):
 
     @staticmethod
     def parse_logprobs(
-        logprobs: List[dict], actual_token_ids: List[int], top_k: int = 0
+        logprobs: List[dict],
+        actual_token_ids: List[int],
+        top_k: int = 0,
+        is_completion: bool = False,
     ) -> List[float]:
         if logprobs is None:
             return []
@@ -432,7 +437,7 @@ class vLLMRollout(RolloutBase):
             else:
                 assert (
                     len(logp) == top_k or len(logp) == top_k + 1
-                ), f"[Rollout] logprobs length should be {top_k} or {top_k+1}, but got {logp}."
+                ), f"[Rollout] logprobs length should be {top_k} or {top_k+1}, but got {logp} for {actual_id}."
                 assert (
                     actual_id in logp
                 ), f"[Rollout] actual token id {actual_id} should be in logprobs {logp.keys()}."
@@ -526,6 +531,7 @@ class vLLMRollout(RolloutBase):
                                 output.prompt_logprobs[1:],
                                 output.prompt_token_ids[1:],
                                 sampling_params.prompt_logprobs,
+                                is_completion=False,
                             )
                             if not self.config.train.train_policy.collect_rollout_logprobs:
                                 prompt_logprobs = []
@@ -540,6 +546,7 @@ class vLLMRollout(RolloutBase):
                                 output.outputs[j].logprobs,
                                 output.outputs[j].token_ids,
                                 sampling_params.logprobs,
+                                is_completion=True,
                             )
                             if not self.config.train.train_policy.collect_rollout_logprobs:
                                 logprob = []
@@ -642,6 +649,7 @@ class vLLMRollout(RolloutBase):
                         results[0].prompt_logprobs[1:],
                         results[0].prompt_token_ids[1:],
                         sampling_params.prompt_logprobs,
+                        is_completion=False,
                     )
                     if not self.config.train.train_policy.collect_rollout_logprobs:
                         prompt_logprobs = []
@@ -659,6 +667,7 @@ class vLLMRollout(RolloutBase):
                             output.logprobs,
                             output.token_ids,
                             sampling_params.logprobs,
+                            is_completion=True,
                         )
                         if self.config.train.train_policy.collect_rollout_logprobs:
                             logprobs = logprob

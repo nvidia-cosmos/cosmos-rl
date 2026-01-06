@@ -668,6 +668,7 @@ class GRPOTrainer(LLMTrainer):
             token_ids = rollout.prompt_token_ids + rollout.completion_token_ids
             updated_token_ids = []
             for token_id in token_ids:
+                assert len(token_id) > 0, "Token ids should not be empty"
                 if len(token_id) > self.config.distillation.top_k:
                     assert (
                         len(token_id) == self.config.distillation.top_k + 1
@@ -676,6 +677,10 @@ class GRPOTrainer(LLMTrainer):
                         token_id = token_id[
                             1:
                         ]  # remove the first token id which is the selected token only keep top_k token ids
+                else:
+                    assert (
+                        len(token_id) == self.config.distillation.top_k
+                    ), f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k}"
                 updated_token_ids.append(token_id)
             updated_token_ids = [[-100] * len(updated_token_ids[0])] + updated_token_ids
             updated_token_ids = updated_token_ids[:computed_max_len] + [
