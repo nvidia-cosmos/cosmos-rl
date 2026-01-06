@@ -147,10 +147,10 @@ class GroupedExperts(nn.Module):
         self.n_routed_experts = args.n_routed_experts
         self.moe_inter_dim = args.moe_inter_dim
         self.gate_and_up_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim * 2, args.dim)
+            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim * 2)
         )
         self.down_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim)
+            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
         )
 
     def forward(
@@ -229,15 +229,16 @@ class GroupedExperts(nn.Module):
             active_local_experts += 1
 
             gate_and_up_proj = get_local_proj(self.gate_and_up_projs, i)
-            gate_proj = gate_and_up_proj[: self.moe_inter_dim, :]
-            up_proj = gate_and_up_proj[self.moe_inter_dim :, :]
+            gate_proj = gate_and_up_proj[:, : self.moe_inter_dim]
+            up_proj = gate_and_up_proj[:, self.moe_inter_dim :]
             down_proj = get_local_proj(self.down_projs, i)
 
             idx_b = idx[:, None].expand(-1, x.size(1))
             x_idx = x.gather(dim=0, index=idx_b)
 
             expert_out = (
-                swiglu(x_idx, gate_proj, down_proj, up_proj) * weights[idx, top, None]
+                swiglu(x_idx, gate_proj.t(), down_proj.t(), up_proj.t())
+                * weights[idx, top, None]
             )
 
             y.scatter_add_(dim=0, index=idx_b, src=expert_out)
@@ -245,11 +246,13 @@ class GroupedExperts(nn.Module):
         if active_local_experts == 0:
             # We need to handle the case where no token selects the experts on this device.
             gate_and_up_proj = get_local_proj(self.gate_and_up_projs, experts_start_idx)
-            gate_proj = gate_and_up_proj[: self.moe_inter_dim, :]
-            up_proj = gate_and_up_proj[self.moe_inter_dim :, :]
+            gate_proj = gate_and_up_proj[:, : self.moe_inter_dim]
+            up_proj = gate_and_up_proj[:, self.moe_inter_dim :]
             down_proj = get_local_proj(self.down_projs, experts_start_idx)
             expert_out = (
-                swiglu(torch.zeros_like(x[0]), gate_proj, down_proj, up_proj)
+                swiglu(
+                    torch.zeros_like(x[0]), gate_proj.t(), down_proj.t(), up_proj.t()
+                )
                 * weights[0, 0, None]
             )
             y[0] += expert_out

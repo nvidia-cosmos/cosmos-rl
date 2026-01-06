@@ -528,7 +528,7 @@ class InternVLChatModel(BaseModel):
             rank_tensor_metadata,
             device,
         ):
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, lm_type, n_experts, parallel_dims
             )
             if dest_name is None:
@@ -587,12 +587,12 @@ class InternVLChatModel(BaseModel):
                 "mlp.experts.down_proj" in dest_name
                 or "mlp.experts.gate_and_up_proj" in dest_name
             ):
-                shared_weight = shared_weight.transpose(0, 1)
+                sharded_weight = sharded_weight.transpose(0, 1)
             assert (
-                local_view.shape == shared_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
             with torch.no_grad():
-                local_view.data.copy_(shared_weight)
+                local_view.data.copy_(sharded_weight)
 
     def separate_model_parts(self) -> List[nn.Module]:
         return [self.model, self.visual, self.mlp1]
