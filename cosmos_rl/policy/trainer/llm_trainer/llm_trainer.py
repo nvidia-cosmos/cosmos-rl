@@ -149,7 +149,7 @@ class LLMTrainer(Trainer):
 
         self.seq_len_multiple = parallel_dims.cp * parallel_dims.tp
         self.lr_schedulers = None
-        if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
+        if self.config.train.quantization.quantization_type != "none":
             # Constraint of FP8/FP4 kernel(torch._scaled_mm): it requires K in MNK is mutiple of 16. In backward of Linear, to
             # calculate the gradient of weight, we have to round the seq_len_multiple to mutiple of 16.
             # See: https://github.com/pytorch/pytorch/blob/851a6fa82df251fbc368f0284d941ce78f68e7b1/aten/src/ATen/native/cuda/Blas.cpp#L1252
