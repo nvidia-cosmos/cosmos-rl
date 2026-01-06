@@ -39,7 +39,12 @@ class TestCosmosHfPrecision(unittest.TestCase):
         ).to(device)
 
         cosmos_model = (
-            Qwen2_5_VLConditionalModel.from_pretrained(hf_model.config, model_name)
+            Qwen2_5_VLConditionalModel.from_pretrained(
+                # Pass None for CosmosConfig to avoid test failure.
+                None,
+                hf_model.config,
+                model_name,
+            )
             .to(device)
             .to(torch.bfloat16)
         )
