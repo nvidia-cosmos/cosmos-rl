@@ -579,10 +579,12 @@ class InternVLChatModel(BaseModel):
                 local_view = local_view[expert_id]
             if slice_range is not None:
                 assert (
-                    local_view.shape[0] == 2 * self.model.model_args.ffn_dim
-                ), f"Shape mismatch: {local_view.shape} != {2 * self.model.model_args.ffn_dim} for {dest_name}"
-                local_view = local_view[slice_range]
+                    local_view.shape[1] == 2 * self.model.model_args.ffn_dim
+                ), f"Shape mismatch: {local_view.shape[1]} != {2 * self.model.model_args.ffn_dim} for {dest_name}"
+                local_view = local_view[:, slice_range]
 
+            if "mlp.experts.down_proj" in dest_name or "mlp.experts.gate_and_up_proj" in dest_name:
+                shared_weight = shared_weight.transpose(0, 1)
             assert (
                 local_view.shape == shared_weight.shape
             ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"

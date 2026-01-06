@@ -98,6 +98,9 @@ class Qwen3MoeWeightMapper(WeightMapper):
             group_keys.append((q_proj_weight_key, q_weight))
             group_keys.append((k_proj_weight_key, k_weight))
             group_keys.append((v_proj_weight_key, v_weight))
+        elif "mlp.experts.down_proj" in param_name_hf or "mlp.experts.gate_and_up_proj" in param_name_hf:
+            new_weight = param.transpose(1, 2)
+            group_keys.append((param_name_hf, new_weight))
         else:
             group_keys.append((param_name_hf, param))
         return group_keys

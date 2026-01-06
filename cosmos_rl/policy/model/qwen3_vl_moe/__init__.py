@@ -844,7 +844,6 @@ class Qwen3VLMoeModel(BaseModel):
                             )
 
                             local_view = local_view[expert_id]
-                            expert_weight = expert_weight.transpose(0, 1)
 
                             assert (
                                 local_view.shape == expert_weight.shape

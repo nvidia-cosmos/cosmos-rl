@@ -299,9 +299,12 @@ class DeepseekV3MoEModel(BaseModel):
 
             if slice_range is not None:
                 assert (
-                    target_tensor.shape[0] == 2 * self.config.moe_inter_dim
-                ), f"Shape mismatch for {dest_name}"
-                target_tensor = target_tensor[slice_range]
+                    target_tensor.shape[1] == 2 * self.config.moe_inter_dim
+                ), f"Shape mismatch: {target_tensor.shape[1]} != {2 * self.config.moe_inter_dim} for {dest_name}"
+                target_tensor = target_tensor[:, slice_range]
+
+            if "mlp.experts.down_proj" in dest_name or "mlp.experts.gate_and_up_proj" in dest_name:
+                shared_weight = shared_weight.transpose(0, 1)
 
             assert (
                 target_tensor.shape == shared_weight.shape
