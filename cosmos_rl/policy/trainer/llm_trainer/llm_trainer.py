@@ -90,10 +90,10 @@ class LLMTrainer(Trainer):
         # FP8 settings
         with torch.device("meta"):
             if config.train.quantization.quantization_type != "none":
-                from cosmos_rl.utils.quantization import ModelConvertersContainer
+                from cosmos_rl.utils.quantization import ModelConverters
 
-                self.model_converters = ModelConvertersContainer(config, parallel_dims)
-                self.model_converters.convert(model)
+                self.model_converters = ModelConverters(config, parallel_dims)
+                self.model_converters.convert_model(model)
 
         pp_enabled = parallel_dims.pp_enabled
 
