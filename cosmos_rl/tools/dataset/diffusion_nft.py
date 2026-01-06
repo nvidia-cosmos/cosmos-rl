@@ -26,7 +26,7 @@ from cosmos_rl.dispatcher.data.schema import RLPayload, Rollout
 from cosmos_rl.launcher.worker_entry import main as launch_worker
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.policy.config import DatasetConfig
-from cosmos_rl.dispatcher.data.packer.base import DataPacker
+from cosmos_rl.dispatcher.data.packer.base import BaseDataPacker
 
 
 class TextPromptDataset(Dataset):
@@ -56,7 +56,7 @@ class GenevalPromptDataset(Dataset):
         return {"prompt": self.prompts[idx], "metadata": self.metadatas[idx]}
 
 
-class DiffusionNFTDataPacker(DataPacker):
+class DiffusionNFTDataPacker(BaseDataPacker):
     def __init__(self):
         super().__init__()
 
