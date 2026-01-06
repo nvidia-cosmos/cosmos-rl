@@ -1849,8 +1849,9 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             data = {
                 "prompt_idx": payload.prompt_idx,
                 "completion_token_ids": payload.completion_token_ids,
-                "prompt_token_ids": payload.prompt_token_ids,
             }
+            if payload.prompt_token_ids is not None:
+                data["prompt_token_ids"] = payload.prompt_token_ids
             uuid_values = []
             for _ in payload.completion_token_ids:
                 uuid_value = str(uuid.uuid4())

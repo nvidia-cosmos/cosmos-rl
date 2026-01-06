@@ -86,7 +86,12 @@ def _swizzle_pp_grpo_forward(
     if config.train.train_policy.temperature > 1e-6:
         raw_logits = raw_logits / config.train.train_policy.temperature
     # [n_tokens, n_vocab]
-    minibatched_topk_indices = kwargs["topk_indices"]
+    if config.distillation.top_k > 0:
+        minibatched_topk_indices = kwargs["topk_indices"]
+    else:
+        minibatched_topk_indices = user_input["input_ids"].unsqueeze(
+            -1
+        )  # [n_tokens, 1]
     current_per_token_logprobs, cu_seqlens = trainer.compute_logprobs(
         minibatch={
             **user_input,
@@ -210,6 +215,7 @@ class TorchEngine(LLMTrainer):
             token_ids = rollout.prompt_token_ids + rollout.completion_token_ids
             updated_token_ids = []
             for token_id in token_ids:
+                assert len(token_id) > 0, "Token ids should not be empty"
                 if len(token_id) > self.config.distillation.top_k:
                     assert (
                         len(token_id) == self.config.distillation.top_k + 1
@@ -218,6 +224,10 @@ class TorchEngine(LLMTrainer):
                         token_id = token_id[
                             1:
                         ]  # remove the first token id which is the selected token only keep top_k token ids
+                else:
+                    assert (
+                        len(token_id) == self.config.distillation.top_k
+                    ), f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k}"
                 token_id = self.map_student_token_ids_to_tokenizer_token_ids(token_id)
                 updated_token_ids.append(token_id)
             updated_token_ids = [[-100] * len(updated_token_ids[0])] + updated_token_ids
@@ -393,10 +403,11 @@ class TorchEngine(LLMTrainer):
                             computed_max_len=computed_max_len,
                         )
                     )
-                    minibatched_topk_indices = self.collate_topk_indices(
-                        [rollouts[i] for i in mini_batch_indices],
-                        computed_max_len=computed_max_len,
-                    )
+                    if self.config.distillation.top_k > 0:
+                        minibatched_topk_indices = self.collate_topk_indices(
+                            [rollouts[i] for i in mini_batch_indices],
+                            computed_max_len=computed_max_len,
+                        )
                     packing_seq = self.config.distillation.sequence_packing
                     if packing_seq:
                         if self.parallel_dims.pp_enabled:
@@ -509,7 +520,8 @@ class TorchEngine(LLMTrainer):
                         if pp_first_stage or pp_last_stage:
                             # First/Last stage: pass all inputs
                             kwargs = {}
-                            kwargs["topk_indices"] = minibatched_topk_indices
+                            if self.config.distillation.top_k > 0:
+                                kwargs["topk_indices"] = minibatched_topk_indices
                             if self.parallel_dims.cp_enabled:
                                 # This is for recover these two tensors after ulysses
                                 kwargs["input_ids_before_cp"] = input_ids_before_cp
@@ -570,10 +582,17 @@ class TorchEngine(LLMTrainer):
                             )
                             user_mini_batch["input_ids"] = packed_args["inputs"]
 
-                            minibatched_topk_indices = pack_sequences_for_extra_tensor(
-                                minibatched_topk_indices.to(self.device),
-                                user_mini_batch["valid_input_len"],
-                            )
+                            if self.config.distillation.top_k > 0:
+                                minibatched_topk_indices = (
+                                    pack_sequences_for_extra_tensor(
+                                        minibatched_topk_indices.to(self.device),
+                                        user_mini_batch["valid_input_len"],
+                                    )
+                                )
+                        if self.config.distillation.top_k <= 0:
+                            minibatched_topk_indices = user_mini_batch[
+                                "input_ids"
+                            ].unsqueeze(-1)
                         # Using the same temperature as student model for better distillation performance
                         if (
                             self.config.train.train_policy.temperature > 1e-6

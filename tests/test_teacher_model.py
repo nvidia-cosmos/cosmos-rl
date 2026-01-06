@@ -143,7 +143,7 @@ class TestTeacherModel(unittest.TestCase):
         data = {
             "prompt_idx": prompt_idx,
             "completion_token_ids": [
-                tokenizer_reference_answer
+                [[t] for t in tokenizer_reference_answer]
                 for _ in range(cosmos_config.rollout.n_generation)
             ],
         }
