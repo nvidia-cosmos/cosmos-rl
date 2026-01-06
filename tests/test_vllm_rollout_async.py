@@ -70,6 +70,7 @@ class MockAPIClient(APIClient):
         )
         self.max_iter = 3
         self.cur_iter = 0
+        self.total_send_prompts = 0
 
         # rollout_completion_payloads cache 1 batch of payloads for testing
         self.rollout_completion_payloads: List[RLPayload] = []
@@ -110,6 +111,7 @@ class MockAPIClient(APIClient):
             batch_size, validation_step
         )
         self.cur_iter += 1
+        self.total_send_prompts += len(payloads_list)
 
         payloads_list = [pl.model_dump() for pl in payloads_list]
         return payloads_list, is_end or self.cur_iter == self.max_iter
@@ -303,7 +305,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
 
             self.assertEqual(
                 len(worker.api_client.rollout_completion_payloads),
-                cosmos_config.rollout.batch_size * worker.api_client.max_iter,
+                worker.api_client.total_send_prompts,
             )
         finally:
             # clean the test environment
@@ -358,7 +360,7 @@ class TestAsyncRolloutWorker(unittest.TestCase):
 
             self.assertEqual(
                 len(worker.api_client.validation_completion_payloads),
-                cosmos_config.validation.batch_size * worker.api_client.max_iter,
+                worker.api_client.total_send_prompts,
             )
         finally:
             # clean the test environment
