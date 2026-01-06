@@ -50,6 +50,7 @@ import torch
 from dataclasses import dataclass
 import os
 import tempfile
+import shutil
 import atexit
 
 # Disable torch compilation before importing B1K wrapper to avoid typing_extensions issues
@@ -63,7 +64,7 @@ import omnigibson as og
 class MockB1KConfig:
     """Minimal configuration for B1KEnvWrapper."""
 
-    num_envs: int = 3  # Small number for testing
+    num_envs: int = 2  # Small number for testing
     task_name: str = "turning_on_radio"  # A task from BEHAVIOR-1K
 
 
@@ -82,6 +83,7 @@ class TestB1KEnvWrapper(unittest.TestCase):
 
     def tearDown(self):
         """Clean up after each test method."""
+        print("Tearing down environment...")
         if hasattr(self, "env") and self.env is not None:
             # Clean up environment properly
             try:
@@ -90,12 +92,13 @@ class TestB1KEnvWrapper(unittest.TestCase):
                 print(f"Warning during env.close(): {e}")
             finally:
                 self.env = None
+        print("✓ Environment torn down successfully")
 
-        # if hasattr(self, "temp_dir") and os.path.exists(self.temp_dir):
-        #     try:
-        #         shutil.rmtree(self.temp_dir)
-        #     except Exception as e:
-        #         print(f"Warning during temp_dir cleanup: {e}")
+        if hasattr(self, "temp_dir") and os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+            except Exception as e:
+                print(f"Warning during temp_dir cleanup: {e}")
 
     def test_create_env(self):
         """Test 1: Create B1K environments."""
@@ -433,7 +436,7 @@ def cleanup_omnigibson():
 
 
 # Register cleanup to be called at exit
-atexit.register(cleanup_omnigibson)
+# atexit.register(cleanup_omnigibson)
 
 
 if __name__ == "__main__":
