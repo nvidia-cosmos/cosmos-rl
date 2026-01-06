@@ -72,7 +72,7 @@ if use_fake:
         torch.bfloat16
     )
 else:
-    from cosmos_rl.policy.vision_gen.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
+    from cosmos_rl.policy.model.wfm.tokenizer.wan2pt1 import Wan2pt1TokenizerHelper
     import torchvision
     import numpy as np
     from cosmos_rl.utils.logging import logger
