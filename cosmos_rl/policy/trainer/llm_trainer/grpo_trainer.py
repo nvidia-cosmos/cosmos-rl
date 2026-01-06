@@ -45,15 +45,17 @@ from cosmos_rl.utils.sequence_packing import (
     pack_sequences_for_logprobs,
     pack_sequences_info_collect,
     pack_sequences_for_masks,
-    pack_sequences_for_teacher_logprobs,
+    pack_sequences_for_extra_tensor,
 )
 from cosmos_rl.utils.ulysses import (
     slice_inputs_for_ulysses,
 )
 from cosmos_rl.utils.util import is_master_rank, str2torch_dtype
 from cosmos_rl.utils.util import compute_logprobs as logprobs_computing
+from cosmos_rl.utils.util import compute_logprobs_for_top_k_indices
 import cosmos_rl.utils.distributed as dist_util
 import torch.distributed as dist
+import torch.nn.functional as F
 
 
 class TrainerPhase(enum.Enum):
@@ -621,7 +623,9 @@ class GRPOTrainer(LLMTrainer):
                 logger.warning(
                     f"[Policy] Teacher logprobs is None for rollout {i}, using [0] * {computed_max_len} and set the logprob_masks to all 0 to avoid the loss calculation due to lack of teacher logprobs"
                 )
-                teacher_logprobs = [0] * computed_max_len
+                teacher_logprobs = [
+                    [0] * (self.config.distillation.top_k or 1)
+                ] * computed_max_len
                 if hasattr(processed_samples[i], "logprob_masks"):
                     # set the logprob_masks to all 0 to avoid the loss calculation due to lack of teacher logprobs
                     processed_samples[i].logprob_masks = [
@@ -631,7 +635,9 @@ class GRPOTrainer(LLMTrainer):
                     processed_samples[i]["logprob_masks"] = [
                         0 for _ in processed_samples[i]["logprob_masks"]
                     ]
-            teacher_logprobs = teacher_logprobs + [0]
+            teacher_logprobs = teacher_logprobs + [
+                [0] * (self.config.distillation.top_k or 1)
+            ]
             teacher_logprobs_list.append(teacher_logprobs)
             if self.config.distillation.include_prompt:
                 if hasattr(processed_samples[i], "logprob_masks"):
@@ -649,10 +655,34 @@ class GRPOTrainer(LLMTrainer):
 
         return torch.tensor(
             [
-                x[:computed_max_len] + [0] * (max(0, computed_max_len - len(x)))
+                x[:computed_max_len]
+                + [[0] * (self.config.distillation.top_k or 1)]
+                * (max(0, computed_max_len - len(x)))
                 for x in teacher_logprobs_list
             ]
         )
+
+    def collate_topk_indices(self, rollouts: List[Rollout], computed_max_len: int):
+        updated_token_ids_list = []
+        for rollout in rollouts:
+            token_ids = rollout.prompt_token_ids + rollout.completion_token_ids
+            updated_token_ids = []
+            for token_id in token_ids:
+                if len(token_id) > self.config.distillation.top_k:
+                    assert (
+                        len(token_id) == self.config.distillation.top_k + 1
+                    ), f"Token ids length {len(token_id)} should be equal to top_k {self.config.distillation.top_k} + 1"
+                    if self.config.distillation.top_k > 0:
+                        token_id = token_id[
+                            1:
+                        ]  # remove the first token id which is the selected token only keep top_k token ids
+                updated_token_ids.append(token_id)
+            updated_token_ids = [[-100] * len(updated_token_ids[0])] + updated_token_ids
+            updated_token_ids = updated_token_ids[:computed_max_len] + [
+                [-100] * len(updated_token_ids[0])
+            ] * (max(0, computed_max_len - len(updated_token_ids)))
+            updated_token_ids_list.append(updated_token_ids)
+        return torch.tensor(updated_token_ids_list)
 
     def compute_teacher_kl_advantages(
         self,
@@ -662,15 +692,102 @@ class GRPOTrainer(LLMTrainer):
         logprob_masks: torch.Tensor,
         cu_seqlens: torch.Tensor,
     ) -> torch.Tensor:
-        kl_penalty_coef = self.config.distillation.kl_penalty_coef
-        kl_discount_factor = self.config.distillation.kl_discount_factor
         current_advantages = torch.masked_select(current_advantages, logprob_masks)
         teacher_logprobs = torch.masked_select(teacher_logprobs, logprob_masks)
         assert (
             current_logprobs.shape == teacher_logprobs.shape == current_advantages.shape
         ), f"current_logprobs.shape: {current_logprobs.shape} != teacher_logprobs.shape: {teacher_logprobs.shape} != current_advantages.shape: {current_advantages.shape}"
         reversed_kl = current_logprobs - teacher_logprobs
-        kl_advantages = -kl_penalty_coef * reversed_kl  # [n_tokens]
+        return self.post_precess_teacher_kl_advantages(
+            reversed_kl,
+            current_advantages,
+            logprob_masks,
+            cu_seqlens,
+            mode="reversed",
+        )
+
+    def compute_teacher_topk_jsd_kl_advantages(
+        self,
+        current_logprobs: torch.Tensor,  # [n_tokens, top_k]
+        teacher_logprobs: torch.Tensor,  # [batch, seq_len, top_k]
+        current_advantages: torch.Tensor,  # [n_tokens]
+        logprob_masks: torch.Tensor,  # [batch, seq_len]
+        cu_seqlens: torch.Tensor,  # [batch + 1]
+    ) -> torch.Tensor:
+        """
+        Compute the Generalized Jensen-Shannon Divergence (JSD) between current_logprobs and teacher_logprobs
+        and use it to adjust the current_advantages. Use top-k logprobs at each token for both current and teacher.
+        """
+        top_k = current_logprobs.shape[-1]
+        assert (
+            top_k == teacher_logprobs.shape[-1]
+        ), f"top_k: {top_k} != teacher_logprobs.shape[-1]: {teacher_logprobs.shape[-1]}"
+        current_advantages = torch.masked_select(current_advantages, logprob_masks)
+        teacher_logprobs = torch.masked_select(
+            teacher_logprobs, logprob_masks.unsqueeze(-1)
+        ).view(-1, top_k)
+        assert (
+            current_logprobs.shape == teacher_logprobs.shape
+        ), f"current_logprobs.shape: {current_logprobs.shape} != teacher_logprobs.shape: {teacher_logprobs.shape}"
+        assert (
+            current_logprobs.shape[:-1] == current_advantages.shape
+        ), f"current_logprobs.shape[:-1]: {current_logprobs.shape[:-1]} != current_advantages.shape: {current_advantages.shape}"
+
+        if self.config.distillation.jsd_beta == 0:
+            jsd = F.kl_div(
+                current_logprobs, teacher_logprobs, reduction="none", log_target=True
+            )
+        elif self.config.distillation.jsd_beta == 1:
+            jsd = F.kl_div(
+                teacher_logprobs, current_logprobs, reduction="none", log_target=True
+            )
+        else:
+            # Compute the log of the mixture distribution
+            # log(a + b) = log(exp(log(a)) + exp(log(b))) -> for mixture
+            beta = torch.tensor(
+                self.config.distillation.jsd_beta,
+                dtype=current_logprobs.dtype,
+            )
+            mixture_log_probs = torch.logsumexp(
+                torch.stack(
+                    [
+                        current_logprobs + torch.log(1 - beta),
+                        teacher_logprobs + torch.log(beta),
+                    ]
+                ),
+                dim=0,
+            )
+            # Compute KL divergences using F.kl_div
+            # PyTorch differs from the standard mathematical definition, so the order of the probability distributions is swapped compared to that defined in the paper.
+            kl_teacher = F.kl_div(
+                mixture_log_probs, teacher_logprobs, reduction="none", log_target=True
+            )
+            kl_student = F.kl_div(
+                mixture_log_probs, current_logprobs, reduction="none", log_target=True
+            )
+
+            # Compute the Generalized Jensen-Shannon Divergence
+            jsd = beta * kl_teacher + (1 - beta) * kl_student
+
+        jsd = jsd.sum(-1)  # Sum over top-k dimension for each token
+        return self.post_precess_teacher_kl_advantages(
+            jsd,
+            current_advantages,
+            logprob_masks,
+            cu_seqlens,
+            mode=f"jsd_top{top_k}",
+        )
+
+    def post_precess_teacher_kl_advantages(
+        self,
+        divergence: torch.Tensor,
+        current_advantages: torch.Tensor,
+        logprob_masks: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        mode: str,
+    ):
+        kl_penalty_coef = self.config.distillation.kl_penalty_coef
+        kl_discount_factor = self.config.distillation.kl_discount_factor
 
         def discounted_future_sum_loop(x: list[float], gamma: float) -> list[float]:
             returns = [0] * len(x)
@@ -680,8 +797,9 @@ class GRPOTrainer(LLMTrainer):
                 returns[i] = cumulative
             return returns
 
+        kl_advantages = -kl_penalty_coef * divergence  # [n_tokens]
         metrics = {
-            "teacher_reversed_kl": reversed_kl.sum() / logprob_masks.sum(),
+            f"teacher_kl_{mode}": divergence.sum() / logprob_masks.sum(),
             "teacher_kl_advantages": kl_advantages.sum() / logprob_masks.sum(),
         }
 
@@ -796,7 +914,7 @@ class GRPOTrainer(LLMTrainer):
         ), "All rollouts should have a valid prompt"
 
         completions_list = [
-            rollout.completion_token_ids
+            [t[0] for t in rollout.completion_token_ids]
             if self.config.train.train_policy.rollout_as_token_ids
             else rollout.completion
             for rollout in rollouts
@@ -1034,6 +1152,16 @@ class GRPOTrainer(LLMTrainer):
                                         processed_samples=minibatched_processed_samples,
                                         computed_max_len=computed_max_len,
                                     )
+                                    if self.config.distillation.top_k > 0:
+                                        minibatched_topk_indices = (
+                                            self.collate_topk_indices(
+                                                rollouts=[
+                                                    rollouts[i]
+                                                    for i in mini_batch_indices
+                                                ],
+                                                computed_max_len=computed_max_len,
+                                            )
+                                        )
                                 user_mini_batch: Dict[str, Any] = (
                                     self.data_packer.policy_collate_fn(
                                         minibatched_processed_samples,
@@ -1053,8 +1181,13 @@ class GRPOTrainer(LLMTrainer):
                                         # Skip the last token logprob which is for <eos> if needed
                                         # Skip the n_ignore_prefix_tokens as they are not included in the loss calculation
                                         rollout_logbprobs.append(
-                                            rollouts[i].completion_logprobs[
-                                                n_ignore_prefix_tokens_list[i] :
+                                            [
+                                                t[0]
+                                                for t in rollouts[
+                                                    i
+                                                ].completion_logprobs[
+                                                    n_ignore_prefix_tokens_list[i] :
+                                                ]
                                             ]
                                         )
                                     user_mini_batch["rollout_logprobs"] = (
@@ -1169,11 +1302,11 @@ class GRPOTrainer(LLMTrainer):
                                         mini_batch_indices,
                                     ):
                                         # Combine prompt and completion logprobs
-                                        sampled_logprobs = (
-                                            rollouts[index].prompt_logprobs
+                                        sampled_logprobs = [
+                                            t[0]
+                                            for t in rollouts[index].prompt_logprobs
                                             + rollouts[index].completion_logprobs
-                                            + [0.0]
-                                        )  # assuming 0.0 for the last token
+                                        ] + [0.0]  # assuming 0.0 for the last token
                                         mask = (
                                             sample.logprob_masks
                                             if hasattr(sample, "logprob_masks")
@@ -1428,7 +1561,7 @@ class GRPOTrainer(LLMTrainer):
                                         if self.config.distillation.enable:
                                             if packing_seq:
                                                 minibatched_teacher_logprobs = (
-                                                    pack_sequences_for_teacher_logprobs(
+                                                    pack_sequences_for_extra_tensor(
                                                         minibatched_teacher_logprobs.to(
                                                             self.device
                                                         ),
@@ -1437,19 +1570,69 @@ class GRPOTrainer(LLMTrainer):
                                                         ],
                                                     )
                                                 )
-                                            current_advantages, teacher_metrics = (
-                                                self.compute_teacher_kl_advantages(
-                                                    current_logprobs=self.old_per_token_logps[
-                                                        local_mini_step
-                                                    ],
-                                                    teacher_logprobs=minibatched_teacher_logprobs.to(
-                                                        self.device
-                                                    ),
-                                                    current_advantages=current_advantages,
-                                                    logprob_masks=logprob_masks,
-                                                    cu_seqlens=cu_seqlens,
+                                                if self.config.distillation.top_k > 0:
+                                                    minibatched_topk_indices = (
+                                                        pack_sequences_for_extra_tensor(
+                                                            minibatched_topk_indices.to(
+                                                                self.device
+                                                            ),
+                                                            user_mini_batch[
+                                                                "valid_input_len"
+                                                            ],
+                                                        )
+                                                    )
+                                            if self.config.distillation.top_k > 0:
+                                                minibatched_student_logprobs, _ = (
+                                                    compute_logprobs_for_top_k_indices(
+                                                        minibatched_topk_indices.to(
+                                                            self.device
+                                                        ),
+                                                        user_mini_batch[
+                                                            "logprob_masks"
+                                                        ],
+                                                        raw_logits.to(
+                                                            dtype=str2torch_dtype(
+                                                                self.config.train.logprob_dtype
+                                                            )
+                                                        ),
+                                                        is_full_logits=True
+                                                        if raw_logits.ndim == 3
+                                                        else False,
+                                                        label_packing_mask=user_mini_batch.get(
+                                                            "label_packing_mask", None
+                                                        ),
+                                                        input_packing_mask=user_mini_batch.get(
+                                                            "input_packing_mask", None
+                                                        ),
+                                                    )
                                                 )
-                                            )
+                                                current_advantages, teacher_metrics = (
+                                                    self.compute_teacher_topk_jsd_kl_advantages(
+                                                        current_logprobs=minibatched_student_logprobs.to(
+                                                            self.device
+                                                        ),
+                                                        teacher_logprobs=minibatched_teacher_logprobs.to(
+                                                            self.device
+                                                        ),
+                                                        current_advantages=current_advantages,
+                                                        logprob_masks=logprob_masks,
+                                                        cu_seqlens=cu_seqlens,
+                                                    )
+                                                )
+                                            else:
+                                                current_advantages, teacher_metrics = (
+                                                    self.compute_teacher_kl_advantages(
+                                                        current_logprobs=self.old_per_token_logps[
+                                                            local_mini_step
+                                                        ],
+                                                        teacher_logprobs=minibatched_teacher_logprobs.to(
+                                                            self.device
+                                                        ).squeeze(-1),
+                                                        current_advantages=current_advantages,
+                                                        logprob_masks=logprob_masks,
+                                                        cu_seqlens=cu_seqlens,
+                                                    )
+                                                )
 
                                         compute_loss_fn = (
                                             self.loss_fn

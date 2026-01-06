@@ -34,14 +34,17 @@ class RolloutResult(BaseModel):
     # The generated conversation history for the prompt.
     completed_conversations: Optional[List[ConversationType]] = None
 
-    # The logprobs of the generated completions
-    completion_logprobs: Optional[List[List[float]]] = None
+    # The logprobs of the generated completions consider top_k tokens
+    completion_logprobs: Optional[List[List[List[float]]]] = None
 
-    # The logprobs of the input prompt
-    prompt_logprobs: Optional[List[float]] = None
+    # The logprobs of the input prompt consider top_k tokens
+    prompt_logprobs: Optional[List[List[float]]] = None
 
     # The token ids of the generated completions
-    completion_token_ids: Optional[List[List[int]]] = None
+    completion_token_ids: Optional[List[List[List[int]]]] = None
 
     # The cumulative logprob of the generated completions which indicates the total probability of the generated completions
     cumulative_logprob: Optional[List[float]] = None
+
+    # The token ids of the input prompt consider top_k tokens
+    prompt_token_ids: Optional[List[List[int]]] = None
