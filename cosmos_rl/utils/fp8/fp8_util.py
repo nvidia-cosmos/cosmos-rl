@@ -101,30 +101,28 @@ class FP8LinearQuantizationConverter(QuantizationConverter):
             raise RuntimeError(
                 "FP8 is only supported for device that has compute capability 8.9 or higher"
             )
-        self.fp8_config = (
-            config.train.quantization.linear_quantization_config.fp_linear_config
-        )
+        self.fp8_config = config.train.quantization.linear_quantization_config
 
-        assert is_valid_fp8_quant_recipe(self.fp8_config.quant_recipe)
-        assert is_valid_fp8_recipe(self.fp8_config.scaling_recipe)
+        assert is_valid_fp8_quant_recipe(self.fp8_config.fp_linear_config.quant_recipe)
+        assert is_valid_fp8_recipe(self.fp8_config.fp_linear_config.scaling_recipe)
 
-        if self.fp8_config.scaling_recipe == FP8Recipe.DELAYED_SCALING:
+        if self.fp8_config.fp_linear_config.scaling_recipe == FP8Recipe.DELAYED_SCALING:
             raise NotImplementedError("[FP8] Delayed scaling is not supported yet.")
 
         self.precompute_scale = False
 
-        if self.fp8_config.quant_recipe == "rowwise":
+        if self.fp8_config.fp_linear_config.quant_recipe == "rowwise":
             # From torchtitan, it reports an issue that RMSNorm will cause NaN when rowwise quantization and torch.compile is enabled,
             # From that issue, it is recommended to set torch._inductor.config.emulate_precision_casts to True to avoid this.
             # Issue: https://github.com/pytorch/pytorch/issues/150859
             torch._inductor.config.emulate_precision_casts = True
             self.ao_float8_config = Float8LinearConfig.from_recipe_name(
-                self.fp8_config.quant_recipe
+                self.fp8_config.fp_linear_config.quant_recipe
             )
             logger.debug(
                 "[FP8] Set torch._inductor.config.emulate_precision_casts to True"
             )
-        elif self.fp8_config.quant_recipe == "tensorwise":
+        elif self.fp8_config.fp_linear_config.quant_recipe == "tensorwise":
             # For tensorwise, torchao supports that precompute scale and perform FSDP2 weight all-gather in FP8.
             # this could save the bandwidth.
             # self.precompute_scale = True
@@ -160,7 +158,6 @@ class FP8LinearQuantizationConverter(QuantizationConverter):
     def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
         if not IS_TORCH_COMPATIBLE_WITH_FP8:
             return
-
         if not self.fp8_config.enable:
             return
 

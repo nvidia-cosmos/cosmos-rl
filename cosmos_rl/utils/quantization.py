@@ -21,19 +21,16 @@ from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 from cosmos_rl.utils.model_converter import QuantizationConverter
 
-# import all quantization converters
-import cosmos_rl.utils.fp8  # noqa: F401
-import cosmos_rl.utils.fp4  # noqa: F401
 
-
-class ModelConvertersContainer(QuantizationConverter):
-    """Model converters sequential container.
-
-    The class build the sequence of model converters defined in `model.converters`
-    job config, and apply them to the model sequentially.
-    """
-
+class ModelConverters(QuantizationConverter):
     def __init__(self, cosmos_config: CosmosConfig, parallel_dims: ParallelDims):
+        # import the quantization converters
+        if cosmos_config.train.quantization.quantization_type == "fp8":
+            import cosmos_rl.utils.fp8  # noqa: F401
+
+        if cosmos_config.train.quantization.quantization_type == "fp4":
+            import cosmos_rl.utils.fp4  # noqa: F401
+
         from cosmos_rl.utils.model_converter import (
             _QUANTIZATION_CONVERTER_MODULE_TYPE_REGISTRY,
         )
@@ -51,7 +48,7 @@ class ModelConvertersContainer(QuantizationConverter):
             for converter_cls in converter_classes
         ]
 
-    def convert(self, model: nn.Module):
+    def convert_model(self, model: nn.Module):
         for converter in self.converters:
             model = converter.convert_model(model)
         return model

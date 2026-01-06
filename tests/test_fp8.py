@@ -2,12 +2,16 @@ import unittest
 
 from torch import nn
 from cosmos_rl.utils.fp8.fp8_util import (
-    FP8ModelConverter,
     IS_TORCH_COMPATIBLE_WITH_FP8,
 )
 from cosmos_rl.policy.config import Config as CosmosConfig
-from cosmos_rl.policy.config import FP8Config
+from cosmos_rl.policy.config import (
+    TrainQuantizationConfig,
+    LinearQuantizationConfig,
+    FPLinearConfig,
+)
 from cosmos_rl.utils.parallelism import ParallelDims
+from cosmos_rl.utils.quantization import ModelConverters
 
 from torchao.float8.float8_linear import Float8Linear
 
@@ -33,10 +37,17 @@ class TestFp8(unittest.TestCase):
     def _test_fp8_model_converter_delayed_scaling(self, quant_recipe, dp_shard):
         demo_model = DemoModel(input_dim=1024, output_dim=512, intermediate_dim=1024)
         config = CosmosConfig()
-        fp8_config = FP8Config(
-            enable_fp8=True, quant_recipe=quant_recipe, fp8_recipe="delayed_scaling"
+        quantization_config = TrainQuantizationConfig(
+            quantization_type="fp8",
+            linear_quantization_config=LinearQuantizationConfig(
+                enable=True,
+                fp_linear_config=FPLinearConfig(
+                    quant_recipe=quant_recipe,
+                    scaling_recipe="delayed_scaling",
+                ),
+            ),
         )
-        config.train.fp8 = fp8_config
+        config.train.quantization = quantization_config
 
         # Mock the parallel_dims
         tp_size = 2
@@ -49,8 +60,8 @@ class TestFp8(unittest.TestCase):
             world_size=dp_shard * tp_size,
             pp_dynamic_shape=False,
         )
-        converter = FP8ModelConverter(config, parallel_dims)
-        converter.convert_model(demo_model)
+        converters = ModelConverters(config, parallel_dims)
+        converters.convert_model(demo_model)
 
     def test_fp8_model_converter_delayed_scaling(self):
         params = [
@@ -87,10 +98,17 @@ class TestFp8(unittest.TestCase):
     def _test_fp8_model_converter(self, quant_recipe, fp8_recipe, dp_shard):
         demo_model = DemoModel(input_dim=1024, output_dim=512, intermediate_dim=1024)
         config = CosmosConfig()
-        fp8_config = FP8Config(
-            enable_fp8=True, quant_recipe=quant_recipe, fp8_recipe=fp8_recipe
+        quantization_config = TrainQuantizationConfig(
+            quantization_type="fp8",
+            linear_quantization_config=LinearQuantizationConfig(
+                enable=True,
+                fp_linear_config=FPLinearConfig(
+                    quant_recipe=quant_recipe,
+                    scaling_recipe=fp8_recipe,
+                ),
+            ),
         )
-        config.train.fp8 = fp8_config
+        config.train.quantization = quantization_config
 
         # Mock the parallel_dims
         tp_size = 2
@@ -103,11 +121,20 @@ class TestFp8(unittest.TestCase):
             world_size=dp_shard * tp_size,
             pp_dynamic_shape=False,
         )
-        config.train.fp8.quant_recipe = quant_recipe
-        config.train.fp8.fp8_recipe = fp8_recipe
+        quantization_config = TrainQuantizationConfig(
+            quantization_type="fp8",
+            linear_quantization_config=LinearQuantizationConfig(
+                enable=True,
+                fp_linear_config=FPLinearConfig(
+                    quant_recipe=quant_recipe,
+                    scaling_recipe=fp8_recipe,
+                ),
+            ),
+        )
+        config.train.quantization = quantization_config
 
-        converter = FP8ModelConverter(config, parallel_dims)
-        converter.convert_model(demo_model)
+        converters = ModelConverters(config, parallel_dims)
+        converters.convert_model(demo_model)
 
         # Check the model is converted
         assert isinstance(
