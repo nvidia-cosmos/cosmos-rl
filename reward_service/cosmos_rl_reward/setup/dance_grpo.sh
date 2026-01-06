@@ -57,7 +57,7 @@ info "Installing redis, msgpack, datasets, trl..."
 
 # Step 5: Install transformers and related packages
 info "Installing transformers and related packages..."
-"$VENV_DIR/bin/pip" install transformers==4.46.1 tokenizers==0.20.1 huggingface_hub==0.26.1 accelerate==1.0.1 || warning "Failed to install transformers packages"
+"$VENV_DIR/bin/pip" install transformers==4.57.3 tokenizers==0.20.1 huggingface_hub==0.26.1 accelerate==1.0.1 || warning "Failed to install transformers packages"
 
 # Step 6: Install flash-attn
 info "Installing packaging and ninja..."
