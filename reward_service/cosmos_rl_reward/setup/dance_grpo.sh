@@ -57,7 +57,7 @@ info "Installing redis, msgpack, datasets, trl..."
 
 # Step 5: Install transformers and related packages
 info "Installing transformers and related packages..."
-"$VENV_DIR/bin/pip" install transformers==4.57.3 tokenizers huggingface_hub accelerate|| warning "Failed to install transformers packages"
+"$VENV_DIR/bin/pip" install transformers==4.46.1 tokenizers==0.20.1 huggingface_hub==0.26.1 accelerate==1.0.1 || warning "Failed to install transformers packages"
 
 # Step 6: Install flash-attn
 info "Installing packaging and ninja..."
@@ -73,7 +73,10 @@ info "Installing DanceGRPO from source..."
 # Step 8: Install additional dependencies
 info "Installing additional dependencies..."
 "$VENV_DIR/bin/pip" install ml-collections absl-py inflect==6.0.4 pydantic==1.10.9 huggingface_hub==0.24.0 protobuf==3.20.0 bitsandbytes==0.48.2 || warning "Failed to install additional dependencies"
-"$VENV_DIR/bin/pip" install cosmos_rl_reward || warning "Failed to install cosmos_rl_reward"
+# Get the path of current file
+CURRENT_FILE_PATH="$(realpath "$0")"
+COSMOS_RL_REWARD_DIR="$(dirname "$(dirname "$(dirname "$CURRENT_FILE_PATH")")")"
+"$VENV_DIR/bin/pip" install "$COSMOS_RL_REWARD_DIR" || warning "Failed to install cosmos_rl_reward"
 
 # Step 9: Initialize git-lfs
 info "Initializing git-lfs..."
