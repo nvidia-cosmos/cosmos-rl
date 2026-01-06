@@ -1731,10 +1731,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             # skip fetching new prompts if the scheduler is busy
             return 0, False
 
-        # skip fetching new prompts if the prompt queue is too large
-        if prompt_queue.qsize() > self.scheduler.max_concurrent_requests:
-            return 0, False
-
         is_end = self.request_new_prompts(
             batch_size, prompt_queue, validation_step=validation_step
         )
