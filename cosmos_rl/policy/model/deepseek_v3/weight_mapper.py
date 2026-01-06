@@ -353,7 +353,10 @@ class DeepseekV3MoEWeightMapper(WeightMapper):
             group_keys.append(
                 (kv_a_proj_with_mqa_weight_key, kv_a_proj_with_mqa_weight)
             )
-        elif "mlp.experts.down_proj" in compatible_key or "mlp.experts.gate_and_up_proj" in compatible_key:
+        elif (
+            "mlp.experts.down_proj" in compatible_key
+            or "mlp.experts.gate_and_up_proj" in compatible_key
+        ):
             new_weight = param.transpose(1, 2)
             group_keys.append((compatible_key, new_weight))
         else:

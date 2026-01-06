@@ -121,7 +121,10 @@ class InternVLWeightMapper(WeightMapper):
             group_keys.append((q_visual_proj_weight_key, q_weight))
             group_keys.append((k_visual_proj_weight_key, k_weight))
             group_keys.append((v_visual_proj_weight_key, v_weight))
-        elif "mlp.experts.down_proj" in compatible_key or "mlp.experts.gate_and_up_proj" in compatible_key:
+        elif (
+            "mlp.experts.down_proj" in compatible_key
+            or "mlp.experts.gate_and_up_proj" in compatible_key
+        ):
             new_weight = param.transpose(1, 2)
             group_keys.append((compatible_key, new_weight))
         else:
