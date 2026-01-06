@@ -167,3 +167,65 @@ class FP8LinearQuantizationConverter(QuantizationConverter):
         models = [model] if isinstance(model, nn.Module) else model
         for m in models:
             precompute_float8_dynamic_scale_for_fsdp(m)
+
+
+@register_quantization_converter_class("moe", "fp8")
+class FP8MoEQuantizationConverter(QuantizationConverter):
+    def __init__(self, config: CosmosConfig, parallel_dims: ParallelDims):
+        super().__init__(config, parallel_dims)
+        if not IS_TORCH_COMPATIBLE_WITH_FP8:
+            return
+
+        if not is_cuda_compatible(8, 9):
+            raise RuntimeError(
+                "FP8 is only supported for device that has compute capability 8.9 or higher"
+            )
+        self.fp8_config = config.train.quantization.moe_quantization_config
+        self.moe_fqns = [
+            "experts"
+        ]  # only convert MoE layers that has `experts` in the FQN.
+
+        if not config.train.compile:
+            logger.warning(
+                "Compile is required for high performance float8 MoE training."
+            )
+
+        assert (
+            parallel_dims.pp_coord[1] == 1
+        ), "Float8 MoE training does not support pipeline parallelism."
+        assert (
+            parallel_dims.cp_coord[1] == 1
+        ), "Float8 MoE training does not support context parallelism."
+
+    def convert_model(self, model: nn.Module):
+        """
+        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
+        to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
+        """
+        from torchao.quantization.quant_api import quantize_
+
+        try:
+            from torchao.prototype.moe_training.conversion_utils import (
+                MoETrainingConfig,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "torchao installation does not have MoE training support. Please install torchao nightly build."
+            ) from e
+
+        def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
+            for target_fqn in self.moe_fqns:
+                if target_fqn in cur_fqn:
+                    return True
+            return False
+
+        # FP8 rowwise quantization for MoE layers.
+        config = MoETrainingConfig()
+        quantize_(model, config=config, filter_fn=moe_module_filter_fn)
+        logger.info(
+            f"Converted MoE layers matching FQNS {self.moe_fqns} "
+            "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
+        )
+
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+        pass

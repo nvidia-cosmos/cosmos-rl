@@ -628,7 +628,8 @@ class FPLinearConfig(BaseModel):
 
 
 class FPMoEConfig(BaseModel):
-    enable: bool = Field(default=False, description="Whether to enable this.")
+    # FP moe is now default in rowwise manner.
+    pass
 
 
 class LinearQuantizationConfig(BaseModel):

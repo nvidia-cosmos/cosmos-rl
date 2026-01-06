@@ -23,6 +23,10 @@ train_batch_per_replica = 32
 sync_weight_interval = 1
 moe_backend = "torch"
 
+[train.quantization]
+quantization_type = "fp8"
+moe_quantization_config = { enable = true }
+
 [policy]
 model_name_or_path = "Qwen/Qwen3-30B-A3B"
 model_max_length = 1024

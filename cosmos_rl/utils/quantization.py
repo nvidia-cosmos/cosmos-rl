@@ -37,12 +37,26 @@ class ModelConverters(QuantizationConverter):
 
         quantization_type = cosmos_config.train.quantization.quantization_type
         converter_classes = []
-        for (
-            _,
-            module_type_registry,
-        ) in _QUANTIZATION_CONVERTER_MODULE_TYPE_REGISTRY.items():
-            if quantization_type in module_type_registry:
-                converter_classes.append(module_type_registry[quantization_type])
+        linear_config = cosmos_config.train.quantization.linear_quantization_config
+        moe_config = cosmos_config.train.quantization.moe_quantization_config
+        if linear_config.enable:
+            if (
+                quantization_type
+                in _QUANTIZATION_CONVERTER_MODULE_TYPE_REGISTRY["linear"]
+            ):
+                converter_classes.append(
+                    _QUANTIZATION_CONVERTER_MODULE_TYPE_REGISTRY["linear"][
+                        quantization_type
+                    ]
+                )
+        if moe_config.enable:
+            if quantization_type in _QUANTIZATION_CONVERTER_MODULE_TYPE_REGISTRY["moe"]:
+                converter_classes.append(
+                    _QUANTIZATION_CONVERTER_MODULE_TYPE_REGISTRY["moe"][
+                        quantization_type
+                    ]
+                )
+
         self.converters = [
             converter_cls(cosmos_config, parallel_dims)
             for converter_cls in converter_classes
