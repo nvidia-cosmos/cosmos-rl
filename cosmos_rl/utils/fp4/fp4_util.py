@@ -98,30 +98,28 @@ class FP4LinearQuantizationConverter(QuantizationConverter):
             raise RuntimeError(
                 "NVFP4 is only supported for device that has compute capability 10.0 or higher"
             )
-        self.fp4_config = (
-            config.train.quantization.linear_quantization_config.fp_linear_config
-        )
+        self.fp4_config = config.train.quantization.linear_quantization_config
 
-        assert is_valid_fp4_quant_recipe(self.fp4_config.quant_recipe)
-        assert is_valid_fp4_recipe(self.fp4_config.scaling_recipe)
+        assert is_valid_fp4_quant_recipe(self.fp4_config.fp_linear_config.quant_recipe)
+        assert is_valid_fp4_recipe(self.fp4_config.fp_linear_config.scaling_recipe)
 
-        if self.fp4_config.scaling_recipe == FP4Recipe.DELAYED_SCALING:
+        if self.fp4_config.fp_linear_config.scaling_recipe == FP4Recipe.DELAYED_SCALING:
             raise NotImplementedError("[FP4] Delayed scaling is not supported yet.")
 
         self.precompute_scale = False
 
-        if self.fp4_config.quant_recipe == "rowwise":
+        if self.fp4_config.fp_linear_config.quant_recipe == "rowwise":
             # From torchtitan, it reports an issue that RMSNorm will cause NaN when rowwise quantization and torch.compile is enabled,
             # From that issue, it is recommended to set torch._inductor.config.emulate_precision_casts to True to avoid this.
             # Issue: https://github.com/pytorch/pytorch/issues/150859
             torch._inductor.config.emulate_precision_casts = True
             self.nvfp4_config = Float4LinearConfig.from_recipe_name(
-                self.fp4_config.quant_recipe
+                self.fp4_config.fp_linear_config.quant_recipe
             )
             logger.debug(
                 "[FP4] Set torch._inductor.config.emulate_precision_casts to True"
             )
-        elif self.fp4_config.quant_recipe == "tensorwise":
+        elif self.fp4_config.fp_linear_config.quant_recipe == "tensorwise":
             self.precompute_scale = False
 
     def convert_model(self, model: torch.nn.Module) -> torch.nn.Module:
