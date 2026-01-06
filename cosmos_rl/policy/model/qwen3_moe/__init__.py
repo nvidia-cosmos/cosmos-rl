@@ -691,14 +691,9 @@ class Qwen3MoE(BaseModel):
                 target_tensor = target_tensor[expert_id]
             if slice_range is not None:
                 assert (
-                    target_tensor.shape[1] == 2 * self.model_args.ffn_dim
-                ), f"Shape mismatch: {target_tensor.shape[1]} != {2 * self.model_args.ffn_dim} for {dest_name}"
-                target_tensor = target_tensor[:, slice_range]
-            if (
-                "mlp.experts.down_proj" in dest_name
-                or "mlp.experts.gate_and_up_proj" in dest_name
-            ):
-                sharded_weight = sharded_weight.transpose(0, 1)
+                    target_tensor.shape[0] == 2 * self.model_args.ffn_dim
+                ), f"Shape mismatch: {target_tensor.shape[0]} != {2 * self.model_args.ffn_dim} for {dest_name}"
+                target_tensor = target_tensor[slice_range]
             assert (
                 target_tensor.shape == sharded_weight.shape
             ), f"Shape mismatch: {target_tensor.shape} != {sharded_weight.shape} for {dest_name}"

@@ -83,6 +83,7 @@ class MoEArgs:
     norm_topk_prob: bool = False
     fake_balanced_gate: bool = False
     enable_router_bias: bool = False
+    qwen3_vl_moe: bool = False
 
 
 class MLP(nn.Module):
@@ -146,12 +147,20 @@ class GroupedExperts(nn.Module):
         super().__init__()
         self.n_routed_experts = args.n_routed_experts
         self.moe_inter_dim = args.moe_inter_dim
-        self.gate_and_up_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim * 2)
-        )
-        self.down_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
-        )
+        if not args.qwen3_vl_moe:
+            self.gate_and_up_projs = nn.Parameter(
+                torch.empty(args.n_routed_experts, args.moe_inter_dim * 2, args.dim)
+            )
+            self.down_projs = nn.Parameter(
+                torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim)
+            )
+        else:
+            self.gate_and_up_projs = nn.Parameter(
+                torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim * 2)
+            )
+            self.down_projs = nn.Parameter(
+                torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
+            )
 
     def forward(
         self,
@@ -229,16 +238,28 @@ class GroupedExperts(nn.Module):
             active_local_experts += 1
 
             gate_and_up_proj = get_local_proj(self.gate_and_up_projs, i)
-            gate_proj = gate_and_up_proj[:, : self.moe_inter_dim]
-            up_proj = gate_and_up_proj[:, self.moe_inter_dim :]
+            gate_proj = (
+                gate_and_up_proj[: self.moe_inter_dim, :]
+                if not self.args.qwen3_vl_moe
+                else gate_and_up_proj[:, : self.moe_inter_dim]
+            )
+            up_proj = (
+                gate_and_up_proj[self.moe_inter_dim :, :]
+                if not self.args.qwen3_vl_moe
+                else gate_and_up_proj[:, self.moe_inter_dim :]
+            )
             down_proj = get_local_proj(self.down_projs, i)
 
             idx_b = idx[:, None].expand(-1, x.size(1))
             x_idx = x.gather(dim=0, index=idx_b)
 
+            if self.args.qwen3_vl_moe:
+                gate_proj = gate_proj.t()
+                up_proj = up_proj.t()
+                down_proj = down_proj.t()
+
             expert_out = (
-                swiglu(x_idx, gate_proj.t(), down_proj.t(), up_proj.t())
-                * weights[idx, top, None]
+                swiglu(x_idx, gate_proj, down_proj, up_proj) * weights[idx, top, None]
             )
 
             y.scatter_add_(dim=0, index=idx_b, src=expert_out)
@@ -246,13 +267,25 @@ class GroupedExperts(nn.Module):
         if active_local_experts == 0:
             # We need to handle the case where no token selects the experts on this device.
             gate_and_up_proj = get_local_proj(self.gate_and_up_projs, experts_start_idx)
-            gate_proj = gate_and_up_proj[:, : self.moe_inter_dim]
-            up_proj = gate_and_up_proj[:, self.moe_inter_dim :]
+            gate_proj = (
+                gate_and_up_proj[:, : self.moe_inter_dim]
+                if not self.args.qwen3_vl_moe
+                else gate_and_up_proj[:, : self.moe_inter_dim]
+            )
+            up_proj = (
+                gate_and_up_proj[:, self.moe_inter_dim :]
+                if not self.args.qwen3_vl_moe
+                else gate_and_up_proj[:, self.moe_inter_dim :]
+            )
             down_proj = get_local_proj(self.down_projs, experts_start_idx)
+
+            if self.args.qwen3_vl_moe:
+                gate_proj = gate_proj.t()
+                up_proj = up_proj.t()
+                down_proj = down_proj.t()
+
             expert_out = (
-                swiglu(
-                    torch.zeros_like(x[0]), gate_proj.t(), down_proj.t(), up_proj.t()
-                )
+                swiglu(torch.zeros_like(x[0]), gate_proj, down_proj, up_proj)
                 * weights[0, 0, None]
             )
             y[0] += expert_out
@@ -287,12 +320,20 @@ class GroupedExpertsDeepEP(nn.Module):
                 model and intermediate dimension parameters.
         """
         super().__init__()
-        self.gate_and_up_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim * 2)
-        )
-        self.down_projs = nn.Parameter(
-            torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
-        )
+        if not args.qwen3_vl_moe:
+            self.gate_and_up_projs = nn.Parameter(
+                torch.empty(args.n_routed_experts, args.moe_inter_dim * 2, args.dim)
+            )
+            self.down_projs = nn.Parameter(
+                torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim)
+            )
+        else:
+            self.gate_and_up_projs = nn.Parameter(
+                torch.empty(args.n_routed_experts, args.dim, args.moe_inter_dim * 2)
+            )
+            self.down_projs = nn.Parameter(
+                torch.empty(args.n_routed_experts, args.moe_inter_dim, args.dim)
+            )
         self.args = args
 
     def init_token_dispatcher(self, ep_mesh: DeviceMesh):
@@ -363,16 +404,25 @@ class GroupedExpertsDeepEP(nn.Module):
                 permuted_local_hidden_states,
                 self.gate_and_up_projs.to_local(),
                 tokens_per_expert,
-                trans_b=False,
+                trans_b=True if not self.args.qwen3_vl_moe else False,
             )
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
             output2 = ops.gmm(
-                output1_, self.down_projs.to_local(), tokens_per_expert, trans_b=False
+                output1_,
+                self.down_projs.to_local(),
+                tokens_per_expert,
+                trans_b=True if not self.args.qwen3_vl_moe else False,
             )
         else:
-            output1 = torch.matmul(x[0] * 0, self.gate_and_up_projs.to_local()[0])
+            if self.args.qwen3_vl_moe:
+                gate_and_up_projs_local = self.gate_and_up_projs.to_local()[0]
+                down_projs_local = self.down_projs.to_local()[0]
+            else:
+                gate_and_up_projs_local = self.gate_and_up_projs.to_local()[0].t()
+                down_projs_local = self.down_projs.to_local()[0].t()
+            output1 = torch.matmul(x[0] * 0, gate_and_up_projs_local)
             output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
-            output2 = torch.matmul(output1_, self.down_projs.to_local()[0])
+            output2 = torch.matmul(output1_, down_projs_local)
 
         y = self.token_dispatcher.token_unpermutation(output2)
 

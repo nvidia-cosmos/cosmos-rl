@@ -153,6 +153,7 @@ class Qwen3MoE(nn.Module):
             route_scale=getattr(model_args.hf_config, "routed_scaling_factor", 1.0),
             dim=model_args.dim,
             moe_inter_dim=model_args.ffn_dim,
+            qwen3_vl_moe=True,
         )
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
