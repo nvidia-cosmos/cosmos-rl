@@ -23,11 +23,6 @@ train_batch_per_replica = 2
 sync_weight_interval = 1
 moe_backend = "torch"
 
-# [train.fp8]
-# enable_fp8 = true
-# fp8_recipe = "dynamic_scaling"
-# quant_recipe = "rowwise"
-# fqn_filter=["lm_head"]
 
 [rollout]
 gpu_memory_utilization = 0.7

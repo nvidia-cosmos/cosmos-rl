@@ -36,7 +36,6 @@ from cosmos_rl.policy.model import ModelRegistry
 from cosmos_rl.policy.config import Config as CosmosConfig
 from cosmos_rl.utils.parallelism import ParallelDims
 import cosmos_rl.utils.util as util
-from cosmos_rl.utils.fp8.fp8_util import FP8ModelConverter
 from cosmos_rl.policy.kernel.modeling_utils import init_flash_attn_meta
 from cosmos_rl.utils.activation_offloading import get_act_offloading_ctx_manager
 from cosmos_rl.policy.trainer.base import Trainer
@@ -90,14 +89,11 @@ class LLMTrainer(Trainer):
 
         # FP8 settings
         with torch.device("meta"):
-            if config.train.fp8.enable_fp8:
-                self.model_converter = FP8ModelConverter(config, parallel_dims)
-                self.model_converter.convert_model(model)
-            elif config.train.fp4.enable_fp4:
-                from cosmos_rl.utils.fp4.fp4_util import FP4ModelConverter
+            if config.train.quantization.quantization_type != "none":
+                from cosmos_rl.utils.quantization import ModelConvertersContainer
 
-                self.model_converter = FP4ModelConverter(config, parallel_dims)
-                self.model_converter.convert_model(model)
+                self.model_converters = ModelConvertersContainer(config, parallel_dims)
+                self.model_converters.convert(model)
 
         pp_enabled = parallel_dims.pp_enabled
 
@@ -305,9 +301,9 @@ class LLMTrainer(Trainer):
         self.optimizers = build_optimizers(
             self.model_parts, self.config, model_module_path=self.model_module_path
         )
-        if self.config.train.fp8.enable_fp8 or self.config.train.fp4.enable_fp4:
+        if self.config.train.quantization.quantization_type != "none":
             self.optimizers.register_step_post_hook(
-                lambda *args, **kwargs: self.model_converter.post_optimizer_hook(
+                lambda *args, **kwargs: self.model_converters.post_optimizer_hook(
                     self.model_parts
                 )
             )

@@ -21,6 +21,7 @@ fsdp_offload = false
 fsdp_reshard_after_forward = "default"
 train_batch_per_replica = 32
 sync_weight_interval = 1
+moe_backend = "torch"
 
 [policy]
 model_name_or_path = "Qwen/Qwen3-30B-A3B"
@@ -53,3 +54,4 @@ cp_size = 1
 dp_shard_size = 1
 pp_size = 1
 dp_replicate_size = 1
+
