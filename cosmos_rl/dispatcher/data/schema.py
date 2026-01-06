@@ -109,16 +109,24 @@ class RLPayload(BaseModel):
         default=None, description="The filter reward for each completion."
     )
 
-    completion_token_ids: Optional[List[List[int]]] = Field(
-        default=None, description="The token ids of each completion."
+    completion_token_ids: Optional[List[List[List[int]]]] = Field(
+        default=None,
+        description="The token ids of each completion considering top-k tokens at each position.",
     )
 
-    completion_logprobs: Optional[List[List[float]]] = Field(
-        default=None, description="The logprobs of each completion."
+    completion_logprobs: Optional[List[List[List[float]]]] = Field(
+        default=None,
+        description="The logprobs of each completion considering top-k tokens at each position.",
     )
 
-    prompt_logprobs: Optional[List[float]] = Field(
-        default=None, description="The logprobs of the input prompt."
+    prompt_logprobs: Optional[List[List[float]]] = Field(
+        default=None,
+        description="The logprobs of the input prompt considering top-k tokens at each position.",
+    )
+
+    prompt_token_ids: Optional[List[List[int]]] = Field(
+        default=None,
+        description="The token ids of the input prompt considering top-k tokens at each position.",
     )
 
     # The cumulative logprob of the generated completions which indicates the total probability of the generated completions
@@ -176,7 +184,7 @@ class Rollout(BaseModel):
         default="", description="The uuid of the teacher result."
     )
 
-    teacher_logprobs: Optional[List[float]] = Field(
+    teacher_logprobs: Optional[List[List[float]]] = Field(
         default=None, description="The logprobs of the teacher for the current rollout."
     )
 
@@ -198,16 +206,24 @@ class Rollout(BaseModel):
         default=0.0, description="The filter reward for the rollout."
     )
 
-    completion_token_ids: Optional[List[int]] = Field(
-        default=None, description="The token ids of current rollout's completion."
+    completion_token_ids: Optional[List[List[int]]] = Field(
+        default=None,
+        description="The token ids of current rollout's completion considering top-k tokens at each position.",
     )
 
-    completion_logprobs: Optional[List[float]] = Field(
-        default=None, description="The logprobs of current rollout's completion."
+    completion_logprobs: Optional[List[List[float]]] = Field(
+        default=None,
+        description="The logprobs of current rollout's completion considering top-k tokens at each position.",
     )
 
-    prompt_logprobs: Optional[List[float]] = Field(
-        default=None, description="The logprobs of the input prompt."
+    prompt_logprobs: Optional[List[List[float]]] = Field(
+        default=None,
+        description="The logprobs of the input prompt considering top-k tokens at each position.",
+    )
+
+    prompt_token_ids: Optional[List[List[int]]] = Field(
+        default=None,
+        description="The token ids of the input prompt considering top-k tokens at each position.",
     )
 
     weight_version: int = Field(

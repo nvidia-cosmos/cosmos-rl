@@ -856,6 +856,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     p.completion_logprobs = rr.completion_logprobs
                     p.completion_token_ids = rr.completion_token_ids
                     p.prompt_logprobs = rr.prompt_logprobs
+                    p.prompt_token_ids = rr.prompt_token_ids
                     p.weight_version = self.current_weight_version
                     p.cumulative_logprob = rr.cumulative_logprob
                     if self.config.rollout.multi_turn_config.enable:
@@ -1656,6 +1657,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 old_payload.completion_logprobs = result.completion_logprobs
                 old_payload.completion_token_ids = result.completion_token_ids
                 old_payload.prompt_logprobs = result.prompt_logprobs
+                old_payload.prompt_token_ids = result.prompt_token_ids
                 old_payload.weight_version = self.current_weight_version
                 old_payload.cumulative_logprob = result.cumulative_logprob
                 if self.config.rollout.multi_turn_config.enable:
@@ -1847,6 +1849,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             data = {
                 "prompt_idx": payload.prompt_idx,
                 "completion_token_ids": payload.completion_token_ids,
+                "prompt_token_ids": payload.prompt_token_ids,
             }
             uuid_values = []
             for _ in payload.completion_token_ids:

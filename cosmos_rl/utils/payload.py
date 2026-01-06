@@ -75,6 +75,7 @@ def extract_rollouts(
                 report_metrics=report_metrics,
                 teacher_result_uuid=teacher_result_uuid,
                 prompt_logprobs=payload.prompt_logprobs,
+                prompt_token_ids=payload.prompt_token_ids,
             )
             for completion, completed_conversation, reward, advantage, n_ignore_prefix_tokens, filter_reward, completion_token_ids, completion_logprobs, report_metrics, teacher_result_uuid in zip(
                 payload.completions,

@@ -1308,6 +1308,18 @@ class DistillationConfig(BaseModel):
         description="Whether to include prompt in the teacher model KL calculation.",
     )
 
+    top_k: int = Field(
+        default=0,
+        description="Top-k filtering for teacher model logits before KL calculation. If larger than 0, generalized Jensen-Shannon Divergence will be used.",
+    )
+
+    jsd_beta: float = Field(
+        default=0.5,
+        description="Interpolation coefficient between `0.0` and `1.0` of the Generalized Jensen-Shannon Divergence "
+        "loss. When beta is `0.0`, the loss is the KL divergence. When beta is `1.0`, the loss is the Inverse KL "
+        "Divergence.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert (
