@@ -230,7 +230,7 @@ class RolloutTaskScheduler:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Track active tasks
-        self.active_tasks: Set[asyncio.Task] = set()
+        self._active_tasks: Set[asyncio.Task] = set()
         self.total_processed = 0
         self.total_submitted = 0
 
@@ -330,9 +330,9 @@ class RolloutTaskScheduler:
 
         while self._running.is_set():
             # Check and clean up completed tasks
-            completed_tasks = {task for task in self.active_tasks if task.done()}
+            completed_tasks = {task for task in self._active_tasks if task.done()}
             for task in completed_tasks:
-                self.active_tasks.remove(task)
+                self._active_tasks.remove(task)
                 # Retrieve any exceptions
                 try:
                     await task
@@ -344,7 +344,7 @@ class RolloutTaskScheduler:
             # Try to start new tasks if we have capacity and not paused
             if not self._paused.is_set():
                 while (
-                    len(self.active_tasks) < self.max_concurrent_requests
+                    len(self._active_tasks) < self.max_concurrent_requests
                     and not self.task_queue.empty()
                 ):
                     try:
@@ -353,11 +353,11 @@ class RolloutTaskScheduler:
 
                         # Create and start a new generation task
                         task = asyncio.create_task(self._generate_single(rollout_task))
-                        self.active_tasks.add(task)
+                        self._active_tasks.add(task)
 
                         logger.debug(
                             f"[RolloutTaskScheduler] Started new task "
-                            f"(active: {len(self.active_tasks)}/{self.max_concurrent_requests})"
+                            f"(active: {len(self._active_tasks)}/{self.max_concurrent_requests})"
                         )
 
                     except Exception:
@@ -368,11 +368,11 @@ class RolloutTaskScheduler:
             await asyncio.sleep(self.check_interval)
 
         # Wait for remaining tasks to complete before shutting down
-        if self.active_tasks:
+        if self._active_tasks:
             logger.info(
-                f"[RolloutTaskScheduler] Waiting for {len(self.active_tasks)} tasks to complete..."
+                f"[RolloutTaskScheduler] Waiting for {len(self._active_tasks)} tasks to complete..."
             )
-            await asyncio.gather(*self.active_tasks, return_exceptions=True)
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)
 
         logger.info("[RolloutTaskScheduler] Worker loop stopped")
 
@@ -681,14 +681,14 @@ class RolloutTaskScheduler:
                 # Wait for active tasks to complete if requested
                 if wait_for_active_tasks:
                     start_time = time.time()
-                    while len(self.active_tasks) > 0:
+                    while len(self._active_tasks) > 0:
                         if timeout is not None and (time.time() - start_time) > timeout:
                             raise TimeoutError(
-                                f"[RolloutTaskScheduler] Timeout waiting for {len(self.active_tasks)} active tasks"
+                                f"[RolloutTaskScheduler] Timeout waiting for {len(self._active_tasks)} active tasks"
                             )
                         time.sleep(0.1)
                         logger.debug(
-                            f"[RolloutTaskScheduler] Waiting for {len(self.active_tasks)} active tasks to complete"
+                            f"[RolloutTaskScheduler] Waiting for {len(self._active_tasks)} active tasks to complete"
                         )
                     logger.info("[RolloutTaskScheduler] All active tasks completed")
 
@@ -757,10 +757,10 @@ class RolloutTaskScheduler:
             TimeoutError: If timeout occurs before all active tasks are drained
         """
         start_time = time.time()
-        while len(self.active_tasks) > 0:
+        while len(self._active_tasks) > 0:
             if timeout is not None and (time.time() - start_time) > timeout:
                 raise TimeoutError(
-                    f"[RolloutTaskScheduler] Timeout waiting for {len(self.active_tasks)} active tasks"
+                    f"[RolloutTaskScheduler] Timeout waiting for {len(self._active_tasks)} active tasks"
                 )
             await asyncio.sleep(0.1)
 
@@ -773,9 +773,18 @@ class RolloutTaskScheduler:
         """
         return (
             self.is_running()
-            and len(self.active_tasks) == 0
+            and len(self._active_tasks) == 0
             and self.task_queue.empty()
             and self.complete_queue.empty()
+        )
+
+    def is_busy(self) -> bool:
+        """
+        Check if the scheduler is busy (running with active tasks more than the max concurrent requests).
+        """
+        return (
+            self.is_running()
+            and len(self._active_tasks) >= self.max_concurrent_requests
         )
 
     def is_all_tasks_completed(self) -> bool:
@@ -785,7 +794,7 @@ class RolloutTaskScheduler:
         Returns:
             True if task queue is empty and there are no active tasks
         """
-        return self.task_queue.empty() and len(self.active_tasks) == 0
+        return self.task_queue.empty() and len(self._active_tasks) == 0
 
     async def wait_all_tasks_completed(self):
         """
@@ -804,6 +813,15 @@ class RolloutTaskScheduler:
             True if results are available, False otherwise
         """
         return not self.complete_queue.empty()
+
+    def active_tasks(self) -> int:
+        """
+        Get the number of active tasks.
+
+        Returns:
+            Number of active tasks
+        """
+        return len(self._active_tasks)
 
     def pending_tasks(self) -> int:
         """
@@ -844,7 +862,7 @@ class RolloutTaskScheduler:
             "paused": self._paused.is_set(),
             "total_submitted": self.total_submitted,
             "total_processed": self.total_processed,
-            "active_tasks": len(self.active_tasks),
+            "active_tasks": self.active_tasks(),
             "pending_tasks": self.pending_tasks(),
             "completed_results": self.completed_results(),
             "max_concurrent_requests": self.max_concurrent_requests,

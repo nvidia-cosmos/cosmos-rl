@@ -1727,12 +1727,21 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             feed_prompts_count (int): the number of prompts fed to the scheduler
             is_end (bool): whether there is no more prompts to fetch
         """
-        if self.scheduler.pending_tasks() > self.scheduler.max_concurrent_requests:
+        if self.scheduler.is_busy():
             # skip fetching new prompts if the scheduler is busy
             return 0, False
 
+        request_prompts_count = min(
+            batch_size,
+            self.scheduler.max_concurrent_requests
+            - self.scheduler.pending_tasks()
+            - self.scheduler.active_tasks(),
+        )
+        if request_prompts_count <= 0:
+            return 0, False
+
         is_end = self.request_new_prompts(
-            batch_size, prompt_queue, validation_step=validation_step
+            request_prompts_count, prompt_queue, validation_step=validation_step
         )
 
         is_validation = validation_step is not None
