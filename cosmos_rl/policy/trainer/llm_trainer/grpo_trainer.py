@@ -863,13 +863,6 @@ class GRPOTrainer(LLMTrainer):
         for teacher_result, idx in zip(all_teacher_logprobs, mini_batch_indices):
             if teacher_result is None:
                 teacher_logprobs = None
-                if self.config.distillation.trainer_token_ids_from_teacher:
-                    rollouts[idx].completion_token_ids = [
-                        [1] * (self.config.distillation.top_k or 1)
-                    ] * len(rollouts[idx].completion_token_ids)
-                    rollouts[idx].prompt_token_ids = [
-                        [1] * (self.config.distillation.top_k or 1)
-                    ] * len(rollouts[idx].prompt_token_ids)
             else:
                 teacher_result = msgpack.unpackb(teacher_result)
                 teacher_logprobs = teacher_result.get("teacher_logprobs", None)
@@ -879,16 +872,52 @@ class GRPOTrainer(LLMTrainer):
                         or "prompt_token_ids" not in teacher_result
                     ):
                         teacher_logprobs = None
-                    rollouts[idx].completion_token_ids = teacher_result.get(
+                    completion_token_ids = teacher_result.get(
                         "completion_token_ids",
-                        [[1] * (self.config.distillation.top_k or 1)]
-                        * len(rollouts[idx].completion_token_ids),
+                        None,
                     )
-                    rollouts[idx].prompt_token_ids = teacher_result.get(
+                    prompt_token_ids = teacher_result.get(
                         "prompt_token_ids",
-                        [[1] * (self.config.distillation.top_k or 1)]
-                        * len(rollouts[idx].prompt_token_ids),
+                        None,
                     )
+                    if completion_token_ids is not None:
+                        assert (
+                            len(completion_token_ids)
+                            == len(rollouts[idx].completion_token_ids)
+                        ), f"Length of completion_token_ids {len(completion_token_ids)} should be equal to length of rollouts[{idx}].completion_token_ids {len(rollouts[idx].completion_token_ids)}"
+                        assert all(
+                            [
+                                a[0] == b[0]
+                                for a, b in zip(
+                                    completion_token_ids,
+                                    rollouts[idx].completion_token_ids,
+                                )
+                            ]
+                        ), f"Token ids mismatch in completion_token_ids from teacher and rollouts for rollout {idx}"
+                        rollouts[idx].completion_token_ids = completion_token_ids
+                    if prompt_token_ids is not None:
+                        assert (
+                            len(prompt_token_ids) == len(rollouts[idx].prompt_token_ids)
+                        ), f"Length of prompt_token_ids {len(prompt_token_ids)} should be equal to length of rollouts[{idx}].prompt_token_ids {len(rollouts[idx].prompt_token_ids)}"
+                        assert all(
+                            [
+                                a[0] == b[0]
+                                for a, b in zip(
+                                    prompt_token_ids, rollouts[idx].prompt_token_ids
+                                )
+                            ]
+                        ), f"Token ids mismatch in prompt_token_ids from teacher and rollouts for rollout {idx}"
+                        rollouts[idx].prompt_token_ids = prompt_token_ids
+            if (
+                teacher_logprobs is None
+                and self.config.distillation.trainer_token_ids_from_teacher
+            ):
+                rollouts[idx].completion_token_ids = [
+                    [1] * (self.config.distillation.top_k or 1)
+                ] * len(rollouts[idx].completion_token_ids)
+                rollouts[idx].prompt_token_ids = [
+                    [1] * (self.config.distillation.top_k or 1)
+                ] * len(rollouts[idx].prompt_token_ids)
             logger.debug(
                 f"[Policy] Teacher result: {len(teacher_logprobs) if teacher_logprobs is not None else 0} items"
             )
