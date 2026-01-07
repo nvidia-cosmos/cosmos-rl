@@ -761,7 +761,7 @@ class Qwen3VLMoeModel(BaseModel):
             if name == embed_tokens_weight_key:
                 reserved[name] = tensor.clone()
 
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, lm_type, n_experts, parallel_dims
             )
 
@@ -802,7 +802,7 @@ class Qwen3VLMoeModel(BaseModel):
                     ) // (n_expert_per_ep // dp_shard_size) == dp_shard_rank
 
                     if belongs_to_current_ep and belongs_to_current_dp_shard:
-                        expert_shard_weight = shared_weight[expert_id]
+                        expert_shard_weight = sharded_weight[expert_id]
                         # Convert expert_id to local_expert_id
                         n_local_experts = (
                             n_experts
@@ -869,10 +869,10 @@ class Qwen3VLMoeModel(BaseModel):
             local_view = target_tensor.to_local() if is_dist_tensor else target_tensor
 
             assert (
-                local_view.shape == shared_weight.shape
-            ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
+                local_view.shape == sharded_weight.shape
+            ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name} with original shape {target_tensor.shape}"
             with torch.no_grad():
-                local_view.data.copy_(shared_weight)
+                local_view.data.copy_(sharded_weight)
 
         # Handle tied lm_head weight
         if (
@@ -888,7 +888,7 @@ class Qwen3VLMoeModel(BaseModel):
             )
             tensor = reserved[embed_tokens_weight_key]
 
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, lm_type, n_experts, parallel_dims
             )
             if dest_name in lm_state_dict:
@@ -900,10 +900,10 @@ class Qwen3VLMoeModel(BaseModel):
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
                 assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                    local_view.shape == sharded_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
                 with torch.no_grad():
-                    local_view.data.copy_(shared_weight)
+                    local_view.data.copy_(sharded_weight)
 
     def separate_model_parts(self) -> List[nn.Module]:
         return [self.model, self.visual]

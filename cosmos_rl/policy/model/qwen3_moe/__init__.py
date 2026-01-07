@@ -641,7 +641,7 @@ class Qwen3MoE(BaseModel):
             if name == embed_tokens_weight_key:
                 reserved[name] = tensor.clone()
 
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor,
                 name,
                 model_type,
@@ -692,13 +692,13 @@ class Qwen3MoE(BaseModel):
             if slice_range is not None:
                 assert (
                     target_tensor.shape[0] == 2 * self.model_args.ffn_dim
-                ), f"Shape mismatch: {target_tensor.shape} != {2 * self.model_args.ffn_dim} for {dest_name}"
+                ), f"Shape mismatch: {target_tensor.shape[0]} != {2 * self.model_args.ffn_dim} for {dest_name}"
                 target_tensor = target_tensor[slice_range]
             assert (
-                target_tensor.shape == shared_weight.shape
-            ), f"Shape mismatch: {target_tensor.shape} != {shared_weight.shape} for {dest_name}"
+                target_tensor.shape == sharded_weight.shape
+            ), f"Shape mismatch: {target_tensor.shape} != {sharded_weight.shape} for {dest_name}"
             with torch.no_grad():
-                target_tensor.data.copy_(shared_weight)
+                target_tensor.data.copy_(sharded_weight)
 
         # Handle weight tying: lm_head shares weights with embed_tokens
         if (
@@ -714,7 +714,7 @@ class Qwen3MoE(BaseModel):
             )
             tensor = reserved[embed_tokens_weight_key]
 
-            dest_name, shared_weight = convert_weight_from_hf(
+            dest_name, sharded_weight = convert_weight_from_hf(
                 tensor, name, model_type, parallel_dims
             )
             if dest_name in self_state_dict:
@@ -726,10 +726,10 @@ class Qwen3MoE(BaseModel):
                     target_tensor.to_local() if is_dist_tensor else target_tensor
                 )
                 assert (
-                    local_view.shape == shared_weight.shape
-                ), f"Shape mismatch: {local_view.shape} != {shared_weight.shape} for {dest_name}"
+                    local_view.shape == sharded_weight.shape
+                ), f"Shape mismatch: {local_view.shape} != {sharded_weight.shape} for {dest_name}"
                 with torch.no_grad():
-                    local_view.data.copy_(shared_weight)
+                    local_view.data.copy_(sharded_weight)
 
     def get_position_ids(self, **kwargs) -> Tuple[torch.Tensor, int]:
         seq_dim_idx = 1
