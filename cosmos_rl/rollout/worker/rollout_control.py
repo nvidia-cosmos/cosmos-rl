@@ -1859,6 +1859,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             data["teacher_result_uuid"] = uuid_values
             self.teacher_interact_queue.put_nowait(data)
             payload.teacher_result_uuids = uuid_values
+            if self.config.distillation.trainer_token_ids_from_teacher:
+                # offload the verbose token ids out of the payload for efficient communication
+                # only keep the first token id which is selected
+                # the full token ids will be fetched from teacher model during distillation
+                payload.completion_token_ids = [
+                    [t[0:1] for t in compl] for compl in payload.completion_token_ids
+                ]
+                payload.prompt_token_ids = [t[0:1] for t in payload.prompt_token_ids]
         return payloads
 
     def work(self):

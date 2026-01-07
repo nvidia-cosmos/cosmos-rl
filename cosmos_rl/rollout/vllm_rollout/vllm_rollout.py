@@ -190,9 +190,7 @@ class vLLMRollout(RolloutBase):
         # Set sampling params for rollout and validation.
         self.val_sampling_params = SamplingParams(
             n=self.config.validation.n_generation,
-            logprobs=0
-            if not self.config.distillation.enable
-            else self.config.distillation.top_k,
+            logprobs=0,
             top_p=self.config.validation.top_p
             if self.config.validation.top_p is not None
             else self.config.rollout.sampling_config.top_p,
@@ -211,9 +209,7 @@ class vLLMRollout(RolloutBase):
             stop_token_ids=self.eos_token_ids,
             include_stop_str_in_output=self.config.rollout.include_stop_str_in_output,
             detokenize=True,
-            prompt_logprobs=0
-            if not self.config.distillation.enable
-            else self.config.distillation.top_k,
+            prompt_logprobs=0,
         )
         self.sampling_params = SamplingParams(
             n=self.config.rollout.n_generation,

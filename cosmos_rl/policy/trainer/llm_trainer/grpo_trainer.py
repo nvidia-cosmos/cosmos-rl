@@ -56,6 +56,7 @@ from cosmos_rl.utils.util import compute_logprobs_for_top_k_indices
 import cosmos_rl.utils.distributed as dist_util
 import torch.distributed as dist
 import torch.nn.functional as F
+import msgpack
 
 
 class TrainerPhase(enum.Enum):
@@ -859,7 +860,38 @@ class GRPOTrainer(LLMTrainer):
         assert (
             len(all_teacher_logprobs) == len(mini_batch_indices)
         ), f"Length of all_teacher_logprobs {len(all_teacher_logprobs)} should be equal to length of mini_batch_indices {len(mini_batch_indices)}"
-        for teacher_logprobs, idx in zip(all_teacher_logprobs, mini_batch_indices):
+        for teacher_result, idx in zip(all_teacher_logprobs, mini_batch_indices):
+            if teacher_result is None:
+                teacher_logprobs = None
+                if self.config.distillation.trainer_token_ids_from_teacher:
+                    rollouts[idx].completion_token_ids = [
+                        [1] * (self.config.distillation.top_k or 1)
+                    ] * len(rollouts[idx].completion_token_ids)
+                    rollouts[idx].prompt_token_ids = [
+                        [1] * (self.config.distillation.top_k or 1)
+                    ] * len(rollouts[idx].prompt_token_ids)
+            else:
+                teacher_result = msgpack.unpackb(teacher_result)
+                teacher_logprobs = teacher_result.get("teacher_logprobs", None)
+                if self.config.distillation.trainer_token_ids_from_teacher:
+                    if (
+                        "completion_token_ids" not in teacher_result
+                        or "prompt_token_ids" not in teacher_result
+                    ):
+                        teacher_logprobs = None
+                    rollouts[idx].completion_token_ids = teacher_result.get(
+                        "completion_token_ids",
+                        [[1] * (self.config.distillation.top_k or 1)]
+                        * len(rollouts[idx].completion_token_ids),
+                    )
+                    rollouts[idx].prompt_token_ids = teacher_result.get(
+                        "prompt_token_ids",
+                        [[1] * (self.config.distillation.top_k or 1)]
+                        * len(rollouts[idx].prompt_token_ids),
+                    )
+            logger.debug(
+                f"[Policy] Teacher result: {len(teacher_logprobs) if teacher_logprobs is not None else 0} items"
+            )
             rollouts[idx].teacher_logprobs = teacher_logprobs
 
     def clear_teacher_result_cache(self):
