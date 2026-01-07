@@ -19,7 +19,7 @@ import uuid
 import torch
 import atexit
 
-from queue import Queue
+from queue import Queue, Empty as QueueEmpty
 from cosmos_rl.policy.model import ModelRegistry, WeightMapper
 from typing import List, Optional, Callable, Union, Tuple
 from functools import partial
@@ -62,6 +62,11 @@ from cosmos_rl.dispatcher.data.schema import (
     RLPayload,
     ConversationType,
 )
+from cosmos_rl.rollout.worker.asynchronous.rollout_task_scheduler import (
+    RolloutTaskScheduler,
+    RolloutTask,
+    CompletedRollout,
+)
 from cosmos_rl.rollout.schema import RolloutResult
 from cosmos_rl.reward.reward_calculator import RewardDispatcher
 from cosmos_rl.dispatcher.data.data_fetcher import WorkerDataFetcher
@@ -80,6 +85,8 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     DisaggregatedRolloutControlWorker will be a replica instance of single DP.
     DisaggregatedRolloutControlWorker should support scaling launch.
     """
+
+    SUPPORT_ASYNC_BACKEND = ["vllm_async"]
 
     def __init__(
         self, config: CosmosConfig, parallel_dims: ParallelDims, **kwargs
@@ -170,6 +177,15 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
         )
         self.data_fetcher = None
 
+        # initialize variable for async rollout.
+        self._is_async_rollout = False
+        self.scheduler: Optional[RolloutTaskScheduler] = None
+        if self.config.rollout.mode == "async":
+            assert (
+                config.rollout.backend in self.SUPPORT_ASYNC_BACKEND
+            ), f"DisaggregatedRolloutControlWorker async mode only supports {self.SUPPORT_ASYNC_BACKEND} backends, but got {config.rollout.backend}"
+            self._is_async_rollout = True
+
         self.setup(
             dataset=kwargs.get("dataset"),
             data_packer=kwargs.get("data_packer"),
@@ -222,6 +238,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if self.should_report
             else 0,
         )
+
+        if self._is_async_rollout:
+            self.scheduler = RolloutTaskScheduler(
+                rollout_engine=self.rollout,
+                data_packer=self.data_packer,
+                max_concurrent_requests=self.config.rollout.async_config.max_concurrent_requests,
+                stream=self.inference_stream,
+            )
 
     def prepare_shard_infos_for_weight_sync_insts(self):
         # update the underlying model before prepare shard infos for weight sync instructions.
@@ -306,6 +330,10 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if self.teacher_interact_thread is not None:
                 self.teacher_interact_thread.join()
                 self.teacher_interact_thread = None
+            if self.scheduler is not None:
+                self.scheduler.stop(wait=False)
+                self.scheduler = None
+
             if self.heartbeat_thread is not None:
                 self.heartbeat_thread.join()
                 self.heartbeat_thread = None
@@ -765,41 +793,79 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
     def do_validation(self):
         validation_queue = Queue()
         validation_payloads: List[RLPayload] = []
+        is_end = False
+        no_more_prompts = False
+
+        # statistic the async rollout
+        total_prompts_count = 0
+        total_validation_payload_count = 0
+
         # Do validation here
         while True:
-            is_end = self.request_new_prompts(
-                self.val_batch_size,
-                validation_queue,
-                validation_step=self.current_step,
-            )
-            if not validation_queue.empty():
-                payloads_list: List[RLPayload] = validation_queue.get()
+            payloads_list: List[RLPayload] = []
+            rollout_results: List[RolloutResult] = []
 
-                rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
-                    payloads=payloads_list,
-                    stream=self.inference_stream,
-                    data_packer=self.val_data_packer,
-                    data_fetcher=self.data_fetcher,
-                    is_validation=True,
+            if self._is_async_rollout:
+                if not no_more_prompts:
+                    (
+                        fetched_prompts,
+                        no_more_prompts,
+                    ) = self._stream_generation_feed_prompts(
+                        self.val_batch_size,
+                        validation_queue,
+                        validation_step=self.current_step,
+                    )
+                    total_prompts_count += fetched_prompts
+
+                is_end = (
+                    no_more_prompts
+                    and self.scheduler.is_idle()
+                    and total_prompts_count == total_validation_payload_count
                 )
-                if rollout_results:
-                    for p, rr in zip(payloads_list, rollout_results):
-                        p.completions = rr.completions
-                        p.completion_logprobs = rr.completion_logprobs
-                        p.completion_token_ids = rr.completion_token_ids
-                        p.prompt_logprobs = rr.prompt_logprobs
-                        p.weight_version = self.current_weight_version
-                        p.cumulative_logprob = rr.cumulative_logprob
-                        if self.config.rollout.multi_turn_config.enable:
-                            p.completed_conversations = rr.completed_conversations
-                        if self.config.train.local_dataset:
-                            p.reference_answer = (
-                                self.data_fetcher.query_reference_answer(
-                                    p.prompt_idx,
-                                    "val",
-                                )
-                            )
-                    validation_payloads.extend(payloads_list)
+
+                # get processed results
+                completed_rollouts = self.scheduler.get_all()
+
+                for cr in completed_rollouts:
+                    payloads_list.append(cr.payload)
+                    rollout_results.append(cr.result)
+
+                total_validation_payload_count += len(payloads_list)
+            else:
+                is_end = self.request_new_prompts(
+                    self.val_batch_size,
+                    validation_queue,
+                    validation_step=self.current_step,
+                )
+                if not validation_queue.empty():
+                    payloads_list: List[RLPayload] = validation_queue.get()
+
+                    rollout_results: List[RolloutResult] = (
+                        self.rollout.rollout_generation(
+                            payloads=payloads_list,
+                            stream=self.inference_stream,
+                            data_packer=self.val_data_packer,
+                            data_fetcher=self.data_fetcher,
+                            is_validation=True,
+                        )
+                    )
+
+            if rollout_results:
+                for p, rr in zip(payloads_list, rollout_results):
+                    p.completions = rr.completions
+                    p.completion_logprobs = rr.completion_logprobs
+                    p.completion_token_ids = rr.completion_token_ids
+                    p.prompt_logprobs = rr.prompt_logprobs
+                    p.weight_version = self.current_weight_version
+                    p.cumulative_logprob = rr.cumulative_logprob
+                    if self.config.rollout.multi_turn_config.enable:
+                        p.completed_conversations = rr.completed_conversations
+                    if self.config.train.local_dataset:
+                        p.reference_answer = self.data_fetcher.query_reference_answer(
+                            p.prompt_idx,
+                            "val",
+                        )
+                validation_payloads.extend(payloads_list)
 
             if is_end:
                 break
@@ -842,19 +908,53 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     self.reward_dispatcher.dequeue_rewards_cal()
                 )
 
-    def lazy_initialize_rollout_engine(self, load_format):
-        # lazy initialization of the rollout engine.
-        if not self.rollout.is_engine_initialized():
-            self.rollout.init_engine(
+    def _start_async_rollout_scheduler(self, load_format):
+        """
+        Start the async rollout scheduler.
+        """
+        assert (
+            self.config.rollout.mode == "async"
+        ), "Async rollout scheduler is not enabled"
+
+        if self.scheduler.is_running():
+            logger.info("[Rollout] Async rollout scheduler is already running")
+            return
+
+        def init_engine_hook(rollout_engine: RolloutBase):
+            """
+            This hook function is used to initialize the rollout engine in the async rollout scheduler.
+            """
+            rollout_engine.init_engine(
                 quantization=self.quantization_type,
                 seed=self.config.rollout.seed,
                 load_format=load_format,
             )
-            self.rollout.post_init_engine_hook(
+            rollout_engine.post_init_engine_hook(
                 self.consume_command,
                 self.report_rollouts,
                 self.validation_flag,
             )
+
+        self.scheduler.start(init_engine_hook, wait_initialized=True)
+        logger.info("[Rollout] Async rollout scheduler started")
+
+    def lazy_initialize_rollout_engine(self, load_format):
+        # lazy initialization of the rollout engine.
+        if not self.rollout.is_engine_initialized():
+            if self._is_async_rollout:
+                # wait the scheduler thread to initialize the rollout engine.
+                self._start_async_rollout_scheduler(load_format)
+            else:
+                self.rollout.init_engine(
+                    quantization=self.quantization_type,
+                    seed=self.config.rollout.seed,
+                    load_format=load_format,
+                )
+                self.rollout.post_init_engine_hook(
+                    self.consume_command,
+                    self.report_rollouts,
+                    self.validation_flag,
+                )
             self.prepare_shard_infos_for_weight_sync_insts()
 
     @RolloutWorkerBase.register_rollout_command_handler(PolicyToRolloutUnicastCommand)
@@ -1431,6 +1531,14 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
             if not self.state.weight_synced():
                 continue
 
+            _, is_validation, _, _ = self.report_rollouts()
+            assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
+
+            if self._is_async_rollout:
+                # In this mode, we perform the stream generation step in the main loop.
+                self.stream_generation_step()
+                continue
+
             # try fetching new prompts if no ending signal is set
             if not self.state.prompt_fetch_end():
                 no_more_prompts = self.request_new_prompts(
@@ -1446,8 +1554,7 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         self.state.set_prompt_consume_end()
                         if self.global_rank == 0:
                             self.send_end_signal()
-            _, is_validation, _, _ = self.report_rollouts()
-            assert not is_validation, "Validation report should be handled in the broadcast command rather than main loop."
+
             if self.state.prompt_consume_end():
                 assert (
                     self._prompt_queue.empty() and self.state.prompt_fetch_end()
@@ -1476,30 +1583,13 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                         self.send_end_signal()
         logger.info(f"[Rollout] Main loop of {self.replica_name} finished")
 
-    def one_step_generation(
-        self,
-    ) -> Tuple[List[RLPayload], List[RolloutResult]]:
+    def _filter_valid_rollout_results_and_report(
+        self, rollout_results: List[RolloutResult], payloads_list: List[RLPayload]
+    ) -> Tuple[List[RolloutResult], List[RLPayload]]:
         """
-        Perform one step of rollout generation.
-        Returns the number of valid payloads generated.
+        Filter the rollout results with valid completions or valid completed_conversations.
+        Returns the valid payloads and valid results for reporting.
         """
-        payloads_list: List[RLPayload] = self._prompt_queue.get()
-
-        rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
-            payloads=payloads_list,
-            stream=self.inference_stream,
-            data_packer=self.data_packer,
-            data_fetcher=self.data_fetcher,
-            is_validation=False,
-        )
-
-        if len(rollout_results) == 0:
-            return False
-
-        assert (
-            len(rollout_results) == len(payloads_list)
-        ), f"Error: Rollout engine returned {len(rollout_results)} for {len(payloads_list)}"
-
         # we need filter the result with valid completions or valid completed_conversations
         valid_result: List[RolloutResult] = []
         valid_payloads_list: List[RLPayload] = []
@@ -1556,8 +1646,6 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                     valid_result.append(rr)
                     valid_payloads_list.append(payload)
 
-        logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
-
         should_report = self.should_report and len(valid_result) > 0
         if should_report:
             valid_payloads: List[RLPayload] = []
@@ -1586,6 +1674,161 @@ class DisaggregatedRolloutControlWorker(RolloutWorkerBase):
                 self.current_weight_version,
             )
         return valid_payloads_list, valid_result
+
+    def one_step_generation(
+        self,
+    ) -> Tuple[List[RLPayload], List[RolloutResult]]:
+        """
+        Perform one step of rollout generation.
+        Returns the number of valid payloads generated.
+        """
+        payloads_list: List[RLPayload] = self._prompt_queue.get()
+
+        rollout_results: List[RolloutResult] = self.rollout.rollout_generation(
+            payloads=payloads_list,
+            stream=self.inference_stream,
+            data_packer=self.data_packer,
+            data_fetcher=self.data_fetcher,
+            is_validation=False,
+        )
+
+        if len(rollout_results) == 0:
+            return False
+
+        assert (
+            len(rollout_results) == len(payloads_list)
+        ), f"Error: Rollout engine returned {len(rollout_results)} for {len(payloads_list)}"
+
+        logger.debug(f"[Rollout] generate end for rank {self.global_rank}")
+
+        return self._filter_valid_rollout_results_and_report(
+            rollout_results, payloads_list
+        )
+
+    def _stream_generation_feed_prompts(
+        self,
+        batch_size: int,
+        prompt_queue: Queue,
+        validation_step: Optional[int] = None,
+    ) -> Tuple[int, bool]:
+        """
+        Perform one step of stream rollout generation.
+        feed the prompts to the rollout_scheduler and collect the rollout results, report the rollout results to the controller.
+
+        This function is non-blocking.
+
+        Args:
+            batch_size (int): the batch size of the prompts to fetch
+            prompt_queue (Queue): the queue to store the prompts
+            validation_step (Optional[int]): the validation step, if None, means no validation.
+
+        Return:
+            feed_prompts_count (int): the number of prompts fed to the scheduler
+            is_end (bool): whether there is no more prompts to fetch
+        """
+        if self.scheduler.is_busy():
+            # skip fetching new prompts if the scheduler is busy
+            return 0, False
+
+        request_prompts_count = min(
+            batch_size,
+            self.scheduler.max_concurrent_requests
+            - self.scheduler.pending_tasks()
+            - self.scheduler.active_tasks(),
+        )
+        if request_prompts_count <= 0:
+            return 0, False
+
+        is_end = self.request_new_prompts(
+            request_prompts_count, prompt_queue, validation_step=validation_step
+        )
+
+        is_validation = validation_step is not None
+
+        # Check if the prompt is valid for the current weight version
+        if not is_validation and not self._prompt_queue.empty():
+            first_payload: RLPayload = self._prompt_queue.queue[0][0]
+            is_valid_prompt_for_current_weight_version = (
+                first_payload.weight_version <= self.current_weight_version
+            )
+            if not is_valid_prompt_for_current_weight_version:
+                return 0, False
+
+        # try to get the prompts from the prompt queue, even if the prompt queue is empty.
+        try:
+            payloads_list: List[RLPayload] = prompt_queue.get_nowait()
+        except QueueEmpty:
+            # if the prompt queue is empty, just skip feed the scheduler.
+            return 0, is_end
+
+        # packing the prompts into tasks and put into the scheduler
+        tasks = [
+            RolloutTask(
+                idx=payload.prompt_idx,
+                payload=payload,
+                is_validation=False,
+            )
+            for payload in payloads_list
+        ]
+        self.scheduler.put_rollout_batch(tasks)
+        return len(payloads_list), is_end
+
+    def _stream_generation_collect_results(self):
+        """
+        Collect the rollout results from the scheduler.
+
+        This function is non-blocking.
+        """
+        results: List[CompletedRollout] = self.scheduler.get_all()
+
+        if len(results) == 0:
+            return
+
+        payloads_list: List[RLPayload] = []
+        rollout_results: List[RolloutResult] = []
+        for cr in results:
+            payloads_list.append(cr.payload)
+            rollout_results.append(cr.result)
+
+        self._filter_valid_rollout_results_and_report(rollout_results, payloads_list)
+
+    def stream_generation_step(self):
+        """
+        Perform the stream rollout generation step, include 3 sub-steps:
+        1. update the state of the rollout generation worker.
+        1. get prompts from controller and feed to the scheduler.
+        3. collect the rollout results from the scheduler and enqueue the reward calculation.
+
+        This function is non-blocking.
+        """
+        # update the state of the rollout generation worker
+        if (
+            self.state.prompt_fetch_end()
+            and self.scheduler.is_all_tasks_completed()
+            # all reward calculation tasks are reported
+            and self.reward_dispatcher.is_empty()
+        ):
+            self.state.set_prompt_consume_end()
+
+        if not self.state.prompt_fetch_end():
+            _, is_end = self._stream_generation_feed_prompts(
+                self.batch_size, self._prompt_queue, validation_step=None
+            )
+            if is_end:
+                logger.info(
+                    f"[Rollout] Receive prompt end, wait for {self.replica_name} to finish all rollouts generation"
+                )
+                self.state.set_prompt_fetch_end()
+
+        self._stream_generation_collect_results()
+
+        # Check if all prompts are consumed, if so, send end signal to the controller.
+        if self.state.prompt_consume_end():
+            # Send end signal to the controller
+            # Because we first report_rollouts() to the controller, so we don't need to check the reward_dispatcher queue here.
+            self.shutdown_signal.set()
+            if self.global_rank == 0:
+                self.send_end_signal()
 
     def enqueue_teacher_calculation(self, payloads: List[RLPayload]) -> List[RLPayload]:
         """

@@ -128,6 +128,13 @@ class RolloutBase(ABC):
         """
         pass
 
+    def shutdown(self):
+        """
+        Shutdown the engine and release the resources.
+        """
+        # In some case, the engine may create a child thread to run the generation, Rollout should release the resources before shutting down.
+        pass
+
     def pre_get_params_for_sync_hook(
         self,
         quantization_type: str,
