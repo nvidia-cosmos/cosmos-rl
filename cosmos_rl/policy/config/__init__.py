@@ -1325,6 +1325,11 @@ class DistillationConfig(BaseModel):
         "Divergence.",
     )
 
+    trainer_token_ids_from_teacher: bool = Field(
+        default=True,
+        description="Whether the trainer gets token ids from teacher model during distillation.",
+    )
+
     @model_validator(mode="after")
     def check_params_value(self):
         assert (
@@ -1337,6 +1342,11 @@ class DistillationConfig(BaseModel):
         assert (
             self.parallelism.dp_shard_size >= -1 and self.parallelism.dp_shard_size != 0
         ), "dp_shard_size must be greater than 0 or -1 to be auto-inferred"
+        if self.top_k <= 0:
+            self.trainer_token_ids_from_teacher = False
+            logger.warning(
+                "top_k is not set for distillation, so trainer_token_ids_from_teacher is set to False."
+            )
         return self
 
 
