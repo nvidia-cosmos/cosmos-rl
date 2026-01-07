@@ -206,6 +206,44 @@ class TestAsyncVLLMRollout(unittest.TestCase):
         results = asyncio.run(test_helper())
         self.assertGreater(len(results), 0)
 
+    def test_update_rollout_weight_in_main_thread(self):
+        """Test update rollout weight from main thread."""
+        cosmos_config = getMockConfig()
+        cosmos_config.rollout.parallelism.tp_size = 1
+
+        async def test_helper():
+            rollout_engine, _ = self.get_rollout_engine_and_data_packer(cosmos_config)
+
+            # step 1, compare the original mean of the parameter
+            module_like = rollout_engine.get_underlying_model()
+            modified_param = ""
+            original_mean = None
+            for name, param in module_like.named_parameters():
+                if "embed_tokens" in name:
+                    modified_param = name
+                    original_mean = param.data.mean().item()
+
+            mean_in_worker = await rollout_engine.rollout_engine.collective_rpc(
+                "_test_get_parameters_mean", args=[modified_param]
+            )
+            self.assertEqual(mean_in_worker[0], original_mean)
+
+            # step 2, modify the parameter in the main thread
+            for name, param in module_like.named_parameters():
+                if modified_param == name:
+                    param.data.fill_(1.0)
+                    break
+
+            mean_in_worker = await rollout_engine.rollout_engine.collective_rpc(
+                "_test_get_parameters_mean", args=[modified_param]
+            )
+            self.assertEqual(mean_in_worker[0], 1.0)
+
+            # finally, clean the test environment
+            rollout_engine.shutdown()
+
+        asyncio.run(test_helper())
+
     def test_async_rollout_single_generate(self):
         """Test async rollout."""
         cosmos_config = getMockConfig()

@@ -263,3 +263,92 @@ class TestModuleLike(unittest.TestCase):
         assert set(parameter_names) == set(original_state_dict.keys()) - set(
             ["lm_head.weight"]
         )
+
+
+class TestModuleLikeIPC(unittest.TestCase):
+    """Test ModuleLike IPC."""
+
+    _test_tensor_name = "model.embed_tokens.weight"
+
+    @staticmethod
+    def _child_process(state_dict_ipc, result_queue: mp.Queue):
+        """Child process function to modify module like."""
+        try:
+            msg = result_queue.get()
+            if msg != "start":
+                return
+
+            # Initialize CUDA in child process
+            torch.cuda.set_device(0)
+            state_dict = named_tensors_from_serialize(state_dict_ipc)
+
+            tensor_mean = state_dict[TestModuleLikeIPC._test_tensor_name].mean().item()
+            result_queue.put((TestModuleLikeIPC._test_tensor_name, tensor_mean))
+        except Exception as e:
+            result_queue.put(("error", str(e), None))
+
+    def test_module_like_modify_tensor(self):
+        """Test ModuleLike modify tensor."""
+        # Ensure 'spawn' start method for CUDA compatibility
+        ctx = mp.get_context("spawn")
+
+        device = torch.device("cuda:0")
+
+        state_dict = {
+            "model.embed_tokens.weight": torch.randn(10, 10, device=device),
+            "model.layers.0.self_attn.q_proj.weight": torch.randn(
+                10, 10, device=device
+            ),
+            "model.layers.0.self_attn.k_proj.weight": torch.randn(
+                10, 10, device=device
+            ),
+            "model.layers.0.self_attn.v_proj.weight": torch.randn(
+                10, 10, device=device
+            ),
+            "model.layers.0.self_attn.o_proj.weight": torch.randn(
+                10, 10, device=device
+            ),
+        }
+
+        fake_module = ModuleLike(state_dict, set())
+
+        state_dict_ipc = named_tensors_to_serialize(state_dict)
+        result_queue = ctx.Queue()
+
+        # start the child process
+        p = ctx.Process(
+            target=self._child_process,
+            args=(state_dict_ipc, result_queue),
+            name="child_process_modify_module_like",
+        )
+        p.start()
+
+        # change the tensor value at main thread
+        old_expected_mean = state_dict[self._test_tensor_name].mean().item()
+        expected_mean = 1.0
+        for name, value in fake_module.named_parameters():
+            if name == self._test_tensor_name:
+                value.copy_(torch.ones_like(value))
+                expected_mean = value.mean().item()
+
+        assert old_expected_mean != expected_mean, "The tensor mean should be changed"
+
+        # send the start message to the child process
+        result_queue.put("start")
+
+        p.join(timeout=30)
+        if p.is_alive():
+            p.terminate()
+            self.fail("Child process timed out")
+
+        self.assertEqual(p.exitcode, 0, "Child process failed")
+
+        # Get result from queue
+        tensor_name, tensor_mean = result_queue.get(timeout=5)
+
+        if tensor_name != self._test_tensor_name:
+            self.fail(
+                f"The tensor name should be {self._test_tensor_name}, but got {tensor_name}"
+            )
+
+        self.assertEqual(tensor_mean, expected_mean)

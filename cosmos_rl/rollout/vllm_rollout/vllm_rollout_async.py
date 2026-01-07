@@ -85,6 +85,15 @@ class VLLMColocateWorkerExtension:
         """
         simplify_process_weights_after_loading()
 
+    def _test_get_parameters_mean(self, param_name: str) -> float:
+        """
+        Test function to get the mean of a parameter.
+        This is used to ensure the get_state_dict_ipc() returns the correct state dict.
+        """
+        with torch.no_grad():
+            param = self._get_model().get_parameter(param_name)
+            return param.data.mean().item()
+
 
 @RolloutRegistry.register(rollout_type="vllm_async")
 class vLLMRolloutAsync(vLLMRollout):
@@ -322,10 +331,15 @@ class vLLMRolloutAsync(vLLMRollout):
         # Note: state dict rather than serialize the whole model, have two benefits:
         # 1. Avoid unexpected object behavior when serializing the whole model.
         # 2. Avoid call `forward()` in the worker process, which is not safe.
-        rpc_results = asyncio.run_coroutine_threadsafe(
-            self.rollout_engine.collective_rpc("get_state_dict_ipc"),
-            self._engine_event_loop,
-        ).result(timeout=None)
+        if asyncio.get_event_loop() is self._engine_event_loop:
+            rpc_results = asyncio.run(
+                self.rollout_engine.collective_rpc("get_state_dict_ipc")
+            )
+        else:
+            rpc_results = asyncio.run_coroutine_threadsafe(
+                self.rollout_engine.collective_rpc("get_state_dict_ipc"),
+                self._engine_event_loop,
+            ).result(timeout=None)
         # vllm backend may have multiple workers, we use the first worker's state dict to initialize the underlying model.
         sd_ipc_worker0, not_parameter_names = rpc_results[0]
         state_dict = named_tensors_from_serialize(sd_ipc_worker0)
