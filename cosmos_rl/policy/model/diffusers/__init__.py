@@ -18,7 +18,7 @@ from typing import List, Tuple, Optional
 import torch
 from torch import nn
 
-from diffusers import DiffusionPipeline
+from cosmos_rl.utils.diffusers_utils import DiffusionPipeline
 from diffusers import training_utils
 
 from abc import ABC, abstractmethod
