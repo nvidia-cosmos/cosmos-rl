@@ -245,10 +245,9 @@ class GroupedExperts(nn.Module):
         if active_local_experts == 0:
             # We need to handle the case where no token selects the experts on this device.
             gate_and_up_proj = get_local_proj(self.gate_and_up_projs, experts_start_idx)
-            gate_proj = gate_and_up_proj[:, : self.moe_inter_dim]
-            up_proj = gate_and_up_proj[:, self.moe_inter_dim :]
+            gate_proj = gate_and_up_proj[: self.moe_inter_dim, :]
+            up_proj = gate_and_up_proj[self.moe_inter_dim :, :]
             down_proj = get_local_proj(self.down_projs, experts_start_idx)
-
             expert_out = (
                 swiglu(torch.zeros_like(x[0]), gate_proj, down_proj, up_proj)
                 * weights[0, 0, None]
