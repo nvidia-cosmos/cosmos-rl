@@ -28,6 +28,7 @@ import subprocess
 import sys
 from cosmos_rl.utils import util
 import toml
+import msgpack
 import tempfile
 from transformers import AutoTokenizer
 
@@ -149,7 +150,7 @@ class TestTeacherModel(unittest.TestCase):
         }
         uuids = redis_controller.publish_teacher_request(data, "test_client")
         for uuid in uuids:
-            teacher_result = redis_controller.get_teacher_result(uuid)
+            teacher_result = msgpack.unpackb(redis_controller.get_teacher_result(uuid))
             assert (
                 len(teacher_result["teacher_logprobs"]) + 1
                 == len(tokenizer_prompt) + len(tokenizer_reference_answer)
