@@ -23,7 +23,8 @@ import cosmos_rl.utils.util as util
 from cosmos_rl.utils.constant import COSMOS_HF_MODEL_TYPES
 import torch
 from transformers import AutoConfig
-from diffusers import DiffusionPipeline
+from cosmos_rl.utils.diffusers_utils import diffusers_config_fn
+
 from cosmos_rl.dispatcher.data.packer import BaseDataPacker
 import collections
 from functools import partial
@@ -644,9 +645,7 @@ class ModelRegistry:
         # TODO (yy): Find a similar function like AutoConfig from transformers for diffusers or write one
         model_name_or_path = config.policy.model_name_or_path
         model = None
-        model_type = util.retry(DiffusionPipeline.load_config)(model_name_or_path)[
-            "_class_name"
-        ]
+        model_type = util.retry(diffusers_config_fn)(model_name_or_path)["_class_name"]
 
         model_cls = ModelRegistry._MODEL_REGISTRY[model_type]
 
