@@ -430,6 +430,108 @@ class GroupedExpertsDeepEP(nn.Module):
         return y
 
 
+def padding_wrapper_for_torch(
+    input: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    alignment: int,
+    num_local_experts: int,
+) -> torch.Tensor:
+    """
+    Padding the input of torch._grouped_mm to match the alignment requirements of this op. Tokens for each expert should be multiple of `alignment`.
+    Args:
+        tokens_per_expert: Number of tokens of each expert. [num_local_experts,]
+        padded_max_len: length of tokens that needs to pad to.
+        alignment: length of tokens of input should be multiple of `alignment`.
+        num_local_experts: Experts number of current ep rank.
+    """
+    total_tokens_num_cur_group = input.size(0)
+    padded_total_tokens_num_cur_group = (
+        total_tokens_num_cur_group + num_local_experts * alignment
+    )
+    padded_total_tokens_num_cur_group = (
+        (padded_total_tokens_num_cur_group + alignment - 1) // alignment * alignment
+    )
+
+    with torch.no_grad():
+        # pad out empty experts to alignment requirement, at least one alignment
+        padded_tokens_per_expert = torch.clamp_min(tokens_per_expert, alignment)
+        # for non empty experts, pad to multiple alignment
+        padded_tokens_per_expert = (
+            (padded_tokens_per_expert + alignment - 1) // alignment * alignment
+        ).to(torch.int32)  # [num_local_experts,]
+
+        start_index_values = torch.cumsum(tokens_per_expert, 0) - tokens_per_expert
+        padded_offsets = torch.cumsum(padded_tokens_per_expert, 0)
+
+        padded_indices = torch.full(
+            (padded_total_tokens_num_cur_group,),
+            -1,
+            dtype=torch.int32,
+            device=input.device,
+        )
+
+        from cosmos_rl.utils.logging import logger
+
+        logger.info(
+            f"LMS: padded_total_tokens_num_cur_group: {padded_total_tokens_num_cur_group}, padded_tokens_per_expert.sum(): {padded_tokens_per_expert.sum()}"
+        )
+        # fill the origin input row indices to padded_indices
+        for expert_id in range(num_local_experts):
+            padded_start = padded_offsets[expert_id].item()
+            start_index = start_index_values[expert_id].item()
+            length = tokens_per_expert[expert_id].item()
+            if length > 0:
+                padded_end = min(
+                    padded_start + length, padded_total_tokens_num_cur_group
+                )
+                from cosmos_rl.utils.logging import logger
+
+                logger.info(
+                    f"LMS: padded_start: {padded_start}, padded_end: {padded_end}"
+                )
+                padded_indices[padded_start:padded_end] = torch.arange(
+                    start_index,
+                    start_index + (padded_end - padded_start),
+                    dtype=torch.int32,
+                    device=input.device,
+                )
+    input_shape = input.shape
+    # append one zero row
+    input = torch.vstack((input, input.new_zeros(input.shape[-1])))
+    input = input[padded_indices, :]
+
+    return input, input_shape, padded_tokens_per_expert, padded_indices
+
+
+def unpadding_wrapper_for_torch(output: torch.Tensor, input_shape, padded_indices):
+    """
+    Recover actual output from padded output of torch._grouped_mm.
+    """
+    out_unpadded = output.new_empty(input_shape)
+    out_unpadded[padded_indices, :] = output
+    out = out_unpadded[:-1]
+    return out
+
+
+def grouped_gemm_wrapper(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    num_local_experts,
+):
+    # FIXME: (lms) adjust this alignment.
+    alignment = 16
+    input, input_shape, tokens_per_expert, padded_indices = padding_wrapper_for_torch(
+        input, tokens_per_expert, alignment, num_local_experts
+    )
+    offsets = torch.cumsum(
+        tokens_per_expert, dim=0, dtype=torch.int32, device=input.device
+    )
+    output = torch._grouped_mm(input, weight, offs=offsets)
+    output = unpadding_wrapper_for_torch(output, input_shape, padded_indices)
+    return output
+
+
 class GroupedExpertsTorch(GroupedExpertsDeepEP):
     """
     Sparse MoE implementation using torch._grouped_gemm.
@@ -437,6 +539,49 @@ class GroupedExpertsTorch(GroupedExpertsDeepEP):
 
     def __init__(self, args: MoEArgs):
         super().__init__(args)
+
+    def run_grouped_gemm(
+        self,
+        x: torch.Tensor,
+        permuted_probs: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Run grouped gemm for the given weights and tokens.
+        Args:
+            x: [total_dispatched_num_tokens, hidden_size]
+            permuted_probs: [total_dispatched_num_tokens, topk]
+            tokens_per_expert: [num_local_experts]
+        Returns:
+            output2: [total_dispatched_num_tokens, hidden_size]
+        """
+        output1 = grouped_gemm_wrapper(
+            x,
+            self.gate_and_up_projs.to_local().transpose(-2, -1),
+            tokens_per_expert,
+            tokens_per_expert.numel(),
+        )  # [total_dispatched_num_tokens, moe_inter_dim * 2]
+        # offsets = torch.cumsum(tokens_per_expert, dim=0, dtype=torch.int32).to(x.device)
+        # output1 = torch._grouped_mm(
+        #     x,
+        #     self.gate_and_up_projs.to_local().transpose(-2, -1),
+        #     offs=offsets,
+        # )  # [total_dispatched_num_tokens, moe_inter_dim * 2]
+        output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
+
+        output2 = grouped_gemm_wrapper(
+            output1_,
+            self.down_projs.to_local().transpose(-2, -1),
+            tokens_per_expert,
+            tokens_per_expert.numel(),
+        )  # [total_dispatched_num_tokens, hidden_size]
+
+        # output2 = torch._grouped_mm(
+        #     output1_,
+        #     self.down_projs.to_local().transpose(-2, -1),
+        #     offs=offsets,
+        # )  # [total_dispatched_num_tokens, hidden_size]
+        return output2
 
     def forward(
         self,
@@ -463,20 +608,7 @@ class GroupedExpertsTorch(GroupedExpertsDeepEP):
         )
         permuted_probs = permuted_probs.unsqueeze(-1)
         if torch.count_nonzero(tokens_per_expert) > 0:
-            offsets = torch.cumsum(tokens_per_expert, dim=0, dtype=torch.int32).to(
-                permuted_local_hidden_states.device
-            )
-            output1 = torch._grouped_mm(
-                permuted_local_hidden_states,
-                self.gate_and_up_projs.to_local().transpose(-2, -1),
-                offs=offsets,
-            )  # [total_dispatched_num_tokens, moe_inter_dim * 2]
-            output1_ = WeightedSwiGLUFunction.apply(output1, permuted_probs, False)
-            output2 = torch._grouped_mm(
-                output1_,
-                self.down_projs.to_local().transpose(-2, -1),
-                offs=offsets,
-            )  # [total_dispatched_num_tokens, hidden_size]
+            return self.run_grouped_gemm(x, permuted_probs, tokens_per_expert)
         else:
             # No tokens dispatched to the current EP rank
             output1 = torch.matmul(
